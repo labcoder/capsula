@@ -83,12 +83,14 @@ pub(crate) struct Feel {
 
 impl Feel {
     /// Packs the three selection indices, four bits each, as the fixture stores them.
-    pub(crate) fn encode(selections: [usize; 3]) -> usize {
-        selections
-            .iter()
-            .enumerate()
-            .map(|(index, selection)| (selection & 0xf) << (index * 4))
-            .sum()
+    pub(crate) fn encode(selections: [isize; 3]) -> Result<usize> {
+        let mut code = 0;
+        for (index, selection) in selections.into_iter().enumerate() {
+            let selection = usize::try_from(selection)?;
+            Verdict::decode(selection)?;
+            code |= selection << (index * 4);
+        }
+        Ok(code)
     }
 
     pub(crate) fn decode(code: usize) -> Result<Self> {
@@ -123,8 +125,10 @@ pub(crate) enum Gate {
 /// One look at the desktop during the quiet second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Quiet {
-    /// The fixture saw physical input or a session lock after Ready.
+    /// A session lock or a failed guard; unlike ordinary input, this is permanent.
     pub(crate) aborted: bool,
+    /// The native guard saw physical input during this Ready attempt.
+    pub(crate) interrupted: bool,
     /// `GetLastInputInfo` now.
     pub(crate) last_input: u32,
     /// The fixture is foreground with its EDIT focused, no key or button is held, and nothing
@@ -175,13 +179,17 @@ impl Lease {
         };
     }
 
-    /// Steps the quiet second; outside it, nothing changes.
+    /// Steps the quiet second; guard failures and post-open input always abort permanently.
     pub(crate) fn observe(&mut self, quiet: Quiet, now: Instant) {
+        if quiet.aborted || (self.gate == Gate::Open && quiet.interrupted) {
+            self.abort();
+            return;
+        }
         let Gate::Quiet { since, input } = self.gate else {
             return;
         };
-        self.gate = if quiet.aborted || !quiet.settled || quiet.last_input != input {
-            Gate::Aborted
+        self.gate = if quiet.interrupted || !quiet.settled || quiet.last_input != input {
+            Gate::Waiting
         } else if now.duration_since(since) >= QUIET {
             Gate::Open
         } else {
@@ -200,6 +208,7 @@ mod tests {
 
     const CALM: Quiet = Quiet {
         aborted: false,
+        interrupted: false,
         last_input: 7,
         settled: true,
     };
@@ -219,6 +228,7 @@ mod tests {
         for (input, settled) in [(1, false), (2, true), (3, false)] {
             let busy = Quiet {
                 aborted: false,
+                interrupted: true,
                 last_input: input,
                 settled,
             };
@@ -359,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn any_input_or_unsettled_look_during_the_quiet_second_aborts_for_good() {
+    fn input_or_unsettled_look_requires_another_ready_and_a_full_quiet_second() {
         let start = Instant::now();
         for spoiled in [
             Quiet {
@@ -371,7 +381,7 @@ mod tests {
                 ..CALM
             },
             Quiet {
-                aborted: true,
+                interrupted: true,
                 ..CALM
             },
         ] {
@@ -379,14 +389,50 @@ mod tests {
             lease.ready(7, start);
             lease.observe(spoiled, start + Duration::from_millis(500));
             lease.observe(CALM, start + QUIET);
-            assert_eq!(lease.gate(), Gate::Aborted, "{spoiled:?}");
-            lease.ready(7, start + QUIET);
-            assert_eq!(
-                lease.gate(),
-                Gate::Aborted,
-                "a second Ready reopens nothing"
-            );
+            assert_eq!(lease.gate(), Gate::Waiting, "{spoiled:?}");
+            assert!(!lease.injectable());
+            lease.ready(7, start + QUIET * 2);
+            lease.observe(CALM, start + QUIET * 2 + Duration::from_millis(999));
+            assert!(!lease.injectable());
+            lease.observe(CALM, start + QUIET * 3);
+            assert!(lease.injectable());
         }
+    }
+
+    #[test]
+    fn a_session_guard_abort_during_quiet_is_permanent() {
+        let start = Instant::now();
+        let mut lease = Lease::new(10);
+        lease.ready(7, start);
+        lease.observe(
+            Quiet {
+                aborted: true,
+                ..CALM
+            },
+            start,
+        );
+        lease.ready(7, start + QUIET);
+        assert_eq!(lease.gate(), Gate::Aborted);
+    }
+
+    #[test]
+    fn an_open_lease_never_rearms_from_a_quiet_observation() {
+        let (mut lease, start) = opened();
+        lease.observe(
+            Quiet {
+                interrupted: true,
+                ..CALM
+            },
+            start + QUIET * 2,
+        );
+        assert_eq!(lease.gate(), Gate::Aborted);
+        lease.ready(7, start + QUIET * 3);
+        lease.observe(CALM, start + QUIET * 3);
+        assert_eq!(
+            lease.gate(),
+            Gate::Aborted,
+            "post-open input aborts permanently"
+        );
     }
 
     #[test]
@@ -440,8 +486,17 @@ mod tests {
                 stretch: Verdict::Unrated,
             }
         );
-        assert_eq!(Feel::encode([2, 1, 3]), 0x312);
+        assert_eq!(Feel::encode([2, 1, 3]).unwrap(), 0x312);
         assert!(Feel::decode(0x4).is_err());
         assert!(Feel::decode(0x1000).is_err());
+    }
+
+    #[test]
+    fn ready_requires_three_explicit_choices_including_explicit_unrated() {
+        for missing in [[-1, -1, -1], [-1, 0, 0], [0, -1, 0], [0, 0, -1]] {
+            assert!(Feel::encode(missing).is_err(), "{missing:?}");
+        }
+        assert_eq!(Feel::encode([0, 0, 0]).unwrap(), 0);
+        assert!(Feel::encode([0, 4, 0]).is_err());
     }
 }

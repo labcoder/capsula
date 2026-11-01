@@ -61,6 +61,9 @@ pub const INSTANCE_ACCOUNT: &str = "capability";
 /// shell's gate observer and the harness's own fixture tell it from the user's input.
 pub const INPUT_SESSION_MARKER: usize = 0x4350_5331;
 
+/// The shell's single focus-grant input at `OpenInput`.
+pub const FOCUS_INPUT_MARKER: usize = 0x4350_5346;
+
 /// `capsula --gate-observer` only: posted to the dock's hit proxy (`proxy_hwnd` in the observer's
 /// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
 pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;

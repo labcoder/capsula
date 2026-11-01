@@ -539,9 +539,18 @@ fn joined_frames<'a>(
             frame.completion_qpc.unwrap_or(0),
             frequency,
         );
+        let provenance = presents
+            .candidates(frequency)
+            .filter(|candidate| {
+                candidate.present.swapchain == chain
+                    && (frame.paint_qpc..=frame.completion_qpc.unwrap_or(0))
+                        .contains(&candidate.present.qpc)
+            })
+            .map(|candidate| candidate.source)
+            .collect::<Vec<_>>();
         writeln!(
             report,
-            "frame={} geometry={} join={joined:?}",
+            "frame={} geometry={} join={joined:?} provenance={provenance:?}",
             frame.id, frame.geometry
         )?;
         match joined {
@@ -625,16 +634,17 @@ fn motion_frames(
             .iter()
             .any(|(begin, end)| *begin <= qpc && qpc <= *end)
     };
-    let first = presents
-        .rows()
+    let candidates = presents.candidates(frequency).collect::<Vec<_>>();
+    let first = candidates
         .iter()
+        .map(|candidate| &candidate.present)
         .filter(|row| row.swapchain == chain)
         .map(|row| row.qpc)
         .min()
         .context("motion trace has no dock rows")?;
-    let last = presents
-        .rows()
+    let last = candidates
         .iter()
+        .map(|candidate| &candidate.present)
         .filter(|row| row.swapchain == chain)
         .map(|row| row.qpc)
         .max()
@@ -653,6 +663,11 @@ fn motion_frames(
         .rows()
         .iter()
         .filter(|row| row.swapchain == chain && row.dropped)
+        .count();
+    let dropped_on_demand = presents
+        .rows()
+        .iter()
+        .filter(|row| row.swapchain == chain && row.dropped && demanded(row.qpc))
         .count();
     let mut intervals = Vec::new();
     for pair in displayed.windows(2) {
@@ -684,10 +699,14 @@ fn motion_frames(
     let max = intervals[intervals.len() - 1];
     writeln!(
         report,
-        "motion_gap_n={} p99_ticks={p99} max_ticks={max} frequency={frequency} unknown_demanded_frames={missing} undisplayed_dock_rows={dropped}; all dropped rows retained",
+        "motion_gap_n={} p99_ticks={p99} max_ticks={max} frequency={frequency} unknown_demanded_frames={missing} undisplayed_dock_rows={dropped} undisplayed_demanded_rows={dropped_on_demand}; all dropped rows retained",
         intervals.len()
     )?;
     ensure!(missing == 0, "moving-frame joins incomplete: {missing}");
+    ensure!(
+        dropped_on_demand == 0,
+        "moving-frame demand contains undisplayed presents: {dropped_on_demand}"
+    );
     ensure!(
         i128::from(p99) * 10_000 <= i128::from(frequency) * 77,
         "moving-frame displayed-gap p99 exceeds7.7ms"

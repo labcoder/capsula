@@ -118,7 +118,12 @@ creates no file.
 A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
-passes the display gate. The UI thread only
+passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
+hover gates panel state-entry QPC → present at p95 ≤8ms. P1's GPUI hover method timed the
+state-machine entry to committed frame submission, not photon time or the OS mouse path.
+Both reports retain display latency separately: missing display feedback is unmeasured there,
+not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
+coverage and motion pacing still require displayed frames. The UI thread only
 queues lines; `tracing-appender`'s worker thread writes and flushes them, and drops lines if
 its queue ever fills rather than blocking. `main` creates the file and the worker before GPUI
 starts, and Quit drains the worker off the UI thread, so the UI thread never touches the disk.
@@ -143,10 +148,18 @@ sequence. It is not an extra loop inside `gate-session`.
 
 The cold trace starts before process launch with the product executable-name filter; all its
 rows must later match that one owned PID. A completed PID-filtered warm capture identifies the
-dock swapchain. The first nondropped row on that chain after the first Dock paint must be inside
-a recorded Dock paint/completion interval; an unavailable first row is never replaced by a later
-one. Startup scenes can overlap but all contain the dock, so this endpoint does not claim a
-specific geometry frame. Process creation comes from `GetProcessTimes`, mapped from its UTC
+dock swapchain. PresentMon 2.6 swallows the first present of each swapchain as a seed. From that
+chain's first CSV row, the harness derives seed present = `QPCTime − msBetweenPresents` and
+seed displayed = `first row displayed − msBetweenDisplayChange`, in checked QPC arithmetic.
+The derived seed must fit exactly one recorded Dock paint/completion interval whose paint
+began before the first harness repaint; its cutoff is retained in `first-harness-repaint.txt`.
+The matching paint need not be the first recorded paint: only the first actual present is the
+seed. Missing, invalid, ambiguous, overlapping or dropped seed evidence is unmeasured; no later
+ordinary row or warm-up repaint substitutes. `seed.txt` retains the first raw row and intervals.
+The 400ms gate is creation → first eligible dock **present**, with
+display latency reported beside it when available. The existing prelaunch name trace remains:
+launching suspended was not adopted, so a name-filter miss fails explicitly rather than
+changing the origin to resume. Process creation comes from `GetProcessTimes`, mapped from its UTC
 FILETIME through a precise-UTC/QPC bracket of at most 1ms. The anchor estimate is not a physical
 lower bound, because creation-timestamp granularity is outside that bracket. Ten conservative
 upper bounds produce nearest-rank p50/p95/max against 400ms. These are fresh
@@ -184,6 +197,15 @@ display/background-process metadata identify the measurement environment.
 One owned EDIT/Ready fixture remains alive throughout the session. Injection starts disabled.
 The initial release shell is bounded to 120 seconds while the owner has about 90 seconds to try
 the 300ms hold, double tap and stretch by hand and choose independent categorical feel verdicts.
+The dock is at top center by default, and Listening is its label, not a separate test window.
+The test window is only for verdicts and Ready. Ready stays disabled until the owner explicitly
+selects all three verdicts, including Unrated if that is the owner's choice.
+The feel product writes `feel/milestones.log`; after its graceful exit, `feel/summary.txt`
+reports recognized holds, exclusion/restoration, double-tap openings and focused/unfocused
+opens, plus apply/Canvas timings. These contain no text or keys, are not present timings,
+and do not replace the owner's verdicts or any automated gate.
+Missing or truncated feel diagnostics are reported as `summary=unmeasured`, without blocking
+otherwise authorized automated phases; failure to retain the summary itself still stops safely.
 During feel the owner also presses Alt-Tab once and separately reports whether a product window
 appears; this verdict may be an external owner reply, not a fourth GUI feel field. The nine
 placements remain runtime-unmeasured; this session adds no placement sweep or flag.
@@ -191,6 +213,14 @@ The owner then physically clicks Ready, releases the button and steps away. Synt
 posted messages and keyboard activation cannot arm Ready. The native fixture arms only after
 button-up, then requires one guarded second with unchanged last-input time before injection
 opens. There is no synthetic foreground transfer or replacement Ready click between phases.
+Physical input or loss of fixture focus during that pre-injection second returns the fixture to
+waiting for a fresh physical Ready. The original 90s feel deadline does not restart; neither
+does the one-hour session limit. Once injection has opened, the existing sticky-abort rule
+applies and no Ready can reopen it. API/guard failures and a session lock still stop safely.
+The product's separate `FOCUS_INPUT_MARKER` is accepted only on a zero-motion relative mouse
+event with no buttons or wheel; marked movement, absolute positioning and other devices remain
+physical input. Post-open owned product focus is still required by the focus phase. Pre-open
+quiet/foreground checks remain conservative if delayed focus work leaves the fixture unsettled.
 
 Good, Off, Broken and Unrated remain separate human results, not approval tokens or substitutes
 for measured gates. An Off or Unrated result needs owner disposition, but does not cancel already
@@ -213,7 +243,7 @@ cleanup; a phase cannot begin without its complete budget.
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
 3. Hover runs 100 guarded crossings. HWND hide observation polls for at most 300ms; its elapsed
    time is not a display timestamp. Observer IDs and panel paint frames feed the separate display
-   summary.
+   summary with independent present and display endpoints.
 4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
    product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
@@ -225,6 +255,7 @@ cleanup; a phase cannot begin without its complete budget.
    Motion frame gaps use exact current-row changes to delimit drawing demand; warmup, capture
    edges and unchanged-pixel gaps are not missed frames. Every displayed gap and undisplayed
    dock row is retained; a missing demanded-frame join stays unmeasured, not a zero-duration pass.
+   An undisplayed present during drawing demand also fails, even if p99 gaps remain ≤7.7ms.
 5. Focus opens the typing surface by a completed double tap, types a known draft, dismisses it
    through local Esc, reopens it without typing, and uses the non-content observation to check
    draft preservation. Normal dismissal must return foreground to the fixture; there is no
@@ -245,7 +276,22 @@ cleanup; a phase cannot begin without its complete budget.
 
 For instrumented phases, a PID-filtered warm trace has an 8-second fixed backstop. Three
 input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
-eligible dock swapchain before the main trace starts. Main trace backstops are fixed per phase:
+eligible dock swapchain before the main trace starts.
+
+Every main-trace swapchain has the same first-present seed rule, including the hover panel.
+Joins consider that derived seed alongside raw rows, using the same uniqueness, drop and reuse
+checks. Reports retain each sample's CSV/seed provenance and the seed derivation; raw CSV rows
+stay unchanged. A seed is eligible only when the first emitted row is displayed, its
+`msBetweenDisplayChange` is positive, and the reconstructed seed display is at or after the
+seed present. PresentMon 2.6 initializes the swapchain's previous display timestamp to zero;
+`SeedFromFirstPresent` updates it only for a displayed seed, and `DeltaUnsignedMilliSeconds`
+returns zero when either timestamp is zero. Thus a positive first-row display interval proves
+the suppressed seed was displayed. Zero, missing or inconsistent display evidence leaves the
+seed ineligible even for present-only gates; raw present endpoints do not require this proof.
+The first emitted row's `Dropped` bit belongs to that row, not its seed; a dropped row cannot
+provide the display proof. Undisplayed-motion counts use raw rows only.
+
+Main trace backstops are fixed per phase:
 
 | Phase | Main backstop |
 | --- | ---: |
@@ -264,7 +310,7 @@ product cutoff and two seconds before that phase's trace bound. Acknowledged dow
 released and the EDIT is uncovered before any potentially slow trace-finish wait, on both
 success and failure.
 
-Any physical input after Ready, lock/desktop change, foreign foreground/capture/menu/move loop,
+After injection has opened, any physical input, lock/desktop change, foreign foreground/capture/menu/move loop,
 or phase error stops the whole session. Cleanup releases only acknowledged injected downs,
 restores owned fixture layout state, closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration

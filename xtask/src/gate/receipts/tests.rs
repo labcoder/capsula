@@ -2,8 +2,9 @@ use super::observation::{Commit, Geometry, Row, Startup};
 use super::*;
 use std::fmt::Write as _;
 
-#[test]
-fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
+const CSV_HEADER: &str = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
+
+fn directory() -> std::path::PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -14,7 +15,13 @@ fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
         std::process::id()
     ));
     fs::create_dir(&directory).unwrap();
-    let header = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
+    directory
+}
+
+#[test]
+fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
+    let directory = directory();
+    let header = CSV_HEADER;
     let warm = directory.join("warm.csv");
     fs::write(
         &warm,
@@ -109,6 +116,67 @@ fn sample_data() -> Observation {
         proxy: [0, 0, 200, 40],
     });
     data
+}
+
+#[test]
+fn an_undisplayed_present_on_motion_demand_fails_even_with_good_display_gaps() {
+    let directory = directory();
+    let mut data = sample_data();
+    for (qpc, geometry) in [(102, 2), (110, 3), (120, 3)] {
+        data.commits.push(Commit {
+            begin_qpc: qpc,
+            qpc,
+            epoch: geometry,
+            geometry,
+            proxy: [0, 0, 200, 40],
+        });
+    }
+    let displayed = [
+        Displayed {
+            at: 107,
+            painted: 105,
+            geometry: 2,
+            present: 106,
+            frame: 1,
+        },
+        Displayed {
+            at: 112,
+            painted: 110,
+            geometry: 3,
+            present: 111,
+            frame: 2,
+        },
+    ];
+    for (index, dropped, expected) in [
+        (0, 0, None),
+        (
+            1,
+            1,
+            Some("moving-frame demand contains undisplayed presents: 1"),
+        ),
+    ] {
+        let mut csv = CSV_HEADER.to_owned();
+        for qpc in [101, 106, 108, 111, 116] {
+            let drop = if qpc == 108 { dropped } else { 0 };
+            writeln!(
+                csv,
+                "fixture.exe,42,0x1,DXGI,1,0,{drop},0.1,0,0,0,Composed: Flip,0,1,0,0,0,0,{qpc}"
+            )
+            .unwrap();
+        }
+        let path = directory.join(format!("{index}.csv"));
+        fs::write(&path, csv).unwrap();
+        let rows = super::super::present::read(&path, 42).unwrap();
+        let mut report = File::create_new(directory.join(format!("{index}.txt"))).unwrap();
+        assert_eq!(
+            motion_frames(&data, &displayed, &[], &rows, 1, 1000, &mut report)
+                .err()
+                .map(|error| error.to_string())
+                .as_deref(),
+            expected
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
 }
 
 fn frame(id: u64, geometry: u64, qpc: i64) -> Frame {

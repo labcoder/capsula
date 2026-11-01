@@ -307,9 +307,12 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 
 fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
     println!(
-        "Injection is disabled. Try hold, double tap and stretch by hand, record each categorical feel verdict. Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and step away. Every feel verdict, including Off, is independent of owner approval."
+        "Injection is disabled. The dock is at the top center by default; Listening appears as its label. Try hold, double tap and stretch on the dock. This test window is only for the three verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and step away for one quiet second. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
     );
-    let mut child = platform::launch(&images.shell, 120_000, std::iter::empty::<OsString>())?;
+    let feel_directory = output.join("feel");
+    fs::create_dir(&feel_directory)?;
+    let diagnostics = Diagnostics::in_directory(&feel_directory);
+    let mut child = platform::launch(&images.shell, 120_000, [diagnostics.argument()])?;
     let mut window = None;
     let mut helpers = Vec::new();
     let body = (|| {
@@ -320,12 +323,23 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
         let ready_end = Instant::now()
             .checked_add(FEEL_LIMIT)
             .context("feel deadline overflow")?;
-        let verdicts = session.await_ready(ready_end)?;
+        let mut attempts = 0;
+        let verdicts = loop {
+            let verdicts = session.await_ready(ready_end)?;
+            attempts += 1;
+            println!("ready_attempt={attempts} feel={verdicts:?}");
+            if session.await_quiet(ready_end)? {
+                break verdicts;
+            }
+            println!(
+                "ready_attempt={attempts} rearmed=true injection_opened=false; original deadline unchanged"
+            );
+        };
         fs::write(
             output.join("owner-feel.txt"),
             format!("{verdicts:?}\nindependent_human_gate=true\nnot_owner_approval=true\n"),
         )?;
-        session.await_quiet()
+        Ok(())
     })();
     session.unbind_product();
     let cleanup_end = Instant::now()
@@ -333,7 +347,12 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
         .context("feel cleanup deadline overflow")?
         .min(end);
     let stopped = session::stop_product(Some(&mut child), window, helpers, cleanup_end);
-    session::combine([body, stopped])
+    let summary = diagnostics.feel_summary().unwrap_or_else(|error| {
+        format!("summary=unmeasured\nerror={error:#}\nnot_an_automated_gate=true\n")
+    });
+    let summarized =
+        fs::write(feel_directory.join("summary.txt"), summary).map_err(anyhow::Error::from);
+    session::combine([body, stopped, summarized])
 }
 
 fn physical_rect([left, top, width, height]: [i32; 4]) -> Result<RECT> {
