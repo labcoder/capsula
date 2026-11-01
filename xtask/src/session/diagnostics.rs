@@ -131,6 +131,34 @@ fn stretch_event(event: &str) -> Result<()> {
 
 type CanvasSample = (i64, i64, u64);
 
+pub(super) fn summarize_feel(records: &[Record]) -> String {
+    let mut holds = 0;
+    let mut excluded = 0;
+    let mut restored = 0;
+    let mut opened = [0; 2];
+    let mut applied = Vec::new();
+    let mut painted = Vec::new();
+    for record in records {
+        match record.mark {
+            Mark::Hold(ok) => {
+                holds += 1;
+                excluded += usize::from(ok);
+            }
+            Mark::HoldEnded(ok) => restored += usize::from(ok),
+            Mark::Opened(focused) => opened[usize::from(focused)] += 1,
+            Mark::Applied { us, .. } => applied.push(us),
+            Mark::Painted(us) => painted.push(us),
+            _ => {}
+        }
+    }
+    format!(
+        "recognized_holds={holds} excluded_ok={excluded} restored_ok={restored}\nrecognized_double_taps={} focused_opens={} unfocused_opens={}\napplied_us={applied:?}\ncanvas_painted_us={painted:?}\nsource=owner feel milestones only; Canvas is not present/display latency; not a human verdict or automated gate\n",
+        opened.iter().sum::<usize>(),
+        opened[1],
+        opened[0]
+    )
+}
+
 pub(super) fn pair_paints(records: &[Record]) -> Result<(Vec<CanvasSample>, usize)> {
     let mut latest = None;
     let mut applied = 0usize;
@@ -159,7 +187,26 @@ pub(super) fn pair_paints(records: &[Record]) -> Result<(Vec<CanvasSample>, usiz
 
 #[cfg(test)]
 mod tests {
-    use super::{Mark, Record, pair_paints};
+    use super::{Mark, Record, pair_paints, summarize_feel};
+
+    #[test]
+    fn feel_summary_reports_recognition_and_focus_without_treating_it_as_a_gate() {
+        let records = [
+            "qpc=10 listening applied_us=8 start_qpc=9",
+            "qpc=20 listening painted_us=1200",
+            "qpc=30 hold excluded=true",
+            "qpc=40 hold ended restored=true",
+            "qpc=50 hold excluded=false",
+            "qpc=60 hold ended restored=false",
+            "qpc=70 input opened focused=false",
+            "qpc=80 input opened focused=true",
+        ]
+        .map(|line| Record::parse(line).unwrap());
+        assert_eq!(
+            summarize_feel(&records),
+            "recognized_holds=2 excluded_ok=1 restored_ok=1\nrecognized_double_taps=2 focused_opens=1 unfocused_opens=1\napplied_us=[8]\ncanvas_painted_us=[1200]\nsource=owner feel milestones only; Canvas is not present/display latency; not a human verdict or automated gate\n"
+        );
+    }
 
     #[test]
     fn diagnostics_accept_only_documented_transcript_free_milestones() {

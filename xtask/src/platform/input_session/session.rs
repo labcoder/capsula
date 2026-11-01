@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -21,7 +21,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
-use super::fixture::{ABORT, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, READY, UNCOVER};
+use super::fixture::{
+    ABORT, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN, OPEN_GATE, READY,
+    REARM, UNCOVER,
+};
 use super::gate::{Feel, Gate, Lease, Quiet};
 use super::{
     FixtureEscMode, InputEdge, MARKER, MAX_COVER, Receipt, Window, class_name, desktop_rect,
@@ -187,8 +190,20 @@ impl Session {
                 "no Ready before the deadline"
             );
             self.fixture.validate()?;
+            ensure!(
+                property(self.fixture.hwnd, ABORT) == 0,
+                "fixture guard aborted before Ready"
+            );
             sleep(Duration::from_millis(10));
         }
+        ensure!(
+            Instant::now() < deadline.min(self.end),
+            "Ready arrived after the deadline"
+        );
+        ensure!(
+            property(self.fixture.hwnd, ABORT) == 0,
+            "fixture guard aborted at Ready"
+        );
         let armed = u32::try_from(property(self.fixture.hwnd, ARMED_INPUT));
         let feel = Feel::decode(property(self.fixture.hwnd, FEEL));
         let mut lease = self.lease.get();
@@ -197,35 +212,84 @@ impl Session {
         self.or_abort(armed.map_err(anyhow::Error::from).and(feel))
     }
 
-    /// Exactly one guarded second with no input of any kind; injection opens only if it passes.
-    pub(crate) fn await_quiet(&mut self) -> Result<()> {
-        loop {
-            let settled = self.settled();
-            let quiet = Quiet {
-                aborted: property(self.fixture.hwnd, ABORT) != 0,
-                last_input: last_input().unwrap_or(0),
-                settled: settled.is_ok(),
-            };
-            let mut lease = self.lease.get();
-            lease.observe(quiet, Instant::now());
-            self.lease.set(lease);
-            match lease.gate() {
-                Gate::Open => break,
-                Gate::Quiet { .. } => sleep(Duration::from_millis(1)),
-                Gate::Waiting => bail!("the quiet second needs Ready first"),
-                Gate::Aborted => {
-                    return Err(settled.err().unwrap_or_else(|| {
-                        anyhow!("input, a session lock or a guard abort during the quiet second")
-                    }));
+    /// True after one guarded quiet second opens injection; false after rearming for a new Ready.
+    pub(crate) fn await_quiet(&mut self, deadline: Instant) -> Result<bool> {
+        let result = (|| {
+            ensure!(
+                matches!(self.gate(), Gate::Quiet { .. }),
+                "the quiet second needs Ready first"
+            );
+            loop {
+                ensure!(
+                    Instant::now() < deadline.min(self.end),
+                    "quiet second deadline exceeded"
+                );
+                self.fixture.validate()?;
+                let settled = self.settled();
+                let quiet = Quiet {
+                    aborted: property(self.fixture.hwnd, ABORT) != 0,
+                    interrupted: property(self.fixture.hwnd, INTERRUPTED) != 0,
+                    last_input: last_input()?,
+                    settled: settled.is_ok(),
+                };
+                let mut lease = self.lease.get();
+                lease.observe(quiet, Instant::now());
+                match lease.gate() {
+                    Gate::Open => {
+                        let input = property(self.fixture.hwnd, ARMED_INPUT);
+                        match request(self.fixture, OPEN_GATE, WPARAM(input), LPARAM(0))? {
+                            1 => {
+                                ensure!(
+                                    Instant::now() < deadline.min(self.end)
+                                        && last_input()? == quiet.last_input
+                                        && property(self.fixture.hwnd, OPEN) != 0
+                                        && property(self.fixture.hwnd, ABORT) == 0,
+                                    "input or deadline raced the native opening"
+                                );
+                                self.lease.set(lease);
+                                break;
+                            }
+                            2 => {
+                                println!(
+                                    "ready_rearm reason=native_opening_race injection_opened=false"
+                                );
+                                let mut waiting = self.lease.get();
+                                waiting.observe(
+                                    Quiet {
+                                        interrupted: true,
+                                        ..quiet
+                                    },
+                                    Instant::now(),
+                                );
+                                self.lease.set(waiting);
+                                return Ok(false);
+                            }
+                            _ => bail!("unknown native gate response"),
+                        }
+                    }
+                    Gate::Quiet { .. } => sleep(Duration::from_millis(1)),
+                    Gate::Waiting => {
+                        println!(
+                            "ready_rearm interrupted={} last_input_changed={} settled_error={:?}",
+                            quiet.interrupted,
+                            usize::try_from(quiet.last_input)?
+                                != property(self.fixture.hwnd, ARMED_INPUT),
+                            settled.err()
+                        );
+                        request(self.fixture, REARM, WPARAM(0), LPARAM(0))?;
+                        self.lease.set(lease);
+                        return Ok(false);
+                    }
+                    Gate::Aborted => bail!("session lock or guard failure during the quiet second"),
                 }
             }
-        }
-        let mut cursor = POINT::default();
-        // SAFETY: cursor is a writable output; nothing moves.
-        let read = unsafe { GetCursorPos(&raw mut cursor) };
-        self.or_abort(read.map_err(anyhow::Error::from))?;
-        self.original_cursor = Some(cursor);
-        Ok(())
+            let mut cursor = POINT::default();
+            // SAFETY: cursor is a writable output; nothing moves.
+            unsafe { GetCursorPos(&raw mut cursor) }?;
+            self.original_cursor = Some(cursor);
+            Ok(true)
+        })();
+        self.or_abort(result)
     }
 
     /// The fixture is foreground with its EDIT focused, nothing is held, captured, in a menu or in
@@ -285,7 +349,7 @@ impl Session {
             "the product's input interval is over"
         );
         ensure!(
-            property(self.fixture.hwnd, ABORT) == 0,
+            property(self.fixture.hwnd, OPEN) != 0 && property(self.fixture.hwnd, ABORT) == 0,
             "physical input or session lock: session aborted, no retry"
         );
         // SAFETY: only the PID is inspected, never another application's window content.

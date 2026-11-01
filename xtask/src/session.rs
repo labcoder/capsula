@@ -89,6 +89,19 @@ impl Diagnostics {
             .collect())
     }
 
+    pub(crate) fn feel_summary(&self) -> Result<String> {
+        let text = fs::read_to_string(&self.path)?;
+        ensure!(
+            text.ends_with('\n'),
+            "feel milestones are empty or truncated"
+        );
+        let records = text
+            .lines()
+            .map(Record::parse)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(diagnostics::summarize_feel(&records))
+    }
+
     pub(crate) fn await_started(&self, session: &Session) -> Result<()> {
         self.observe(session, 0, |records| {
             records

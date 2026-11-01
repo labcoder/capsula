@@ -12,7 +12,7 @@ use super::{
     Images,
     capture::{Capture, guarded_wait},
     observation::{self, Kind, Observation},
-    present::{self, Present},
+    present::Present,
 };
 use crate::platform::{self, Process, gate_capture, input_session::WindowKind};
 use crate::session;
@@ -47,7 +47,7 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let mut report = File::create_new(output.join("cold.tsv"))?;
     writeln!(
         report,
-        "trial\tstatus\tanchor_estimate_ms\tconservative_upper_ms\tpresent_qpc\tdisplayed_qpc"
+        "trial\tstatus\tpresent_anchor_estimate_ms\tpresent_conservative_upper_ms\tpresent_qpc\tdisplayed_qpc\tdisplay_conservative_upper_ms"
     )?;
     let mut samples = Vec::new();
     for index in 1..=10 {
@@ -64,13 +64,21 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             Ok(sample) => {
                 writeln!(
                     report,
-                    "{index}\tmeasured\t{:.6}\t{:.6}\t{}\t{}",
-                    sample.anchor_estimate_ms, sample.upper_ms, sample.present, sample.displayed
+                    "{index}\tmeasured\t{:.6}\t{:.6}\t{}\t{}\t{}",
+                    sample.anchor_estimate_ms,
+                    sample.upper_ms,
+                    sample.present,
+                    sample
+                        .displayed
+                        .map_or_else(|| "NA".to_owned(), |qpc| qpc.to_string()),
+                    sample
+                        .display_upper_ms
+                        .map_or_else(|| "NA".to_owned(), |ms| format!("{ms:.6}"))
                 )?;
                 samples.push(sample.upper_ms);
             }
             Err(error) => {
-                writeln!(report, "{index}\tunmeasured\tNA\tNA\tNA\tNA")?;
+                writeln!(report, "{index}\tunmeasured\tNA\tNA\tNA\tNA\tNA")?;
                 fs::write(directory.join("result.txt"), format!("{error:#}\n"))?;
                 return Err(error.context(format!("cold launch{index}; no retry")));
             }
@@ -88,7 +96,7 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     )?;
     ensure!(
         samples[9] <= 400.0,
-        "cold first dock display p95 exceeds400ms"
+        "cold first dock present p95 exceeds400ms"
     );
     Ok(())
 }
@@ -118,13 +126,28 @@ fn launch(images: &Images, output: &Path, guard: &impl Fn() -> Result<()>) -> Re
         window = Some(product);
         helpers = session::owned_helpers(pid)?;
         guarded_wait(Duration::from_secs(1), guard)?;
+        let mut first_repaint = None;
         let chain = Capture::warm_only(
             pid,
             &output.join("warm.csv"),
-            || product.request_gate_repaint(),
+            || {
+                if first_repaint.is_none() {
+                    let cutoff = gate_capture::qpc()?;
+                    first_repaint = Some(cutoff);
+                    fs::write(
+                        output.join("first-harness-repaint.txt"),
+                        format!("qpc={cutoff}\n"),
+                    )?;
+                }
+                product.request_gate_repaint()
+            },
             guard,
         )?;
-        Ok((clock, chain))
+        Ok((
+            clock,
+            chain,
+            first_repaint.context("cold repaint cutoff missing")?,
+        ))
     })();
     let rows = trace.finish(guard);
     let stopped = session::stop_product(Some(&mut child), window, helpers, deadline);
@@ -142,11 +165,21 @@ fn launch(images: &Images, output: &Path, guard: &impl Fn() -> Result<()>) -> Re
     let rows = rows?;
     stopped?;
     let data = observation::read(&observer, pid)?;
-    let sample = measure(&data, rows.rows(), clock_and_chain.1, &clock_and_chain.0)?;
+    let seed = rows
+        .seed(clock_and_chain.1, clock_and_chain.0.frequency)
+        .map_err(|status| anyhow::anyhow!("first dock seed unmeasured: {status:?}"))?;
+    fs::write(output.join("seed.txt"), format!("{seed:?}\n"))?;
+    let sample = measure(
+        &data,
+        &seed.present,
+        seed.displayed_qpc,
+        &clock_and_chain.0,
+        clock_and_chain.2,
+    )?;
     fs::write(
         output.join("result.txt"),
         format!(
-            "{sample:?}\nmethod=first nondropped warmed-dock-swapchain row after the first actual Dock paint; that first row must be bounded by a recorded Dock paint/completion; unavailable first rows are not skipped. Startup scene versions may overlap, but all contain the dock; no claim about a specific startup geometry frame. Latencies use OS-reported creation UTC mapped to QPC, with the full clock bracket retained. anchor_estimate_ms is not a physical lower bound: OS creation-timestamp granularity is outside the anchor bracket; only conservative upper_ms gates.\n"
+            "{sample:?}\nmethod=creation to PresentMon's first-present seed, derived from the first dock CSV row and uniquely bounded by a Dock paint/completion that began before the first harness repaint. Missing or unbounded seeds are unmeasured; later ordinary/warm-up rows are never substituted. Seed provenance is retained in seed.txt; display latency is reported separately, not gated. Prelaunch name filtering remains; suspended launch was not adopted. Latencies use OS-reported creation UTC mapped to QPC, with the full clock bracket retained. anchor_estimate_ms is not a physical lower bound: OS creation-timestamp granularity is outside the anchor bracket; only present conservative upper_ms gates.\n"
         ),
     )?;
     Ok(sample)
@@ -157,7 +190,8 @@ struct Sample {
     anchor_estimate_ms: f64,
     upper_ms: f64,
     present: i64,
-    displayed: i64,
+    displayed: Option<i64>,
+    display_upper_ms: Option<f64>,
 }
 
 #[expect(
@@ -167,9 +201,10 @@ struct Sample {
 )]
 fn measure(
     data: &Observation,
-    rows: &[Present],
-    chain: u64,
+    row: &Present,
+    displayed: Option<i64>,
     clock: &gate_capture::CreationClock,
+    first_repaint: i64,
 ) -> Result<Sample> {
     ensure!(
         data.startup
@@ -179,37 +214,33 @@ fn measure(
             == clock.frequency,
         "cold clock domains differ"
     );
-    let first = data
-        .frames
-        .iter()
-        .filter(|frame| frame.kind == Kind::Dock)
-        .map(|frame| frame.paint_qpc)
-        .min()
-        .context("no dock paint recorded")?;
-    let row = rows
-        .iter()
-        .filter(|row| row.swapchain == chain && !row.dropped && row.qpc >= first)
-        .min_by_key(|row| row.qpc)
-        .context("no displayed dock present")?;
-    ensure!(
-        data.frames.iter().any(|frame| frame.kind == Kind::Dock
+    let mut frames = data.frames.iter().filter(|frame| {
+        frame.kind == Kind::Dock
             && frame.paint_qpc <= row.qpc
-            && frame.completion_qpc.is_some_and(|end| row.qpc <= end)),
-        "first eligible dock present lacks a paint/completion bound; later presents not substituted"
-    );
-    let displayed = row
-        .display_after_ms
-        .and_then(|ms| present::display_qpc(row.qpc, ms, clock.frequency))
-        .context("first nondropped dock present has no display endpoint")?;
+            && frame.completion_qpc.is_some_and(|end| row.qpc <= end)
+    });
+    let frame = frames
+        .next()
+        .context("first dock seed has no frame bound; no later substitution")?;
     ensure!(
-        row.qpc >= clock.latest && displayed >= clock.latest,
+        frames.next().is_none() && !row.dropped,
+        "first dock seed is ambiguous or dropped"
+    );
+    ensure!(
+        frame.paint_qpc < first_repaint,
+        "first dock seed frame was painted after the harness repaint"
+    );
+    ensure!(
+        row.qpc >= clock.latest,
         "cold present precedes process creation"
     );
     Ok(Sample {
-        anchor_estimate_ms: (displayed - clock.latest) as f64 * 1000.0 / clock.frequency as f64,
-        upper_ms: (displayed - clock.earliest) as f64 * 1000.0 / clock.frequency as f64,
+        anchor_estimate_ms: (row.qpc - clock.latest) as f64 * 1000.0 / clock.frequency as f64,
+        upper_ms: (row.qpc - clock.earliest) as f64 * 1000.0 / clock.frequency as f64,
         present: row.qpc,
         displayed,
+        display_upper_ms: displayed
+            .map(|qpc| (qpc - clock.earliest) as f64 * 1000.0 / clock.frequency as f64),
     })
 }
 
@@ -253,28 +284,53 @@ mod tests {
             frequency: 1000,
             evidence: String::new(),
         };
-        let mut rows = vec![
-            Present {
-                qpc: 111,
-                swapchain: 5,
-                dropped: false,
-                display_after_ms: Some(1.0),
-            },
-            Present {
-                qpc: 125,
-                swapchain: 5,
-                dropped: false,
-                display_after_ms: Some(1.0),
-            },
-        ];
-        assert!(measure(&data, &rows, 5, &clock).is_err());
-        rows[0].qpc = 105;
-        let sample = measure(&data, &rows, 5, &clock).unwrap();
+        let mut seed = Present {
+            qpc: 111,
+            swapchain: 5,
+            dropped: false,
+            display_after_ms: None,
+        };
+        assert!(measure(&data, &seed, None, &clock, 115).is_err());
+        seed.qpc = 105;
+        let sample = measure(&data, &seed, Some(106), &clock, 115).unwrap();
         assert_eq!(sample.present, 105);
-        assert_eq!(sample.displayed, 106);
-        assert!((sample.anchor_estimate_ms - 16.0).abs() < f64::EPSILON);
-        assert!((sample.upper_ms - 17.0).abs() < f64::EPSILON);
-        rows[0].display_after_ms = None;
-        assert!(measure(&data, &rows, 5, &clock).is_err());
+        assert_eq!(sample.displayed, Some(106));
+        assert!((sample.anchor_estimate_ms - 15.0).abs() < f64::EPSILON);
+        assert!((sample.upper_ms - 16.0).abs() < f64::EPSILON);
+        assert_eq!(sample.display_upper_ms, Some(17.0));
+        assert_eq!(
+            measure(&data, &seed, None, &clock, 115).unwrap().displayed,
+            None
+        );
+        seed.qpc = 125;
+        assert!(
+            measure(&data, &seed, None, &clock, 115).is_err(),
+            "a warm repaint cannot supply a seed"
+        );
+        assert_eq!(
+            measure(&data, &seed, None, &clock, 135).unwrap().present,
+            125,
+            "a proved first-present seed may match a later recorded startup paint"
+        );
+        seed.qpc = 105;
+        assert!(
+            measure(&data, &seed, None, &clock, 100).is_err(),
+            "paint at the first repaint is ineligible"
+        );
+        seed.dropped = true;
+        assert!(measure(&data, &seed, None, &clock, 115).is_err());
+        seed.dropped = false;
+        data.frames[1].paint_qpc = 104;
+        assert!(
+            measure(&data, &seed, None, &clock, 115).is_err(),
+            "overlapping frame bounds are ambiguous"
+        );
+        assert!(
+            measure(&data, &seed, None, &clock, 103).is_err(),
+            "a post-repaint overlapping frame cannot be ignored"
+        );
+        data.frames[1].paint_qpc = 120;
+        data.frames[0].completion_qpc = None;
+        assert!(measure(&data, &seed, None, &clock, 115).is_err());
     }
 }
