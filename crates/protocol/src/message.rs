@@ -1,5 +1,8 @@
 //! The messages on each pipe, as closed enums. The shell's first frame on every pipe is a
 //! [`Hello`], and the brain decodes nothing else until the capability in it checks out.
+//!
+//! postcard encodes a variant by its position, so a new variant goes at the end of its enum and
+//! the handshake's bytes stay readable by other builds.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +83,9 @@ pub enum Phase {
 pub enum ControlToBrain {
     /// The handshake; first and only once.
     Hello(Hello),
+    /// The user chose Quit: the brain ends its helpers, deletes the capability and exits, and
+    /// doesn't relaunch the shell.
+    Quitting,
     /// The first Esc, after the shell has already stopped locally. `revealed` lists the steps
     /// whose entrance had finished, so the thread records what stayed; the brain keeps only
     /// indices of steps the run produced, and the control cap bounds the list.
@@ -89,9 +95,6 @@ pub enum ControlToBrain {
         /// Indices of the steps that stayed on screen.
         revealed: Vec<u32>,
     },
-    /// The user chose Quit: the brain ends its helpers, deletes the capability and exits, and
-    /// doesn't relaunch the shell.
-    Quitting,
 }
 
 /// Brain to shell, on the control pipe.
@@ -102,6 +105,12 @@ pub enum ControlToShell {
         /// This brain's incarnation.
         incarnation: Incarnation,
     },
+    /// The shell is from another build. The brain exits after sending this, so the shell can
+    /// start the brain from its own folder.
+    BuildMismatch {
+        /// The brain's [`crate::BUILD_ID`].
+        brain_build: String,
+    },
     /// A run's phase changed.
     RunState {
         /// The run.
@@ -110,12 +119,6 @@ pub enum ControlToShell {
         thread: ThreadId,
         /// Its new phase.
         phase: Phase,
-    },
-    /// The shell is from another build. The brain exits after sending this, so the shell can
-    /// start the brain from its own folder.
-    BuildMismatch {
-        /// The brain's [`crate::BUILD_ID`].
-        brain_build: String,
     },
 }
 
@@ -152,4 +155,48 @@ pub enum DataToShell {
         /// The step.
         step: Step,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation, Secret,
+    };
+
+    /// The bytes another build must be able to read: the handshake and its answers. A new
+    /// variant goes at the end of its enum, or these tags move.
+    #[test]
+    fn handshake_frames_keep_their_bytes_across_builds() {
+        let hello = Hello {
+            build_id: "b".to_owned(),
+            capability: Secret::new([7; CAPABILITY_LEN]),
+        };
+        let mut hello_bytes = vec![0, 1, b'b'];
+        hello_bytes.extend([7; CAPABILITY_LEN]);
+        let encode = |bytes: postcard::Result<Vec<u8>>| bytes.expect("encodes");
+        assert_eq!(
+            encode(postcard::to_allocvec(&ControlToBrain::Hello(hello.clone()))),
+            hello_bytes
+        );
+        assert_eq!(
+            encode(postcard::to_allocvec(&DataToBrain::Hello(hello))),
+            hello_bytes
+        );
+        assert_eq!(
+            encode(postcard::to_allocvec(&ControlToBrain::Quitting)),
+            [1]
+        );
+        assert_eq!(
+            encode(postcard::to_allocvec(&ControlToShell::Welcome {
+                incarnation: Incarnation(5)
+            })),
+            [0, 5]
+        );
+        assert_eq!(
+            encode(postcard::to_allocvec(&ControlToShell::BuildMismatch {
+                brain_build: "b".to_owned()
+            })),
+            [1, 1, b'b']
+        );
+    }
 }

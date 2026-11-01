@@ -76,6 +76,9 @@ impl EventKind {
     }
 }
 
+/// An event to append: what it records, its searchable text, and its typed record as JSON.
+pub type NewEvent<'a> = (EventKind, Option<&'a str>, Option<&'a str>);
+
 /// How a run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunEnd {
@@ -342,20 +345,38 @@ impl Store {
         Ok(())
     }
 
-    /// Ends an active run. A run that already ended keeps its first outcome.
+    /// Appends a run's last `events` and ends it, in one transaction, so its outcome is never
+    /// stored without them. A run that already ended keeps its first outcome.
     ///
     /// # Errors
-    /// Fails with [`StoreError::NoRun`] when the run isn't active.
-    pub fn end_run(&mut self, run: RunId, end: RunEnd) -> Result<(), StoreError> {
+    /// Fails with [`StoreError::NoRun`] when the run isn't an active run of the thread, and
+    /// with [`StoreError::NoThread`] when there are events and the thread isn't live.
+    pub fn end_run(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        events: &[NewEvent<'_>],
+        end: RunEnd,
+    ) -> Result<(), StoreError> {
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        if !events.is_empty() {
+            insert_events(&tx, thread, run, events, now)?;
+        }
         let (state, reason) = end.columns();
-        let ended = self.conn.execute(
-            "UPDATE runs SET state = ?2, reason = ?3, ended_ms = ?4
-             WHERE id = ?1 AND state = 'active'",
-            params![sql_id(run.0, StoreError::NoRun)?, state, reason, now_ms()],
+        let ended = tx.execute(
+            "UPDATE runs SET state = ?3, reason = ?4, ended_ms = ?5
+             WHERE id = ?1 AND thread = ?2 AND state = 'active'",
+            params![run, thread, state, reason, now],
         )?;
         if ended == 0 {
             return Err(StoreError::NoRun);
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -378,8 +399,7 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Appends an event to an active run of a live thread. `text` is what search finds;
-    /// `body` is the typed record as JSON.
+    /// Appends events to an active run of a live thread, in one transaction.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't live, and with
@@ -388,30 +408,14 @@ impl Store {
         &mut self,
         thread: ThreadId,
         run: RunId,
-        kind: EventKind,
-        text: Option<&str>,
-        body: Option<&str>,
+        events: &[NewEvent<'_>],
     ) -> Result<(), StoreError> {
         let (thread, run) = (
             sql_id(thread.0, StoreError::NoThread)?,
             sql_id(run.0, StoreError::NoRun)?,
         );
-        let now = now_ms();
         let tx = self.conn.transaction()?;
-        if !touch(&tx, thread, now)? {
-            return Err(StoreError::NoThread);
-        }
-        let active: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM runs WHERE id = ?1 AND thread = ?2 AND state = 'active'",
-                params![run, thread],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if active.is_none() {
-            return Err(StoreError::NoRun);
-        }
-        insert_event(&tx, thread, Some(run), kind, text, body, now)?;
+        insert_events(&tx, thread, run, events, now_ms())?;
         tx.commit()?;
         Ok(())
     }
@@ -519,6 +523,33 @@ impl Store {
         tracing::warn!("a reader blocked the checkpoint; the next start retries it");
         Ok(Deletion::Pending)
     }
+}
+
+/// Inserts events for an active run of a live thread, marking the thread changed.
+fn insert_events(
+    conn: &Connection,
+    thread: i64,
+    run: i64,
+    events: &[NewEvent<'_>],
+    now: i64,
+) -> Result<(), StoreError> {
+    if !touch(conn, thread, now)? {
+        return Err(StoreError::NoThread);
+    }
+    let active: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM runs WHERE id = ?1 AND thread = ?2 AND state = 'active'",
+            params![run, thread],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if active.is_none() {
+        return Err(StoreError::NoRun);
+    }
+    for &(kind, text, body) in events {
+        insert_event(conn, thread, Some(run), kind, text, body, now)?;
+    }
+    Ok(())
 }
 
 /// Marks a live thread changed; false when it isn't live.
