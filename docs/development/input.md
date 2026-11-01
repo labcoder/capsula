@@ -60,16 +60,61 @@ sequenceDiagram
 | Resting | The dock shows the link status again |
 | HoldStarted | Every Capsula window gets `WDA_EXCLUDEFROMCAPTURE`, then the hold is logged. Slice 7 sends `HoldRecognized` only after this call returns |
 | HoldEnded | Capture exclusion is removed |
-| OpenInput | The typing panel opens and takes focus |
+| OpenInput | The typing panel opens and takes focus (see [Taking the front](#taking-the-front)) |
 
 ## The typing panel
 
 A double tap opens a small panel where the hover panel would be, with one gpui-kit `Input`.
-It's the only window Capsula activates. Windows allows the activation because the user just
-pressed Alt. The panel remembers the window that was in front. Esc hides it and gives the
+It's the only window Capsula activates, as described in [Taking the front](#taking-the-front). The
+panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Capsula still has the front and that window still exists.
 The panel is hidden, not closed, so its draft survives. Hover never opens over it or dismisses it.
 It has no Send, history or other controls yet.
+
+### Taking the front
+
+Windows lets a process call `SetForegroundWindow` only if one of a few conditions holds, among
+them that it "received the last input event" ([SetForegroundWindow, Remarks][sfw]). Raw Input
+with `RIDEV_INPUTSINK` gives Capsula a copy of the shortcut's keys, but the keys themselves still
+go to the app in front, so a plain activation fails (`focused=false` on c39d553). Pressing Alt
+doesn't help: "the system automatically enables calls to SetForegroundWindow if the user presses
+the ALT key" ([LockSetForegroundWindow, Remarks][lsfw]) only lifts a `LockSetForegroundWindow` lock.
+It doesn't meet any of the conditions above.
+
+So on each `OpenInput`, immediately before `SetForegroundWindow`, Capsula sends exactly one
+input: `INPUT_MOUSE` with no motion, no flags, no wheel or button data, and `dwExtraInfo` set to
+`FOCUS_INPUT_MARKER`. That makes Capsula the last input's sender. PowerToys Run uses the same
+method ([microsoft/PowerToys#4362][ptr]). There's no retry and no fallback. If `SendInput` is
+refused or the activation still fails, the panel stays open, unfocused and clickable, and the
+log says `focused=false`.
+
+Side effects:
+
+- Other apps' low-level mouse hooks see the event with `LLMHF_INJECTED`. The gate harness accepts
+  it only with the marker, zero motion and no buttons.
+- It resets the idle timer (`GetLastInputInfo`), which the user's keypress just did anyway.
+- UIPI drops it when the app in front is elevated, so the panel can't take focus over an admin
+  app.
+- It carries no key, so it can't open a menu in the app in front. The shell's Raw Input
+  registration is keyboard-only, so the gesture never sees it, and the gate observer records
+  only marked left presses.
+
+Rejected alternatives:
+
+- Activating at the second key-down while Alt is held relies on the Alt misreading above.
+- A `RegisterHotKey` grant ([Raymond Chen][hotkey]) would take the Ctrl+Alt key-down from the app
+  in front during the tap window, would fire on AltGr, and would have to activate before the tap
+  completes.
+- `AttachThreadInput` makes focus changes synchronous with the foreground thread
+  ([Raymond Chen][attach]), so a hung app in front could block the UI thread, and it can't attach
+  to an elevated app.
+- An injected Alt can open a menu in the app in front.
+
+[sfw]: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
+[lsfw]: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-locksetforegroundwindow
+[ptr]: https://github.com/microsoft/PowerToys/pull/4362
+[hotkey]: https://devblogs.microsoft.com/oldnewthing/20090226-00/?p=19013
+[attach]: https://devblogs.microsoft.com/oldnewthing/20130607-00/?p=4143
 
 ## Esc
 

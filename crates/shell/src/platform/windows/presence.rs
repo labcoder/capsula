@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use capsula_protocol::constants::OBJECT_PREFIX;
+use capsula_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use gpui_kit::Window;
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -18,7 +18,9 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, SendInput, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, GetWindowSubclass, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
     NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
@@ -594,9 +596,26 @@ fn process_of(hwnd: HWND) -> u32 {
     process
 }
 
+/// The one input Capsula sends: a mouse event with no motion, buttons, wheel or keys, tagged
+/// so the gate harness can tell it from the user's input.
+fn focus_input() -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwExtraInfo: FOCUS_INPUT_MARKER,
+                ..MOUSEINPUT::default()
+            },
+        },
+    }
+}
+
 /// Brings a text surface to the front so it takes typing. Returns the window it replaced,
-/// or `None` when this window already had the front. Windows allows it right after the
-/// user's own Alt press, which the shortcut includes.
+/// or `None` when this window already had the front. Call it once per open.
+///
+/// Windows lets the process that received the last input event set the foreground, and the
+/// user's keys went to the app in front, so Capsula first sends [`focus_input`]. With an
+/// elevated app in front, UIPI drops it and the activation fails.
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows keeps the current foreground.
@@ -606,6 +625,11 @@ pub(crate) fn activate_presence_window(
     let hwnd = hwnd_of(window)?;
     // SAFETY: reads the foreground handle without taking ownership.
     let previous = unsafe { GetForegroundWindow() };
+    let size = i32::try_from(size_of::<INPUT>()).expect("INPUT's size fits in i32");
+    // SAFETY: one initialized INPUT, with its exact size.
+    if unsafe { SendInput(&[focus_input()], size) } != 1 {
+        tracing::debug!("the focus input was refused");
+    }
     // SAFETY: `hwnd` is this thread's live window.
     if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
         return Err(PresenceError::Activate);
@@ -940,8 +964,10 @@ unsafe extern "system" fn hover_subclass(
 
 #[cfg(test)]
 mod tests {
-    use super::{place_hidden, proxy_proc, signed_words};
+    use super::{focus_input, place_hidden, proxy_proc, signed_words};
+    use capsula_protocol::constants::FOCUS_INPUT_MARKER;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT_MOUSE, MOUSE_EVENT_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowRect, IsWindowVisible,
         MA_NOACTIVATE, WM_MOUSEACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -955,6 +981,26 @@ mod tests {
             // SAFETY: the test owns this live window on its creating thread.
             unsafe { DestroyWindow(self.0) }.expect("the test window remains owned by its thread");
         }
+    }
+
+    #[test]
+    fn focus_input_is_a_tagged_mouse_event_that_does_nothing() {
+        let input = focus_input();
+        assert_eq!(input.r#type, INPUT_MOUSE, "a mouse event, never a key");
+        // SAFETY: `focus_input` initializes the mouse member, which `r#type` names.
+        let mouse = unsafe { input.Anonymous.mi };
+        assert_eq!((mouse.dx, mouse.dy), (0, 0), "no motion");
+        assert_eq!(mouse.mouseData, 0, "no wheel or extra buttons");
+        assert_eq!(
+            mouse.dwFlags,
+            MOUSE_EVENT_FLAGS(0),
+            "no button, wheel, absolute or desktop flags"
+        );
+        assert_eq!(mouse.time, 0, "the system stamps it");
+        assert_eq!(
+            mouse.dwExtraInfo, FOCUS_INPUT_MARKER,
+            "tagged for the gate harness"
+        );
     }
 
     #[test]
