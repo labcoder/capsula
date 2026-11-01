@@ -7,6 +7,12 @@ use capsula_brain::logging;
 use capsula_protocol::constants;
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(capsula_brain::SCREEN_WORKER) {
+        // shortcut: the fake screen worker only waits for its job to end it; slice 6 builds it.
+        loop {
+            std::thread::park();
+        }
+    }
     if logging::init(constants::BRAIN_LOG).is_err() {
         return ExitCode::FAILURE;
     }

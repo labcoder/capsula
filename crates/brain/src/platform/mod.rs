@@ -8,4 +8,6 @@
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{Instance, PipeServer, client_image, create_owner_only, session_id};
+pub use windows::{
+    Helper, Instance, Job, PipeServer, client_image, create_owner_only, launch_detached, session_id,
+};

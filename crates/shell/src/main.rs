@@ -30,16 +30,19 @@ fn main() -> ExitCode {
     };
     tracing::info!(build = capsula_protocol::BUILD_ID, "shell started");
     let (states, state_changes) = async_channel::unbounded();
-    if let Err(error) = link::spawn(states) {
-        tracing::error!(%error, "can't start the link to the brain");
-        return ExitCode::FAILURE;
-    }
+    let link = match link::spawn(states) {
+        Ok(link) => link,
+        Err(error) => {
+            tracing::error!(%error, "can't start the link to the brain");
+            return ExitCode::FAILURE;
+        }
+    };
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
-            if let Err(error) = status::open(state_changes, cx) {
+            if let Err(error) = status::open(state_changes, link, cx) {
                 tracing::error!(%error, "can't open the status window");
                 cx.quit();
             }

@@ -17,6 +17,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::platform::{self, Instance, PipeServer};
@@ -24,6 +25,9 @@ use crate::tap::Tap;
 
 /// How long a connected client has to complete each step of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
+/// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
+const NO_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the brain checks a shell against.
 #[derive(Debug)]
@@ -53,21 +57,17 @@ pub enum IpcError {
     Accept(#[from] io::Error),
 }
 
-/// Why [`Pipes::serve`] returned.
+/// How one shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ending {
+pub(crate) enum Session {
     /// The shell sent `Quitting`.
     Quit,
     /// A shell from another build connected; it starts its own brain.
     BuildMismatch,
-}
-
-/// How one shell connection ended.
-#[derive(Debug, PartialEq, Eq)]
-enum Session {
-    Quit,
-    BuildMismatch,
+    /// The shell went away without `Quitting`: it crashed or was killed.
     ShellLost,
+    /// No shell connected for [`NO_SHELL_TIMEOUT`].
+    NoShell,
 }
 
 /// Why a client was turned away or a session broke.
@@ -144,23 +144,31 @@ impl Pipes {
         Ok(())
     }
 
-    /// Serves one shell at a time until one quits or is from another build.
+    /// Waits for a shell, serves it, and returns how its session ended. Clients that fail the
+    /// handshake are logged and skipped. A relaunched shell that ends before a session starts
+    /// (`launched` fires) counts as lost.
     ///
     /// # Errors
     /// Fails only when a pipe can no longer accept clients.
-    pub(crate) async fn serve(
+    pub(crate) async fn next_session(
         &mut self,
         identity: &Identity,
-        mut tap: Tap,
-    ) -> Result<Ending, IpcError> {
+        tap: &mut Tap,
+        launched: &mut Option<oneshot::Receiver<()>>,
+    ) -> Result<Session, IpcError> {
         loop {
-            self.control.connect().await?;
-            let session = self.session(identity, &mut tap).await;
+            // A shell the brain relaunched tells it to stop once it connects, so only an
+            // idle brain gives up.
+            let idle = launched.is_none();
+            tokio::select! {
+                accepted = self.control.connect() => accepted?,
+                () = exited(launched) => return Ok(Session::ShellLost),
+                () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
+            }
+            let session = self.session(identity, tap).await;
             self.renew()?;
             match session {
-                Ok(Session::Quit) => return Ok(Ending::Quit),
-                Ok(Session::BuildMismatch) => return Ok(Ending::BuildMismatch),
-                Ok(Session::ShellLost) => tracing::info!("the shell disconnected"),
+                Ok(session) => return Ok(session),
                 Err(error) => tracing::warn!(%error, "connection refused"),
             }
         }
@@ -240,6 +248,19 @@ impl Pipes {
     }
 }
 
+/// Resolves when the relaunched shell has ended, or when the relaunch dropped its sender
+/// because no shell started; never when there's none to wait for.
+async fn exited(launched: &mut Option<oneshot::Receiver<()>>) {
+    let Some(exit) = launched.as_mut() else {
+        return std::future::pending().await;
+    };
+    // Either way no shell is coming, so both count as a lost shell.
+    if exit.await.is_err() {
+        tracing::warn!("the shell wasn't relaunched");
+    }
+    *launched = None;
+}
+
 fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, IpcError> {
     platform::create_owner_only(&pipe.name(session), instance)
         .map_err(|source| IpcError::Create { pipe, source })
@@ -309,7 +330,10 @@ mod tests {
     use capsula_protocol::message::{CAPABILITY_LEN, Hello, Incarnation};
     use capsula_protocol::{BUILD_ID, Secret};
 
-    use super::{Identity, Verdict, check_hello};
+    use tokio::sync::oneshot;
+
+    use super::{Identity, Pipes, Session, Verdict, check_hello};
+    use crate::tap::Tap;
 
     fn identity() -> Identity {
         Identity {
@@ -350,5 +374,64 @@ mod tests {
             capability: Secret::new(one_byte_off),
         };
         assert_eq!(check_hello(&near, &id), Verdict::WrongCapability);
+    }
+
+    #[tokio::test]
+    async fn a_relaunched_shell_that_ends_before_connecting_counts_as_lost() {
+        // A session id no real logon has, so the test never meets a running brain's pipes.
+        let mut pipes =
+            Pipes::create(u32::MAX - std::process::id()).expect("the test pipes are free");
+        let (exited, exit) = oneshot::channel();
+        exited.send(()).expect("the receiver is alive");
+        let mut launched = Some(exit);
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::ShellLost);
+        assert!(launched.is_none(), "the ended shell isn't waited on again");
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_that_never_started_a_shell_counts_as_lost() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 3 - std::process::id()).expect("the test pipes are free");
+        let (failed, exit) = oneshot::channel::<()>();
+        drop(failed);
+        let mut launched = Some(exit);
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::ShellLost);
+        assert!(
+            launched.is_none(),
+            "the failed relaunch isn't waited on again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brain_no_shell_reaches_gives_up() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 1 - std::process::id()).expect("the test pipes are free");
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut None)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::NoShell);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brain_waits_for_the_shell_it_relaunched() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 2 - std::process::id()).expect("the test pipes are free");
+        let (_starting, exit) = oneshot::channel::<()>();
+        let mut launched = Some(exit);
+        let waited = tokio::time::timeout(
+            super::NO_SHELL_TIMEOUT * 4,
+            pipes.next_session(&identity(), &mut Tap::from_env(), &mut launched),
+        )
+        .await;
+        assert!(waited.is_err(), "still waiting for the relaunched shell");
     }
 }
