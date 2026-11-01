@@ -82,10 +82,19 @@ pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipe
             .reject_remote_clients(true)
             .create_with_security_attributes_raw(name, (&raw mut attributes).cast())
     };
+    // The OS writes some SIDs as aliases (the built-in Administrator account as `LA`), so the
+    // check compares against how it writes ours, not the raw S-1-5 form.
+    let wanted = descriptor_sddl(descriptor);
     // SAFETY: the descriptor came from the conversion above and nothing references it now.
     unsafe { LocalFree(descriptor) };
     let server = server?;
-    check_user_only(&dacl_sddl(&server)?, &user)
+    let wanted = wanted?;
+    let user = wanted
+        .rsplit(';')
+        .next()
+        .and_then(|sid| sid.strip_suffix(')'))
+        .unwrap_or(&user);
+    check_user_only(&dacl_sddl(&server)?, user)
         .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
     Ok(server)
 }
@@ -111,6 +120,14 @@ fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
             i32::try_from(status).expect("Win32 error codes fit in i32"),
         ));
     }
+    let result = descriptor_sddl(descriptor);
+    // SAFETY: `descriptor` came from GetSecurityInfo and is no longer referenced.
+    unsafe { LocalFree(descriptor) };
+    result
+}
+
+/// A security descriptor's DACL in SDDL.
+fn descriptor_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
     let mut text: *mut u16 = std::ptr::null_mut();
     let mut len = 0u32;
     // SAFETY: `descriptor` is valid; on success `text` holds `len` LocalAlloc'd UTF-16 units.
@@ -135,8 +152,6 @@ fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
     };
     // SAFETY: `text` came from the conversion above (or is null) and is no longer referenced.
     unsafe { LocalFree(text.cast()) };
-    // SAFETY: `descriptor` came from GetSecurityInfo and is no longer referenced.
-    unsafe { LocalFree(descriptor) };
     result
 }
 
