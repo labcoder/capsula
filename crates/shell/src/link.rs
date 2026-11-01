@@ -153,12 +153,22 @@ struct Link {
     shared: Arc<Shared>,
 }
 
-/// Starts the link thread. It reports every state change on `states` and ends when the UI
-/// drops the receiver or the user quits.
+/// A link that hasn't started connecting, so the UI can arm the keyboard first. Dropping it
+/// unstarted ends the link, and Quit then waits for nothing.
+#[derive(Debug)]
+pub(crate) struct LinkStart {
+    link: Link,
+    states: Sender<LinkState>,
+    retries: Receiver<()>,
+    alive: Sender<()>,
+}
+
+/// Prepares the link. It reports every state change on `states` once started, and ends when
+/// the UI drops the receiver or the user quits.
 ///
 /// # Errors
-/// Fails when the shell can't find its own path or session, or the thread can't start.
-pub(crate) fn spawn(states: Sender<LinkState>) -> std::io::Result<LinkHandle> {
+/// Fails when the shell can't find its own path or session.
+pub(crate) fn prepare(states: Sender<LinkState>) -> std::io::Result<(LinkHandle, LinkStart)> {
     let shared = Arc::new(Shared::default());
     let link = Link {
         brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
@@ -167,17 +177,40 @@ pub(crate) fn spawn(states: Sender<LinkState>) -> std::io::Result<LinkHandle> {
     };
     let (retry, retries) = async_channel::bounded(1);
     let (alive, done) = async_channel::bounded::<()>(1);
-    thread::Builder::new()
-        .name("link".to_owned())
-        .spawn(move || {
-            link.run(&states, &retries);
-            drop(alive);
-        })?;
-    Ok(LinkHandle {
+    let handle = LinkHandle {
         shared,
         retry,
         done,
-    })
+    };
+    let start = LinkStart {
+        link,
+        states,
+        retries,
+        alive,
+    };
+    Ok((handle, start))
+}
+
+impl LinkStart {
+    /// Starts connecting on the link thread, which may start the brain.
+    ///
+    /// # Errors
+    /// Fails when the thread can't start.
+    pub(crate) fn spawn(self) -> std::io::Result<()> {
+        let Self {
+            link,
+            states,
+            retries,
+            alive,
+        } = self;
+        thread::Builder::new()
+            .name("link".to_owned())
+            .spawn(move || {
+                link.run(&states, &retries);
+                drop(alive);
+            })?;
+        Ok(())
+    }
 }
 
 impl Link {

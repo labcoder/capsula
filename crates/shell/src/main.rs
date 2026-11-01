@@ -2,6 +2,8 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod credential;
+mod escape;
+mod input;
 mod link;
 mod logging;
 mod platform;
@@ -30,10 +32,17 @@ fn main() -> ExitCode {
     };
     tracing::info!(build = capsula_protocol::BUILD_ID, "shell started");
     let (states, state_changes) = async_channel::unbounded();
-    let link = match link::spawn(states) {
-        Ok(link) => link,
+    let (link, start) = match link::prepare(states) {
+        Ok(prepared) => prepared,
         Err(error) => {
-            tracing::error!(%error, "can't start the link to the brain");
+            tracing::error!(%error, "can't prepare the link to the brain");
+            return ExitCode::FAILURE;
+        }
+    };
+    let diagnostics = match presence::Diagnostics::prepare() {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            tracing::error!(%error, "can't create the --input-diagnostics file");
             return ExitCode::FAILURE;
         }
     };
@@ -42,12 +51,21 @@ fn main() -> ExitCode {
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
-            if let Err(error) = presence::open(state_changes, link.clone(), cx) {
-                tracing::error!(%error, "can't open the dock");
+            // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
+            let started = presence::open(state_changes, link.clone(), diagnostics, cx)
+                .map_err(|error| tracing::error!(%error, "can't open the dock"))
+                .and_then(|()| {
+                    start
+                        .spawn()
+                        .map_err(|error| tracing::error!(%error, "can't start the link"))
+                });
+            if started.is_err() {
                 link.begin_quit();
-                let told = cx
-                    .background_executor()
-                    .spawn(async move { link.finish_quit() });
+                let diagnostics = presence::diagnostics::release(cx);
+                let told = cx.background_executor().spawn(async move {
+                    link.finish_quit();
+                    drop(diagnostics);
+                });
                 cx.spawn(async move |cx| {
                     told.await;
                     cx.update(|cx| cx.quit());

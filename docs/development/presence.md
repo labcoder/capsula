@@ -1,7 +1,8 @@
 # Presence and native surfaces
 
-The shell owns the dock, hover panel and tray on GPUI's UI thread. The dock opens while the
-brain link is still connecting. A link failure changes its label to Offline; Retry never sends
+The shell owns the dock, hover panel, typing panel and tray on GPUI's UI thread. The dock opens
+and the keyboard is armed before the brain link starts connecting; [input.md](input.md) covers
+the shortcut, the typing panel and Esc. A link failure changes its label to Offline; Retry never sends
 the previous input again.
 
 ```mermaid
@@ -21,7 +22,10 @@ The panel is created at startup, then explicitly positioned and sized while stil
 GPUI saves requested bounds for a hidden window instead of applying them immediately; leaving
 the native window at Windows' default size also leaves its renderer's textures oversized.
 Hidden placement bounds those resources without moving window creation into the first hover.
-The same panel is hidden and reused, never recreated for each hover.
+The same panel is hidden and reused, never recreated for each hover. The typing panel is the
+one exception to never activating: it's a tool window without no-activate, created on the first
+double tap, activated only explicitly, and hidden rather than closed. While it's open, hover
+leaves it alone and the hover panel stays hidden.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 
