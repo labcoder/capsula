@@ -410,7 +410,7 @@ fn check_flushed(
             Mark::Applied { us, .. } => Some(us),
             _ => None,
         })
-        .max();
+        .collect::<Vec<_>>();
     let painted = records
         .iter()
         .filter_map(|record| match record.mark {
@@ -429,7 +429,7 @@ fn check_flushed(
         );
     }
     println!(
-        "diagnostic applied_us_max={applied:?} excludes OS queue; painted_us_max={painted:?} is Canvas draw callback, NOT display/present latency"
+        "diagnostic applied_us_samples={applied:?} excludes OS queue; painted_us_max={painted:?} is Canvas draw callback, NOT display/present latency"
     );
     Ok(())
 }

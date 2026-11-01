@@ -51,6 +51,9 @@ pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
     }
+    if let Ok(proxy) = input_session::owned_window(child, input_session::WindowKind::ProductProxy) {
+        return proxy.close();
+    }
     let mut state = (child.id(), Vec::<HWND>::new());
     // SAFETY: collect receives the live exclusive state pointer for this synchronous enumeration.
     unsafe {
