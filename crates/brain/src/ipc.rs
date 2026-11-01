@@ -157,10 +157,13 @@ impl Pipes {
         launched: &mut Option<oneshot::Receiver<()>>,
     ) -> Result<Session, IpcError> {
         loop {
+            // A shell the brain relaunched tells it to stop once it connects, so only an
+            // idle brain gives up.
+            let idle = launched.is_none();
             tokio::select! {
                 accepted = self.control.connect() => accepted?,
                 () = exited(launched) => return Ok(Session::ShellLost),
-                () = tokio::time::sleep(NO_SHELL_TIMEOUT) => return Ok(Session::NoShell),
+                () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
             }
             let session = self.session(identity, tap).await;
             self.renew()?;
@@ -397,5 +400,19 @@ mod tests {
             .await
             .expect("no pipe failed");
         assert_eq!(session, Session::NoShell);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brain_waits_for_the_shell_it_relaunched() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 2 - std::process::id()).expect("the test pipes are free");
+        let (_starting, exit) = oneshot::channel::<()>();
+        let mut launched = Some(exit);
+        let waited = tokio::time::timeout(
+            super::NO_SHELL_TIMEOUT * 4,
+            pipes.next_session(&identity(), &mut Tap::from_env(), &mut launched),
+        )
+        .await;
+        assert!(waited.is_err(), "still waiting for the relaunched shell");
     }
 }
