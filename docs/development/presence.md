@@ -52,8 +52,10 @@ over sixty seconds. CPU is percent of one core; memory is endpoint private bytes
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
 The task checks that the same shell, brain and worker survive the sample and waits for all
 three to exit. Run only in an agreed quiet window; the benchmark sends no input.
-`--baseline <release-directory>` samples older binaries with the same counters and closes the
-spawned shell's own status window with `WM_CLOSE` after the sample; it never targets another app.
+`--baseline <release-directory>` samples older binaries with the same counters. After the sample,
+it sends `WM_CLOSE` to the spawned shell's presence proxy, which requests the normal graceful
+Quit path. Pre-dock binaries fall back to closing their single visible status window. Both
+paths verify the spawned shell's PID; neither targets another app.
 `--panel` opens the current shell's panel programmatically before settling, so the sample
 includes the panel's steady-state resources rather than only the never-hovered dock.
 
