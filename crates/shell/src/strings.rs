@@ -13,15 +13,19 @@ pub(crate) enum Text {
     Connected,
     Reconnecting,
     Failed,
+    Retry,
+    Quit,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
         Self::Failed,
+        Self::Retry,
+        Self::Quit,
     ];
 
     const fn id(self) -> &'static str {
@@ -30,6 +34,8 @@ impl Text {
             Self::Connected => "status-connected",
             Self::Reconnecting => "status-reconnecting",
             Self::Failed => "status-failed",
+            Self::Retry => "action-retry",
+            Self::Quit => "action-quit",
         }
     }
 }

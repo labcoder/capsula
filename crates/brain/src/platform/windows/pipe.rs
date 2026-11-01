@@ -1,4 +1,4 @@
-//! Win32: owner-only named pipes, the client's identity, and the session id.
+//! Owner-only named pipes, the client's identity, and the session id.
 
 use std::ffi::OsString;
 use std::io;

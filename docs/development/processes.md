@@ -1,0 +1,42 @@
+# Processes, jobs and recovery
+
+Capsula runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
+nothing it started can outlive it.
+
+```mermaid
+flowchart LR
+  Shell["capsula.exe (no job)"]
+  subgraph BrainJob["brain job (kill on close)"]
+    Screen["capsulad --screen"]
+    subgraph RunJob["run job, one per run"]
+      Child["a run's helper"]
+    end
+  end
+  Brain["capsulad.exe (holds the job handles)"]
+  Shell <-->|pipes| Brain
+  Brain -.->|owns| BrainJob
+```
+
+- **The brain job** has `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only the brain holds its handle.
+  When the brain exits or is killed, Windows ends everything in it.
+- **A run job** nests inside the brain job. A helper is created with
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST` naming both jobs, so it's inside from its first instruction.
+  Ending a run terminates its run job and waits until the job is empty, which ends that run's
+  processes and nothing else.
+- **The screen worker** sits in the brain job directly, so ending a run never touches it. In
+  slice 0 it's a placeholder that only waits.
+- Helpers inherit no handles, and nothing secret is ever on their command lines.
+- **The shell** isn't in any job, so a brain crash doesn't take the window with it. Each process
+  starts the other detached and, where the starting job allows it, outside that job.
+
+## Recovery
+
+| What happens | What the other process does |
+|---|---|
+| The shell dies | The brain relaunches it after 0.2 s, then 1 s, then 5 s, and stops after three crashes in a minute |
+| The brain dies | Its helpers end with it. The shell restarts it once; a second loss within a minute shows Retry |
+| A shell is started by hand | It finds the running brain through the pipes and the capability |
+| Quit | The shell sends `Quitting`. The brain ends its jobs, deletes the instance capability and exits, then the shell exits |
+
+In slice 0, closing the status window is Quit, because it's the only window. Slice 1 moves Quit
+to the tray.

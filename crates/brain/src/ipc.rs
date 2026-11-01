@@ -53,20 +53,14 @@ pub enum IpcError {
     Accept(#[from] io::Error),
 }
 
-/// Why [`Pipes::serve`] returned.
+/// How one shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ending {
+pub(crate) enum Session {
     /// The shell sent `Quitting`.
     Quit,
     /// A shell from another build connected; it starts its own brain.
     BuildMismatch,
-}
-
-/// How one shell connection ended.
-#[derive(Debug, PartialEq, Eq)]
-enum Session {
-    Quit,
-    BuildMismatch,
+    /// The shell went away without `Quitting`: it crashed or was killed.
     ShellLost,
 }
 
@@ -144,23 +138,22 @@ impl Pipes {
         Ok(())
     }
 
-    /// Serves one shell at a time until one quits or is from another build.
+    /// Waits for a shell, serves it, and returns how its session ended. Clients that fail the
+    /// handshake are logged and skipped.
     ///
     /// # Errors
     /// Fails only when a pipe can no longer accept clients.
-    pub(crate) async fn serve(
+    pub(crate) async fn next_session(
         &mut self,
         identity: &Identity,
-        mut tap: Tap,
-    ) -> Result<Ending, IpcError> {
+        tap: &mut Tap,
+    ) -> Result<Session, IpcError> {
         loop {
             self.control.connect().await?;
-            let session = self.session(identity, &mut tap).await;
+            let session = self.session(identity, tap).await;
             self.renew()?;
             match session {
-                Ok(Session::Quit) => return Ok(Ending::Quit),
-                Ok(Session::BuildMismatch) => return Ok(Ending::BuildMismatch),
-                Ok(Session::ShellLost) => tracing::info!("the shell disconnected"),
+                Ok(session) => return Ok(session),
                 Err(error) => tracing::warn!(%error, "connection refused"),
             }
         }
