@@ -770,9 +770,11 @@ version = "0.1.0"
 name = "capsula-shell"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "capsula-protocol",
  "fluent-bundle",
  "gpui-kit",
+ "keyring",
  "raw-window-handle",
  "thiserror 2.0.21",
  "tracing",
