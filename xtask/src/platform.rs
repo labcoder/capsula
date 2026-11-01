@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use windows::Win32::Foundation::{
-    ERROR_NO_MORE_FILES, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -23,6 +23,56 @@ use windows::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS, OpenProcess,
     PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ, WaitForSingleObject,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+};
+use windows::core::BOOL;
+
+pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {
+    unsafe extern "system" fn collect(window: HWND, param: LPARAM) -> BOOL {
+        let state =
+            std::ptr::with_exposed_provenance_mut::<(u32, Vec<HWND>)>(param.0.cast_unsigned());
+        // SAFETY: EnumWindows synchronously passes the exclusive state pointer supplied below.
+        let (shell_pid, windows) = unsafe { &mut *state };
+        let mut pid = 0;
+        // SAFETY: window is supplied by EnumWindows and pid is writable.
+        unsafe { GetWindowThreadProcessId(window, Some(&raw mut pid)) };
+        if pid == *shell_pid {
+            // SAFETY: checking a window's visibility requires no caller-owned pointers.
+            if unsafe { IsWindowVisible(window) }.as_bool() {
+                windows.push(window);
+            }
+        }
+        BOOL::from(true)
+    }
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let mut state = (child.id(), Vec::<HWND>::new());
+    // SAFETY: collect receives the live exclusive state pointer for this synchronous enumeration.
+    unsafe {
+        EnumWindows(
+            Some(collect),
+            LPARAM((&raw mut state).expose_provenance().cast_signed()),
+        )
+    }?;
+    anyhow::ensure!(
+        state.1.len() == 1,
+        "expected one visible baseline shell window; found {}",
+        state.1.len()
+    );
+    let window = state.1[0];
+    let mut pid = 0;
+    // SAFETY: window came from EnumWindows and pid is writable.
+    unsafe { GetWindowThreadProcessId(window, Some(&raw mut pid)) };
+    anyhow::ensure!(
+        pid == child.id(),
+        "baseline window ownership changed before close"
+    );
+    // SAFETY: the window belongs to the spawned shell; WM_CLOSE has no pointer parameters.
+    unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) }?;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub(crate) struct Entry {

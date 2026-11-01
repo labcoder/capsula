@@ -21,10 +21,12 @@ fn usage() -> String {
         "usage: cargo xtask <task>
 
 tasks:
-  bench idle [--duration 1..60]  release idle CPU/private bytes on Rez (default 60s)
+  bench idle [--duration 1..60] [--baseline <release-directory>]
+                    release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
                     30s settle, GetProcessTimes + private bytes, bounded autoquit;
                     CPU is percent of one core, not the whole machine
+                    baseline uses that directory and closes its own shell window
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"

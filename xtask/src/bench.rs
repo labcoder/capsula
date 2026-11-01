@@ -14,29 +14,47 @@ use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
 use crate::platform::{self, Process};
 
-pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
+fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>)> {
     ensure!(
         args.next().as_deref() == Some("idle"),
-        "use cargo xtask bench idle [--duration 1..60]"
+        "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory>]"
     );
-    let seconds = match args.next().as_deref() {
-        None => 60,
-        Some("--duration") => args
-            .next()
-            .context("--duration needs seconds")?
-            .parse::<u64>()?,
-        Some(_) => bail!("use cargo xtask bench idle [--duration 1..60]"),
-    };
-    ensure!(
-        (1..=60).contains(&seconds) && args.next().is_none(),
-        "duration must be 1..60 seconds with no extra arguments"
-    );
+    let mut duration = None;
+    let mut baseline = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--duration" if duration.is_none() => {
+                let seconds = args
+                    .next()
+                    .context("--duration needs seconds")?
+                    .parse::<u64>()?;
+                ensure!(
+                    (1..=60).contains(&seconds),
+                    "duration must be 1..60 seconds"
+                );
+                duration = Some(seconds);
+            }
+            "--baseline" if baseline.is_none() => {
+                baseline = Some(PathBuf::from(
+                    args.next()
+                        .context("--baseline needs a release directory")?,
+                ));
+            }
+            _ => bail!("unknown or duplicate benchmark option"),
+        }
+    }
+    Ok((duration.unwrap_or(60), baseline))
+}
+
+pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
+    let (seconds, baseline) = options(args)?;
     let exe = std::env::current_exe()?;
     let release: PathBuf = exe
         .parent()
         .and_then(|path| path.parent())
         .context("xtask executable is not inside a Cargo profile directory")?
         .join("release");
+    let release = baseline.as_ref().unwrap_or(&release);
     let shell = release.join(SHELL_EXE);
     ensure!(
         shell.is_file() && release.join(BRAIN_EXE).is_file(),
@@ -54,14 +72,19 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
     let measurement = measure(child.id(), seconds, &mut tracked);
+    let close = if baseline.is_some() {
+        platform::close_shell_window(&mut child).context("closing baseline shell window")
+    } else {
+        Ok(())
+    };
     let cleanup = wait_for_exit(&mut child, &tracked, deadline);
-    match (measurement, cleanup) {
-        (Err(measurement), Err(cleanup)) => {
-            bail!("measurement failed: {measurement:#}; cleanup failed: {cleanup:#}")
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
+    let errors = [measurement, close, cleanup]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>();
+    ensure!(errors.is_empty(), "{}", errors.join("; "));
+    Ok(())
 }
 
 fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Process)>) -> Result<()> {
@@ -193,8 +216,39 @@ fn percent(cpu: Duration, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::percent;
+    use super::{options, percent};
+    use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn baseline_and_duration_options_combine_in_either_order() {
+        assert_eq!(
+            options(["idle".to_owned()].into_iter()).unwrap(),
+            (60, None),
+            "default duration and binary location remain unchanged"
+        );
+        for args in [
+            vec!["idle", "--baseline", "release", "--duration", "1"],
+            vec!["idle", "--duration", "1", "--baseline", "release"],
+        ] {
+            assert_eq!(
+                options(args.into_iter().map(str::to_owned)).unwrap(),
+                (1, Some(PathBuf::from("release"))),
+                "combined options"
+            );
+        }
+        for args in [
+            vec!["idle", "--duration", "0"],
+            vec!["idle", "--baseline"],
+            vec!["idle", "--duration", "61"],
+            vec!["idle", "--baseline", "a", "--baseline", "b"],
+        ] {
+            assert!(
+                options(args.into_iter().map(str::to_owned)).is_err(),
+                "invalid options must fail"
+            );
+        }
+    }
 
     #[test]
     fn cpu_percent_is_of_one_core_not_the_machine() {
