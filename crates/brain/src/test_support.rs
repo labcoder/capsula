@@ -40,5 +40,6 @@ impl Drop for Scratch {
 pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
-    Brain::new(store, Fixture::parse(script).expect("script")).expect("brain")
+    let high_water = store.high_water().expect("high water");
+    Brain::new(store, high_water, Fixture::parse(script).expect("script")).expect("brain")
 }

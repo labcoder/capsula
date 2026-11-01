@@ -85,7 +85,8 @@ pub async fn run() -> Result<(), BrainError> {
         finished_deletions = recovered.finished_deletions,
         "store recovered"
     );
-    let mut brain = Brain::new(store, fixture()?).map_err(BrainError::Helpers)?;
+    let high_water = store.high_water()?;
+    let mut brain = Brain::new(store, high_water, fixture()?).map_err(BrainError::Helpers)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;

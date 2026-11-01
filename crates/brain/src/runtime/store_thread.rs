@@ -21,11 +21,12 @@ impl StoreThread {
         let handle = thread::Builder::new()
             .name("store".to_owned())
             .spawn(move || {
+                // Every queued op runs, even with nobody left to hear the acknowledgement.
                 for op in queue {
                     if let Some(ack) = apply(&mut store, op)
                         && acks.send(ack).is_err()
                     {
-                        break;
+                        tracing::debug!("an acknowledgement had no listener");
                     }
                 }
             })?;

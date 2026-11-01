@@ -53,8 +53,9 @@ pub const MAX_STEPS: usize = 64;
 pub const MAX_STEP_LABEL: usize = 256;
 
 /// Bytes of data-pipe frames the brain may send before the shell grants more with
-/// [`DataToBrain::Credit`] [guess]. It holds two of the largest frames, so a reading shell never
-/// waits on a grant and no frame is too big to ever send.
+/// [`DataToBrain::Credit`] [guess]. It holds the largest frame the data pipe allows, so no frame
+/// is too big to send, and several of the 64 KiB text frames runs stream, so a reading shell
+/// rarely waits on a grant.
 pub const DATA_WINDOW: u32 = 512 * 1024;
 
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built

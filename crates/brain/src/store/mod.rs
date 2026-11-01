@@ -493,6 +493,14 @@ fn insert_event(
     Ok(())
 }
 
+#[cfg(test)]
+impl Store {
+    /// The raw connection, for tests that inspect rows the API doesn't return.
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -61,17 +61,22 @@ flowchart LR
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
 | Control | `RunState`, `Ping` | 256 queued frames [guess] | The shell counts as hung and the connection ends |
-| Data | `AssistantText`, `StepCommit` | 512 KiB of credit [guess] | Frames wait for credit; 2 s without progress ends the run as `view_stalled` |
+| Data | `AssistantText`, `StepCommit` | Unbounded queue; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
-  grants more with `Credit`. That's two of the largest frames, so no frame is too big to send
-  and a reading shell never waits on a grant. Grants never raise the credit past the window.
+  grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
+  big to send, and several 64 KiB text frames. Grants never raise the credit past the window.
+- **Stop drops the stopped run's unsent data**, and so does a new turn that replaces a run, so
+  the replacement's first frame isn't stuck behind text nobody will show.
 - **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
-  connection if one goes unanswered for 2 s. Outside runs there are no timers.
+  connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
+  runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it.
-- shortcut: the brain doesn't pause the engine when the data queue grows; the run budgets bound
-  it, and real engines get backpressure in slice 3.
+- shortcut: the data queue has no 4 MiB cap and the brain doesn't pause the engine when it
+  grows; the run budgets bound it, and real engines get backpressure in slice 3.
+- shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
+  `RunState`; the brain sends only `RunState` and `Ping`, so it can't fill short of a hung shell.
 
 ## Starting and reconnecting
 

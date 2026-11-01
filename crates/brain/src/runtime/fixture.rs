@@ -12,7 +12,7 @@ use std::time::Duration;
 use capsula_protocol::message::{RunId, Step};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::coordinator::{EngineEvent, Input};
+use crate::coordinator::{EngineEvent, Input, MAX_TEXT};
 
 /// The script runs use unless a dev build names another in [`constants::FIXTURE_ENV`].
 ///
@@ -67,7 +67,13 @@ impl Fixture {
             let (kind, arg) = rest.split_once(' ').unwrap_or((rest, ""));
             fixture.lines.push(match kind {
                 "text" => Line::Text(after, arg.to_owned()),
-                "fill" => Line::Text(after, "x".repeat(arg.parse().map_err(|_| bad)?)),
+                "fill" => {
+                    let bytes: usize = arg.parse().map_err(|_| bad)?;
+                    if bytes > MAX_TEXT {
+                        return Err(FixtureError { line: index + 1 });
+                    }
+                    Line::Text(after, "x".repeat(bytes))
+                }
                 "step" => Line::Step(after, arg.to_owned()),
                 "fail" => Line::Fail(after),
                 _ => return Err(bad),
@@ -150,7 +156,7 @@ mod tests {
             ]
         );
         assert_eq!(fixture.late.as_deref(), Some("z"));
-        for bad in ["x text", "5 shout", "1 fill many"] {
+        for bad in ["x text", "5 shout", "1 fill many", "1 fill 1048577"] {
             assert_eq!(
                 Fixture::parse(&format!("0 text ok\n{bad}"))
                     .map(|_| ())

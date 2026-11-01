@@ -174,6 +174,18 @@ pub enum StoreOp {
     },
 }
 
+impl StoreOp {
+    /// The run the operation belongs to.
+    pub fn run(&self) -> RunId {
+        match self {
+            Self::BeginTurn { run, .. }
+            | Self::Append { run, .. }
+            | Self::CommitStep { run, .. }
+            | Self::EndRun { run, .. } => *run,
+        }
+    }
+}
+
 /// The input named a run that isn't current, so it changed nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stale;

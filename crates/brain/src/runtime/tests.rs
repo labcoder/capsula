@@ -193,6 +193,71 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
     );
 }
 
+// Real time: paused time would jump ahead whenever the runtime waits on the store's own thread.
+#[tokio::test]
+async fn a_shell_that_stops_reading_data_ends_the_run_as_stalled() {
+    let scratch = Scratch::new("stalled");
+    let mut brain = test_support::brain(&scratch, "0 fill 240000\n0 fill 240000\n5000 step late");
+    // Small buffers, so the data writer blocks inside a write long before credit runs out.
+    let (control, control_client) = tokio::io::duplex(4096);
+    let (data, data_client) = tokio::io::duplex(4096);
+    let (mut control_in, mut control_out) = tokio::io::split(control_client);
+    let (_data_in, mut data_out) = tokio::io::split(data_client);
+    let mut tap = Tap::from_env();
+    let client = async {
+        let submit = DataToBrain::TextSubmit {
+            thread: None,
+            text: "go".to_owned(),
+        };
+        data_out
+            .write_all(&frame::encode(&submit, Pipe::Data).expect("encodes"))
+            .await
+            .expect("sent");
+        let started = tokio::time::Instant::now();
+        let mut phases = Vec::new();
+        // Answer every ping, read nothing on data, until the run ends.
+        loop {
+            match ipc::read::<ControlToShell>(&mut control_in, Pipe::Control)
+                .await
+                .expect("readable")
+                .expect("open")
+            {
+                ControlToShell::Ping => {
+                    let pong =
+                        frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
+                    control_out.write_all(&pong).await.expect("sent");
+                }
+                ControlToShell::RunState { phase, .. } => {
+                    phases.push(phase);
+                    if phase == Phase::Interrupted {
+                        break;
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(
+            phases,
+            [Phase::Thinking, Phase::Answering, Phase::Interrupted]
+        );
+        let after = started.elapsed();
+        assert!(
+            (Duration::from_secs(2)..Duration::from_secs(3)).contains(&after),
+            "stalled after {after:?}"
+        );
+        drop((control_in, control_out, data_out));
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close();
+    let store = Store::open(&scratch.db()).expect("reopen");
+    let reason: String = store
+        .conn_for_tests()
+        .query_row("SELECT reason FROM runs", [], |row| row.get(0))
+        .expect("one run");
+    assert_eq!(reason, "view_stalled");
+}
+
 /// Rez measurement for the pull request, not a check: run it with
 /// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_`.
 #[tokio::test]
@@ -210,12 +275,13 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
             // Throughput: one run read to its last byte, granting credit as a shell would.
             shell.submit("read").await;
             let (run, _) = shell.state().await;
-            let started = tokio::time::Instant::now();
+            let mut started = None;
             let mut bytes = 0;
             while bytes < 960_000 {
                 let DataToShell::AssistantText { delta, .. } = shell.data().await else {
                     panic!("text only");
                 };
+                started.get_or_insert_with(tokio::time::Instant::now);
                 bytes += delta.len();
                 let credit = DataToBrain::Credit {
                     bytes: u32::try_from(delta.len() + 64).expect("small"),
@@ -223,7 +289,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
                 let frame = frame::encode(&credit, Pipe::Data).expect("encodes");
                 shell.data_out.write_all(&frame).await.expect("sent");
             }
-            streams.push(started.elapsed());
+            streams.push(started.expect("text arrived").elapsed());
             shell.stop(run).await;
             while shell.state().await != (run, Phase::Interrupted) {}
             // Stop: a second run that nothing reads.
@@ -251,5 +317,8 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
         );
     };
     report("Stop -> Interrupted, data writer blocked", &mut stops);
-    report("960 kB of text streamed and read", &mut streams);
+    report(
+        "960 kB of text from its first frame to its last",
+        &mut streams,
+    );
 }

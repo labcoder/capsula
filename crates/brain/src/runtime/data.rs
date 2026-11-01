@@ -1,8 +1,10 @@
 //! The data pipe's outgoing queue: frames in order, sent only against the byte credit the shell
-//! grants, so a shell that stops reading can't make the brain buffer without bound.
+//! grants, so a shell that stops reading can't make the brain send without bound.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+use capsula_protocol::message::RunId;
 
 /// How long the shell may leave the queue blocked on credit before the run ends as
 /// `view_stalled` (architecture v1 §3.2) [guess].
@@ -10,11 +12,11 @@ pub(crate) const STALL: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub(crate) struct DataQueue {
-    frames: VecDeque<Vec<u8>>,
+    frames: VecDeque<(RunId, Vec<u8>)>,
     credit: usize,
     window: usize,
-    /// When the front frame first had to wait for credit.
-    blocked_since: Option<Instant>,
+    /// Since when bytes have waited, on credit or on a write the shell isn't draining.
+    waiting_since: Option<Instant>,
 }
 
 impl DataQueue {
@@ -24,12 +26,17 @@ impl DataQueue {
             frames: VecDeque::new(),
             credit: window,
             window,
-            blocked_since: None,
+            waiting_since: None,
         }
     }
 
-    pub(crate) fn push(&mut self, frame: Vec<u8>) {
-        self.frames.push_back(frame);
+    pub(crate) fn push(&mut self, run: RunId, frame: Vec<u8>) {
+        self.frames.push_back((run, frame));
+    }
+
+    /// Drops a stopped run's frames that haven't started writing; the shell would drop them.
+    pub(crate) fn revoke(&mut self, run: RunId) {
+        self.frames.retain(|(owner, _)| *owner != run);
     }
 
     /// Adds credit, never past the window, so a confused shell can't unbound the queue.
@@ -38,21 +45,25 @@ impl DataQueue {
         self.credit = self.credit.saturating_add(bytes).min(self.window);
     }
 
-    /// The next frame, if the credit covers it.
+    /// The next frame, if the credit covers it. Call [`DataQueue::wrote`] once it's written.
     pub(crate) fn pop(&mut self, now: Instant) -> Option<Vec<u8>> {
-        let len = self.frames.front()?.len();
+        let len = self.frames.front()?.1.len();
+        self.waiting_since.get_or_insert(now);
         if len > self.credit {
-            self.blocked_since.get_or_insert(now);
             return None;
         }
         self.credit -= len;
-        self.blocked_since = None;
-        self.frames.pop_front()
+        self.frames.pop_front().map(|(_, frame)| frame)
     }
 
-    /// Whether frames have waited on credit for longer than [`STALL`].
+    /// The frame from the last [`DataQueue::pop`] reached the pipe: progress.
+    pub(crate) fn wrote(&mut self) {
+        self.waiting_since = None;
+    }
+
+    /// Whether bytes have waited without progress for [`STALL`] or longer.
     pub(crate) fn stalled(&self, now: Instant) -> bool {
-        self.blocked_since
+        self.waiting_since
             .is_some_and(|since| now.duration_since(since) >= STALL)
     }
 }
@@ -61,14 +72,19 @@ impl DataQueue {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use capsula_protocol::message::RunId;
+
     use super::{DataQueue, STALL};
+
+    const A: RunId = RunId(1);
+    const B: RunId = RunId(2);
 
     #[test]
     fn frames_go_in_order_and_only_against_credit() {
         let start = Instant::now();
         let mut queue = DataQueue::new(10);
-        queue.push(vec![1; 6]);
-        queue.push(vec![2; 6]);
+        queue.push(A, vec![1; 6]);
+        queue.push(A, vec![2; 6]);
         assert_eq!(queue.pop(start), Some(vec![1; 6]));
         assert_eq!(queue.pop(start), None, "4 bytes of credit left");
         queue.grant(1);
@@ -82,23 +98,46 @@ mod tests {
     fn credit_never_exceeds_the_window() {
         let mut queue = DataQueue::new(8);
         queue.grant(u32::MAX);
-        queue.push(vec![0; 9]);
+        queue.push(A, vec![0; 9]);
         assert_eq!(queue.pop(Instant::now()), None);
     }
 
     #[test]
-    fn a_queue_blocked_on_credit_stalls_after_the_limit() {
+    fn a_stopped_run_loses_only_its_unsent_frames() {
+        let start = Instant::now();
+        let mut queue = DataQueue::new(100);
+        queue.push(A, vec![1]);
+        queue.push(B, vec![2]);
+        queue.push(A, vec![3]);
+        queue.revoke(A);
+        assert_eq!(queue.pop(start), Some(vec![2]));
+        assert_eq!(queue.pop(start), None);
+    }
+
+    #[test]
+    fn waiting_on_credit_stalls_after_the_limit() {
         let start = Instant::now();
         let mut queue = DataQueue::new(5);
         assert!(!queue.stalled(start + STALL * 2), "empty never stalls");
-        queue.push(vec![0; 3]);
-        queue.push(vec![0; 5]);
+        queue.push(A, vec![0; 3]);
+        queue.push(A, vec![0; 5]);
         assert!(queue.pop(start).is_some());
+        queue.wrote();
         assert_eq!(queue.pop(start), None, "2 bytes of credit left");
         assert!(!queue.stalled(start + Duration::from_millis(1999)));
         assert!(queue.stalled(start + STALL));
         queue.grant(3);
         assert!(queue.pop(start + STALL).is_some());
+        queue.wrote();
         assert!(!queue.stalled(start + STALL * 3), "progress resets it");
+    }
+
+    #[test]
+    fn a_write_the_shell_never_drains_stalls_too() {
+        let start = Instant::now();
+        let mut queue = DataQueue::new(100);
+        queue.push(A, vec![0; 3]);
+        assert!(queue.pop(start).is_some(), "credit is plenty");
+        assert!(queue.stalled(start + STALL), "but the write never finished");
     }
 }

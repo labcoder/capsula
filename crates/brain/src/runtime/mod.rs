@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, RunId,
+    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, RunId, ThreadId,
 };
 use capsula_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -33,6 +33,9 @@ use fixture::Fixture;
 use store_thread::StoreThread;
 
 /// Control frames queued for the shell before it counts as hung (architecture v1 §3.2) [guess].
+/// shortcut: no slots reserved for urgent frames and no coalescing of `RunState`; the brain sends
+/// only `RunState` and `Ping` today, so the queue can't fill short of a hung shell. Add both
+/// with the first urgent brain-to-shell message.
 const CONTROL_QUEUE: usize = 256;
 /// The watchdog's ping interval while a run is active [guess].
 const PING_EVERY: Duration = Duration::from_millis(500);
@@ -69,9 +72,14 @@ pub(crate) struct Brain {
 }
 
 impl Brain {
-    /// Starts the store thread. The store must already be recovered.
-    pub(crate) fn new(store: Store, fixture: Fixture) -> std::io::Result<Self> {
-        let (last_thread, last_run) = store.high_water().map_err(std::io::Error::other)?;
+    /// Starts the store thread. The store must already be recovered, and `high_water` is its
+    /// highest thread and run ids.
+    pub(crate) fn new(
+        store: Store,
+        high_water: (ThreadId, RunId),
+        fixture: Fixture,
+    ) -> std::io::Result<Self> {
+        let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         let store = StoreThread::spawn(store, inputs_tx.clone())?;
         Ok(Self {
@@ -129,6 +137,7 @@ impl Brain {
             let offline = self.apply(effects, None);
             debug_assert!(offline.is_ok(), "applying without a shell can't fail");
         }
+        self.deadline = None;
         ended
     }
 
@@ -147,15 +156,24 @@ impl Brain {
                     Frame::Control(message) => {
                         link.tap.record(Pipe::Control, Direction::ToBrain, &message);
                         match message {
-                            ControlToBrain::Stop { run, revealed } => Input::Stop { run, revealed },
+                            ControlToBrain::Stop { run, revealed } => {
+                                link.queue.borrow_mut().revoke(run);
+                                Input::Stop { run, revealed }
+                            }
                             ControlToBrain::Pong => {
                                 ping_sent = None;
                                 continue;
                             }
+                            // The readers end the connection on these.
                             ControlToBrain::Hello(_) | ControlToBrain::Quitting => continue,
                         }
                     }
-                    Frame::Data(DataToBrain::TextSubmit { thread, text }) => Input::Turn { thread, text },
+                    Frame::Data(DataToBrain::TextSubmit { thread, text }) => {
+                        if let Some(replaced) = running {
+                            link.queue.borrow_mut().revoke(replaced);
+                        }
+                        Input::Turn { thread, text }
+                    }
                     Frame::Data(DataToBrain::Credit { bytes }) => {
                         link.queue.borrow_mut().grant(bytes);
                         link.ready.notify_one();
@@ -194,6 +212,7 @@ impl Brain {
             };
             if self.coordinator.current_run().is_none() {
                 ping_sent = None;
+                self.deadline = None;
             }
             if self.apply(effects, Some(&mut link)).is_err() {
                 tracing::warn!("the shell's control queue is full");
@@ -212,8 +231,11 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
+                    let run = op.run();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
+                        let failed = self.inputs_tx.send(Input::StoreFailed { run });
+                        debug_assert!(failed.is_ok(), "the brain holds its own receiver");
                     }
                 }
                 Effect::Control(message) => {
@@ -315,6 +337,7 @@ async fn write_data(
             tracing::warn!(%error, "data pipe failed");
             return Ended::Lost;
         }
+        queue.borrow_mut().wrote();
     }
 }
 
@@ -344,9 +367,12 @@ impl Link<'_, '_> {
 
     /// Data frames carry content, so the tap never records them.
     fn data(&mut self, message: &DataToShell) {
+        let run = match message {
+            DataToShell::AssistantText { run, .. } | DataToShell::StepCommit { run, .. } => *run,
+        };
         match frame::encode(message, Pipe::Data) {
             Ok(frame) => {
-                self.queue.borrow_mut().push(frame);
+                self.queue.borrow_mut().push(run, frame);
                 self.ready.notify_one();
             }
             Err(error) => tracing::error!(%error, "a data message didn't encode"),
