@@ -43,7 +43,7 @@ flowchart LR
 | Screen worker | Screen capture, UI Automation, OCR and image encoding. It's killable, because a stuck UIA provider can't be stopped any other way |
 | Claude Code | The user's own Claude Code, started fresh for each question in its own nested run job, restricted to Capsula's tools. Ending a question terminates that run job only |
 
-The shell keeps nothing on disk, so restarting it is always safe. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
+The shell keeps no state on disk, only its log, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Capsula\logs` (`Capsula Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
 
 ## Crates
 
