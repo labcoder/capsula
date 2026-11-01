@@ -217,6 +217,10 @@ cleanup; a phase cannot begin without its complete budget.
 4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
    product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
+   Every required category needs stable native and measured display coverage. Rest additionally
+   needs displayed-body receipts at the center and edge; motion needs them on the body and
+   retracting edge. Dropped-only or otherwise unavailable display evidence makes the phase
+   incomplete even when native routing succeeded.
    The left-edge resting points keep the bulb inside the pill on the middle-left fixture.
    Motion frame gaps use exact current-row changes to delimit drawing demand; warmup, capture
    edges and unchanged-pixel gaps are not missed frames. Every displayed gap and undisplayed

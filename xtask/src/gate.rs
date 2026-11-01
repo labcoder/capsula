@@ -696,7 +696,12 @@ fn summarize(
                 observation::summarize_hover(observer, pid, &mut rows, dock, output)
             }
             Trial::ReceiptRest | Trial::ReceiptMotion => {
-                receipts::summarize(observer, pid, &mut rows, dock, output)
+                let mode = if trial == Trial::ReceiptRest {
+                    receipts::Mode::Rest
+                } else {
+                    receipts::Mode::Motion
+                };
+                receipts::summarize(observer, pid, &mut rows, dock, output, mode)
             }
             _ => Ok(()),
         }

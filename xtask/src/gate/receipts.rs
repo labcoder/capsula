@@ -24,6 +24,15 @@ pub(super) enum Mode {
     Motion,
 }
 
+impl Mode {
+    fn categories(self) -> &'static [&'static str] {
+        match self {
+            Self::Rest => &["center", "edge", "outside", "external"],
+            Self::Motion => &["body", "previous", "outside", "external", "retract"],
+        }
+    }
+}
+
 const HEADER: &str = "sequence,category,x,y,move_begin,move_end,move_accepted,click_begin,click_end,click_accepted,recipient,receipt_qpc,epoch,recipient_count,status";
 
 struct Received {
@@ -63,11 +72,7 @@ pub(super) fn exercise(
         writeln!(file, "{HEADER}")?;
         let duration = Duration::from_secs(if mode == Mode::Rest { 20 } else { 30 });
         let end = Instant::now() + duration;
-        let categories: &[&str] = if mode == Mode::Rest {
-            &["center", "edge", "outside", "external"]
-        } else {
-            &["body", "previous", "outside", "external", "retract"]
-        };
+        let categories = mode.categories();
         let mut sequence = 0usize;
         let mut seen = BTreeMap::<&str, usize>::new();
         while Instant::now() < end {
@@ -363,6 +368,7 @@ pub(super) fn summarize(
     presents: &mut PresentRows,
     dock_chain: u64,
     output: &Path,
+    mode: Mode,
 ) -> Result<()> {
     let data = observation::read(observer, pid)?;
     let frequency = data.startup.context("observer startup missing")?.frequency;
@@ -370,7 +376,7 @@ pub(super) fn summarize(
     let (displayed, uncertain) =
         joined_frames(&data, presents, dock_chain, frequency, &mut report)?;
     let text = fs::read_to_string(output.join("receipt-trials.csv"))?;
-    let motion = if text.contains(",retract,") {
+    let motion = if mode == Mode::Motion {
         motion_frames(
             &data,
             &displayed,
@@ -388,12 +394,17 @@ pub(super) fn summarize(
     ensure!(lines.next() == Some(HEADER), "invalid receipt trial schema");
     let mut native_measured = BTreeMap::<String, usize>::new();
     let mut displayed_body_counts = BTreeMap::<String, usize>::new();
+    let mut display_measured = BTreeMap::<String, usize>::new();
     let mut failures = Vec::new();
     let mut attempted = 0;
     let mut unmeasured = 0;
     for line in lines {
         let fields = line.split(',').collect::<Vec<_>>();
         ensure!(fields.len() == 15, "invalid receipt trial column count");
+        ensure!(
+            mode.categories().contains(&fields[1]),
+            "unexpected receipt category"
+        );
         if fields[14] == "no_candidate" {
             writeln!(report, "{line} unmeasured=no_candidate")?;
             continue;
@@ -447,6 +458,9 @@ pub(super) fn summarize(
         }
         *native_measured.entry(fields[1].to_owned()).or_default() += 1;
         let visible_body = displayed_body(&data, &displayed, &uncertain, point, begin, receipt);
+        if visible_body.is_some() {
+            *display_measured.entry(fields[1].to_owned()).or_default() += 1;
+        }
         if let Some(true) = visible_body {
             *displayed_body_counts
                 .entry(fields[1].to_owned())
@@ -465,17 +479,24 @@ pub(super) fn summarize(
     }
     writeln!(
         report,
-        "attempted={attempted} unmeasured={unmeasured} native_measured={native_measured:?} displayed_body={displayed_body_counts:?} failures={failures:?}"
+        "attempted={attempted} unmeasured={unmeasured} native_measured={native_measured:?} display_measured={display_measured:?} displayed_body={displayed_body_counts:?} failures={failures:?}"
     )?;
     ensure!(attempted > 0, "no receipt attempts");
-    ensure!(
-        native_measured.values().sum::<usize>() > 0,
-        "no stable native ownership joins"
-    );
-    if text.contains(",retract,") {
+    for category in mode.categories() {
         ensure!(
-            displayed_body_counts.get("retract").copied().unwrap_or(0) > 0,
-            "retracting-edge displayed-body receipts unmeasured"
+            native_measured.get(*category).copied().unwrap_or(0) > 0
+                && display_measured.get(*category).copied().unwrap_or(0) > 0,
+            "{category} native/display receipt coverage unmeasured"
+        );
+    }
+    let body_categories: &[&str] = match mode {
+        Mode::Rest => &["center", "edge"],
+        Mode::Motion => &["body", "retract"],
+    };
+    for category in body_categories {
+        ensure!(
+            displayed_body_counts.get(*category).copied().unwrap_or(0) > 0,
+            "{category} displayed-body receipts unmeasured"
         );
     }
     if let Err(error) = motion {
@@ -709,181 +730,4 @@ fn displayed_body(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::observation::{Commit, Geometry, Row, Startup};
-    use super::*;
-
-    fn sample_data() -> Observation {
-        let mut data = Observation::default();
-        data.startup = Some(Startup {
-            panel_hwnd: 2,
-            frequency: 1000,
-            work_area: [0, 0, 1000, 1000],
-            dock: [0, 0, 100, 40],
-            overlay: [0, 0, 200, 40],
-            panel: [0, 44, 200, 100],
-        });
-        for (id, right) in [(1, 120), (2, 140), (3, 130), (4, 110)] {
-            data.geometries.insert(
-                id,
-                Geometry {
-                    origin_y: 20,
-                    rows: vec![Row {
-                        drawn: Some([0, right]),
-                        owned: [Some([0, right.max(130)]), None],
-                    }],
-                },
-            );
-        }
-        data.commits.push(Commit {
-            begin_qpc: 99,
-            qpc: 100,
-            epoch: 1,
-            geometry: 1,
-            proxy: [0, 0, 200, 40],
-        });
-        data
-    }
-
-    fn frame(id: u64, geometry: u64, qpc: i64) -> Frame {
-        Frame {
-            id,
-            geometry,
-            paint_qpc: qpc,
-            completion_qpc: Some(qpc + 1),
-            kind: Kind::Dock,
-            hover: 0,
-        }
-    }
-
-    #[test]
-    fn retract_targets_require_recent_contraction_not_an_older_cycle_peak() {
-        let mut data = sample_data();
-        data.frames = vec![frame(1, 2, 90), frame(2, 3, 95), frame(3, 1, 98)];
-        let cover = RECT {
-            left: 0,
-            top: 0,
-            right: 208,
-            bottom: 40,
-        };
-        assert_eq!(
-            candidate(&data, "retract", [0, 0, 100, 40], cover),
-            Some([139, 20])
-        );
-        data.frames[1] = frame(2, 4, 95);
-        assert_eq!(candidate(&data, "retract", [0, 0, 100, 40], cover), None);
-        assert_eq!(
-            candidate(&data, "edge", [0, 0, 100, 40], cover),
-            Some([0, 20])
-        );
-        assert_eq!(
-            candidate(&data, "previous", [0, 0, 100, 40], cover),
-            Some([129, 20])
-        );
-        assert_eq!(
-            candidate(&data, "outside", [0, 0, 100, 40], cover),
-            Some([130, 20])
-        );
-    }
-
-    #[test]
-    fn newer_unknown_or_overlapping_frames_never_reuse_an_older_display_claim() {
-        let mut data = sample_data();
-        data.frames = vec![frame(1, 1, 90)];
-        let displayed = [Displayed {
-            at: 95,
-            painted: 90,
-            geometry: 1,
-            present: 91,
-            frame: 1,
-        }];
-        assert_eq!(
-            displayed_body(&data, &displayed, &[], [119, 20], 100, 102),
-            Some(true)
-        );
-        assert_eq!(
-            displayed_body(&data, &displayed, &[], [120, 20], 100, 102),
-            Some(false)
-        );
-        let unknown = frame(2, 2, 98);
-        assert_eq!(
-            displayed_body(&data, &displayed, &[&unknown], [119, 20], 100, 102),
-            None
-        );
-        data.frames.push(Frame {
-            completion_qpc: Some(93),
-            ..frame(3, 2, 89)
-        });
-        assert_eq!(
-            displayed_body(&data, &displayed, &[], [119, 20], 100, 102),
-            None
-        );
-    }
-
-    #[test]
-    fn a_mask_upload_in_flight_at_the_receipt_is_not_a_stable_mask() {
-        let mut data = sample_data();
-        assert_eq!(stable_mask(&data, 105, 108).unwrap().unwrap().epoch, 1);
-        data.commits.push(Commit {
-            begin_qpc: 107,
-            qpc: 120,
-            epoch: 2,
-            geometry: 2,
-            proxy: [0, 0, 200, 40],
-        });
-        assert!(stable_mask(&data, 105, 108).unwrap().is_none());
-        data.commits[1].begin_qpc = 109;
-        assert_eq!(stable_mask(&data, 105, 108).unwrap().unwrap().epoch, 1);
-        data.commits[1].begin_qpc = 101;
-        data.commits[1].qpc = 103;
-        assert_eq!(stable_mask(&data, 105, 108).unwrap().unwrap().epoch, 2);
-    }
-
-    #[test]
-    fn drawing_demand_starts_only_on_changed_current_pixels_and_keeps_gaps() {
-        let mut data = sample_data();
-        for (qpc, geometry) in [(101, 1), (102, 2), (103, 3), (104, 3), (105, 4)] {
-            data.commits.push(Commit {
-                begin_qpc: qpc,
-                qpc,
-                epoch: geometry,
-                geometry,
-                proxy: [0, 0, 200, 40],
-            });
-        }
-        assert_eq!(demand_spans(&data).unwrap(), vec![(102, 104), (105, 105)]);
-        let padded = Geometry {
-            origin_y: 19,
-            rows: vec![
-                Row {
-                    drawn: None,
-                    owned: [Some([0, 140]), None],
-                },
-                Row {
-                    drawn: Some([0, 120]),
-                    owned: [Some([0, 140]), None],
-                },
-            ],
-        };
-        assert!(
-            same_drawn(&data.geometries[&1], &padded),
-            "ownership padding isn't drawing demand"
-        );
-    }
-
-    #[test]
-    fn cover_clamps_inside_the_work_area_without_losing_the_overlay() {
-        assert_eq!(
-            cover_rect([0, 100, 336, 272], [0, 0, 2560, 1400]).unwrap(),
-            RECT {
-                left: 0,
-                top: 92,
-                right: 344,
-                bottom: 380
-            }
-        );
-        assert!(cover_rect([0, 0, 1100, 100], [0, 0, 2560, 1440]).is_err());
-        assert!(inside([3, 4], [3, 4, 2, 2]));
-        assert!(!inside([5, 4], [3, 4, 2, 2]));
-    }
-}
+mod tests;

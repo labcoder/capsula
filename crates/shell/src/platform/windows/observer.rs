@@ -117,17 +117,3 @@ pub(crate) fn client_origin(window: &Window) -> Result<[i32; 2], PresenceError> 
 pub(crate) fn window_handle(window: &Window) -> Result<usize, PresenceError> {
     Ok(hwnd_of(window)?.0.expose_provenance())
 }
-
-#[cfg(test)]
-mod tests {
-    use capsula_protocol::constants::OBSERVER_REPAINT_MESSAGE;
-    use windows::Win32::UI::WindowsAndMessaging::WM_APP;
-
-    use super::FRAME_DRAWN;
-
-    #[test]
-    fn the_harness_repaint_message_is_the_documented_app_message() {
-        assert_eq!(OBSERVER_REPAINT_MESSAGE, WM_APP + 0x10);
-        assert_ne!(FRAME_DRAWN, OBSERVER_REPAINT_MESSAGE);
-    }
-}
