@@ -75,6 +75,10 @@ pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
 /// `cargo xtask pipe-dump`. Capabilities are zeroed in the recording.
 pub const PIPE_TAP_ENV: &str = "CAPSULA_PIPE_TAP";
 
+/// Dev builds only: set this to a fixture script and the brain's fixture engine plays it instead
+/// of the built-in one.
+pub const FIXTURE_ENV: &str = "CAPSULA_FIXTURE";
+
 #[cfg(test)]
 mod tests {
     use super::{BRAIN_LOG, SHELL_LOG};

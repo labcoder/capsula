@@ -52,6 +52,11 @@ pub const MAX_STEPS: usize = 64;
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
 
+/// Bytes of data-pipe frames the brain may send before the shell grants more with
+/// [`DataToBrain::Credit`] [guess]. It holds two of the largest frames, so a reading shell never
+/// waits on a grant and no frame is too big to ever send.
+pub const DATA_WINDOW: u32 = 512 * 1024;
+
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +94,8 @@ pub enum ControlToBrain {
         /// Indices of the steps that stayed on screen.
         revealed: Vec<u32>,
     },
+    /// The answer to [`ControlToShell::Ping`].
+    Pong,
     /// The user chose Quit: the brain ends its helpers, deletes the capability and exits, and
     /// doesn't relaunch the shell.
     Quitting,
@@ -102,6 +109,8 @@ pub enum ControlToShell {
         /// This brain's incarnation.
         incarnation: Incarnation,
     },
+    /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
+    Ping,
     /// A run's phase changed.
     RunState {
         /// The run.
@@ -124,6 +133,12 @@ pub enum ControlToShell {
 pub enum DataToBrain {
     /// The handshake, repeated so the data pipe is authenticated on its own.
     Hello(Hello),
+    /// The shell has taken `bytes` more of the brain's data frames, header included, and the
+    /// brain may send that many more.
+    Credit {
+        /// How many bytes.
+        bytes: u32,
+    },
     /// Typed chat: a new turn in `thread`, or in a new thread when it's `None`.
     TextSubmit {
         /// The thread to continue.

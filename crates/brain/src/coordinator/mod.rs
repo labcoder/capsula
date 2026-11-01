@@ -224,6 +224,11 @@ impl Coordinator {
         }
     }
 
+    /// The run in flight, if any.
+    pub fn current_run(&self) -> Option<RunId> {
+        self.current.as_ref().map(|run| run.id)
+    }
+
     /// Acts on one input.
     ///
     /// # Errors

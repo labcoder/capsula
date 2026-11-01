@@ -42,6 +42,37 @@ The capability is checked before anything else, so a client without it learns no
 whether its build matches. A shell that meets a brain from another build waits for that brain to
 exit and starts the one beside itself.
 
+## After the handshake
+
+Each pipe has its own reader and writer, all polled together in one task with the core loop
+(`crates/brain/src/runtime/`). A reader never waits behind a write, so `Stop` reaches the
+coordinator even while the data writer is blocked on a shell that stopped reading.
+
+```mermaid
+flowchart LR
+  CR[control reader] --> L[core loop]
+  DR[data reader] --> L
+  SYS[store thread, engine, timers] --> L
+  L --> CQ[control queue, 256 frames] --> CW[control writer]
+  L --> DQ[data queue] --> DW[data writer]
+  DR -. Credit .-> DQ
+```
+
+| Pipe | Carries | Bound | When it's full |
+|---|---|---|---|
+| Control | `RunState`, `Ping` | 256 queued frames [guess] | The shell counts as hung and the connection ends |
+| Data | `AssistantText`, `StepCommit` | 512 KiB of credit [guess] | Frames wait for credit; 2 s without progress ends the run as `view_stalled` |
+
+- **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
+  grants more with `Credit`. That's two of the largest frames, so no frame is too big to send
+  and a reading shell never waits on a grant. Grants never raise the credit past the window.
+- **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
+  connection if one goes unanswered for 2 s. Outside runs there are no timers.
+- **The tap** records control frames only; data frames carry what the user typed and the
+  answer, so they're never written to it.
+- shortcut: the brain doesn't pause the engine when the data queue grows; the run budgets bound
+  it, and real engines get backpressure in slice 3.
+
 ## Starting and reconnecting
 
 A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `capsulad.exe`

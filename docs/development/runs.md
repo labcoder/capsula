@@ -75,8 +75,19 @@ of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, an
 step that went over is never sent. Model rounds, tool calls and speech budgets arrive with the
 engines that use them.
 
-## Not here yet
+## The fixture engine
 
-The coordinator isn't wired to the pipes until the next pull request, which adds the store
-thread, the fixture engine, the per-pipe writers and the watchdog. The step is a labelled
-placeholder until slice 4's scene format.
+Until slice 3 brings real engines, every run plays a fixture script
+(`crates/brain/fixtures/default.txt`, or in a dev build the file `CAPSULA_FIXTURE` names). One
+line per event: `<ms> text <words>`, `<ms> fill <bytes>`, `<ms> step <label>`, `<ms> fail`, and
+`late <label>`, a step the engine still finishes after it's cancelled. The coordinator refuses
+that late step as stale, and the store would refuse it too.
+
+## Around the coordinator
+
+The store runs on its own thread, which owns the connection and executes store operations in
+order. The fixture engine, the store thread and the deadline timer report back as inputs, and
+the pipes' readers and writers are described in `ipc.md`. A shell that disconnects ends the
+current run as `interrupted(shell_lost)`.
+
+The step is a labelled placeholder until slice 4's scene format.

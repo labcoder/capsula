@@ -16,11 +16,12 @@ use capsula_protocol::tap::Direction;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::platform::{self, Instance, PipeServer};
+use crate::runtime::{Brain, Ended};
 use crate::tap::Tap;
 
 /// How long a connected client has to complete each step of the handshake.
@@ -83,8 +84,8 @@ enum SessionError {
     NotHello,
     #[error("wrong capability")]
     WrongCapability,
-    #[error("Hello sent twice")]
-    RepeatedHello,
+    #[error("protocol error: {0}")]
+    Protocol(&'static str),
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
@@ -153,6 +154,7 @@ impl Pipes {
     pub(crate) async fn next_session(
         &mut self,
         identity: &Identity,
+        brain: &mut Brain,
         tap: &mut Tap,
         launched: &mut Option<oneshot::Receiver<()>>,
     ) -> Result<Session, IpcError> {
@@ -165,7 +167,7 @@ impl Pipes {
                 () = exited(launched) => return Ok(Session::ShellLost),
                 () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
             }
-            let session = self.session(identity, tap).await;
+            let session = self.session(identity, brain, tap).await;
             self.renew()?;
             match session {
                 Ok(session) => return Ok(session),
@@ -177,6 +179,7 @@ impl Pipes {
     async fn session(
         &mut self,
         identity: &Identity,
+        brain: &mut Brain,
         tap: &mut Tap,
     ) -> Result<Session, SessionError> {
         check_client(&self.control, &identity.shell_image)?;
@@ -233,24 +236,13 @@ impl Pipes {
             return Err(SessionError::WrongCapability);
         }
         tracing::info!("shell connected");
-
-        // shortcut: after the handshake the only message slice 0 has is Quitting, read by this one
-        // task; slice 2 adds the reader and writer task per pipe that runs need.
-        // A repeated Hello is refused unrecorded: only a redacted copy may reach the tap.
-        loop {
-            match read::<ControlToBrain>(&mut self.control, Pipe::Control).await? {
-                None => return Ok(Session::ShellLost),
-                Some(ControlToBrain::Hello(_)) => return Err(SessionError::RepeatedHello),
-                Some(message @ ControlToBrain::Quitting) => {
-                    tap.record(Pipe::Control, Direction::ToBrain, &message);
-                    return Ok(Session::Quit);
-                }
-                // No run exists to stop until the coordinator is wired to the pipes.
-                Some(message @ ControlToBrain::Stop { .. }) => {
-                    tap.record(Pipe::Control, Direction::ToBrain, &message);
-                }
-            }
-        }
+        Ok(
+            match brain.serve(&mut self.control, &mut self.data, tap).await {
+                Ended::Quit => Session::Quit,
+                Ended::Lost => Session::ShellLost,
+                Ended::Broken(reason) => return Err(SessionError::Protocol(reason)),
+            },
+        )
     }
 }
 
@@ -297,8 +289,8 @@ async fn send<T: Serialize>(
 
 /// Reads one frame. `None` means the client closed between frames, which on a named pipe
 /// arrives as a broken-pipe error rather than a zero-length read.
-async fn read<T: DeserializeOwned>(
-    pipe: &mut PipeServer,
+pub(crate) async fn read<T: DeserializeOwned>(
+    pipe: &mut (impl AsyncRead + Unpin),
     kind: Pipe,
 ) -> Result<Option<T>, FrameError> {
     let closed = |e: &io::Error| {
@@ -340,6 +332,7 @@ mod tests {
 
     use super::{Identity, Pipes, Session, Verdict, check_hello};
     use crate::tap::Tap;
+    use crate::test_support::{self, Scratch};
 
     fn identity() -> Identity {
         Identity {
@@ -387,11 +380,13 @@ mod tests {
         // A session id no real logon has, so the test never meets a running brain's pipes.
         let mut pipes =
             Pipes::create(u32::MAX - std::process::id()).expect("the test pipes are free");
+        let scratch = Scratch::new("ipc");
+        let mut brain = test_support::brain(&scratch, "");
         let (exited, exit) = oneshot::channel();
         exited.send(()).expect("the receiver is alive");
         let mut launched = Some(exit);
         let session = pipes
-            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .next_session(&identity(), &mut brain, &mut Tap::from_env(), &mut launched)
             .await
             .expect("no pipe failed");
         assert_eq!(session, Session::ShellLost);
@@ -402,11 +397,13 @@ mod tests {
     async fn a_relaunch_that_never_started_a_shell_counts_as_lost() {
         let mut pipes =
             Pipes::create(u32::MAX - 3 - std::process::id()).expect("the test pipes are free");
+        let scratch = Scratch::new("ipc");
+        let mut brain = test_support::brain(&scratch, "");
         let (failed, exit) = oneshot::channel::<()>();
         drop(failed);
         let mut launched = Some(exit);
         let session = pipes
-            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .next_session(&identity(), &mut brain, &mut Tap::from_env(), &mut launched)
             .await
             .expect("no pipe failed");
         assert_eq!(session, Session::ShellLost);
@@ -420,8 +417,10 @@ mod tests {
     async fn a_brain_no_shell_reaches_gives_up() {
         let mut pipes =
             Pipes::create(u32::MAX - 1 - std::process::id()).expect("the test pipes are free");
+        let scratch = Scratch::new("ipc");
+        let mut brain = test_support::brain(&scratch, "");
         let session = pipes
-            .next_session(&identity(), &mut Tap::from_env(), &mut None)
+            .next_session(&identity(), &mut brain, &mut Tap::from_env(), &mut None)
             .await
             .expect("no pipe failed");
         assert_eq!(session, Session::NoShell);
@@ -431,11 +430,13 @@ mod tests {
     async fn a_brain_waits_for_the_shell_it_relaunched() {
         let mut pipes =
             Pipes::create(u32::MAX - 2 - std::process::id()).expect("the test pipes are free");
+        let scratch = Scratch::new("ipc");
+        let mut brain = test_support::brain(&scratch, "");
         let (_starting, exit) = oneshot::channel::<()>();
         let mut launched = Some(exit);
         let waited = tokio::time::timeout(
             super::NO_SHELL_TIMEOUT * 4,
-            pipes.next_session(&identity(), &mut Tap::from_env(), &mut launched),
+            pipes.next_session(&identity(), &mut brain, &mut Tap::from_env(), &mut launched),
         )
         .await;
         assert!(waited.is_err(), "still waiting for the relaunched shell");
