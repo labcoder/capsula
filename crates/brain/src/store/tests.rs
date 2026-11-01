@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
 
