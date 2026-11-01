@@ -25,8 +25,10 @@ use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::relaunch::Crashes;
 
-/// How long a relaunched shell the brain can't watch gets to connect [guess].
-const UNWATCHED_GRACE: Duration = Duration::from_secs(60);
+/// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
+/// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
+/// in the one-minute crash window [guess].
+const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
 
 /// The argument that starts `capsulad` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
