@@ -10,8 +10,8 @@ const MIGRATIONS: &[&str] = &[V1];
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
 const V1: &str = "
--- AUTOINCREMENT on threads and runs keeps the highest id ever issued, so a deleted thread's
--- id and its runs' ids never come back for a new one that late work could be mistaken for.
+-- AUTOINCREMENT keeps the highest id ever issued, so a deleted thread's id, its runs' ids and
+-- its events' ids never come back for new ones that late work could be mistaken for.
 CREATE TABLE threads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX runs_id_thread ON runs (id, thread);
 CREATE INDEX runs_active ON runs (state) WHERE state = 'active';
 
 CREATE TABLE events (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread INTEGER NOT NULL REFERENCES threads (id),
     run INTEGER,
     kind TEXT NOT NULL,
@@ -51,6 +51,7 @@ CREATE VIRTUAL TABLE events_fts USING fts5 (text, content = 'events', content_ro
 -- Deleted rows leave the index at once instead of lingering in old segments until a merge.
 INSERT INTO events_fts (events_fts, rank) VALUES ('secure-delete', 1);
 -- An update would leave the external-content index holding the old text past a deletion.
+-- Only plain INSERT may write events: INSERT OR REPLACE deletes without firing events_fts_delete.
 CREATE TRIGGER events_append_only BEFORE UPDATE ON events BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
 END;

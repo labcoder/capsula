@@ -2,8 +2,9 @@
 //!
 //! One file in WAL mode. Every commit is durable (`synchronous=FULL`), so "saved" means the
 //! transaction committed. Deleting a thread is two transactions: the first hides it and bumps its
-//! deletion generation, the second removes every row, and a checkpoint then truncates the WAL so
-//! no copy of the content stays in the file (architecture v1 §6.4).
+//! deletion generation, the second removes every row, and a checkpoint then truncates the WAL
+//! (architecture v1 §6.4). That zeroes the deleted rows, but until the purge step lands, stale
+//! copies can survive in page gaps and FTS index keys (see [`Store::finish_delete`]).
 
 mod schema;
 #[cfg(test)]
@@ -20,8 +21,8 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// `%LOCALAPPDATA%` isn't set, so the store has no home.
-    #[error("%LOCALAPPDATA% is not set")]
+    /// `%LOCALAPPDATA%` isn't set to an absolute path, so the store has no home.
+    #[error("%LOCALAPPDATA% is not set to an absolute path")]
     NoLocalAppData,
     /// The store's folder couldn't be created.
     #[error("can't create the store's folder")]
@@ -135,8 +136,9 @@ impl RunEnd {
     }
 }
 
-/// A live thread, as the threads panel lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A live thread, as the threads panel lists it. Its `Debug` leaves the title out, so a log
+/// line can't carry it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Thread {
     /// Its id.
     pub id: ThreadId,
@@ -144,6 +146,26 @@ pub struct Thread {
     pub title: String,
     /// When it last changed, in Unix milliseconds.
     pub updated_ms: i64,
+}
+
+impl std::fmt::Debug for Thread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Thread")
+            .field("id", &self.id)
+            .field("updated_ms", &self.updated_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How far a deletion got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Deletion {
+    /// The rows are gone and the WAL was checkpointed and truncated.
+    Finished,
+    /// The rows are gone, but a reader blocked the checkpoint, so the WAL and the main file
+    /// still hold the old pages until a later checkpoint.
+    Pending,
 }
 
 /// A thread's deletion generation. Work stamped with an older one is stale.
@@ -157,6 +179,8 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
+    /// Deletions whose rows are now gone but whose checkpoint a reader blocked.
+    pub pending_deletions: usize,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
 }
@@ -167,14 +191,13 @@ pub struct Store {
     conn: Connection,
 }
 
-/// The store's file: `%LOCALAPPDATA%\\<product>\\<store file>`.
+/// The store's file, in the data folder.
 ///
 /// # Errors
-/// Fails when `%LOCALAPPDATA%` isn't set.
+/// Fails when `%LOCALAPPDATA%` isn't an absolute path.
 pub fn default_path() -> Result<PathBuf, StoreError> {
-    let dir = std::env::var_os("LOCALAPPDATA").ok_or(StoreError::NoLocalAppData)?;
-    Ok(PathBuf::from(dir)
-        .join(constants::DATA_DIR)
+    Ok(crate::platform::data_dir()
+        .ok_or(StoreError::NoLocalAppData)?
         .join(constants::STORE_FILE))
 }
 
@@ -207,11 +230,14 @@ impl Store {
     /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
     /// deletions left pending finish. Run it once at start, before any new run.
     ///
+    /// shortcut: two sessions of the same user run two brains on one store, and the second's
+    /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
+    /// so a per-session store or a lock waits until Capsula supports them.
+    ///
     /// # Errors
     /// Fails when SQLite fails.
     pub fn recover(&mut self) -> Result<Recovered, StoreError> {
         let mut recovered = Recovered::default();
-        // Deletions first, so their runs aren't counted as crashed.
         let pending: Vec<i64> = self
             .conn
             .prepare("SELECT id FROM threads WHERE state = 'deleting'")?
@@ -227,13 +253,17 @@ impl Store {
                 }
             }
         }
+        // Only live threads' runs: a thread whose deletion failed again isn't coming back.
         recovered.crashed_runs = self.conn.execute(
             "UPDATE runs SET state = 'failed', reason = 'crash', ended_ms = ?1
-             WHERE state = 'active'",
+             WHERE state = 'active'
+             AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
         // A checkpoint a reader blocked last time gets another chance here.
-        self.checkpoint()?;
+        if self.checkpoint()? == Deletion::Pending {
+            recovered.pending_deletions = std::mem::take(&mut recovered.finished_deletions);
+        }
         Ok(recovered)
     }
 
@@ -270,7 +300,10 @@ impl Store {
         run: RunId,
         text: &str,
     ) -> Result<(), StoreError> {
-        let (thread, run) = (sql_id(thread.0)?, sql_id(run.0)?);
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
         let now = now_ms();
         let tx = self.conn.transaction()?;
         if let Some(title) = title {
@@ -318,7 +351,7 @@ impl Store {
         let ended = self.conn.execute(
             "UPDATE runs SET state = ?2, reason = ?3, ended_ms = ?4
              WHERE id = ?1 AND state = 'active'",
-            params![sql_id(run.0)?, state, reason, now_ms()],
+            params![sql_id(run.0, StoreError::NoRun)?, state, reason, now_ms()],
         )?;
         if ended == 0 {
             return Err(StoreError::NoRun);
@@ -359,7 +392,10 @@ impl Store {
         text: Option<&str>,
         body: Option<&str>,
     ) -> Result<(), StoreError> {
-        let (thread, run) = (sql_id(thread.0)?, sql_id(run.0)?);
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
         let now = now_ms();
         let tx = self.conn.transaction()?;
         if !touch(&tx, thread, now)? {
@@ -385,6 +421,10 @@ impl Store {
     /// # Errors
     /// Fails when SQLite fails.
     pub fn search(&self, words: &str, limit: usize) -> Result<Vec<ThreadId>, StoreError> {
+        // FTS5 reads the phrase as a C string, so a NUL would cut it short and fail to parse.
+        if words.contains('\0') {
+            return Ok(Vec::new());
+        }
         // A quoted phrase, so the user's text is never parsed as FTS5 query syntax.
         let phrase = format!("\"{}\"", words.replace('"', "\"\""));
         let mut query = self.conn.prepare(
@@ -408,27 +448,36 @@ impl Store {
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't live.
     pub fn begin_delete(&mut self, thread: ThreadId) -> Result<Generation, StoreError> {
-        let generation = self
-            .conn
+        let thread = sql_id(thread.0, StoreError::NoThread)?;
+        // An explicit transaction, so an error raised at commit reaches the caller; an
+        // autocommit statement read through query_row would drop it.
+        let tx = self.conn.transaction()?;
+        let generation = tx
             .query_row(
                 "UPDATE threads SET state = 'deleting',
                  deletion_generation = deletion_generation + 1
                  WHERE id = ?1 AND state = 'live' RETURNING deletion_generation",
-                params![sql_id(thread.0)?],
+                params![thread],
                 |row| row.get(0),
             )
             .optional()?
             .ok_or(StoreError::NoThread)?;
+        tx.commit()?;
         Ok(Generation(generation))
     }
 
     /// Deletion's second transaction: removes every row of a thread [`Store::begin_delete`]
-    /// fenced, then truncates the WAL.
+    /// fenced, then truncates the WAL. Returns [`Deletion::Pending`] when a reader blocked the
+    /// checkpoint.
+    ///
+    /// shortcut: the rows are zeroed, but stale cell copies in b-tree page gaps and whole tokens
+    /// in FTS5's `events_fts_idx` keys can survive; the purge PR (slice 2, before PR 7, which
+    /// makes deletion reachable) adds the FTS rebuild, VACUUM and checkpoint that remove them.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't being deleted.
-    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<(), StoreError> {
-        let thread = sql_id(thread.0)?;
+    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<Deletion, StoreError> {
+        let thread = sql_id(thread.0, StoreError::NoThread)?;
         let deleting: Option<i64> = self
             .conn
             .query_row(
@@ -455,16 +504,20 @@ impl Store {
         Ok(())
     }
 
-    /// Copies the WAL into the main file and truncates it to zero bytes, so deleted content
-    /// survives in neither.
-    fn checkpoint(&self) -> Result<(), StoreError> {
+    /// Copies the WAL into the main file and truncates it to zero bytes, so the zeroed pages
+    /// replace the old ones in both. A reader holding an older snapshot blocks it.
+    ///
+    /// shortcut: a blocked checkpoint is retried only by `recover()` at the next start; the
+    /// purge PR retries it in-session.
+    fn checkpoint(&self) -> Result<Deletion, StoreError> {
         let busy: i64 = self
             .conn
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-        if busy != 0 {
-            tracing::warn!("a reader blocked the checkpoint; the next start retries it");
+        if busy == 0 {
+            return Ok(Deletion::Finished);
         }
-        Ok(())
+        tracing::warn!("a reader blocked the checkpoint; the next start retries it");
+        Ok(Deletion::Pending)
     }
 }
 
@@ -485,6 +538,7 @@ fn insert_event(
     body: Option<&str>,
     now: i64,
 ) -> Result<(), StoreError> {
+    // Only a plain INSERT may write events: OR REPLACE would skip the FTS delete trigger.
     conn.execute(
         "INSERT INTO events (thread, run, kind, text, body, created_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -515,7 +569,7 @@ fn row_id(raw: i64) -> u64 {
 }
 
 /// A protocol id as a rowid. An id past `i64::MAX` can only come from a bad peer and names
-/// no thread or run.
-fn sql_id(id: u64) -> Result<i64, StoreError> {
-    i64::try_from(id).map_err(|_| StoreError::NoThread)
+/// nothing, so it fails with `missing`.
+fn sql_id(id: u64, missing: StoreError) -> Result<i64, StoreError> {
+    i64::try_from(id).map_err(|_| missing)
 }

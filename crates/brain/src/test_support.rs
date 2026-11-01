@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use capsula_protocol::constants;
+
 use crate::runtime::Brain;
 use crate::runtime::fixture::Fixture;
 use crate::store::Store;
@@ -14,8 +16,11 @@ impl Scratch {
     pub(crate) fn new(name: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("capsula-store-{}-{name}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "{}-store-{}-{name}-{n}",
+            constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
         // A folder left by an earlier aborted run would make the test start from old data.
         if dir.exists() {
             std::fs::remove_dir_all(&dir).expect("old scratch folder removable");

@@ -83,6 +83,8 @@ pub async fn run() -> Result<(), BrainError> {
     tracing::info!(
         crashed_runs = recovered.crashed_runs,
         finished_deletions = recovered.finished_deletions,
+        pending_deletions = recovered.pending_deletions,
+        failed_deletions = recovered.failed_deletions,
         "store recovered"
     );
     let high_water = store.high_water()?;
