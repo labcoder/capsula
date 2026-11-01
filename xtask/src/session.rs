@@ -65,6 +65,7 @@ enum Mark {
     EscapeDismiss,
     EscapeIgnore,
     EscapeState { wanted: bool, stop: bool },
+    Stretch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +111,9 @@ impl Record {
                 wanted: wanted.parse()?,
                 stop: stop.parse()?,
             }
+        } else if let Some(value) = event.strip_prefix("stretch ") {
+            stretch_event(value)?;
+            Mark::Stretch
         } else {
             match event {
                 "resting" => Mark::Resting,
@@ -123,6 +127,46 @@ impl Record {
         };
         Ok(Self { qpc, mark })
     }
+}
+
+fn stretch_event(event: &str) -> Result<()> {
+    if let Some(active) = event.strip_prefix("active source=") {
+        let (source, bounds) = active
+            .split_once(" pill=")
+            .context("stretch pill missing")?;
+        ensure!(
+            matches!(source, "cursor" | "fixture"),
+            "unknown stretch source"
+        );
+        let (pill, overlay) = bounds
+            .split_once(" overlay=")
+            .context("stretch overlay missing")?;
+        for rect in [pill, overlay] {
+            ensure!(rect.split(',').count() == 4, "invalid stretch rectangle");
+            for (index, value) in rect.split(',').enumerate() {
+                let value: i32 = value.parse()?;
+                ensure!(index < 2 || value > 0, "empty stretch rectangle");
+            }
+        }
+    } else {
+        let counts = event
+            .strip_prefix("settled ")
+            .or_else(|| event.strip_prefix("totals "))
+            .context("unknown stretch milestone")?;
+        let mut fields = counts.split_whitespace();
+        for prefix in ["ticks=", "shape=", "moves=", "unchanged=", "failed="] {
+            fields
+                .next()
+                .and_then(|field| field.strip_prefix(prefix))
+                .context("invalid stretch counters")?
+                .parse::<u64>()?;
+        }
+        ensure!(
+            fields.next().is_none(),
+            "unexpected stretch diagnostic field"
+        );
+    }
+    Ok(())
 }
 
 type CanvasSample = (i64, i64, u64);
@@ -918,6 +962,39 @@ mod tests {
             assert!(
                 Record::parse(line).is_err(),
                 "invalid diagnostic envelope or milestone"
+            );
+        }
+    }
+
+    #[test]
+    fn stretch_milestones_are_validated_without_becoming_input_milestones() {
+        for event in [
+            "active source=fixture pill=-10,20,112,48 overlay=-30,0,300,200",
+            "active source=cursor pill=10,20,112,48 overlay=0,0,300,200",
+            "settled ticks=12 shape=8 moves=1 unchanged=3 failed=0",
+            "totals ticks=12 shape=8 moves=1 unchanged=3 failed=0",
+        ] {
+            let record = Record::parse(&format!("qpc=1 stretch {event}")).unwrap();
+            assert_eq!(
+                record,
+                Record {
+                    qpc: 1,
+                    mark: Mark::Stretch
+                }
+            );
+            assert_eq!(pair_paints(&[record]).unwrap(), (Vec::new(), 0));
+        }
+        for event in [
+            "active source=other pill=1,2,3,4 overlay=1,2,3,4",
+            "active source=cursor pill=1,2,0,4 overlay=1,2,3,4",
+            "active source=cursor pill=1,2,3,4 overlay=1,2,3,4 extra=text",
+            "totals ticks=12 shape=8 moves=1 unchanged=3",
+            "totals ticks=12 shape=8 moves=1 unchanged=3 failed=oops",
+            "totals ticks=12 shape=8 moves=1 unchanged=3 failed=0 extra=text",
+        ] {
+            assert!(
+                Record::parse(&format!("qpc=1 stretch {event}")).is_err(),
+                "invalid stretch event: {event}"
             );
         }
     }

@@ -1,10 +1,12 @@
 //! Win32 implementations of the shell's platform functions.
 
+mod hit_mask;
 mod keyboard;
 mod pipe;
 mod presence;
 mod process;
 
+pub(crate) use hit_mask::MaskUpdate;
 pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
 pub(crate) use pipe::{PipeClient, session_id};
 pub(crate) use presence::{

@@ -1,9 +1,12 @@
-//! The resting dock, transient hover panel, typing panel and native tray share one UI-thread
-//! owner, which also applies keyboard gestures and Esc.
+//! The resting dock, its stretch, transient hover panel, typing panel and native tray share one
+//! UI-thread owner, which also applies keyboard gestures and Esc.
 
 pub(crate) mod diagnostics;
 mod geometry;
 mod gesture;
+mod outline;
+mod paint;
+mod stretch;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -31,6 +34,9 @@ use crate::strings::{Strings, Text};
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use geometry::{Layout, PanelVisibility, Position};
+use outline::Outline;
+use paint::OutlinePaint;
+use stretch::Stretch;
 
 /// Keeps the app owner alive even when its panel is hidden.
 struct PresenceApp {
@@ -59,6 +65,7 @@ struct Presence {
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
+    stretch: Stretch,
 }
 
 /// The typing surface: the one window Capsula activates, and only on a double tap.
@@ -84,10 +91,11 @@ impl Presence {
             area,
             [physical(112.0), physical(48.0)],
             [physical(300.0), physical(140.0)],
+            self.stretch.extent(),
         );
         self.dock_window
             .update(cx, |_, window, cx| {
-                platform::place_presence_window(window, self.layout.dock)?;
+                platform::place_presence_window(window, self.layout.overlay)?;
                 window.bounds_changed(cx);
                 Ok::<_, platform::PresenceError>(())
             })
@@ -96,7 +104,13 @@ impl Presence {
             .iter()
             .position(|candidate| *candidate == position)
             .expect("every dock position has a menu entry");
-        self.native.place(self.layout.dock, index)?;
+        self.stretch.reposition();
+        let proposal = outline::Ownership::only(self.outline());
+        if !self.reshape(proposal, cx) {
+            // Frames retry the upload until the mask takes it.
+            self.start_ticking(cx);
+        }
+        self.native.show(index)?;
         self.dismiss_text(cx)?;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         if let Err(error) = self.pointer_changed(cx) {
@@ -139,7 +153,7 @@ impl Presence {
             return Ok(());
         }
         let point = platform::cursor_position()?;
-        if self.layout.contains(point, self.panel_visibility) {
+        if self.hovered(point, self.panel_visibility) {
             self.pointer_settle = None;
             if self.panel_visibility == PanelVisibility::Hidden {
                 self.set_panel(PanelVisibility::Visible, cx)?;
@@ -155,7 +169,7 @@ impl Presence {
                 .await;
             let result = this.update(cx, |this, cx| {
                 let point = platform::cursor_position()?;
-                if !this.layout.contains(point, PanelVisibility::Visible) {
+                if !this.hovered(point, PanelVisibility::Visible) {
                     this.set_panel(PanelVisibility::Hidden, cx)?;
                 }
                 Ok::<_, OpenError>(())
@@ -169,6 +183,12 @@ impl Presence {
 
     fn text_open(&self) -> bool {
         self.text.as_ref().is_some_and(|text| text.visible)
+    }
+
+    /// Whether the pointer is over the presence's outline, where the hit proxy takes it, or
+    /// over the panel when it's shown.
+    fn hovered(&self, point: [i32; 2], panel: PanelVisibility) -> bool {
+        self.owned().contains(point) || self.layout.panel_contains(point, panel)
     }
 
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
@@ -423,6 +443,7 @@ impl Presence {
             return;
         }
         let link = self.link.clone();
+        diagnostics::record(cx, format_args!("stretch totals {}", self.stretch.totals()));
         let diagnostics = diagnostics::release(cx);
         let told = cx.background_executor().spawn(async move {
             link.finish_quit();
@@ -452,10 +473,14 @@ struct Dock {
     label: SharedString,
     /// Used only with `--input-diagnostics`; the next render takes it into a paint-phase marker.
     pending_paint: PendingPaint,
+    /// The body to paint, in physical screen pixels.
+    outline: Outline,
+    /// The dock window's top-left on screen, in physical pixels.
+    origin: [i32; 2],
 }
 
 impl Render for Dock {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // Recorded in GPUI's paint phase, not at present: PresentMon must join it to the screen.
         let marker = self.pending_paint.take().map(|at| {
             canvas(
@@ -468,21 +493,44 @@ impl Render for Dock {
             .absolute()
             .size_full()
         });
-        div().size_full().p_1().children(marker).child(
-            div()
-                .size_full()
-                .rounded_full()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .text_color(cx.theme().foreground)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .child(self.label.clone()),
-        )
+        let scale = window.scale_factor();
+        let [x, y, width, height] = self.outline.pill;
+        let [origin_x, origin_y] = self.origin.map(f64::from);
+        div()
+            .size_full()
+            .relative()
+            .children(marker)
+            .child(OutlinePaint {
+                outline: self.outline,
+                origin: self.origin,
+                fill: cx.theme().background,
+                border: cx.theme().border,
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(logical(x - origin_x, scale))
+                    .top(logical(y - origin_y, scale))
+                    .w(logical(width, scale))
+                    .h(logical(height, scale))
+                    .text_color(cx.theme().foreground)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .child(self.label.clone()),
+            )
     }
+}
+
+/// Physical pixels as GPUI's logical pixels.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "screen coordinates fit f32"
+)]
+fn logical(physical: f64, scale: f32) -> gpui_kit::Pixels {
+    px(physical as f32 / scale)
 }
 
 struct Panel {
@@ -606,6 +654,8 @@ pub(crate) enum OpenError {
     QuitDelay,
     #[error("--esc-fixture needs --quit-after-ms or --smoke, so global Esc is always given back")]
     EscFixtureDeadline,
+    #[error("--stretch-fixture needs --quit-after-ms or --smoke, so its frames always stop")]
+    StretchFixtureDeadline,
 }
 
 fn options() -> WindowOptions {
@@ -649,10 +699,7 @@ pub(crate) fn open(
     diagnostics: Option<Diagnostics>,
     cx: &mut App,
 ) -> Result<(), OpenError> {
-    let Launch {
-        quit_delay,
-        escape_fixture,
-    } = launch(std::env::args().skip(1))?;
+    let flags = launch(std::env::args().skip(1))?;
     if let Some(diagnostics) = diagnostics {
         cx.set_global(diagnostics);
     }
@@ -665,7 +712,6 @@ pub(crate) fn open(
         retry: strings.get(Text::Retry),
         quit: strings.get(Text::Quit),
     };
-    let native = PresenceNative::new(labels, events.clone())?;
     let dock_events = events.clone();
     let initial_label = dock_label(LinkState::Connecting, cx);
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
@@ -674,6 +720,8 @@ pub(crate) fn open(
         cx.new(|_| Dock {
             label: initial_label,
             pending_paint: PendingPaint::default(),
+            outline: Outline::default(),
+            origin: [0; 2],
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -683,6 +731,9 @@ pub(crate) fn open(
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
+    let stretch = Stretch::new(scale);
+    let slot = [scaled(112.0, scale), scaled(48.0, scale)];
+    let native = PresenceNative::new(labels, events.clone(), stretch.mask_size(slot))?;
     let panel_events = events.clone();
     let close_events = events.clone();
     let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
@@ -721,31 +772,33 @@ pub(crate) fn open(
             gesture: owner_gesture,
             activity: Activity::default(),
             escape_hold: EscapeHold::default(),
-            escape_fixture,
+            escape_fixture: flags.escape_fixture,
             layout: Layout {
                 dock: [0; 4],
                 panel: [0; 4],
+                overlay: [0; 4],
             },
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,
+            stretch,
         }
     });
     owner.update(cx, |this, cx| this.position(Position::default(), cx))?;
     let deliver = gesture::deliver(gesture, dock_window, owner.downgrade(), cx);
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;
     owner.update(cx, Presence::sync_escape)?;
-    schedule_diagnostic_launch(&owner, quit_delay, cx);
+    schedule_diagnostic_launch(&owner, &flags, cx);
     cx.set_global(PresenceApp { _owner: owner });
     Ok(())
 }
 
-/// `--smoke` shows the panel after a second; `--smoke` and `--quit-after-ms` then quit.
-fn schedule_diagnostic_launch(
-    owner: &Entity<Presence>,
-    quit_delay: Option<Duration>,
-    cx: &mut App,
-) {
+/// `--stretch-fixture` starts stretching now; `--smoke` shows the panel after a second;
+/// `--smoke` and `--quit-after-ms` then quit.
+fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut App) {
+    if flags.stretch_fixture {
+        owner.update(cx, Presence::start_fixture);
+    }
     if std::env::args().any(|arg| arg == "--smoke") {
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
@@ -758,7 +811,7 @@ fn schedule_diagnostic_launch(
         })
         .detach();
     }
-    if let Some(delay) = quit_delay {
+    if let Some(delay) = flags.quit_delay {
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(delay).await;
@@ -777,7 +830,11 @@ fn listen(
         while let Ok(event) = event_changes.recv().await {
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
-                    PresenceEvent::PointerChanged => this.pointer_changed(cx)?,
+                    PresenceEvent::PointerChanged => {
+                        this.follow_pointer(cx);
+                        this.pointer_changed(cx)?;
+                    }
+                    PresenceEvent::PointerMoved => this.follow_pointer(cx),
                     PresenceEvent::Position(index) => {
                         if let Some(position) = Position::ALL.get(index) {
                             this.position(*position, cx)?;
@@ -834,16 +891,21 @@ fn listen(
 struct Launch {
     quit_delay: Option<Duration>,
     escape_fixture: bool,
+    /// `--stretch-fixture`: stretch out and back on a clock, with no input, until Quit.
+    stretch_fixture: bool,
 }
 
 fn launch(args: impl Iterator<Item = String>) -> Result<Launch, OpenError> {
     let mut delay = None;
     let mut escape_fixture = false;
+    let mut stretch_fixture = false;
     for arg in args {
         if arg == "--smoke" {
             delay = Some(Duration::from_secs(10));
         } else if arg == "--esc-fixture" {
             escape_fixture = true;
+        } else if arg == "--stretch-fixture" {
+            stretch_fixture = true;
         } else if let Some(value) = arg.strip_prefix("--quit-after-ms=") {
             let millis = value.parse::<u64>().map_err(|_| OpenError::QuitDelay)?;
             if !(1..=120_000).contains(&millis) {
@@ -855,9 +917,13 @@ fn launch(args: impl Iterator<Item = String>) -> Result<Launch, OpenError> {
     if escape_fixture && delay.is_none() {
         return Err(OpenError::EscFixtureDeadline);
     }
+    if stretch_fixture && delay.is_none() {
+        return Err(OpenError::StretchFixtureDeadline);
+    }
     Ok(Launch {
         quit_delay: delay,
         escape_fixture,
+        stretch_fixture,
     })
 }
 
@@ -899,6 +965,7 @@ mod tests {
             Launch {
                 quit_delay: Some(Duration::from_millis(500)),
                 escape_fixture: true,
+                stretch_fixture: false,
             }
         );
         assert!(
@@ -907,5 +974,27 @@ mod tests {
                 .escape_fixture
         );
         assert!(!launch(args(&[])).unwrap().escape_fixture);
+    }
+
+    #[test]
+    fn the_stretch_fixture_only_runs_with_a_quit_deadline() {
+        assert!(matches!(
+            launch(args(&["--stretch-fixture"])),
+            Err(OpenError::StretchFixtureDeadline)
+        ));
+        assert_eq!(
+            launch(args(&["--stretch-fixture", "--quit-after-ms=70000"])).unwrap(),
+            Launch {
+                quit_delay: Some(Duration::from_secs(70)),
+                escape_fixture: false,
+                stretch_fixture: true,
+            }
+        );
+        assert!(
+            launch(args(&["--smoke", "--stretch-fixture"]))
+                .unwrap()
+                .stretch_fixture
+        );
+        assert!(!launch(args(&[])).unwrap().stretch_fixture);
     }
 }

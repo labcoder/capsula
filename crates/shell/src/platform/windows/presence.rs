@@ -1,5 +1,6 @@
 //! Capsula's presence beyond what GPUI draws: the tray icon and its menu, the dock's hit-test
-//! proxy, and the window styles that keep presence windows out of the taskbar and focus.
+//! proxy, and the window styles that keep presence windows out of the taskbar and focus. The
+//! proxy's alpha mask lives in `hit_mask.rs`.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -46,6 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
+use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 
 /// The tray's callback message to the proxy window.
@@ -64,6 +66,8 @@ const QUIT_COMMAND: usize = 11;
 pub(crate) enum PresenceEvent {
     /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
     PointerChanged,
+    /// The pointer moved over the proxy after `PresenceNative::watch_pointer`; sent once.
+    PointerMoved,
     /// The user picked a dock position in the tray menu, an index into `positions`.
     Position(usize),
     /// The user picked Retry in the tray menu.
@@ -121,6 +125,9 @@ pub(crate) enum PresenceError {
     /// Windows kept the current foreground window.
     #[error("Windows refused to activate the window")]
     Activate,
+    /// The hit mask was empty, couldn't be allocated, or was smaller than the proxy.
+    #[error("the hit mask doesn't fit the proxy")]
+    MaskSize,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
@@ -172,16 +179,19 @@ struct ProxyState {
     taskbar_created: u32,
     position: Cell<usize>,
     retry_enabled: Cell<bool>,
+    /// Set by `watch_pointer`; the next pointer move over the proxy sends `PointerMoved`.
+    watch: Cell<bool>,
 }
 
-/// The tray icon and the dock's hit-test proxy: a hidden, nearly invisible, non-activating
-/// window that takes the pointer where the dock rests, so the dock window itself can stay
-/// click-through. Owned by the UI thread that created it; dropping it removes both.
+/// The tray icon and the dock's hit-test proxy: an invisible, non-activating per-pixel-alpha
+/// window that takes the pointer only over the presence's outline, so the dock window itself
+/// can stay click-through. Owned by the UI thread that created it; dropping it removes both.
 #[derive(Debug)]
 pub(crate) struct PresenceNative {
     instance: HINSTANCE,
     atom: u16,
     hwnd: HWND,
+    mask: HitMask,
     tray: bool,
     /// Raw Input and its lifecycle notifications are registered.
     keyboard: bool,
@@ -189,14 +199,17 @@ pub(crate) struct PresenceNative {
 }
 
 impl PresenceNative {
-    /// Adds the tray icon and creates the proxy, hidden until the first `place`.
+    /// Adds the tray icon and creates the proxy, hidden until the first `show`, with a mask
+    /// for proxies up to `mask_size` physical pixels.
     ///
     /// # Errors
-    /// Fails when Windows refuses the window class, the window or the tray icon.
+    /// Fails when Windows refuses the mask, the window class, the window or the tray icon.
     pub(crate) fn new(
         labels: PresenceLabels,
         events: Sender<PresenceEvent>,
+        mask_size: [i32; 2],
     ) -> Result<Self, PresenceError> {
+        let mask = HitMask::new(mask_size)?;
         // SAFETY: plain call for this executable's own module.
         let instance: HINSTANCE = unsafe { GetModuleHandleW(PCWSTR::null()) }?.into();
         // SAFETY: loads a shared system icon, which is never destroyed.
@@ -213,12 +226,14 @@ impl PresenceNative {
             taskbar_created,
             position: Cell::new(1),
             retry_enabled: Cell::new(false),
+            watch: Cell::new(false),
         });
         // Every field Drop cleans up starts empty, so a failure below undoes only what was done.
         let mut native = Self {
             instance,
             atom: 0,
             hwnd: HWND::default(),
+            mask,
             tray: false,
             keyboard: false,
             state: Rc::into_raw(state),
@@ -257,9 +272,6 @@ impl PresenceNative {
                 None,
             )
         }?;
-        // Alpha 0 would let clicks through; 1 of 255 is invisible but still hit-tested.
-        // SAFETY: `hwnd` is this thread's live layered window.
-        unsafe { SetLayeredWindowAttributes(native.hwnd, COLORREF(0), 1, LWA_ALPHA) }?;
         // SAFETY: `hwnd` is live; the slot holds the state, which Drop detaches before freeing.
         unsafe {
             SetWindowLongPtrW(
@@ -274,14 +286,34 @@ impl PresenceNative {
         Ok(native)
     }
 
-    /// Moves the proxy to `[x, y, width, height]` in physical pixels, topmost, and shows it.
+    /// Gives the proxy its owned pixels, where `spans` names a screen row's owned columns as
+    /// up to two `[left, right)` spans, and moves it to `window` when that changed.
     ///
     /// # Errors
-    /// Fails when Windows refuses the move.
-    pub(crate) fn place(&mut self, bounds: [i32; 4], position: usize) -> Result<(), PresenceError> {
-        place(self.hwnd, bounds)?;
+    /// Fails when `window` outgrows the mask or Windows refuses the update.
+    pub(crate) fn reshape(
+        &mut self,
+        window: [i32; 4],
+        spans: impl Fn(i32) -> [Option<[i32; 2]>; 2],
+    ) -> Result<MaskUpdate, PresenceError> {
+        self.mask.update(self.hwnd, window, spans)
+    }
+
+    /// Shows the proxy topmost and checks `position` in the tray menu. Call after `reshape`.
+    ///
+    /// # Errors
+    /// Fails when Windows refuses the change.
+    pub(crate) fn show(&mut self, position: usize) -> Result<(), PresenceError> {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+        // SAFETY: `hwnd` is this thread's live window; only its z-order and visibility change.
+        unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) }?;
         self.state().position.set(position);
         Ok(())
+    }
+
+    /// Sends one `PointerMoved` on the next pointer move over the proxy.
+    pub(crate) fn watch_pointer(&self) {
+        self.state().watch.set(true);
     }
 
     /// Sends every left Ctrl, left Alt and other key, from any app, to `deliver` on this
@@ -834,7 +866,12 @@ unsafe extern "system" fn proxy_proc(
                 }
                 return LRESULT(0);
             }
-            WM_MOUSEMOVE | WM_MOUSELEAVE => state.hover.on_pointer(hwnd, message),
+            WM_MOUSEMOVE | WM_MOUSELEAVE => {
+                if message == WM_MOUSEMOVE && state.watch.replace(false) {
+                    send(&state.hover.events, PresenceEvent::PointerMoved);
+                }
+                state.hover.on_pointer(hwnd, message);
+            }
             _ if message == state.taskbar_created && message != 0 => {
                 if let Err(error) = add_tray(hwnd, &state) {
                     tracing::warn!(%error, "can't add the tray icon back");

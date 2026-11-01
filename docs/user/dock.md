@@ -4,6 +4,10 @@ The dock sits at the top center of your screen's work area. It shows Starting, R
 Reconnecting or Offline. Move the pointer over it to open the small status panel; move away
 from both the dock and panel to close it. Hovering doesn't take focus from your current app.
 
+When the pointer reaches the dock, the dock stretches toward it and follows it a short way.
+Move farther away, or onto the panel, and it settles back. Only the dock's own shape takes the
+pointer: clicks just beside it, even while it stretches, reach the app underneath.
+
 Use the tray menu to choose one of nine positions: top, middle or bottom, aligned left,
 center or right. This choice currently lasts until the shell restarts. A later release moves
 it into Settings → General and saves it.

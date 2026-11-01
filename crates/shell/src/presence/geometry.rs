@@ -1,4 +1,4 @@
-//! Physical work-area geometry shared by the dock, its hit proxy and its panel.
+//! Physical work-area geometry shared by the dock, its stretch overlay and its panel.
 
 /// One of the nine work-area anchors, in row-major order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,7 +42,15 @@ impl Position {
         }
     }
 
-    pub(crate) fn layout(self, area: [i32; 4], dock: [i32; 2], panel: [i32; 2]) -> Layout {
+    /// Places the dock's slot, its panel, and the overlay the stretch draws in: the slot grown
+    /// by `extent` on every side, inside the work area.
+    pub(crate) fn layout(
+        self,
+        area: [i32; 4],
+        dock: [i32; 2],
+        panel: [i32; 2],
+        extent: i32,
+    ) -> Layout {
         let [left, top, width, height] = area;
         let (column, row) = self.axes();
         let dock_width = dock[0].min(width);
@@ -58,9 +66,19 @@ impl Position {
         } else {
             (y - panel_height).max(top)
         };
+        let overlay_x = (x - extent).max(left);
+        let overlay_y = (y - extent).max(top);
+        let overlay_right = (x + dock_width + extent).min(left + width);
+        let overlay_bottom = (y + dock_height + extent).min(top + height);
         Layout {
             dock: [x, y, dock_width, dock_height],
             panel: [panel_x, panel_y, panel_width, panel_height],
+            overlay: [
+                overlay_x,
+                overlay_y,
+                overlay_right - overlay_x,
+                overlay_bottom - overlay_y,
+            ],
         }
     }
 }
@@ -74,14 +92,17 @@ pub(crate) enum PanelVisibility {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
+    /// The resting dock's slot; its pill is the outline's resting shape.
     pub(crate) dock: [i32; 4],
     pub(crate) panel: [i32; 4],
+    /// The click-through dock window, room for the stretched outline.
+    pub(crate) overlay: [i32; 4],
 }
 
 impl Layout {
-    pub(crate) fn contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
-        contains(self.dock, point)
-            || (panel == PanelVisibility::Visible && contains(self.panel, point))
+    /// Whether the pointer is over the panel. Over the dock is the outline's question.
+    pub(crate) fn panel_contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
+        panel == PanelVisibility::Visible && contains(self.panel, point)
     }
 }
 
@@ -97,7 +118,7 @@ mod tests {
     fn nine_anchors_use_work_area_edges_and_center() {
         let actual = Position::ALL.map(|position| {
             position
-                .layout([-1000, 40, 900, 600], [100, 40], [300, 120])
+                .layout([-1000, 40, 900, 600], [100, 40], [300, 120], 0)
                 .dock
         });
         assert_eq!(
@@ -119,28 +140,46 @@ mod tests {
     #[test]
     fn every_panel_fits_and_touches_its_dock() {
         for position in Position::ALL {
-            let layout = position.layout([30, -600, 900, 600], [100, 40], [300, 120]);
+            let layout = position.layout([30, -600, 900, 600], [100, 40], [300, 120], 0);
             let [x, y, width, height] = layout.panel;
             assert!(x >= 30 && y >= -600 && x + width <= 930 && y + height <= 0);
             assert!(y == layout.dock[1] + 40 || y + height == layout.dock[1]);
-            assert!(layout.contains([layout.dock[0], layout.dock[1]], PanelVisibility::Hidden));
-            assert!(layout.contains([x, y], PanelVisibility::Visible));
-            assert!(!layout.contains([x - 1, y - 1], PanelVisibility::Visible));
+            assert!(!layout.panel_contains([x, y], PanelVisibility::Hidden));
+            assert!(layout.panel_contains([x, y], PanelVisibility::Visible));
+            assert!(!layout.panel_contains([x - 1, y - 1], PanelVisibility::Visible));
         }
     }
 
     #[test]
     fn tiny_work_area_clamps_both_surfaces() {
-        let layout = Position::BottomRight.layout([10, 20, 80, 30], [100, 40], [300, 120]);
+        let layout = Position::BottomRight.layout([10, 20, 80, 30], [100, 40], [300, 120], 50);
         assert_eq!(layout.dock, [10, 20, 80, 30]);
         assert_eq!(layout.panel, [10, 20, 80, 30]);
+        assert_eq!(layout.overlay, [10, 20, 80, 30]);
     }
 
     #[test]
     fn panel_is_not_owned_when_hidden_and_far_edge_is_outside() {
-        let layout = Position::TopCenter.layout([0, 0, 900, 600], [100, 40], [300, 120]);
-        assert!(!layout.contains([300, 60], PanelVisibility::Hidden));
-        assert!(layout.contains([300, 60], PanelVisibility::Visible));
-        assert!(!layout.contains([600, 160], PanelVisibility::Visible));
+        let layout = Position::TopCenter.layout([0, 0, 900, 600], [100, 40], [300, 120], 0);
+        assert!(!layout.panel_contains([300, 60], PanelVisibility::Hidden));
+        assert!(layout.panel_contains([300, 60], PanelVisibility::Visible));
+        assert!(!layout.panel_contains([600, 160], PanelVisibility::Visible));
+    }
+
+    #[test]
+    fn the_stretch_overlay_grows_the_slot_inside_the_work_area() {
+        let top = Position::TopCenter.layout([0, 0, 900, 600], [100, 40], [300, 120], 110);
+        assert_eq!(top.dock, [400, 0, 100, 40]);
+        assert_eq!(top.overlay, [290, 0, 320, 150]);
+        let middle = Position::Center.layout([0, 0, 900, 600], [100, 40], [300, 120], 110);
+        assert_eq!(middle.overlay, [290, 170, 320, 260]);
+        for position in Position::ALL {
+            let layout = position.layout([-1000, 40, 900, 600], [100, 40], [300, 120], 110);
+            let [x, y, width, height] = layout.overlay;
+            let [dock_x, dock_y, dock_width, dock_height] = layout.dock;
+            assert!(x >= -1000 && y >= 40 && x + width <= -100 && y + height <= 640);
+            assert!(x <= dock_x && y <= dock_y);
+            assert!(x + width >= dock_x + dock_width && y + height >= dock_y + dock_height);
+        }
     }
 }

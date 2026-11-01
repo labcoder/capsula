@@ -34,6 +34,10 @@ tasks:
                     CPU is percent of one core, not the whole machine
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
+  bench stretch [--duration 1..60] [--baseline <release-directory>]
+                    input-free continuous stretch, default 30s after 30s warmup;
+                    baseline runs without stretch; raw cycles and bounded DWM CSV,
+                    fixture totals cover its whole lifetime, not just sampling
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
