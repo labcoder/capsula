@@ -228,14 +228,14 @@ impl Pipes {
 
         // shortcut: after the handshake the only message slice 0 has is Quitting, read by this one
         // task; slice 2 adds the reader and writer task per pipe that runs need.
-        let message = read::<ControlToBrain>(&mut self.control, Pipe::Control).await?;
-        if let Some(message) = &message {
-            tap.record(Pipe::Control, Direction::ToBrain, message);
-        }
-        match message {
+        // A repeated Hello is refused unrecorded: only a redacted copy may reach the tap.
+        match read::<ControlToBrain>(&mut self.control, Pipe::Control).await? {
             None => Ok(Session::ShellLost),
-            Some(ControlToBrain::Quitting) => Ok(Session::Quit),
             Some(ControlToBrain::Hello(_)) => Err(SessionError::RepeatedHello),
+            Some(message @ ControlToBrain::Quitting) => {
+                tap.record(Pipe::Control, Direction::ToBrain, &message);
+                Ok(Session::Quit)
+            }
         }
     }
 }

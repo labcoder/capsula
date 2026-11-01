@@ -50,10 +50,10 @@ pub async fn run() -> Result<(), BrainError> {
         incarnation: Incarnation(getrandom::u64()?),
         shell_image: std::env::current_exe()?.with_file_name(SHELL_EXE),
     };
-    credential::store(&identity.capability)?;
+    credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let ending = pipes.serve(&identity, tap::Tap::from_env()).await;
-    if let Err(error) = credential::delete() {
+    if let Err(error) = credential::delete(session) {
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
     match ending? {

@@ -21,6 +21,8 @@ use crate::platform::{self, PipeClient};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pause between tries while the brain starts or rotates its capability.
 const RETRY_DELAY: Duration = Duration::from_millis(50);
+/// How long each handshake read or write may take.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `ERROR_PIPE_BUSY`: the pipe exists but another client holds it.
 const PIPE_BUSY: i32 = 231;
 
@@ -143,9 +145,11 @@ impl Link {
 
     fn handshake(&self) -> Result<Connection, LinkError> {
         let control = open(&Pipe::Control.name(self.session), &self.brain)?;
+        // A brain that hangs mid-handshake must not hang the shell with it.
+        control.set_timeout(Some(HANDSHAKE_TIMEOUT));
         let hello = Hello {
             build_id: BUILD_ID.to_owned(),
-            capability: credential::read()?,
+            capability: credential::read(self.session)?,
         };
         frame::write(
             &mut &control,
@@ -166,6 +170,7 @@ impl Link {
         };
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
+        control.set_timeout(None);
         Ok(Connection {
             control,
             data,

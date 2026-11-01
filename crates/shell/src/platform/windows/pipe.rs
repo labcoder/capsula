@@ -7,27 +7,34 @@ use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, FlushFileBuffers, OPEN_EXISTING, ReadFile,
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
-use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    CreateEventW, INFINITE, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 /// A connected client end of a pipe. Reading and writing through `&PipeClient` may happen on
 /// two threads at once; two concurrent reads (or writes) would interleave and must not.
 #[derive(Debug)]
-pub(crate) struct PipeClient(OwnedHandle);
+pub(crate) struct PipeClient {
+    handle: OwnedHandle,
+    /// Milliseconds each read or write may take; `INFINITE` by default.
+    timeout_ms: AtomicU32,
+}
 
 impl PipeClient {
     /// Connects to the pipe `name`.
@@ -53,7 +60,11 @@ impl PipeClient {
         }
         .map_err(win32_io_error)?;
         // SAFETY: CreateFileW returned a valid handle that nothing else owns.
-        Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle.0) }))
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+        Ok(Self {
+            handle,
+            timeout_ms: AtomicU32::new(INFINITE),
+        })
     }
 
     /// The executable of the process serving this pipe.
@@ -67,8 +78,17 @@ impl PipeClient {
         process_image(pid)
     }
 
+    /// Bounds each later read and write; `None` waits forever. A transfer that times out is
+    /// cancelled and fails with `TimedOut`.
+    pub(crate) fn set_timeout(&self, timeout: Option<Duration>) {
+        let ms = timeout.map_or(INFINITE, |t| {
+            u32::try_from(t.as_millis()).unwrap_or(INFINITE - 1)
+        });
+        self.timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
     fn raw(&self) -> HANDLE {
-        HANDLE(self.0.as_raw_handle())
+        HANDLE(self.handle.as_raw_handle())
     }
 
     /// Runs one overlapped read or write and waits for it. `start` must use the buffer the
@@ -90,10 +110,29 @@ impl PipeClient {
         {
             return Err(error);
         }
+        // SAFETY: the event handle is open for the borrow.
+        let waited = unsafe {
+            WaitForSingleObject(
+                HANDLE(event.as_raw_handle()),
+                self.timeout_ms.load(Ordering::Relaxed),
+            )
+        };
+        if waited == WAIT_TIMEOUT {
+            // SAFETY: cancels only this operation; the wait below lets it finish before
+            // `overlapped` and the buffer go away.
+            if let Err(error) = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) } {
+                tracing::debug!(%error, "cancel found the transfer already done");
+            }
+        }
         let mut done = 0u32;
         // SAFETY: `overlapped` and the caller's buffer outlive the operation, because waiting
-        // (`bwait` true) returns only once it has completed.
-        unsafe { GetOverlappedResult(self.raw(), &raw const overlapped, &raw mut done, true) }?;
+        // (`bwait` true) returns only once it has completed or been cancelled.
+        let result =
+            unsafe { GetOverlappedResult(self.raw(), &raw const overlapped, &raw mut done, true) };
+        if waited != WAIT_OBJECT_0 && result.is_err() {
+            return Err(ERROR_TIMEOUT.to_hresult().into());
+        }
+        result?;
         Ok(usize::try_from(done).expect("u32 fits in usize on Windows"))
     }
 }

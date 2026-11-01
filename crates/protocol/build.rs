@@ -10,7 +10,9 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
+    // Without a commit, builds from different sources would share an id and accept each other.
+    let commit = git(&["rev-parse", "--short=12", "HEAD"])
+        .expect("the build id needs git: build from a git checkout with git on PATH");
     // HEAD's reflog changes on every commit and checkout, so the id follows them.
     if let Some(reflog) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {
         println!("cargo::rerun-if-changed={reflog}");

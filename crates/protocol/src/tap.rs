@@ -85,11 +85,13 @@ fn payload_len_checked(record: &Record) -> Result<u32, FrameError> {
 /// short.
 pub fn read(reader: &mut impl Read) -> Result<Option<Record>, FrameError> {
     let mut kind = [0; 2];
-    match reader.read_exact(&mut kind) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+    // Only an end before the first byte is clean; anything later is a cut record.
+    match reader.read(&mut kind[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
         Err(e) => return Err(e.into()),
     }
+    reader.read_exact(&mut kind[1..]).map_err(truncated)?;
     let pipe = match kind[0] {
         0 => Pipe::Control,
         1 => Pipe::Data,
@@ -193,6 +195,10 @@ mod tests {
         };
         let mut file = Vec::new();
         write(&mut file, &record).expect("writes");
+        assert!(
+            matches!(read(&mut &file[..1]), Err(FrameError::Truncated)),
+            "one byte"
+        );
         assert!(matches!(read(&mut &file[..3]), Err(FrameError::Truncated)));
         assert!(matches!(
             read(&mut &file[..file.len() - 1]),

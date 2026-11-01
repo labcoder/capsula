@@ -16,12 +16,13 @@ pub(crate) enum CredentialError {
     WrongLength,
 }
 
-/// The capability the running brain stored.
+/// The capability the brain of Windows session `session` stored.
 ///
 /// # Errors
 /// Fails when there is none or it's malformed.
-pub(crate) fn read() -> Result<Capability, CredentialError> {
-    let bytes = Entry::new(INSTANCE_SERVICE, INSTANCE_ACCOUNT)?.get_secret()?;
+pub(crate) fn read(session: u32) -> Result<Capability, CredentialError> {
+    let account = format!("{INSTANCE_ACCOUNT}-{session}");
+    let bytes = Entry::new(INSTANCE_SERVICE, &account)?.get_secret()?;
     let bytes: [u8; CAPABILITY_LEN] = bytes.try_into().map_err(|_| CredentialError::WrongLength)?;
     Ok(Secret::new(bytes))
 }
