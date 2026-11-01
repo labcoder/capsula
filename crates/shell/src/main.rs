@@ -5,7 +5,7 @@ mod credential;
 mod link;
 mod logging;
 mod platform;
-mod status;
+mod presence;
 mod strings;
 
 use std::process::ExitCode;
@@ -42,9 +42,17 @@ fn main() -> ExitCode {
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
-            if let Err(error) = status::open(state_changes, link, cx) {
-                tracing::error!(%error, "can't open the status window");
-                cx.quit();
+            if let Err(error) = presence::open(state_changes, link.clone(), cx) {
+                tracing::error!(%error, "can't open the dock");
+                link.begin_quit();
+                let told = cx
+                    .background_executor()
+                    .spawn(async move { link.finish_quit() });
+                cx.spawn(async move |cx| {
+                    told.await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
             }
         });
     ExitCode::SUCCESS

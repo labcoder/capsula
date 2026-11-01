@@ -15,17 +15,51 @@ pub(crate) enum Text {
     Failed,
     Retry,
     Quit,
+    DockOffline,
+    DockPosition,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    MiddleLeft,
+    Center,
+    MiddleRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 17] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
         Self::Failed,
         Self::Retry,
         Self::Quit,
+        Self::DockOffline,
+        Self::DockPosition,
+        Self::TopLeft,
+        Self::TopCenter,
+        Self::TopRight,
+        Self::MiddleLeft,
+        Self::Center,
+        Self::MiddleRight,
+        Self::BottomLeft,
+        Self::BottomCenter,
+        Self::BottomRight,
+    ];
+
+    pub(crate) const POSITIONS: [Self; 9] = [
+        Self::TopLeft,
+        Self::TopCenter,
+        Self::TopRight,
+        Self::MiddleLeft,
+        Self::Center,
+        Self::MiddleRight,
+        Self::BottomLeft,
+        Self::BottomCenter,
+        Self::BottomRight,
     ];
 
     const fn id(self) -> &'static str {
@@ -36,6 +70,17 @@ impl Text {
             Self::Failed => "status-failed",
             Self::Retry => "action-retry",
             Self::Quit => "action-quit",
+            Self::DockOffline => "dock-offline",
+            Self::DockPosition => "dock-position",
+            Self::TopLeft => "position-top-left",
+            Self::TopCenter => "position-top-center",
+            Self::TopRight => "position-top-right",
+            Self::MiddleLeft => "position-middle-left",
+            Self::Center => "position-center",
+            Self::MiddleRight => "position-middle-right",
+            Self::BottomLeft => "position-bottom-left",
+            Self::BottomCenter => "position-bottom-center",
+            Self::BottomRight => "position-bottom-right",
         }
     }
 }
