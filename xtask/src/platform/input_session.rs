@@ -354,6 +354,12 @@ impl Window {
         pid(unsafe { GetForegroundWindow() }) == self.pid
     }
 
+    pub(crate) fn is_visible(self) -> Result<bool> {
+        self.validate()?;
+        // SAFETY: the queried handle still belongs to the expected process.
+        Ok(unsafe { IsWindowVisible(self.hwnd) }.as_bool())
+    }
+
     pub(crate) fn counts(self) -> Result<(usize, usize)> {
         self.validate()?;
         Ok((property(self.hwnd, CHANGES), property(self.hwnd, ESCAPES)))

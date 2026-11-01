@@ -52,7 +52,7 @@ const TRIALS: [Trial; 13] = [
     Trial::StretchTwo,
     Trial::StretchThree,
     Trial::Input(Phase::Keyboard, FixtureEscMode::Free),
-    Trial::Input(Phase::Hover, FixtureEscMode::Free),
+    Trial::Input(Phase::Click, FixtureEscMode::Free),
     Trial::ReceiptRest,
     Trial::ReceiptMotion,
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
@@ -66,7 +66,7 @@ impl Trial {
     fn trace_bound(self) -> Option<Duration> {
         let seconds = match self {
             Self::Input(Phase::Keyboard, _) => 50,
-            Self::Input(Phase::Hover, _) | Self::ReceiptRest => 30,
+            Self::Input(Phase::Click, _) | Self::ReceiptRest => 30,
             Self::ReceiptMotion => 40,
             Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
@@ -90,7 +90,7 @@ impl Trial {
             Self::StretchTwo => "cpu-stretch-2",
             Self::StretchThree => "cpu-stretch-3",
             Self::Input(Phase::Keyboard, _) => "keyboard",
-            Self::Input(Phase::Hover, _) => "hover",
+            Self::Input(Phase::Click, _) => "click",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
             Self::Input(Phase::Layouts, _) => "layouts",
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
@@ -722,8 +722,8 @@ fn summarize(
                 dock,
                 output,
             ),
-            Trial::Input(Phase::Hover, _) => {
-                observation::summarize_hover(observer, pid, &mut rows, dock, output)
+            Trial::Input(Phase::Click, _) => {
+                observation::summarize_click(observer, pid, &mut rows, dock, output)
             }
             Trial::ReceiptRest | Trial::ReceiptMotion => {
                 let mode = if trial == Trial::ReceiptRest {
@@ -848,7 +848,7 @@ mod tests {
     fn receipts_follow_hover_and_esc_conflict_is_last() {
         let hover = TRIALS
             .iter()
-            .position(|trial| *trial == Trial::Input(Phase::Hover, FixtureEscMode::Free))
+            .position(|trial| *trial == Trial::Input(Phase::Click, FixtureEscMode::Free))
             .unwrap();
         assert_eq!(
             &TRIALS[hover + 1..hover + 3],

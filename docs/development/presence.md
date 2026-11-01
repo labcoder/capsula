@@ -1,6 +1,6 @@
 # Presence and native surfaces
 
-The shell owns the dock, hover panel, typing panel and tray on GPUI's UI thread. The dock opens
+The shell owns the dock, status panel, typing panel and tray on GPUI's UI thread. The dock opens
 and the keyboard is armed before the brain link starts connecting; [input.md](input.md) covers
 the shortcut, the typing panel and Esc. A link failure changes its label to Offline; Retry never sends
 the previous input again.
@@ -8,9 +8,9 @@ the previous input again.
 ```mermaid
 flowchart LR
     Link["Brain link thread"] -->|status| Owner["Presence owner, UI thread"]
-    Native["Native tray and hit proxy"] -->|commands / pointer boundary| Owner
+    Native["Native tray and hit proxy"] -->|commands / button-down / pointer boundary| Owner
     Owner --> Dock["Transparent GPUI popup"]
-    Owner --> Panel["Nonactivating hover panel"]
+    Owner --> Panel["Nonactivating status panel"]
     Owner -->|Quit off the UI thread| Link
 ```
 
@@ -21,18 +21,27 @@ proxy owns exactly the outline's pixels and reports pointer entry and exit (see
 The panel is created at startup, then explicitly positioned and sized while still hidden.
 GPUI saves requested bounds for a hidden window instead of applying them immediately; leaving
 the native window at Windows' default size also leaves its renderer's textures oversized.
-Hidden placement bounds those resources without moving window creation into the first hover.
-The same panel is hidden and reused, never recreated for each hover. The typing panel is the
+Hidden placement bounds those resources without moving window creation into the first click.
+The same panel is hidden and reused, never recreated for each click. The typing panel is the
 one exception to never activating: it's a tool window without no-activate, created on the first
-double tap, activated only explicitly, and hidden rather than closed. While it's open, hover
-leaves it alone and the hover panel stays hidden.
+double tap, activated only explicitly, and hidden rather than closed. While it's open, pointer
+events and dock clicks leave it alone and the status panel stays hidden. `presence/text.rs`
+owns its lifetime and retains a GPUI `observe_window_activation` subscription. A previously
+active, visible typing surface hides on deactivation, preserving its `InputState` and dropping
+the saved foreground without restoring it. Deferred handling rechecks `is_window_active`,
+visibility, prior activation and the open generation; stale, initial and Esc-generated blur
+notifications cannot hide a newly opened surface. Esc and explicit dismiss keep their existing
+conditional foreground restoration.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 
 The nine positions are calculated from the primary display's physical work area, not its
 entire screen. Logical dimensions are converted using the dock's scale factor. The panel
 touches the dock and clamps inward at an edge. Crossing their shared edge keeps it open.
-Leaving both starts one 80 ms grace timer; there is no idle polling. Synchronous native
+Hover never opens it: the proxy's left-button-down toggles it without activation. A Stop
+fallback stays open regardless of pointer departure or further dock clicks while needed.
+Leaving both starts one 80 ms grace timer; there is no idle polling. The timer rechecks typing
+and Stop ownership before hiding. Synchronous native
 placement calls `bounds_changed` afterwards so GPUI receives its otherwise-dropped resize.
 
 The native tray menu offers position, Retry and Quit. Position is deliberately session-local
@@ -118,8 +127,9 @@ flowchart LR
   `on_next_frame` and are requested only while the bulb moves. A settled bulb requests none:
   under a still pointer, the proxy reports the pointer's next move over the body once, and at
   rest the next entry starts the stretch again. There's no hook, mouse capture, timer or polling.
-- **Hover.** The panel opens, and stays, while the pointer is over the outline or the shown
-  panel. The pill's rounded corners and the slot's 4 px padding pass the pointer through, and
+- **Status panel.** Left-button-down on the outline toggles the panel; hover only stretches
+  the dock. An open panel stays while the pointer is over the outline or the shown panel.
+  The pill's rounded corners and the slot's 4 px padding pass the pointer through, and
   the 80 ms grace timer covers the 4 px gap between the pill and the panel. Windows may not
   report the outline moving under a still pointer, so after each accepted mask update the owner
   checks whether the pointer's side of the outline changed, and rechecks hover only then.
@@ -197,8 +207,12 @@ is one line:
   uploaded geometry; `epoch` and `geometry` are the accepted state after it. Only an accepted
   change of rows (initial, stretched, trimmed) advances the epoch; a failure logs its proposal
   and leaves both.
-- `hover id=H qpc= visible=true|false`, on every hover panel show or hide, stamped before
-  the native call that places the panel.
+- `hover id=H qpc= visible=true|false click_qpc=`, on every status panel show or hide. The
+  legacy name and paint IDs are unchanged. `qpc` is state entry, before native placement;
+  `click_qpc` is zero except for click-triggered changes. The proxy captures that native
+  button-down counter once, before observer or event processing, and carries it through the
+  unconditional product event to placement. A tagged `click` receipt shares exactly that
+  `click_qpc`, so the harness measures from native receipt rather than queued owner handling.
 - `paint frame=F qpc= kind=dock|panel hover= drawn_epoch= drawn_geometry= mask_epoch=`. A dock
   frame is stamped in `OutlinePaint`'s paint with `hover=0`; `drawn_geometry`'s `drawn` spans
   are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size

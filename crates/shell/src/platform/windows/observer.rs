@@ -55,11 +55,16 @@ impl ProxyHandle {
 
 /// Stamps and reports the observer's messages. True means the message is consumed; a
 /// click always goes on to the proxy's normal handling.
-pub(super) fn on_message(observe: Option<&Observe>, message: u32, wparam: WPARAM) -> bool {
+pub(super) fn on_message(
+    observe: Option<&Observe>,
+    message: u32,
+    wparam: WPARAM,
+    click_qpc: Option<i64>,
+) -> bool {
     let Some(observe) = observe else {
         return false;
     };
-    let qpc = performance_counter();
+    let qpc = click_qpc.unwrap_or_else(performance_counter);
     match message {
         FRAME_DRAWN => {
             let frame = u64::try_from(wparam.0).unwrap_or(u64::MAX);

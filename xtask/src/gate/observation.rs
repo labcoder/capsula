@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use capsula_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
 mod summary;
-pub(super) use summary::{summarize_hover, summarize_keyboard};
+pub(super) use summary::{summarize_click, summarize_keyboard};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Startup {
@@ -93,6 +93,7 @@ pub(super) struct Hover {
     pub(super) id: u64,
     pub(super) qpc: i64,
     pub(super) visible: bool,
+    pub(super) click_qpc: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,14 +235,24 @@ impl Observation {
             "drawn" => self.accept_drawn(text)?,
             "target" => self.accept_target(text)?,
             "hover" => {
-                let [id, counter, visible] = fields(text, ["id", "qpc", "visible"])?;
+                let (id, counter, visible, click) =
+                    if text.split(' ').any(|field| field.starts_with("click_qpc=")) {
+                        let [id, counter, visible, click] =
+                            fields(text, ["id", "qpc", "visible", "click_qpc"])?;
+                        (id, counter, visible, number::<i64>(click)?)
+                    } else {
+                        let [id, counter, visible] = fields(text, ["id", "qpc", "visible"])?;
+                        (id, counter, visible, 0)
+                    };
                 let id = number(id)?;
                 next_id(id, self.hovers.len())?;
                 let qpc = ordered(counter, self.hovers.last().map_or(0, |value| value.qpc))?;
+                ensure!((0..=qpc).contains(&click), "invalid panel click origin");
                 self.hovers.push(Hover {
                     id,
                     qpc,
                     visible: boolean(visible)?,
+                    click_qpc: (click != 0).then_some(click),
                 });
             }
             "click" => self.accept_click(text)?,

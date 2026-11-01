@@ -291,6 +291,7 @@ fn inside(point: [i32; 2], rect: [i32; 4]) -> bool {
 }
 
 fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) -> Option<[i32; 2]> {
+    let panel = data.startup.as_ref()?.panel;
     let commit = data.commits.last()?;
     let geometry = data.geometries.get(&commit.geometry)?;
     let y = dock[1] + dock[3] / 2;
@@ -298,7 +299,7 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
         .rows
         .get(usize::try_from(y - geometry.origin_y).ok()?)?;
     let [left, right] = row.drawn?;
-    match category {
+    let point = match category {
         "center" => Some([left.midpoint(right), y]),
         "edge" => Some([left, y]),
         "body" => (right > dock[0] + dock[2]).then_some([right - 1, y]),
@@ -322,6 +323,7 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
         "retract" => {
             let frequency = data.startup.as_ref()?.frequency;
             let mut retracting = false;
+            let mut point = None;
             for frame in data.frames.iter().rev().filter(|frame| {
                 frame.kind == Kind::Dock
                     && frame.paint_qpc <= commit.qpc
@@ -336,11 +338,11 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
                     }
                     retracting = true;
                 }
-                let point = [old_right - 1, y];
+                let target = [old_right - 1, y];
                 if retracting
-                    && !geometry.contains_owned(point)
+                    && !geometry.contains_owned(target)
                     && inside(
-                        point,
+                        target,
                         [
                             cover.left,
                             cover.top,
@@ -349,13 +351,15 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
                         ],
                     )
                 {
-                    return Some(point);
+                    point = Some(target);
+                    break;
                 }
             }
-            None
+            point
         }
         _ => None,
-    }
+    };
+    point.filter(|point| !inside(*point, panel))
 }
 
 #[expect(

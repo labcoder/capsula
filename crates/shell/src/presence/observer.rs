@@ -254,6 +254,7 @@ enum Record {
     Hover {
         id: u64,
         qpc: i64,
+        click_qpc: i64,
         visible: bool,
     },
     Target {
@@ -499,8 +500,8 @@ pub(super) fn flush(cx: &mut App, surface: Surface) {
     }
 }
 
-/// Records a hover panel show or hide, before the native call that places it, as hover `H`.
-pub(super) fn hover(cx: &mut App, visibility: PanelVisibility) {
+/// Records a status panel change and optional native click origin as legacy hover `H`.
+pub(super) fn hover(cx: &mut App, visibility: PanelVisibility, trigger_qpc: Option<i64>) {
     if !cx.has_global::<Observer>() {
         return;
     }
@@ -511,6 +512,7 @@ pub(super) fn hover(cx: &mut App, visibility: PanelVisibility) {
     observer.shared.send(Record::Hover {
         id,
         qpc,
+        click_qpc: trigger_qpc.unwrap_or(0),
         visible: visibility == PanelVisibility::Visible,
     });
 }
@@ -709,8 +711,16 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
              mask_epoch={mask_epoch}",
             drawn.epoch, drawn.geometry
         ),
-        Record::Hover { id, qpc, visible } => {
-            writeln!(out, "hover id={id} qpc={qpc} visible={visible}")
+        Record::Hover {
+            id,
+            qpc,
+            click_qpc,
+            visible,
+        } => {
+            writeln!(
+                out,
+                "hover id={id} qpc={qpc} visible={visible} click_qpc={click_qpc}"
+            )
         }
         Record::Target {
             frame,
@@ -909,9 +919,19 @@ mod tests {
             text(&Record::Hover {
                 id: 2,
                 qpc: 1240,
+                click_qpc: 1230,
                 visible: true,
             }),
-            "hover id=2 qpc=1240 visible=true\n"
+            "hover id=2 qpc=1240 visible=true click_qpc=1230\n"
+        );
+        assert_eq!(
+            text(&Record::Hover {
+                id: 3,
+                qpc: 1250,
+                click_qpc: 0,
+                visible: false
+            }),
+            "hover id=3 qpc=1250 visible=false click_qpc=0\n"
         );
         assert_eq!(
             text(&Record::Target {

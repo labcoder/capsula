@@ -36,7 +36,7 @@ pub(crate) struct PhaseContext<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Keyboard,
-    Hover,
+    Click,
     Focus,
     Layouts,
     Esc,
@@ -472,7 +472,7 @@ pub(crate) fn exercise(
         }
         match phase {
             Phase::Keyboard => keyboard(session, counts, diagnostics),
-            Phase::Hover => hover(session, counts, context),
+            Phase::Click => click_panel(session, counts, context),
             Phase::Focus => focus(session, counts, diagnostics),
             Phase::Layouts => layouts(session, counts, diagnostics),
             Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
@@ -480,7 +480,7 @@ pub(crate) fn exercise(
     })();
     let release = session.release_injected();
     println!(
-        "SendInput accepted_batches={} first_qpc={:?} last_qpc={:?} qpc_frequency={}; injection timestamps only, NOT WM_INPUT-to-present latency",
+        "SendInput accepted_batches={} first_qpc={:?} last_qpc={:?} qpc_frequency={}; injection timestamps only, NOT native-callback-to-present latency",
         session.batches, session.first_qpc, session.last_qpc, session.qpc_frequency
     );
     combine([result, release])
@@ -572,19 +572,29 @@ fn keyboard(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostic
     Ok(())
 }
 
-fn hover(session: &mut Session, counts: &mut Counts, context: &PhaseContext<'_>) -> Result<()> {
+fn click_panel(
+    session: &mut Session,
+    counts: &mut Counts,
+    context: &PhaseContext<'_>,
+) -> Result<()> {
     let [enter, leave] = session.hover_points(context.dock, context.overlay)?;
     for index in 0..100 {
         session.wait(Duration::from_micros(1000 + (index * 997) % 6944))?;
         counts.attempts += 1;
         session.move_pointer(enter, Target::Product)?;
-        let enter_qpc = session.last_qpc;
+        session.wait(Duration::from_millis(10))?;
+        ensure!(
+            !session.panel_visible()?,
+            "hover alone opened the status panel"
+        );
+        session.click(enter, Target::Product)?;
+        let click_qpc = session.last_qpc;
         session.wait(Duration::from_millis(100))?;
         let entered = session.panel_visible()?;
         counts.behavior_fail += u32::from(!entered);
         ensure!(
             entered,
-            "hover entry did not make an owned panel HWND visible"
+            "pill click did not make an owned panel HWND visible"
         );
         session.move_pointer(leave, Target::Edit)?;
         let leave_qpc = session.last_qpc;
@@ -596,11 +606,11 @@ fn hover(session: &mut Session, counts: &mut Counts, context: &PhaseContext<'_>)
         let observed_leave = leave_at.elapsed();
         let left = !session.panel_visible()?;
         counts.behavior_fail += u32::from(!left);
-        ensure!(left, "hover leave did not hide the owned panel HWND");
+        ensure!(left, "pointer leave did not hide the owned panel HWND");
         counts.sent += 1;
         counts.behavior_pass += 1;
         println!(
-            "hover attempt={} injection_enter_qpc={enter_qpc:?} injection_leave_qpc={leave_qpc:?} observed_hwnd_leave_ms={:.3}; NOT paint/present latency",
+            "click attempt={} injection_click_qpc={click_qpc:?} injection_leave_qpc={leave_qpc:?} observed_hwnd_leave_ms={:.3}; NOT button-down/present latency",
             counts.attempts,
             observed_leave.as_secs_f64() * 1000.0
         );
@@ -621,61 +631,83 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
     if !records
         .iter()
         .any(|record| record.mark == Mark::Opened(true))
-        || !session.product()?.is_foreground()
+        || !session
+            .typing_window()
+            .and_then(Window::is_visible)
+            .unwrap_or(false)
     {
         counts.behavior_fail += 1;
-        bail!("completed short double tap did not foreground the product; no text injected");
+        bail!("completed short double tap did not show and foreground typing; no text injected");
     }
     session.tap(0x1e)?;
     session.tap(0x01)?;
     diagnostics.observe(session, since, |records| {
-        records.iter().any(|record| record.mark == Mark::Dismissed)
-            && records
-                .iter()
-                .any(|record| record.mark == Mark::EscapeDismiss)
+        [Mark::Dismissed, Mark::EscapeDismiss]
+            .iter()
+            .all(|mark| records.iter().any(|record| record.mark == *mark))
     })?;
     if !session.fixture.is_foreground() {
         counts.behavior_fail += 1;
         bail!("Escape did not return foreground to the fixture");
     }
-    session.wait(Duration::from_millis(325))?;
-    let reopened_since = short_chord(session)?;
-    session.wait(Duration::from_millis(50))?;
-    short_chord(session)?;
-    let reopened = diagnostics.observe(session, reopened_since, |records| {
-        records
+    for switch_away in [true, false] {
+        session.wait(Duration::from_millis(325))?;
+        let reopened_since = short_chord(session)?;
+        session.wait(Duration::from_millis(50))?;
+        short_chord(session)?;
+        let reopened = diagnostics.observe(session, reopened_since, |records| {
+            records
+                .iter()
+                .any(|record| matches!(record.mark, Mark::Opened(_)))
+                && records
+                    .iter()
+                    .any(|record| matches!(record.mark, Mark::Draft { .. }))
+        })?;
+        if !reopened
             .iter()
-            .any(|record| matches!(record.mark, Mark::Opened(_)))
-            && records
-                .iter()
-                .any(|record| matches!(record.mark, Mark::Draft { .. }))
-    })?;
-    if !reopened
-        .iter()
-        .any(|record| record.mark == Mark::Opened(true))
-        || !session.product()?.is_foreground()
-        || !reopened.iter().any(|record| {
-            record.mark
-                == (Mark::Draft {
-                    nonempty: true,
-                    preserved: true,
-                })
-        })
-    {
-        counts.behavior_fail += 1;
-        bail!("draft reopen was unfocused, not foreground, empty or not preserved");
+            .any(|record| record.mark == Mark::Opened(true))
+            || !session
+                .typing_window()
+                .and_then(Window::is_visible)
+                .unwrap_or(false)
+            || !reopened.iter().any(|record| {
+                record.mark
+                    == (Mark::Draft {
+                        nonempty: true,
+                        preserved: true,
+                    })
+            })
+        {
+            counts.behavior_fail += 1;
+            bail!("draft reopen was hidden, unfocused, empty or not preserved");
+        }
+        if switch_away {
+            let typing = session.typing_window()?;
+            let point = session.edit_point()?;
+            session.move_pointer(point, Target::Edit)?;
+            session.click(point, Target::Edit)?;
+            let since = session.last_qpc.context("fixture click was not sent")?;
+            diagnostics.observe(session, since, |records| {
+                records.iter().any(|record| record.mark == Mark::Dismissed)
+            })?;
+            ensure!(
+                !typing.is_visible()?,
+                "typing stayed visible after switching away"
+            );
+        } else {
+            session.tap(0x01)?;
+            diagnostics.observe(session, reopened_since, |records| {
+                records.iter().any(|record| record.mark == Mark::Dismissed)
+                    && records
+                        .iter()
+                        .any(|record| record.mark == Mark::EscapeDismiss)
+            })?;
+        }
+        ensure!(
+            session.fixture_foreground(),
+            "typing dismissal did not leave the fixture in front"
+        );
     }
-    session.tap(0x01)?;
-    diagnostics.observe(session, reopened_since, |records| {
-        records.iter().any(|record| record.mark == Mark::Dismissed)
-            && records
-                .iter()
-                .any(|record| record.mark == Mark::EscapeDismiss)
-    })?;
-    ensure!(
-        session.fixture.is_foreground(),
-        "draft dismissal did not return foreground to the fixture"
-    );
     let (_, before) = session.fixture.counts()?;
     session.tap(0x01)?;
     counts.sent += 1;

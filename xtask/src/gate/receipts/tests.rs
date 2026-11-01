@@ -221,6 +221,32 @@ fn retract_targets_require_recent_contraction_not_an_older_cycle_peak() {
 }
 
 #[test]
+fn receipt_points_never_target_the_status_panel_opened_by_a_body_click() {
+    let mut data = sample_data();
+    let cover = RECT {
+        left: 0,
+        top: 0,
+        right: 208,
+        bottom: 40,
+    };
+    assert_eq!(
+        candidate(&data, "center", [0, 0, 100, 40], cover),
+        Some([60, 20])
+    );
+    data.frames = vec![frame(1, 2, 90), frame(2, 3, 95), frame(3, 1, 98)];
+    assert_eq!(
+        candidate(&data, "retract", [0, 0, 100, 40], cover),
+        Some([139, 20])
+    );
+    data.startup.as_mut().unwrap().panel = [0, 10, 208, 100];
+    for category in [
+        "center", "edge", "body", "previous", "outside", "external", "retract",
+    ] {
+        assert_eq!(candidate(&data, category, [0, 0, 100, 40], cover), None);
+    }
+}
+
+#[test]
 fn newer_unknown_or_overlapping_frames_never_reuse_an_older_display_claim() {
     let mut data = sample_data();
     data.frames = vec![frame(1, 1, 90)];

@@ -36,8 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetLayeredWindowAttributes,
     SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, TrackPopupMenuEx, UnregisterClassW, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WNDCLASSEXW,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL,
+    WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -67,6 +67,9 @@ const QUIT_COMMAND: usize = 11;
 /// What the presence surfaces tell the UI thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresenceEvent {
+    DockPressed {
+        qpc: i64,
+    },
     /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
     PointerChanged,
     /// The pointer moved over the proxy after `PresenceNative::watch_pointer`; sent once.
@@ -873,6 +876,7 @@ unsafe extern "system" fn proxy_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let click_qpc = (message == WM_LBUTTONDOWN).then(performance_counter);
     if message == WM_MOUSEACTIVATE {
         return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX));
     }
@@ -888,7 +892,7 @@ unsafe extern "system" fn proxy_proc(
         if state.keys.on_message(hwnd, message, wparam, lparam) {
             return LRESULT(0);
         }
-        if observer::on_message(state.observe.get(), message, wparam) {
+        if observer::on_message(state.observe.get(), message, wparam, click_qpc) {
             return LRESULT(0);
         }
         if EscapeHotkey::fired(message, wparam) {
@@ -896,6 +900,15 @@ unsafe extern "system" fn proxy_proc(
             return LRESULT(0);
         }
         match message {
+            WM_LBUTTONDOWN => {
+                send(
+                    &state.hover.events,
+                    PresenceEvent::DockPressed {
+                        qpc: click_qpc.expect("button-down captured its counter before dispatch"),
+                    },
+                );
+                return LRESULT(0);
+            }
             WM_CLOSE => {
                 send(&state.hover.events, PresenceEvent::Quit);
                 return LRESULT(0);
