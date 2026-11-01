@@ -1,0 +1,26 @@
+[package]
+name = "capsula-shell"
+description = "Capsula's shell, capsula: everything the user sees, hears and touches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "capsula"
+path = "src/main.rs"
+
+[dependencies]
+capsula-protocol.workspace = true
+fluent-bundle.workspace = true
+gpui-kit.workspace = true
+raw-window-handle = { version = "0.6", features = ["std"] }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+unic-langid.workspace = true
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true

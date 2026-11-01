@@ -1,0 +1,52 @@
+# cargo deny check: licenses, advisories, bans and sources, for what ships on Windows.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+# Vulnerabilities always fail. Unmaintained crates fail only when Capsula depends on them
+# directly: GPUI's transitive ones (instant, paste, rustybuzz, ttf-parser) have no upgrade.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# The agreed list (project AGENTS.md). MPL-2.0 goes in as a named exception when a dependency
+# needs it, and anything GPL-family never does.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# The agreed list stays whole even when no dependency uses an entry yet.
+unused-allowed-license = "allow"
+# Permissive licenses outside the list, each needed by one GPUI dependency.
+exceptions = [
+    # 0BSD, public-domain-equivalent: gpui-component's enum iteration.
+    { crate = "enum-iterator", allow = ["0BSD"] },
+    { crate = "enum-iterator-derive", allow = ["0BSD"] },
+    # CC0-1.0, public-domain dedication: gpui-component's file watching.
+    { crate = "notify", allow = ["CC0-1.0"] },
+    # MPL-2.0, file-level copyleft, allowed when a dependency needs it: dirs-sys, through
+    # gpui-kit-assets' rust-embed.
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+]
+
+[licenses.private]
+# Capsula's own crates are unpublished and unlicensed until OSC-111.
+ignore = true
+
+[bans]
+# GPUI's graph carries several versions of the windows crates; duplicates are reported, not fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/longbridge/gpui-kit"]

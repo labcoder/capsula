@@ -1,0 +1,21 @@
+[package]
+name = "capsula-brain"
+description = "Capsula's headless brain, capsulad."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "capsulad"
+path = "src/main.rs"
+
+[dependencies]
+capsula-protocol.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

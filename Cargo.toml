@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = ["crates/protocol", "crates/scene", "crates/brain", "crates/shell", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+# No license until OSC-111 decides one; nothing is published.
+publish = false
+
+[workspace.dependencies]
+capsula-protocol = { path = "crates/protocol" }
+fluent-bundle = "0.16"
+gpui-kit = "0.8.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+unic-langid = "0.9"
+
+# Lints start from BeautifulRust's lints/lints.toml (MIT, github.com/morganlinton/BeautifulRust
+# at a9cdcfa94d13), then add Capsula's rules: unwrap denied, unsafe only in platform modules.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "allow"
+panic_in_result_fn = "warn"
+missing_panics_doc = "warn"
+missing_errors_doc = "warn"
+missing_assert_message = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+rc_buffer = "warn"
+string_add = "warn"
+wildcard_imports = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+as_conversions = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# The gpui-kit revision S1 built and measured, over registry gpui-pre 0.3.10. Upgrading it is a
+# deliberate change that reruns P1's window tests.
+[patch.crates-io]
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
+gpui-component-macros = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }

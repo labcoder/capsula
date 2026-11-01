@@ -1,0 +1,3 @@
+# The shell's text. Product names come from the constants file, never from here.
+
+status-starting = Starting…
