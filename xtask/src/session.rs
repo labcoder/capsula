@@ -838,11 +838,11 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
 }
 
 fn layouts(session: &mut Session, counts: &mut Counts) -> Result<()> {
-    let mut layouts = Layouts::capture(session)?;
+    let layouts = Layouts::capture(session)?;
     let exercise = (|| {
         for selection in [Layout::German, Layout::Spanish] {
             counts.attempts += 1;
-            layouts.load(session, selection)?;
+            Layouts::load(session, selection)?;
             session.clear_fixture()?;
             session.modifier(0x138, InputEdge::Down)?;
             session.tap(match selection {

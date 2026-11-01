@@ -118,3 +118,11 @@ starts, and Quit drains the worker off the UI thread, so the UI thread never tou
 
 Unit tests cover the reducer's thresholds and sequences, scan-code naming and Esc ordering.
 Real AltGr layouts, focus, hold feel and Listening on screen need the approved desktop session.
+The separate-process fixture owns its window loop in `platform/input_session/fixture.rs`.
+On Windows 8 and later, layout loading must run in the process that owns keyboard focus, so
+the runner sends a bounded numeric request to the foreground fixture and verifies its active
+layout acknowledgement before typing. The fixture tracks newly loaded handles and restores
+its original layout on request and on exit, including after a lost acknowledgement. The
+runner then checks the loaded-layout list. The approved session separately compares the
+owner's persistent language registry settings before and after the layouts phase; a change
+stops the session and is reported, never silently repaired with registry writes.
