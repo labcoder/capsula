@@ -855,7 +855,7 @@ mod tests {
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
     };
 
-    use super::super::guard::physical_event;
+    use super::super::guard::{InputClass, PhysicalInput, physical_event};
     use super::layout_id;
     use capsula_protocol::constants::FOCUS_INPUT_MARKER;
 
@@ -874,47 +874,93 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(physical_event(&mouse_event(calm)).unwrap(), None);
-        for mouse in [
-            RAWMOUSE {
-                ulExtraInformation: 0,
-                ..calm
-            },
-            RAWMOUSE {
-                ulExtraInformation: marker + 1,
-                ..calm
-            },
-            RAWMOUSE { lLastX: 1, ..calm },
-            RAWMOUSE { lLastY: -1, ..calm },
-            RAWMOUSE {
-                usFlags: MOUSE_MOVE_ABSOLUTE,
-                ..calm
-            },
-            RAWMOUSE {
-                usFlags: MOUSE_MOVE_NOCOALESCE,
-                ..calm
-            },
-            RAWMOUSE {
-                Anonymous: RAWMOUSE_0 { ulButtons: 1 },
-                ..calm
-            },
-            RAWMOUSE {
-                Anonymous: RAWMOUSE_0 {
-                    ulButtons: 0x0078_0400,
+        for (mouse, class, expected_marker) in [
+            (
+                RAWMOUSE {
+                    ulExtraInformation: 0,
+                    ..calm
                 },
-                ..calm
-            },
-            RAWMOUSE {
-                Anonymous: RAWMOUSE_0 {
-                    ulButtons: 0x0078_0800,
+                InputClass::Other,
+                0,
+            ),
+            (
+                RAWMOUSE {
+                    ulExtraInformation: marker + 1,
+                    ..calm
                 },
-                ..calm
-            },
-            RAWMOUSE {
-                ulRawButtons: 1,
-                ..calm
-            },
+                InputClass::Other,
+                marker + 1,
+            ),
+            (
+                RAWMOUSE { lLastX: 1, ..calm },
+                InputClass::MouseMove { dx: 1, dy: 0 },
+                marker,
+            ),
+            (
+                RAWMOUSE { lLastY: -1, ..calm },
+                InputClass::MouseMove { dx: 0, dy: -1 },
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    usFlags: MOUSE_MOVE_ABSOLUTE,
+                    ..calm
+                },
+                InputClass::Other,
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    usFlags: MOUSE_MOVE_NOCOALESCE,
+                    ..calm
+                },
+                InputClass::Other,
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    Anonymous: RAWMOUSE_0 { ulButtons: 1 },
+                    ..calm
+                },
+                InputClass::Button,
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    Anonymous: RAWMOUSE_0 {
+                        ulButtons: 0x0078_0400,
+                    },
+                    ..calm
+                },
+                InputClass::Wheel,
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    Anonymous: RAWMOUSE_0 {
+                        ulButtons: 0x0078_0800,
+                    },
+                    ..calm
+                },
+                InputClass::Wheel,
+                marker,
+            ),
+            (
+                RAWMOUSE {
+                    ulRawButtons: 1,
+                    ..calm
+                },
+                InputClass::Button,
+                marker,
+            ),
         ] {
-            assert!(physical_event(&mouse_event(mouse)).unwrap().is_some());
+            assert_eq!(
+                physical_event(&mouse_event(mouse)).unwrap(),
+                Some(PhysicalInput {
+                    class,
+                    marker: Some(expected_marker),
+                })
+            );
         }
     }
 
@@ -926,9 +972,21 @@ mod tests {
             ExtraInformation: u32::try_from(FOCUS_INPUT_MARKER).unwrap(),
             ..Default::default()
         };
-        assert!(physical_event(&raw).unwrap().is_some());
+        assert_eq!(
+            physical_event(&raw).unwrap(),
+            Some(PhysicalInput {
+                class: InputClass::Keyboard,
+                marker: Some(u32::try_from(FOCUS_INPUT_MARKER).unwrap()),
+            })
+        );
         raw.header.dwType = RIM_TYPEHID.0;
-        assert!(physical_event(&raw).unwrap().is_some());
+        assert_eq!(
+            physical_event(&raw).unwrap(),
+            Some(PhysicalInput {
+                class: InputClass::Other,
+                marker: None,
+            })
+        );
     }
 
     #[test]
