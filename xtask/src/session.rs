@@ -21,6 +21,9 @@ use crate::platform::{
     },
 };
 
+mod diagnostics;
+use diagnostics::{Mark, Record, pair_paints};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Keyboard,
@@ -49,108 +52,6 @@ struct Counts {
     sent: u32,
     behavior_pass: u32,
     behavior_fail: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mark {
-    Applied { us: u64, start_qpc: i64 },
-    Painted(u64),
-    Resting,
-    Hold(bool),
-    HoldEnded(bool),
-    Opened(bool),
-    Dismissed,
-    EscapeStop,
-    EscapeClear,
-    EscapeDismiss,
-    EscapeIgnore,
-    EscapeState { wanted: bool, stop: bool },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Record {
-    qpc: i64,
-    mark: Mark,
-}
-
-impl Record {
-    fn parse(line: &str) -> Result<Self> {
-        let (counter, event) = line
-            .strip_prefix("qpc=")
-            .and_then(|line| line.split_once(' '))
-            .context("invalid input diagnostic envelope")?;
-        let qpc = counter.parse()?;
-        ensure!(qpc > 0, "invalid diagnostic QPC counter");
-        let mark = if let Some(value) = event.strip_prefix("listening applied_us=") {
-            let (us, start) = value
-                .split_once(" start_qpc=")
-                .context("input diagnostic start QPC missing")?;
-            let start_qpc = start.parse()?;
-            ensure!(
-                start_qpc > 0 && start_qpc <= qpc,
-                "invalid input diagnostic start QPC"
-            );
-            Mark::Applied {
-                us: us.parse()?,
-                start_qpc,
-            }
-        } else if let Some(value) = event.strip_prefix("listening painted_us=") {
-            Mark::Painted(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("hold excluded=") {
-            Mark::Hold(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("hold ended restored=") {
-            Mark::HoldEnded(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("input opened focused=") {
-            Mark::Opened(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("escape wanted=") {
-            let (wanted, stop) = value
-                .split_once(" stop=")
-                .context("invalid Escape diagnostic state")?;
-            Mark::EscapeState {
-                wanted: wanted.parse()?,
-                stop: stop.parse()?,
-            }
-        } else {
-            match event {
-                "resting" => Mark::Resting,
-                "input dismissed" => Mark::Dismissed,
-                "escape action=Stop" => Mark::EscapeStop,
-                "escape action=Clear" => Mark::EscapeClear,
-                "escape action=Dismiss" => Mark::EscapeDismiss,
-                "escape action=Ignore" => Mark::EscapeIgnore,
-                _ => bail!("unknown input diagnostic event"),
-            }
-        };
-        Ok(Self { qpc, mark })
-    }
-}
-
-type CanvasSample = (i64, i64, u64);
-
-fn pair_paints(records: &[Record]) -> Result<(Vec<CanvasSample>, usize)> {
-    let mut latest = None;
-    let mut applied = 0usize;
-    let mut pairs = Vec::new();
-    for record in records {
-        match record.mark {
-            Mark::Applied { start_qpc, .. } => {
-                latest = Some(start_qpc);
-                applied += 1;
-            }
-            Mark::Painted(us) => pairs.push((
-                latest
-                    .take()
-                    .context("Canvas paint has no unmatched preceding applied milestone")?,
-                record.qpc,
-                us,
-            )),
-            _ => {}
-        }
-    }
-    let missing = applied
-        .checked_sub(pairs.len())
-        .context("more Canvas paints than applied milestones")?;
-    Ok((pairs, missing))
 }
 
 #[derive(Debug)]
@@ -873,95 +774,7 @@ fn layouts(session: &mut Session, counts: &mut Counts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mark, Phase, Record, pair_paints};
-
-    #[test]
-    fn diagnostics_accept_only_documented_transcript_free_milestones() {
-        assert_eq!(
-            Record::parse("qpc=123 listening applied_us=42 start_qpc=100").unwrap(),
-            Record {
-                qpc: 123,
-                mark: Mark::Applied {
-                    us: 42,
-                    start_qpc: 100
-                }
-            },
-            "native callback QPC is retained with the applied duration"
-        );
-        assert_eq!(
-            Record::parse("qpc=123 listening painted_us=42").unwrap(),
-            Record {
-                qpc: 123,
-                mark: Mark::Painted(42)
-            },
-            "paint duration remains a Canvas callback marker"
-        );
-        assert_eq!(
-            Record::parse("qpc=124 escape wanted=true stop=false")
-                .unwrap()
-                .mark,
-            Mark::EscapeState {
-                wanted: true,
-                stop: false
-            },
-            "Escape registration state"
-        );
-        for line in [
-            "listening applied_us=1",
-            "qpc=0 resting",
-            "qpc=1 hold excluded=maybe",
-            "qpc=2 unexpected",
-            "qpc=3 listening applied_us=-1 start_qpc=1",
-            "qpc=3 listening applied_us=1 start_qpc=4",
-            "qpc=3 listening applied_us=1 start_qpc=0",
-        ] {
-            assert!(
-                Record::parse(line).is_err(),
-                "invalid diagnostic envelope or milestone"
-            );
-        }
-    }
-
-    #[test]
-    fn paint_pairs_with_latest_applied_without_hiding_a_missing_sample() {
-        let records = [
-            Record {
-                qpc: 11,
-                mark: Mark::Applied {
-                    us: 1,
-                    start_qpc: 10,
-                },
-            },
-            Record {
-                qpc: 12,
-                mark: Mark::Resting,
-            },
-            Record {
-                qpc: 21,
-                mark: Mark::Applied {
-                    us: 1,
-                    start_qpc: 20,
-                },
-            },
-            Record {
-                qpc: 22,
-                mark: Mark::Painted(2),
-            },
-        ];
-        assert_eq!(
-            pair_paints(&records).unwrap(),
-            (vec![(20, 22, 2)], 1),
-            "the latest callback is paired and the earlier missing paint remains counted"
-        );
-        assert!(
-            pair_paints(&[Record {
-                qpc: 1,
-                mark: Mark::Painted(2)
-            }])
-            .is_err(),
-            "orphan paints cannot become successful samples"
-        );
-    }
+    use super::Phase;
 
     #[test]
     fn only_explicit_known_phases_are_accepted() {

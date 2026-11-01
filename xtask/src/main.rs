@@ -31,9 +31,15 @@ tasks:
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
                     30s settle, GetProcessTimes + private bytes, bounded autoquit;
-                    CPU is percent of one core, not the whole machine
+                    CPU is percent of one core, not the whole machine;
+                    three 2s saturated-thread trials calibrate the highest cycle rate
+                    before launch; cycles CPU is the gate, GetProcessTimes stays beside it
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
+  bench stretch [--duration 1..60] [--baseline <release-directory>]
+                    input-free continuous stretch, default 30s after 30s warmup;
+                    baseline runs without stretch; raw cycles and bounded DWM CSV,
+                    fixture totals cover its whole lifetime, not just sampling
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"

@@ -14,10 +14,10 @@ flowchart LR
     Owner -->|Quit off the UI thread| Link
 ```
 
-The dock is a small transparent `PopUp` window. Its native styles include layered,
-transparent, no-activate and tool-window; app-window is removed. A separate native hit proxy
-owns its resting rectangle. The proxy is visually transparent but receives mouse entry and
-exit. The panel is interactive, nonactivating and excluded from the taskbar in the same way.
+The dock is a transparent `PopUp` overlay, sized for the stretch. Its native styles include
+layered, transparent, no-activate and tool-window; app-window is removed. A separate native hit
+proxy owns exactly the outline's pixels and reports pointer entry and exit (see
+[Stretch and hit testing](#stretch-and-hit-testing)). The panel is interactive, nonactivating and excluded from the taskbar in the same way.
 The panel is created at startup, then explicitly positioned and sized while still hidden.
 GPUI saves requested bounds for a hidden window instead of applying them immediately; leaving
 the native window at Windows' default size also leaves its renderer's textures oversized.
@@ -46,6 +46,13 @@ small even before placement, so a transparency failure cannot cover the desktop.
 bounded launch check, not a performance benchmark or permission to inject input.
 
 For idle measurements, build the workspace in release mode, then run `cargo xtask bench idle`.
+Before launching the shell, the benchmark spins one thread in three two-second trials,
+measuring `QueryThreadCycleTime` divided by wall time and printing each rate and the highest.
+Each role and the process-tree total report calibrated cycle CPU as
+`cycles / (highest_rate * wall) * 100`, beside `GetProcessTimes`. The slice 1 CPU gate reads
+the calibrated column because tick-charged process times can alias the 144 Hz workload.
+This is a measured saturated-thread normalization, not a fixed clock-frequency assumption;
+preemption and frequency changes can affect calibration, so retain the rates and both columns.
 It refuses an existing product process, launches the release shell at normal priority with a
 bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
@@ -59,7 +66,89 @@ paths verify the spawned shell's PID; neither targets another app.
 `--panel` opens the current shell's panel programmatically before settling, so the sample
 includes the panel's steady-state resources rather than only the never-hovered dock.
 
-Geometry tests cover all anchors, negative work-area origins, edge containment and the
-hidden-panel boundary. Transparency, cross-process click-through, native focus and Alt-Tab
-behavior need desktop evidence; a style bit or unit test alone cannot certify them. Stretch
-and outline hit testing are a later layer; this layer has no per-frame region updates.
+Geometry tests cover all anchors, negative work-area origins, edge containment, the
+hidden-panel boundary and the stretch overlay. Transparency, cross-process click-through, native
+focus and Alt-Tab behavior need desktop evidence; a style bit or unit test alone cannot certify
+them.
+
+## Stretch and hit testing
+
+The presence has one outline, in `presence/outline.rs`: the resting pill, plus a round bulb
+joined to it by a tapering neck while it stretches. The dock's painting and the hit proxy read
+the same `row_span` for each physical pixel row, so a drawn pixel is a pixel that takes the
+pointer.
+
+```mermaid
+flowchart LR
+    Ptr["Pointer over the outline<br/>(proxy WM_MOUSEMOVE)"] --> Owner
+    Fix["--stretch-fixture clock"] --> Owner
+    Owner["Presence owner<br/>spring step, once per frame"] --> Out["Outline"]
+    Out --> Mask["Hit mask<br/>current ∪ previous outline,<br/>changed rows, one UpdateLayeredWindow"]
+    Out --> Dock["Dock<br/>repainted only when a pixel changed"]
+```
+
+- **The hit proxy** is a per-pixel-alpha layered window (`platform/windows/hit_mask.rs`).
+  Pixels inside the outline have alpha 1, which is invisible but hit-tested. The rest have
+  alpha 0, which Windows passes through to whatever lies beneath, in any process. It never gets
+  `WS_EX_TRANSPARENT` or a region. Its 32-bit bitmap and row table are allocated once, sized
+  for the largest stretch. A frame rewrites only the rows whose span changed, and calls no Win32
+  function when none did. The proxy moves only when the outline's box leaves its current
+  rectangle; it then becomes the box plus a 24 px margin (logical), in the same
+  `UpdateLayeredWindow` call. Raw Input, the tray, the Esc hotkey and capture exclusion stay on
+  this same window.
+- **Ownership.** Each frame the mask owns the outline the dock is about to draw and, if it
+  changed, the previous frame's outline too. A row holds at most two spans, merged when they
+  touch. So a retracting edge stays hit-tested for the one frame its drawing may take to reach
+  the screen, and the frame after motion stops trims the mask to the outline alone. A position
+  choice is a jump, not motion: the mask owns only the new placement at once, so it never has
+  to span two placements. Nothing waits for the display, so a frame presented more than one
+  frame late can still expose a retracting edge, a drawn pixel the pointer passes through.
+  The dock shows only an outline the mask accepted. A failed upload is
+  retried on the next frame, for at most three frames in a row; then frames stop until a
+  pointer event or position choice starts another burst.
+- **Painting.** The dock window is the click-through overlay: the dock's slot grown by the
+  stretch's reach, inside the work area. It's placed once per position choice, never per frame.
+  The outline paints as one border quad and one fill quad per device-pixel row, and GPUI snaps
+  them to the same pixels the mask owns, so edges are hard rather than antialiased. The label
+  stays on the resting pill.
+- **Motion.** The stretch starts when the pointer reaches the outline. Each frame reads the
+  pointer, aims the bulb under it, or 96 px (logical) toward it from the nearest point of the
+  pill's spine, and steps one critically damped spring. Past that reach plus the bulb's radius,
+  or over the shown panel, the bulb heads back to the pill's center. Frames come from GPUI's
+  `on_next_frame` and are requested only while the bulb moves. A settled bulb requests none:
+  under a still pointer, the proxy reports the pointer's next move over the body once, and at
+  rest the next entry starts the stretch again. There's no hook, mouse capture, timer or polling.
+- **Hover.** The panel opens, and stays, while the pointer is over the outline or the shown
+  panel. The pill's rounded corners and the slot's 4 px padding pass the pointer through, and
+  the 80 ms grace timer covers the 4 px gap between the pill and the panel. Windows may not
+  report the outline moving under a still pointer, so after each accepted mask update the owner
+  checks whether the pointer's side of the outline changed, and rechecks hover only then.
+- **Per frame**, Capsula's code allocates nothing and takes no lock. GPUI itself still boxes
+  each `on_next_frame` callback and rebuilds the dock's small element tree when it repaints.
+
+Unit tests cover the outline's edge, interior and exterior pixels, a stretched body beyond the
+resting pill, the retracting band owned for one frame and then trimmed, touching and separate
+spans in one row, a jump owning only the new placement, failed uploads advancing nothing, the
+margin rule for proxy moves, the spring settling without overshoot, the bulb's reach and
+release, and the fixture's path. Real click receipt over the body and through
+to another process is checked only in an approved input session.
+
+`capsula --stretch-fixture` (with `--quit-after-ms` or `--smoke`, or it refuses to start)
+drives the same frame path from a clock instead of the pointer: out to full reach and back every
+two seconds, toward the middle of the overlay, until Quit. It sends no input. With
+`--input-diagnostics=<file>` the shell writes `stretch active` and `stretch settled` lines, and
+at Quit a `stretch totals` line for the whole run: frames (`ticks`), in-place mask updates
+(`shape`), margin moves (`moves`), frames with no pixel change (`unchanged`) and failed updates
+(`failed`). No content is recorded.
+
+`cargo xtask bench stretch [--duration 1..60] [--baseline <release-directory>]` measures it.
+It launches the current release with `--stretch-fixture` and diagnostics, warms for thirty
+seconds, then samples user plus kernel time, cycles and private bytes of the shell, brain and
+worker over the duration (thirty seconds by default). CPU is percent of one core, with the same
+pre-launch cycle-rate calibration as idle and GetProcessTimes beside it. After Quit it requires a totals line with
+`failed=0`. Lifetime counters are printed separately and are never divided into the sample's
+cycles. A bounded 1 Hz `typeperf` samples DWM's CPU and PID alongside. Its first row is blank,
+so it's kept as an invalid warm-up and never read as zero. DWM's bounded window extends past
+the CPU sample; use its CSV timestamps. It's whole-desktop context, not Capsula's CPU. A baseline (older main)
+gets neither fixture nor diagnostics: it has no stretch, so the pair compares a stretching
+presence with a still one, not like for like. Run only in an agreed quiet window.

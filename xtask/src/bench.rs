@@ -1,27 +1,38 @@
-//! Bounded release idle CPU and private-memory measurements on Rez.
+//! Bounded release idle/stretch CPU, cycles, DWM and private-memory measurements on Rez.
 #![expect(
     clippy::print_stdout,
     reason = "benchmark results are command-line output"
 )]
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
 use crate::platform::{self, Process};
 
-fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, bool)> {
-    ensure!(
-        args.next().as_deref() == Some("idle"),
-        "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory> | --panel]"
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Workload {
+    Idle,
+    Panel,
+    Stretch,
+}
+
+fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, Workload)> {
+    let mut workload = match args.next().as_deref() {
+        Some("idle") => Workload::Idle,
+        Some("stretch") => Workload::Stretch,
+        _ => bail!(
+            "use cargo xtask bench <idle|stretch> [--duration 1..60] [--baseline <release-directory> | --panel]"
+        ),
+    };
     let mut duration = None;
     let mut baseline = None;
-    let mut panel = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--duration" if duration.is_none() => {
@@ -41,19 +52,24 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
                         .context("--baseline needs a release directory")?,
                 ));
             }
-            "--panel" if !panel => panel = true,
+            "--panel" if workload == Workload::Idle => workload = Workload::Panel,
             _ => bail!("unknown or duplicate benchmark option"),
         }
     }
     ensure!(
-        !(panel && baseline.is_some()),
+        !(workload == Workload::Panel && baseline.is_some()),
         "--panel requires the current shell"
     );
-    Ok((duration.unwrap_or(60), baseline, panel))
+    let default_seconds = if workload == Workload::Stretch {
+        30
+    } else {
+        60
+    };
+    Ok((duration.unwrap_or(default_seconds), baseline, workload))
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    let (seconds, baseline, panel) = options(args)?;
+    let (seconds, baseline, workload) = options(args)?;
     let exe = std::env::current_exe()?;
     let release: PathBuf = exe
         .parent()
@@ -73,12 +89,46 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
     );
 
-    println!("programmatic panel warmup before sampling: {panel}");
-    let mut child = platform::launch(&shell, (seconds + 40) * 1000, panel.then_some("--smoke"))
+    let metrics = if workload == Workload::Stretch {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("stretch-bench-{}-{nonce}", std::process::id()));
+        fs::create_dir(&path).context("creating private benchmark output directory")?;
+        println!("raw benchmark output: {}", path.display());
+        Some(path)
+    } else {
+        None
+    };
+    let mut extra: Vec<OsString> = Vec::new();
+    if workload == Workload::Panel {
+        extra.push("--smoke".into());
+    } else if workload == Workload::Stretch && baseline.is_none() {
+        extra.push("--stretch-fixture".into());
+        let mut diagnostics = OsString::from("--input-diagnostics=");
+        diagnostics.push(
+            metrics
+                .as_ref()
+                .context("missing stretch output directory")?
+                .join("stretch.txt"),
+        );
+        extra.push(diagnostics);
+    }
+    println!(
+        "workload: {workload:?}; baseline has no scripted stretch: {}",
+        baseline.is_some()
+    );
+    let cycle_rate = calibrate_rate()?;
+    let mut child = platform::launch(&shell, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
-    let measurement = measure(child.id(), seconds, &mut tracked);
+    let measurement = measure(
+        child.id(),
+        seconds,
+        &mut tracked,
+        metrics.as_deref(),
+        cycle_rate,
+    );
     let close = if baseline.is_some() {
         platform::close_shell_window(&mut child).context("closing baseline shell window")
     } else {
@@ -91,10 +141,48 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(|error| format!("{error:#}"))
         .collect::<Vec<_>>();
     ensure!(errors.is_empty(), "{}", errors.join("; "));
+    if workload == Workload::Stretch && baseline.is_none() {
+        let diagnostics = fs::read_to_string(
+            metrics
+                .context("missing stretch output directory")?
+                .join("stretch.txt"),
+        )?;
+        let totals = stretch_totals(&diagnostics)?;
+        println!("whole-lifetime fixture counters (not sample-window frame counts): {totals}");
+    }
     Ok(())
 }
 
-fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Process)>) -> Result<()> {
+fn stretch_totals(diagnostics: &str) -> Result<&str> {
+    let totals = diagnostics
+        .lines()
+        .find(|line| line.contains("stretch totals ticks="))
+        .context("fixture did not report stretch totals")?;
+    for name in ["ticks=", "shape=", "failed="] {
+        let value = totals
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(name))
+            .with_context(|| format!("stretch totals lack {name}"))?
+            .parse::<u64>()?;
+        ensure!(
+            if name == "failed=" {
+                value == 0
+            } else {
+                value > 0
+            },
+            "fixture did not produce successful continuous mask changes: {totals}"
+        );
+    }
+    Ok(totals)
+}
+
+fn measure(
+    shell_pid: u32,
+    seconds: u64,
+    tracked: &mut Vec<(&'static str, Process)>,
+    metrics: Option<&Path>,
+    cycle_rate: f64,
+) -> Result<()> {
     sleep(Duration::from_secs(30));
     tracked.push(("shell", Process::open(shell_pid)?));
     let entries = platform::processes()?;
@@ -112,6 +200,50 @@ fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Proces
         entries.len() == 3,
         "product process set changed during startup; refusing a contaminated measurement"
     );
+    let dwm = if let Some(path) = metrics {
+        Some(
+            platform::capture_dwm(seconds + 1, &path.join("dwm.csv"))
+                .context("starting bounded whole-desktop DWM counters")?,
+        )
+    } else {
+        None
+    };
+    let measurement = interval(seconds, tracked, cycle_rate);
+    let capture = (|| -> Result<()> {
+        if let Some(mut child) = dwm {
+            let status = child
+                .wait()
+                .context("waiting for bounded DWM counter capture")?;
+            ensure!(status.success(), "DWM counter capture failed: {status}");
+            let data = fs::read(
+                metrics
+                    .context("missing DWM output directory")?
+                    .join("dwm.csv"),
+            )?;
+            let rows = data
+                .split(|byte| *byte == b'\n')
+                .filter(|line| line.starts_with(b"\""))
+                .count();
+            ensure!(
+                u64::try_from(rows)? == seconds + 2,
+                "DWM CSV lacks the expected header and samples: {rows} rows"
+            );
+            println!(
+                "DWM CSV retains all 1Hz rows and PIDs, including the first invalid warmup value; its bounded window extends beyond the CPU interval; use CSV timestamps; whole-desktop activity, not Capsula attribution"
+            );
+        }
+        Ok(())
+    })();
+    let errors = [measurement, capture]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>();
+    ensure!(errors.is_empty(), "{}", errors.join("; "));
+    Ok(())
+}
+
+fn interval(seconds: u64, tracked: &[(&str, Process)], cycle_rate: f64) -> Result<()> {
     let start = Instant::now();
     let before = tracked
         .iter()
@@ -132,35 +264,43 @@ fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Proces
         "product process set changed during measurement"
     );
     println!(
-        "idle release: 30s settle; sequential endpoint counters included in wall; user+kernel CPU / wall; 100% = one core; private bytes (not peak)"
+        "release: 30s warmup; sequential endpoint counters included in wall; GetProcessTimes user+kernel CPU / wall; QueryProcessCycleTime raw cycles and cycles_cpu_% = cycles/(measured_rate*wall)*100; 100% = one calibrated core; private bytes (not peak)"
     );
-    println!("role pid wall_s cpu_s cpu_% private_start_B private_end_B");
+    println!("role pid wall_s cpu_s cpu_% cycles cycles_cpu_% private_start_B private_end_B");
     let mut total_cpu = Duration::ZERO;
     let mut total_before = 0;
     let mut total_after = 0;
+    let mut total_cycles = 0;
     for (((role, process), before), after) in tracked.iter().zip(&before).zip(&after) {
         let cpu = after
             .cpu
             .checked_sub(before.cpu)
             .context("process CPU counter went backwards")?;
         total_cpu += cpu;
+        let cycles = after
+            .cycles
+            .checked_sub(before.cycles)
+            .context("process cycle counter went backwards")?;
+        total_cycles += cycles;
         total_before += before.private_bytes;
         total_after += after.private_bytes;
         println!(
-            "{role} {} {:.3} {:.6} {:.3} {} {}",
+            "{role} {} {:.3} {:.6} {:.3} {cycles} {:.3} {} {}",
             process.pid,
             wall.as_secs_f64(),
             cpu.as_secs_f64(),
             percent(cpu, wall),
+            cycle_percent(cycles, cycle_rate, wall),
             before.private_bytes,
             after.private_bytes
         );
     }
     println!(
-        "total - {:.3} {:.6} {:.3} {total_before} {total_after}",
+        "total - {:.3} {:.6} {:.3} {total_cycles} {:.3} {total_before} {total_after}",
         wall.as_secs_f64(),
         total_cpu.as_secs_f64(),
-        percent(total_cpu, wall)
+        percent(total_cpu, wall),
+        cycle_percent(total_cycles, cycle_rate, wall)
     );
     Ok(())
 }
@@ -221,9 +361,52 @@ fn percent(cpu: Duration, wall: Duration) -> f64 {
     cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
 }
 
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "bounded two-second cycle deltas fit exactly in f64"
+)]
+fn calibrate_rate() -> Result<f64> {
+    let mut highest = 0.0_f64;
+    for trial in 1..=3 {
+        let start = Instant::now();
+        let before = platform::thread_cycles()?;
+        while start.elapsed() < Duration::from_secs(2) {
+            std::hint::spin_loop();
+        }
+        let cycles = platform::thread_cycles()?
+            .checked_sub(before)
+            .context("calibration thread cycle counter went backwards")?;
+        let wall = start.elapsed();
+        let rate = cycles as f64 / wall.as_secs_f64();
+        ensure!(
+            rate.is_finite() && rate > 0.0,
+            "invalid measured cycle rate"
+        );
+        highest = highest.max(rate);
+        println!(
+            "calibration trial={trial} wall_s={:.6} cycles={cycles} cycles_per_s={rate:.3}",
+            wall.as_secs_f64()
+        );
+    }
+    println!(
+        "cycle_rate_per_s={highest:.3}; highest of three saturated-thread 2s samples; calibrated cycles CPU is the slice1 gate; GetProcessTimes retained beside it"
+    );
+    Ok(highest)
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "bounded process cycle deltas are well within f64 precision"
+)]
+fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
+    cycles as f64 / (rate * wall.as_secs_f64()) * 100.0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{options, percent};
+    use super::{Workload, cycle_percent, options, percent, stretch_totals};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -231,7 +414,7 @@ mod tests {
     fn baseline_and_duration_options_combine_in_either_order() {
         assert_eq!(
             options(["idle".to_owned()].into_iter()).unwrap(),
-            (60, None, false),
+            (60, None, Workload::Idle),
             "default duration and binary location remain unchanged"
         );
         for args in [
@@ -240,7 +423,7 @@ mod tests {
         ] {
             assert_eq!(
                 options(args.into_iter().map(str::to_owned)).unwrap(),
-                (1, Some(PathBuf::from("release")), false),
+                (1, Some(PathBuf::from("release")), Workload::Idle),
                 "combined options"
             );
         }
@@ -258,8 +441,44 @@ mod tests {
         }
         assert_eq!(
             options(["idle", "--panel"].into_iter().map(str::to_owned)).unwrap(),
-            (60, None, true)
+            (60, None, Workload::Panel)
         );
+    }
+
+    #[test]
+    fn stretch_accepts_a_non_stretch_baseline_but_not_panel_mode() {
+        assert_eq!(
+            options(["stretch"].into_iter().map(str::to_owned)).unwrap(),
+            (30, None, Workload::Stretch)
+        );
+        assert_eq!(
+            options(
+                ["stretch", "--baseline", "release"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap(),
+            (30, Some(PathBuf::from("release")), Workload::Stretch)
+        );
+        assert!(options(["stretch", "--panel"].into_iter().map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn stretch_requires_motion_totals_and_no_mask_failure() {
+        let totals = "qpc=1 stretch totals ticks=12 shape=8 moves=1 unchanged=3 failed=0";
+        assert_eq!(stretch_totals(totals).unwrap(), totals);
+        for invalid in [
+            "",
+            "qpc=1 stretch totals ticks=0 shape=0 failed=0",
+            "qpc=1 stretch totals ticks=12 shape=8 failed=1",
+            "qpc=1 stretch totals ticks=12 shape=8",
+            "qpc=1 stretch totals ticks=12 shape=oops failed=0",
+        ] {
+            assert!(
+                stretch_totals(invalid).is_err(),
+                "invalid totals: {invalid}"
+            );
+        }
     }
 
     #[test]
@@ -273,6 +492,18 @@ mod tests {
             (percent(Duration::from_secs(120), Duration::from_secs(60)) - 200.0).abs()
                 < f64::EPSILON,
             "two CPU seconds per wall second is 200% of one core"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the requested calibration example is exactly representable as 25.0"
+    )]
+    fn calibrated_cycles_are_percent_of_one_measured_core() {
+        assert_eq!(
+            cycle_percent(2_000_000_000, 4_000_000_000.0, Duration::from_secs(2)),
+            25.0
         );
     }
 }

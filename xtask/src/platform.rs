@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use windows::Win32::Foundation::{
     ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
@@ -21,9 +21,11 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS, OpenProcess,
-    PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ, WaitForSingleObject,
+    CREATE_NO_WINDOW, GetCurrentThread, GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ,
+    WaitForSingleObject,
 };
+use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
 };
@@ -139,6 +141,37 @@ pub(crate) fn launch(
         .spawn()?)
 }
 
+pub(crate) fn capture_dwm(samples: u64, path: &Path) -> Result<Child> {
+    let system_root = std::env::var_os("SystemRoot").context("SystemRoot is unavailable")?;
+    Ok(
+        Command::new(Path::new(&system_root).join("System32/typeperf.exe"))
+            .args([
+                r"\Process(dwm)\% Processor Time",
+                r"\Process(dwm)\ID Process",
+                "-si",
+                "1",
+                "-sc",
+            ])
+            .arg(samples.to_string())
+            .arg("-o")
+            .arg(path)
+            .creation_flags(CREATE_NO_WINDOW.0 | NORMAL_PRIORITY_CLASS.0)
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(path.with_extension("stdout.txt"))?)
+            .stderr(std::fs::File::create(path.with_extension("stderr.txt"))?)
+            .spawn()?,
+    )
+}
+
+pub(crate) fn thread_cycles() -> Result<u64> {
+    // SAFETY: the pseudo-handle refers to this live thread and must not be closed.
+    let thread = unsafe { GetCurrentThread() };
+    let mut cycles = 0;
+    // SAFETY: the current-thread handle has query access and cycles is writable.
+    unsafe { QueryThreadCycleTime(thread, &raw mut cycles) }?;
+    Ok(cycles)
+}
+
 #[derive(Debug)]
 pub(crate) struct Process {
     pub(crate) pid: u32,
@@ -148,6 +181,7 @@ pub(crate) struct Process {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sample {
     pub(crate) cpu: Duration,
+    pub(crate) cycles: u64,
     pub(crate) private_bytes: usize,
 }
 
@@ -211,6 +245,9 @@ impl Process {
         };
         // SAFETY: EX begins with PROCESS_MEMORY_COUNTERS and cb specifies the full writable allocation.
         unsafe { GetProcessMemoryInfo(handle, (&raw mut memory).cast(), memory.cb) }?;
+        let mut cycles = 0;
+        // SAFETY: the live process handle has query access and cycles is writable.
+        unsafe { QueryProcessCycleTime(handle, &raw mut cycles) }?;
         if let Some(code) = self.exit_code()? {
             bail!("pid {} exited during sampling with code {code}", self.pid);
         }
@@ -218,6 +255,7 @@ impl Process {
             |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
         Ok(Sample {
             cpu: Duration::from_nanos((ticks(kernel) + ticks(user)) * 100),
+            cycles,
             private_bytes: memory.PrivateUsage,
         })
     }
