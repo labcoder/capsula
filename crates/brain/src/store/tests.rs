@@ -1,16 +1,21 @@
 use std::path::{Path, PathBuf};
 
+use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
 
-use super::{EventKind, Failure, Interruption, Recovered, RunEnd, Store, StoreError};
+use super::{Deletion, EventKind, Failure, Interruption, Recovered, RunEnd, Store, StoreError};
 
 /// A store file in its own temp folder, removed afterwards.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("capsula-store-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "{}-store-{}-{name}",
+            constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
         // A folder left by an earlier aborted run would make the test start from old data.
         if dir.exists() {
             std::fs::remove_dir_all(&dir).expect("old scratch folder removable");
@@ -110,7 +115,7 @@ fn run_row(store: &Store, run: RunId) -> (String, Option<String>) {
         .conn
         .query_row(
             "SELECT state, reason FROM runs WHERE id = ?1",
-            [super::sql_id(run.0).expect("id")],
+            [super::sql_id(run.0, StoreError::NoRun).expect("id")],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("run row")
@@ -143,6 +148,10 @@ fn reopening_keeps_threads_and_events() {
     assert_eq!(threads.len(), 1);
     assert_eq!(threads[0].id, thread);
     assert_eq!(threads[0].title, format!("Title {MARKER}"));
+    assert!(
+        !format!("{threads:?}").contains(MARKER),
+        "Debug leaves titles out"
+    );
     assert_eq!(store.search(MARKER, 10).expect("search"), vec![thread]);
 }
 
@@ -194,6 +203,7 @@ fn search_takes_any_text_and_skips_threads_being_deleted() {
         "FTS5 syntax in the words is matched literally"
     );
     assert!(store.search("", 10).expect("empty").is_empty());
+    assert!(store.search("red\0fox", 10).expect("NUL").is_empty());
     store.begin_delete(doomed).expect("begin");
     assert!(store.search(MARKER, 10).expect("search").is_empty());
     assert_eq!(store.threads().expect("threads").len(), 1);
@@ -230,6 +240,16 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
         store.append(a, run_b, EventKind::AssistantText, Some("x"), None),
         Err(StoreError::NoRun)
     ));
+    assert!(matches!(
+        store.append(
+            b,
+            RunId(u64::MAX),
+            EventKind::AssistantText,
+            Some("x"),
+            None
+        ),
+        Err(StoreError::NoRun)
+    ));
     store
         .end_run(run_b, RunEnd::Interrupted(Interruption::Stop))
         .expect("end");
@@ -254,7 +274,10 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
         "events are append-only"
     );
     store.begin_delete(b).expect("begin");
-    store.finish_delete(b).expect("b deletes cleanly");
+    assert_eq!(
+        store.finish_delete(b).expect("b deletes cleanly"),
+        Deletion::Finished
+    );
 }
 
 #[test]
@@ -305,8 +328,18 @@ fn ids_are_never_reused_after_a_deletion() {
     let scratch = Scratch::new("runids");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = turn(&mut store, Err("t"), "x");
+    let newest_event = |store: &Store| -> i64 {
+        store
+            .conn
+            .query_row("SELECT max(id) FROM events", [], |row| row.get(0))
+            .expect("max id")
+    };
+    let deleted_event = newest_event(&store);
     store.begin_delete(thread).expect("begin");
-    store.finish_delete(thread).expect("finish");
+    assert_eq!(
+        store.finish_delete(thread).expect("finish"),
+        Deletion::Finished
+    );
     drop(store);
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(store.high_water().expect("high water"), (thread, run));
@@ -318,10 +351,71 @@ fn ids_are_never_reused_after_a_deletion() {
         store.begin_turn(ThreadId(thread.0 + 1), Some("u"), run, "x"),
         Err(StoreError::StaleId)
     ));
+    turn(&mut store, Err("u"), "y");
+    assert!(
+        newest_event(&store) > deleted_event,
+        "event ids aren't reused either"
+    );
 }
 
 #[test]
-fn a_deleted_thread_leaves_no_copy_in_the_files() {
+fn a_deletion_that_fails_at_commit_leaves_the_thread_live() {
+    let scratch = Scratch::new("commitfail");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, _) = turn(&mut store, Err("t"), "x");
+    // The deletion's own update breaks a foreign key that is only checked at commit.
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE fence (
+                 thread INTEGER REFERENCES threads (id) DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE TRIGGER fence_on_delete AFTER UPDATE OF state ON threads BEGIN
+                 INSERT INTO fence VALUES (-1);
+             END;",
+        )
+        .expect("trap");
+    assert!(matches!(
+        store.begin_delete(thread),
+        Err(StoreError::Sql(_))
+    ));
+    let threads = store.threads().expect("threads");
+    assert_eq!(threads.len(), 1, "the thread is still live");
+    assert_eq!(threads[0].id, thread);
+    turn(&mut store, Ok(thread), "still takes work");
+}
+
+#[test]
+fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
+    let scratch = Scratch::new("stuck");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, _) = plant(&mut store);
+    store.begin_delete(thread).expect("begin");
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER keep_threads BEFORE DELETE ON threads BEGIN
+                 SELECT RAISE(ABORT, 'kept');
+             END;",
+        )
+        .expect("trap");
+    assert_eq!(
+        store.recover().expect("recover"),
+        Recovered {
+            failed_deletions: 1,
+            ..Recovered::default()
+        },
+        "the stuck thread's run isn't counted as crashed"
+    );
+    assert!(store.threads().expect("threads").is_empty());
+    assert!(store.search(MARKER, 10).expect("search").is_empty());
+}
+
+/// The deleted rows are zeroed in every file. At this scale no page splits and no FTS segment
+/// spans two leaves, so it can't see the stale copies that page gaps and `events_fts_idx` keys
+/// keep at real sizes; the purge PR's test covers those.
+#[test]
+fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     let scratch = Scratch::new("delete");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (kept, _) = turn(&mut store, Err("kept"), "unrelated");
@@ -332,7 +426,10 @@ fn a_deleted_thread_leaves_no_copy_in_the_files() {
     );
 
     store.begin_delete(thread).expect("begin");
-    store.finish_delete(thread).expect("finish");
+    assert_eq!(
+        store.finish_delete(thread).expect("finish"),
+        Deletion::Finished
+    );
     assert!(!contains_marker(&scratch.db()), "found while open");
     for table in ["events", "runs", "threads"] {
         assert_eq!(
@@ -374,4 +471,43 @@ fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
         Err(StoreError::NoThread)
     ));
     drop(crashed);
+}
+
+#[test]
+fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
+    let scratch = Scratch::new("blocked");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    // The checkpoint would otherwise wait out the 5 s busy timeout before giving up.
+    store
+        .conn
+        .busy_timeout(std::time::Duration::ZERO)
+        .expect("timeout");
+    let (first, _) = plant(&mut store);
+    let (second, _) = plant(&mut store);
+    store.begin_delete(first).expect("begin");
+    store.begin_delete(second).expect("begin");
+    let reader = Connection::open(scratch.db()).expect("reader");
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .expect("snapshot");
+
+    assert_eq!(
+        store.finish_delete(first).expect("finish"),
+        Deletion::Pending
+    );
+    assert!(
+        contains_marker(&scratch.db()),
+        "the old pages are still in the files"
+    );
+    assert_eq!(
+        store.recover().expect("recover"),
+        Recovered {
+            pending_deletions: 1,
+            ..Recovered::default()
+        }
+    );
+
+    reader.execute_batch("COMMIT").expect("end snapshot");
+    assert_eq!(store.recover().expect("retry"), Recovered::default());
+    assert!(!contains_marker(&scratch.db()));
 }
