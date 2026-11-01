@@ -19,7 +19,7 @@ use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::time::timeout;
 
-use crate::platform::{self, PipeServer};
+use crate::platform::{self, Instance, PipeServer};
 use crate::tap::Tap;
 
 /// How long a connected client has to complete each step of the handshake.
@@ -118,6 +118,7 @@ fn check_hello(hello: &Hello, identity: &Identity) -> Verdict {
 /// The control and data pipes.
 #[derive(Debug)]
 pub struct Pipes {
+    session: u32,
     control: PipeServer,
     data: PipeServer,
 }
@@ -128,14 +129,19 @@ impl Pipes {
     /// # Errors
     /// Fails when either name is taken or the OS refuses.
     pub fn create(session: u32) -> Result<Self, IpcError> {
-        let create = |pipe: Pipe| {
-            platform::create_owner_only(&pipe.name(session))
-                .map_err(|source| IpcError::Create { pipe, source })
-        };
         Ok(Self {
-            control: create(Pipe::Control)?,
-            data: create(Pipe::Data)?,
+            session,
+            control: create(session, Pipe::Control, Instance::First)?,
+            data: create(session, Pipe::Data, Instance::First)?,
         })
+    }
+
+    /// Swaps in fresh instances for the next shell. A used instance isn't reused, because its
+    /// end of stream outlives `DisconnectNamedPipe` in tokio's readiness state.
+    fn renew(&mut self) -> Result<(), IpcError> {
+        self.control = create(self.session, Pipe::Control, Instance::Next)?;
+        self.data = create(self.session, Pipe::Data, Instance::Next)?;
+        Ok(())
     }
 
     /// Serves one shell at a time until one quits or is from another build.
@@ -150,12 +156,7 @@ impl Pipes {
         loop {
             self.control.connect().await?;
             let session = self.session(identity, &mut tap).await;
-            for pipe in [&self.control, &self.data] {
-                // Disconnecting an instance with no client fails harmlessly.
-                if let Err(error) = pipe.disconnect() {
-                    tracing::debug!(%error, "disconnect");
-                }
-            }
+            self.renew()?;
             match session {
                 Ok(Session::Quit) => return Ok(Ending::Quit),
                 Ok(Session::BuildMismatch) => return Ok(Ending::BuildMismatch),
@@ -237,6 +238,11 @@ impl Pipes {
             Some(ControlToBrain::Hello(_)) => Err(SessionError::RepeatedHello),
         }
     }
+}
+
+fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, IpcError> {
+    platform::create_owner_only(&pipe.name(session), instance)
+        .map_err(|source| IpcError::Create { pipe, source })
 }
 
 fn check_client(pipe: &PipeServer, shell_image: &Path) -> Result<(), SessionError> {

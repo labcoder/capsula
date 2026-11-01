@@ -29,7 +29,17 @@ pub type PipeServer = NamedPipeServer;
 /// Without it, the default DACL also lets Everyone and anonymous clients read.
 const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)";
 
-/// Creates the only instance of `name`, refusing remote clients and every other user.
+/// Whether a pipe instance is the first with its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Instance {
+    /// Fails if any process already holds the name.
+    First,
+    /// Replaces an instance this process holds, so the name is never free in between.
+    Next,
+}
+
+/// Creates an instance of `name`, refusing remote clients and every other user. At most two
+/// instances exist: the one in use and its replacement while it's swapped in.
 ///
 /// # Errors
 /// Fails when the name is taken (another brain got there first), the OS refuses, or the DACL
@@ -38,7 +48,7 @@ const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)";
     clippy::missing_panics_doc,
     reason = "the only expect is on a fixed 24-byte struct size"
 )]
-pub fn create_owner_only(name: &str) -> io::Result<NamedPipeServer> {
+pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipeServer> {
     let sddl: Vec<u16> = OWNER_ONLY.encode_utf16().chain(Some(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and outlives the call; on success `descriptor` holds a
@@ -62,8 +72,8 @@ pub fn create_owner_only(name: &str) -> io::Result<NamedPipeServer> {
     // SAFETY: `attributes` and the descriptor it points to are valid for the whole call.
     let server = unsafe {
         ServerOptions::new()
-            .first_pipe_instance(true)
-            .max_instances(1)
+            .first_pipe_instance(instance == Instance::First)
+            .max_instances(2)
             .reject_remote_clients(true)
             .create_with_security_attributes_raw(name, (&raw mut attributes).cast())
     };
@@ -199,7 +209,7 @@ pub fn session_id() -> io::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_owner_only, create_owner_only};
+    use super::{Instance, check_owner_only, create_owner_only};
 
     #[test]
     fn only_a_protected_single_owner_entry_passes() {
@@ -217,11 +227,12 @@ mod tests {
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
         let name = format!(r"\\.\pipe\capsula-test-{}", std::process::id());
-        let first = create_owner_only(&name).expect("first instance");
-        assert!(
-            create_owner_only(&name).is_err(),
-            "a second instance must fail"
-        );
-        drop(first);
+        let first = create_owner_only(&name, Instance::First).expect("first instance");
+        let again = create_owner_only(&name, Instance::First);
+        assert!(again.is_err(), "a second first instance must fail");
+        let next = create_owner_only(&name, Instance::Next).expect("replacement instance");
+        let third = create_owner_only(&name, Instance::Next);
+        assert!(third.is_err(), "only two instances may exist");
+        drop((first, next));
     }
 }

@@ -50,7 +50,8 @@ impl PipeClient {
                 flags,
                 None,
             )
-        }?;
+        }
+        .map_err(win32_io_error)?;
         // SAFETY: CreateFileW returned a valid handle that nothing else owns.
         Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle.0) }))
     }
@@ -155,4 +156,28 @@ pub(crate) fn session_id() -> io::Result<u32> {
     // SAFETY: plain call; `session` is a writable u32.
     unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) }?;
     Ok(session)
+}
+
+/// Converts a Win32 failure to an `io::Error` with the plain Win32 code, so `kind()` reports
+/// `NotFound` and friends; `io::Error::from` keeps the HRESULT, which maps to no kind.
+fn win32_io_error(error: windows::core::Error) -> io::Error {
+    let hresult = error.code().0.cast_unsigned();
+    if hresult & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error(i32::try_from(hresult & 0xFFFF).expect("16 bits fit in i32"))
+    } else {
+        error.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::PipeClient;
+
+    #[test]
+    fn a_missing_pipe_is_not_found() {
+        let error = PipeClient::open(r"\\.\pipe\capsula-test-no-such-pipe").expect_err("no server");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error:?}");
+    }
 }
