@@ -118,8 +118,9 @@ pub(crate) fn processes() -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-pub(crate) fn launch(exe: &Path, quit_after_ms: u64) -> Result<Child> {
+pub(crate) fn launch(exe: &Path, quit_after_ms: u64, extra: Option<&str>) -> Result<Child> {
     Ok(Command::new(exe)
+        .args(extra)
         .arg(format!("--quit-after-ms={quit_after_ms}"))
         .creation_flags(NORMAL_PRIORITY_CLASS.0)
         .stdin(Stdio::null())

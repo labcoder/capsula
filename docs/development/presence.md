@@ -17,10 +17,11 @@ The dock is a small transparent `PopUp` window. Its native styles include layere
 transparent, no-activate and tool-window; app-window is removed. A separate native hit proxy
 owns its resting rectangle. The proxy is visually transparent but receives mouse entry and
 exit. The panel is interactive, nonactivating and excluded from the taskbar in the same way.
-It opens on the first hover and is then hidden and reused, never closed, so a session that
-never hovers creates no second GPUI window or swap chain. The first hover pays that creation
-cost instead; its latency is unmeasured. Retry gating and the panel's status
-read the owner's link state, which exists whether or not the panel does.
+The panel is created at startup, then explicitly positioned and sized while still hidden.
+GPUI saves requested bounds for a hidden window instead of applying them immediately; leaving
+the native window at Windows' default size also leaves its renderer's textures oversized.
+Hidden placement bounds those resources without moving window creation into the first hover.
+The same panel is hidden and reused, never recreated for each hover.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 
@@ -49,6 +50,8 @@ The task checks that the same shell, brain and worker survive the sample and wai
 three to exit. Run only in an agreed quiet window; the benchmark sends no input.
 `--baseline <release-directory>` samples older binaries with the same counters and closes the
 spawned shell's own status window with `WM_CLOSE` after the sample; it never targets another app.
+`--panel` opens the current shell's panel programmatically before settling, so the sample
+includes the panel's steady-state resources rather than only the never-hovered dock.
 
 Geometry tests cover all anchors, negative work-area origins, edge containment and the
 hidden-panel boundary. Transparency, cross-process click-through, native focus and Alt-Tab

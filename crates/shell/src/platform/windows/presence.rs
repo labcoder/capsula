@@ -425,16 +425,23 @@ pub(crate) fn place_presence_window(
     Ok(place(hwnd_of(window)?, bounds)?)
 }
 
-/// Hides a presence window without moving it or touching focus.
+/// Positions and sizes a hidden presence window without showing or activating it.
+/// Call `window.bounds_changed(cx)` afterwards so GPUI observes the resize.
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses.
-pub(crate) fn hide_presence_window(window: &mut Window) -> Result<(), PresenceError> {
-    let hwnd = hwnd_of(window)?;
-    let flags = SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
-    // SAFETY: `hwnd` is live; with these flags only visibility changes.
-    unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, flags) }?;
+pub(crate) fn place_hidden_presence_window(
+    window: &mut Window,
+    bounds: [i32; 4],
+) -> Result<(), PresenceError> {
+    place_hidden(hwnd_of(window)?, bounds)?;
     Ok(())
+}
+
+fn place_hidden(hwnd: HWND, [x, y, width, height]: [i32; 4]) -> windows::core::Result<()> {
+    let flags = SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE;
+    // SAFETY: `hwnd` is live; it is sized and positioned without being shown or activated.
+    unsafe { SetWindowPos(hwnd, None, x, y, width, height, flags) }
 }
 
 /// The primary monitor's work area, `[x, y, width, height]` in physical pixels.
@@ -719,9 +726,65 @@ unsafe extern "system" fn hover_subclass(
 
 #[cfg(test)]
 mod tests {
-    use super::{proxy_proc, signed_words};
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{MA_NOACTIVATE, WM_MOUSEACTIVATE};
+    use super::{place_hidden, proxy_proc, signed_words};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowRect, IsWindowVisible,
+        MA_NOACTIVATE, WM_MOUSEACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+    use windows::core::{PCWSTR, w};
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // SAFETY: the test owns this live window on its creating thread.
+            unsafe { DestroyWindow(self.0) }.expect("the test window remains owned by its thread");
+        }
+    }
+
+    #[test]
+    fn hidden_panel_is_sized_without_becoming_visible_or_taking_focus() {
+        // SAFETY: reads the foreground without changing it.
+        let foreground = unsafe { GetForegroundWindow() };
+        // SAFETY: STATIC is a built-in class; no borrowed data or parent, and no show style.
+        let window = TestWindow(
+            unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    w!("STATIC"),
+                    PCWSTR::null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1600,
+                    900,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap(),
+        );
+        place_hidden(window.0, [80, 90, 300, 140]).unwrap();
+        let mut rect = RECT::default();
+        // SAFETY: the window is live and rect is writable.
+        unsafe { GetWindowRect(window.0, &raw mut rect) }.unwrap();
+        assert_eq!(
+            [
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top
+            ],
+            [80, 90, 300, 140]
+        );
+        // SAFETY: reads visibility of the live test window.
+        assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());
+        // SAFETY: reads the foreground without changing it.
+        assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+    }
 
     #[test]
     fn resting_proxy_refuses_mouse_activation_without_swallowing_the_click() {

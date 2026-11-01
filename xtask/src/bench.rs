@@ -14,13 +14,14 @@ use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
 use crate::platform::{self, Process};
 
-fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>)> {
+fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, bool)> {
     ensure!(
         args.next().as_deref() == Some("idle"),
-        "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory>]"
+        "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory> | --panel]"
     );
     let mut duration = None;
     let mut baseline = None;
+    let mut panel = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--duration" if duration.is_none() => {
@@ -40,14 +41,19 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
                         .context("--baseline needs a release directory")?,
                 ));
             }
+            "--panel" if !panel => panel = true,
             _ => bail!("unknown or duplicate benchmark option"),
         }
     }
-    Ok((duration.unwrap_or(60), baseline))
+    ensure!(
+        !(panel && baseline.is_some()),
+        "--panel requires the current shell"
+    );
+    Ok((duration.unwrap_or(60), baseline, panel))
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    let (seconds, baseline) = options(args)?;
+    let (seconds, baseline, panel) = options(args)?;
     let exe = std::env::current_exe()?;
     let release: PathBuf = exe
         .parent()
@@ -67,7 +73,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
     );
 
-    let mut child = platform::launch(&shell, (seconds + 40) * 1000)
+    println!("programmatic panel warmup before sampling: {panel}");
+    let mut child = platform::launch(&shell, (seconds + 40) * 1000, panel.then_some("--smoke"))
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
@@ -224,7 +231,7 @@ mod tests {
     fn baseline_and_duration_options_combine_in_either_order() {
         assert_eq!(
             options(["idle".to_owned()].into_iter()).unwrap(),
-            (60, None),
+            (60, None, false),
             "default duration and binary location remain unchanged"
         );
         for args in [
@@ -233,7 +240,7 @@ mod tests {
         ] {
             assert_eq!(
                 options(args.into_iter().map(str::to_owned)).unwrap(),
-                (1, Some(PathBuf::from("release"))),
+                (1, Some(PathBuf::from("release")), false),
                 "combined options"
             );
         }
@@ -242,12 +249,17 @@ mod tests {
             vec!["idle", "--baseline"],
             vec!["idle", "--duration", "61"],
             vec!["idle", "--baseline", "a", "--baseline", "b"],
+            vec!["idle", "--baseline", "a", "--panel"],
         ] {
             assert!(
                 options(args.into_iter().map(str::to_owned)).is_err(),
                 "invalid options must fail"
             );
         }
+        assert_eq!(
+            options(["idle", "--panel"].into_iter().map(str::to_owned)).unwrap(),
+            (60, None, true)
+        );
     }
 
     #[test]

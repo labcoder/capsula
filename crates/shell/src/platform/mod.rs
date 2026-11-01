@@ -10,6 +10,6 @@ mod windows;
 #[cfg(windows)]
 pub(crate) use windows::{
     PipeClient, PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
-    configure_presence_window, cursor_position, hide_presence_window, launch_detached,
-    lock_single_instance, place_presence_window, session_id, work_area,
+    configure_presence_window, cursor_position, launch_detached, lock_single_instance,
+    place_hidden_presence_window, place_presence_window, session_id, work_area,
 };
