@@ -264,10 +264,12 @@ impl PresentRows {
         let displayed_qpc = source
             .present
             .display_after_ms
+            .filter(|_| !source.present.dropped)
             .and_then(|ms| display_qpc(source.present.qpc, ms, frequency))
             .zip(source.between_display_change_ms)
             .and_then(|(displayed, ms)| displayed.checked_sub(qpc_delta(ms, frequency)?))
-            .filter(|displayed| *displayed > qpc);
+            .filter(|displayed| *displayed >= qpc)
+            .ok_or(Join::Unavailable)?;
         Ok(MatchedPresent {
             present: Present {
                 qpc,
@@ -275,7 +277,7 @@ impl PresentRows {
                 dropped: false,
                 display_after_ms: None,
             },
-            displayed_qpc,
+            displayed_qpc: Some(displayed_qpc),
             source: Source::Seed(*source),
         })
     }
@@ -509,12 +511,12 @@ mod tests {
         assert_eq!(parsed.join_present(10, 101, 105, 1000), Err(Join::Reused));
         let dropped = seed_row(122, 10, "20", "20").replace("DXGI,0,0,0,", "DXGI,0,0,1,");
         let mut parsed = parse(&csv(&dropped), 35620).unwrap();
-        let seed = parsed.join_present(10, 101, 105, 1000).unwrap();
-        assert!(
-            !seed.present.dropped,
-            "the following CSV row's drop is not the seed's drop"
+        assert_eq!(
+            parsed.seed(10, 1000),
+            Err(Join::Unavailable),
+            "a dropped following row provides no seed display proof"
         );
-        assert!(matches!(seed.source, Source::Seed(source) if source.present.dropped));
+        assert_eq!(parsed.join_present(10, 101, 105, 1000), Err(Join::Missing));
         assert_eq!(parsed.join_present(10, 121, 125, 1000), Err(Join::Dropped));
     }
 
@@ -533,13 +535,16 @@ mod tests {
                 "only the observed row remains"
             );
             let mut parsed = parse(&csv(&seed_row(122, 10, "20", interval)), 35620).unwrap();
-            let seed = parsed.join_present(10, 101, 105, 1000).unwrap();
-            assert_eq!(seed.present.qpc, 102);
-            assert_eq!(seed.displayed_qpc, None, "display interval {interval:?}");
+            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
+            assert_eq!(
+                parsed.join_present(10, 101, 105, 1000),
+                Err(Join::Missing),
+                "display interval {interval:?} cannot prove seed eligibility"
+            );
             let mut parsed = parse(&csv(&seed_row(122, 10, "20", interval)), 35620).unwrap();
             assert_eq!(
                 parsed.join(10, 101, 105, 1000),
-                Join::Unavailable,
+                Join::Missing,
                 "display joins remain strict"
             );
         }
@@ -560,10 +565,31 @@ mod tests {
         );
         let parsed = parse(&csv(&seed_row(122, 10, "20", "200")), 35620).unwrap();
         assert_eq!(
-            parsed.seed(10, 1000).unwrap().displayed_qpc,
-            None,
+            parsed.seed(10, 1000),
+            Err(Join::Unavailable),
             "display cannot precede the seed present"
         );
+    }
+
+    #[test]
+    fn seed_eligibility_requires_display_history_from_the_suppressed_present() {
+        for display_ms in ["0", "NA"] {
+            let parsed = parse(&csv(&seed_row(122, 10, "20", display_ms)), 35620).unwrap();
+            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
+            assert_eq!(parsed.candidates(1000).count(), 1);
+        }
+        for display_ms in ["0", "NA"] {
+            let row = seed_row(122, 10, "20", "20").replace(",13,", &format!(",{display_ms},"));
+            let parsed = parse(&csv(&row), 35620).unwrap();
+            assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
+        }
+        let parsed = parse(&csv(&seed_row(122, 10, "20", "33")), 35620).unwrap();
+        let seed = parsed.seed(10, 1000).unwrap();
+        assert_eq!(seed.present.qpc, 102);
+        assert_eq!(seed.displayed_qpc, Some(102));
+        assert!(!seed.present.dropped);
+        let parsed = parse(&csv(&seed_row(122, 10, "20", "34")), 35620).unwrap();
+        assert_eq!(parsed.seed(10, 1000), Err(Join::Unavailable));
     }
 
     #[test]

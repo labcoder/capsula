@@ -281,11 +281,15 @@ eligible dock swapchain before the main trace starts.
 Every main-trace swapchain has the same first-present seed rule, including the hover panel.
 Joins consider that derived seed alongside raw rows, using the same uniqueness, drop and reuse
 checks. Reports retain each sample's CSV/seed provenance and the seed derivation; raw CSV rows
-stay unchanged. Missing display intervals leave seed display latency unmeasured without
-invalidating a valid present endpoint. Receipt/display joins still require display feedback.
-The first emitted row's `Dropped` bit belongs to that row, not its seed: the seed never inherits
-it, and undisplayed-motion counts use raw rows only. A seed with no derived display endpoint
-does not certify display visibility.
+stay unchanged. A seed is eligible only when the first emitted row is displayed, its
+`msBetweenDisplayChange` is positive, and the reconstructed seed display is at or after the
+seed present. PresentMon 2.6 initializes the swapchain's previous display timestamp to zero;
+`SeedFromFirstPresent` updates it only for a displayed seed, and `DeltaUnsignedMilliSeconds`
+returns zero when either timestamp is zero. Thus a positive first-row display interval proves
+the suppressed seed was displayed. Zero, missing or inconsistent display evidence leaves the
+seed ineligible even for present-only gates; raw present endpoints do not require this proof.
+The first emitted row's `Dropped` bit belongs to that row, not its seed; a dropped row cannot
+provide the display proof. Undisplayed-motion counts use raw rows only.
 
 Main trace backstops are fixed per phase:
 
