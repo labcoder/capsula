@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use capsula_protocol::BUILD_ID;
 use capsula_protocol::constants::SHELL_EXE;
 use capsula_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
+use tokio::sync::oneshot;
 
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
@@ -68,8 +69,13 @@ pub async fn run() -> Result<(), BrainError> {
     credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let ended = serve(&mut pipes, &identity).await;
-    if let Err(error) = jobs.terminate() {
-        tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");
+    // Ending the job waits on the processes, so it runs off the async thread.
+    match tokio::task::spawn_blocking(move || jobs.terminate()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");
+        }
+        Err(error) => tracing::warn!(%error, "ending the helpers panicked"),
     }
     if let Err(error) = credential::delete(session) {
         tracing::warn!(%error, "couldn't delete the instance capability");
@@ -81,8 +87,14 @@ pub async fn run() -> Result<(), BrainError> {
 async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcError> {
     let mut tap = tap::Tap::from_env();
     let mut crashes = Crashes::default();
+    let mut launched = None;
     loop {
-        match pipes.next_session(identity, &mut tap).await? {
+        let session = pipes
+            .next_session(identity, &mut tap, &mut launched)
+            .await?;
+        // A shell connected or the relaunched one died; either way nothing waits on it now.
+        launched = None;
+        match session {
             Session::Quit => {
                 tracing::info!("quit");
                 return Ok(());
@@ -97,16 +109,31 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
                     continue;
                 };
                 tracing::warn!(?delay, "the shell died; relaunching it");
-                tokio::spawn(relaunch(identity.shell_image.clone(), delay));
+                let (exited, exit) = oneshot::channel();
+                launched = Some(exit);
+                tokio::spawn(relaunch(identity.shell_image.clone(), delay, exited));
             }
         }
     }
 }
 
-async fn relaunch(shell: PathBuf, delay: Duration) {
+/// Relaunches the shell after `delay`, then reports on `exited` when it ends, so a shell that
+/// dies before connecting counts as a crash too.
+async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) {
     tokio::time::sleep(delay).await;
-    match platform::launch_detached(&shell) {
-        Ok(pid) => tracing::info!(pid, "relaunched the shell"),
-        Err(error) => tracing::error!(%error, "can't relaunch the shell"),
+    let mut child = match platform::launch_detached(&shell) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::error!(%error, "can't relaunch the shell");
+            return;
+        }
+    };
+    tracing::info!(pid = child.id(), "relaunched the shell");
+    if let Err(error) = tokio::task::spawn_blocking(move || child.wait()).await {
+        tracing::warn!(%error, "lost track of the relaunched shell");
+        return;
+    }
+    if exited.send(()).is_err() {
+        tracing::debug!("the relaunched shell had connected");
     }
 }

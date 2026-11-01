@@ -17,7 +17,7 @@ pub(crate) struct Crashes(Vec<Instant>);
 
 impl Crashes {
     /// Records a crash at `now`. Returns the delay before relaunching, or `None` once the shell
-    /// has crashed more often in the last minute than there are backoff steps.
+    /// has used its three relaunches in the last minute: the fourth crash stops.
     pub(crate) fn record(&mut self, now: Instant) -> Option<Duration> {
         self.0.retain(|&at| now.duration_since(at) < WINDOW);
         self.0.push(now);

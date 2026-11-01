@@ -21,10 +21,16 @@ struct Status {
 }
 
 impl Status {
-    /// Tells the brain off the UI thread, then quits.
+    /// Marks Quit at once, tells the brain off the UI thread, then quits. A second Quit while
+    /// the first is under way does nothing.
     fn quit(&self, cx: &mut Context<'_, Self>) {
+        if !self.link.begin_quit() {
+            return;
+        }
         let link = self.link.clone();
-        let told = cx.background_executor().spawn(async move { link.quit() });
+        let told = cx
+            .background_executor()
+            .spawn(async move { link.finish_quit() });
         cx.spawn(async move |_, cx| {
             told.await;
             cx.update(|cx| cx.quit());

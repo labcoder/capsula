@@ -4,7 +4,6 @@
 //! Connecting starts the brain when no brain pipe answers, authenticates with the capability
 //! from Credential Manager, and checks that the pipe's server is the brain beside the shell.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -28,6 +27,8 @@ const RETRY_DELAY: Duration = Duration::from_millis(50);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `ERROR_PIPE_BUSY`: the pipe exists but another client holds it.
 const PIPE_BUSY: i32 = 231;
+/// How long Quit waits for the brain to take `Quitting` and close the pipe.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A second brain loss within this long needs the user's Retry [guess, v1 §2.3].
 const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 
@@ -57,6 +58,8 @@ enum LinkError {
     Rejected,
     #[error("the brain is from another build")]
     BuildMismatch,
+    #[error("quitting")]
+    Quitting,
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
@@ -86,24 +89,42 @@ struct Shared {
 pub(crate) struct LinkHandle {
     shared: Arc<Shared>,
     retry: Sender<()>,
+    /// Closes when the link thread ends.
+    done: Receiver<()>,
 }
 
 impl LinkHandle {
-    /// Tells the brain the user quit, so it ends its helpers and exits instead of relaunching
-    /// the shell. Blocks until the brain has read it, so call it off the UI thread.
-    pub(crate) fn quit(&self) {
-        self.shared.quitting.store(true, Ordering::SeqCst);
+    /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
+    /// Returns false when Quit was already under way.
+    pub(crate) fn begin_quit(&self) -> bool {
+        let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
+        // Wakes a link waiting for Retry, so it sees Quit and ends.
+        let _woken = self.retry.try_send(());
+        first
+    }
+
+    /// Tells a connected brain the user quit, so it ends its helpers and exits instead of
+    /// relaunching the shell, then waits for the link to end. A link that's still connecting
+    /// sends `Quitting` itself once connected. Blocks for up to [`QUIT_TIMEOUT`] twice, so call
+    /// it off the UI thread.
+    pub(crate) fn finish_quit(&self) {
         let control = self
             .shared
             .control
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let Some(control) = control else { return };
-        let sent = frame::write(&mut &*control, &ControlToBrain::Quitting, Pipe::Control)
-            .and_then(|()| Ok((&*control).flush()?));
-        if let Err(error) = sent {
-            tracing::warn!(%error, "couldn't tell the brain about Quit");
+        if let Some(control) = control {
+            send_quitting(&control);
+        }
+        let deadline = Instant::now() + QUIT_TIMEOUT;
+        // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
+        // needs more than this one wait.
+        while !self.done.is_closed() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !self.done.is_closed() {
+            tracing::warn!("the brain didn't close the pipe after Quit");
         }
     }
 
@@ -112,6 +133,14 @@ impl LinkHandle {
         if self.retry.try_send(()).is_err() {
             tracing::debug!("a retry is already pending");
         }
+    }
+}
+
+/// Sends `Quitting`, bounded so a stalled brain can't hold the shell open.
+fn send_quitting(control: &PipeClient) {
+    control.set_timeout(Some(QUIT_TIMEOUT));
+    if let Err(error) = frame::write(&mut &*control, &ControlToBrain::Quitting, Pipe::Control) {
+        tracing::warn!(%error, "couldn't tell the brain about Quit");
     }
 }
 
@@ -136,10 +165,18 @@ pub(crate) fn spawn(states: Sender<LinkState>) -> std::io::Result<LinkHandle> {
         shared: Arc::clone(&shared),
     };
     let (retry, retries) = async_channel::bounded(1);
+    let (alive, done) = async_channel::bounded::<()>(1);
     thread::Builder::new()
         .name("link".to_owned())
-        .spawn(move || link.run(&states, &retries))?;
-    Ok(LinkHandle { shared, retry })
+        .spawn(move || {
+            link.run(&states, &retries);
+            drop(alive);
+        })?;
+    Ok(LinkHandle {
+        shared,
+        retry,
+        done,
+    })
 }
 
 impl Link {
@@ -149,11 +186,12 @@ impl Link {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
         loop {
-            if states.send_blocking(state).is_err() {
+            if self.quitting() || states.send_blocking(state).is_err() {
                 return;
             }
             let connection = match self.connect() {
                 Ok(connection) => connection,
+                Err(_) if self.quitting() => return,
                 Err(error) => {
                     tracing::error!(%error, "can't reach the brain");
                     if !wait_for_retry(states, retries) {
@@ -165,12 +203,18 @@ impl Link {
             };
             tracing::info!(incarnation = ?connection.incarnation, "connected to the brain");
             self.set_control(Some(Arc::clone(&connection.control)));
+            // Quit may have come while connecting, when there was no pipe to send it on.
+            if self.quitting() {
+                send_quitting(&connection.control);
+                watch(&connection);
+                return;
+            }
             if states.send_blocking(LinkState::Connected).is_err() {
                 return;
             }
             watch(&connection);
             self.set_control(None);
-            if self.shared.quitting.load(Ordering::SeqCst) {
+            if self.quitting() {
                 return;
             }
             tracing::warn!("lost the brain");
@@ -184,6 +228,10 @@ impl Link {
             }
             (state, last_loss) = (LinkState::Reconnecting, Some(now));
         }
+    }
+
+    fn quitting(&self) -> bool {
+        self.shared.quitting.load(Ordering::SeqCst)
     }
 
     fn set_control(&self, control: Option<Arc<PipeClient>>) {
@@ -201,6 +249,7 @@ impl Link {
         loop {
             let error = match self.handshake() {
                 Ok(connection) => return Ok(connection),
+                Err(LinkError::NoBrain) if self.quitting() => return Err(LinkError::Quitting),
                 Err(LinkError::NoBrain) if !launched => {
                     platform::launch_detached(&self.brain).map_err(LinkError::Launch)?;
                     launched = true;
@@ -214,6 +263,10 @@ impl Link {
                 Err(error @ LinkError::NotOurBrain(_)) => return Err(error),
                 Err(error) => error,
             };
+            // A brain we started is kept so it can be told to quit; otherwise nothing waits on us.
+            if self.quitting() && !launched {
+                return Err(LinkError::Quitting);
+            }
             if Instant::now() >= deadline {
                 return Err(error);
             }

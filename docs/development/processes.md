@@ -33,7 +33,7 @@ flowchart LR
 
 | What happens | What the other process does |
 |---|---|
-| The shell dies | The brain relaunches it after 0.2 s, then 1 s, then 5 s, and stops after three crashes in a minute |
+| The shell dies | The brain relaunches it after 0.2 s, then 1 s, then 5 s, then stops: a fourth crash within a minute isn't relaunched. A shell that dies before connecting counts |
 | The brain dies | Its helpers end with it. The shell restarts it once; a second loss within a minute shows Retry |
 | A shell is started by hand | It finds the running brain through the pipes and the capability |
 | Quit | The shell sends `Quitting`. The brain ends its jobs, deletes the instance capability and exits, then the shell exits |

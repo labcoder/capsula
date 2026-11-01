@@ -203,11 +203,16 @@ impl AttributeList {
         // SAFETY: the sizing call takes a null list and only writes `size`; it reports
         // ERROR_INSUFFICIENT_BUFFER, which is expected.
         unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &raw mut size) };
-        let mut list = Self(vec![0; size.div_ceil(size_of::<u64>())]);
+        let mut buffer = vec![0_u64; size.div_ceil(size_of::<u64>())];
         // SAFETY: the buffer is at least `size` bytes, as the sizing call asked.
-        if unsafe { InitializeProcThreadAttributeList(list.ptr(), 1, 0, &raw mut size) } == FALSE {
+        let initialized = unsafe {
+            InitializeProcThreadAttributeList(buffer.as_mut_ptr().cast(), 1, 0, &raw mut size)
+        };
+        if initialized == FALSE {
             return Err(io::Error::last_os_error());
         }
+        // Only an initialized list gets the destructor.
+        let mut list = Self(buffer);
         // SAFETY: `jobs` holds open job handles and outlives every use of the list, which only
         // lives inside `Job::spawn`.
         let updated = unsafe {

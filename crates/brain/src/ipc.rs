@@ -17,6 +17,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::platform::{self, Instance, PipeServer};
@@ -139,7 +140,8 @@ impl Pipes {
     }
 
     /// Waits for a shell, serves it, and returns how its session ended. Clients that fail the
-    /// handshake are logged and skipped.
+    /// handshake are logged and skipped. A relaunched shell that ends before a session starts
+    /// (`launched` fires) counts as lost.
     ///
     /// # Errors
     /// Fails only when a pipe can no longer accept clients.
@@ -147,9 +149,13 @@ impl Pipes {
         &mut self,
         identity: &Identity,
         tap: &mut Tap,
+        launched: &mut Option<oneshot::Receiver<()>>,
     ) -> Result<Session, IpcError> {
         loop {
-            self.control.connect().await?;
+            tokio::select! {
+                accepted = self.control.connect() => accepted?,
+                () = exited(launched) => return Ok(Session::ShellLost),
+            }
             let session = self.session(identity, tap).await;
             self.renew()?;
             match session {
@@ -233,6 +239,18 @@ impl Pipes {
     }
 }
 
+/// Resolves when the relaunched shell has ended; never when there's none to wait for.
+async fn exited(launched: &mut Option<oneshot::Receiver<()>>) {
+    let ended = match launched.as_mut() {
+        Some(exit) => exit.await.is_ok(),
+        None => false,
+    };
+    *launched = None;
+    if !ended {
+        std::future::pending::<()>().await;
+    }
+}
+
 fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, IpcError> {
     platform::create_owner_only(&pipe.name(session), instance)
         .map_err(|source| IpcError::Create { pipe, source })
@@ -302,7 +320,10 @@ mod tests {
     use capsula_protocol::message::{CAPABILITY_LEN, Hello, Incarnation};
     use capsula_protocol::{BUILD_ID, Secret};
 
-    use super::{Identity, Verdict, check_hello};
+    use tokio::sync::oneshot;
+
+    use super::{Identity, Pipes, Session, Verdict, check_hello};
+    use crate::tap::Tap;
 
     fn identity() -> Identity {
         Identity {
@@ -343,5 +364,21 @@ mod tests {
             capability: Secret::new(one_byte_off),
         };
         assert_eq!(check_hello(&near, &id), Verdict::WrongCapability);
+    }
+
+    #[tokio::test]
+    async fn a_relaunched_shell_that_ends_before_connecting_counts_as_lost() {
+        // A session id no real logon has, so the test never meets a running brain's pipes.
+        let mut pipes =
+            Pipes::create(u32::MAX - std::process::id()).expect("the test pipes are free");
+        let (exited, exit) = oneshot::channel();
+        exited.send(()).expect("the receiver is alive");
+        let mut launched = Some(exit);
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::ShellLost);
+        assert!(launched.is_none(), "the ended shell isn't waited on again");
     }
 }

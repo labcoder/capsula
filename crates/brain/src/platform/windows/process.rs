@@ -3,7 +3,7 @@
 use std::io;
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows_sys::Win32::System::Threading::{
@@ -15,7 +15,7 @@ use windows_sys::Win32::System::Threading::{
 ///
 /// # Errors
 /// Fails when the process can't be created.
-pub fn launch_detached(exe: &Path) -> io::Result<u32> {
+pub fn launch_detached(exe: &Path) -> io::Result<Child> {
     let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     let spawn = |flags: u32| {
         Command::new(exe)
@@ -26,9 +26,8 @@ pub fn launch_detached(exe: &Path) -> io::Result<u32> {
             .spawn()
     };
     // A job that forbids breakaway refuses the flag; then the shell stays in that job.
-    let child = match spawn(base | CREATE_BREAKAWAY_FROM_JOB) {
+    match spawn(base | CREATE_BREAKAWAY_FROM_JOB) {
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED.cast_signed()) => spawn(base),
         result => result,
-    }?;
-    Ok(child.id())
+    }
 }
