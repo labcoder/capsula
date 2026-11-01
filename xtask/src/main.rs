@@ -15,12 +15,18 @@ use capsula_protocol::tap::{self, Direction};
 mod bench;
 #[cfg(windows)]
 mod platform;
+#[cfg(windows)]
+mod session;
 
 fn usage() -> String {
     format!(
         "usage: cargo xtask <task>
 
 tasks:
+  input-session <keyboard|hover|focus|layouts|esc>
+                    approved input session only; owned fixture, physical-input abort,
+                    bounded cleanup; SendInput QPC is not input-to-present timing
+  input-fixture     internal separate-process text fixture (105s autoexit)
   bench idle [--duration 1..60] [--baseline <release-directory> | --panel]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
@@ -48,6 +54,10 @@ fn main() -> Result<()> {
         ),
         #[cfg(windows)]
         Some("bench") => bench::run(args),
+        #[cfg(windows)]
+        Some("input-session") => session::run(args),
+        #[cfg(windows)]
+        Some("input-fixture") => platform::input_session::fixture(),
         #[cfg(not(windows))]
         Some("bench") => bail!("idle benchmarking requires Windows on Rez"),
         Some(other) => bail!("unknown task {other:?}\n\n{}", usage()),

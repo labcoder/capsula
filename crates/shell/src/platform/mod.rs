@@ -9,7 +9,9 @@ mod windows;
 
 #[cfg(windows)]
 pub(crate) use windows::{
-    PipeClient, PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
+    Capture, Deliver, EscapeHotkey, EventTime, Foreground, PipeClient, PresenceError,
+    PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface, activate_presence_window,
     configure_presence_window, cursor_position, launch_detached, lock_single_instance,
-    place_hidden_presence_window, place_presence_window, session_id, work_area,
+    performance_counter, place_hidden_presence_window, place_presence_window, restore_foreground,
+    session_id, set_capture, work_area,
 };

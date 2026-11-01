@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
@@ -40,7 +41,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, SWP_FRAMECHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     WS_THICKFRAME,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowThreadProcessId, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+};
 use windows::core::{HSTRING, PCWSTR, w};
+
+use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -64,6 +70,8 @@ pub(crate) enum PresenceEvent {
     Retry,
     /// A panel close request hides the panel without quitting the shell.
     DismissPanel,
+    /// Esc reached Capsula: the global hotkey, a focused panel, or the Stop fallback.
+    Escape,
     /// The user picked Quit in the tray menu.
     Quit,
 }
@@ -101,6 +109,18 @@ pub(crate) enum PresenceError {
     /// The shell refused the tray icon.
     #[error("the tray refused the icon")]
     Tray,
+    /// Raw Input was started twice.
+    #[error("the keyboard is already armed")]
+    KeyboardArmed,
+    /// Session changes can't be watched, so a lock could leave keys held.
+    #[error("can't watch session changes")]
+    SessionWatch(#[source] windows::core::Error),
+    /// Desktop switches can't be watched, so the secure desktop could leave keys held.
+    #[error("can't watch desktop switches")]
+    DesktopWatch,
+    /// Windows kept the current foreground window.
+    #[error("Windows refused to activate the window")]
+    Activate,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
@@ -143,9 +163,9 @@ impl Hover {
 }
 
 /// What the proxy's window procedure reads. Only the UI thread touches it.
-#[derive(Debug)]
 struct ProxyState {
     labels: PresenceLabels,
+    keys: Keys,
     hover: Hover,
     icon: HICON,
     /// Explorer broadcasts this after it restarts, when every tray icon must be added again.
@@ -163,6 +183,8 @@ pub(crate) struct PresenceNative {
     atom: u16,
     hwnd: HWND,
     tray: bool,
+    /// Raw Input and its lifecycle notifications are registered.
+    keyboard: bool,
     state: *const ProxyState,
 }
 
@@ -185,6 +207,7 @@ impl PresenceNative {
         let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
         let state = Rc::new(ProxyState {
             labels,
+            keys: Keys::default(),
             hover: Hover::new(events),
             icon,
             taskbar_created,
@@ -197,6 +220,7 @@ impl PresenceNative {
             atom: 0,
             hwnd: HWND::default(),
             tray: false,
+            keyboard: false,
             state: Rc::into_raw(state),
         };
 
@@ -260,6 +284,33 @@ impl PresenceNative {
         Ok(())
     }
 
+    /// Sends every left Ctrl, left Alt and other key, from any app, to `deliver` on this
+    /// thread, and arms the one-shot deadline it returns. Call once, before the brain connects.
+    ///
+    /// # Errors
+    /// Fails when called twice or Windows refuses Raw Input or a reset watcher.
+    pub(crate) fn arm_keyboard(&mut self, deliver: Deliver) -> Result<(), PresenceError> {
+        keyboard::arm(self.hwnd, &self.state().keys, deliver)?;
+        self.keyboard = true;
+        Ok(())
+    }
+
+    /// Holds Esc system-wide until the returned value drops.
+    ///
+    /// # Errors
+    /// Fails when another app, or this one, already holds Esc.
+    pub(crate) fn register_escape(&self) -> Result<EscapeHotkey, PresenceError> {
+        EscapeHotkey::register(self.hwnd)
+    }
+
+    /// Keeps the proxy, which shows over the dock, out of capture like the GPUI surfaces.
+    ///
+    /// # Errors
+    /// Fails when Windows refuses the affinity.
+    pub(crate) fn set_capture(&self, capture: Capture) -> Result<(), PresenceError> {
+        set_affinity(self.hwnd, capture)
+    }
+
     pub(crate) fn enable_retry(&self) {
         self.state().retry_enabled.set(true);
     }
@@ -280,6 +331,9 @@ impl PresenceNative {
 
 impl Drop for PresenceNative {
     fn drop(&mut self) {
+        if self.keyboard {
+            keyboard::disarm(self.hwnd, &self.state().keys);
+        }
         if self.tray {
             let data = NOTIFYICONDATAW {
                 cbSize: struct_size::<NOTIFYICONDATAW>(),
@@ -312,15 +366,18 @@ impl Drop for PresenceNative {
     }
 }
 
-/// Whether a GPUI surface paints only or owns interactive controls.
+/// Whether a GPUI surface paints only, owns hover controls, or takes typing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresenceSurface {
     Overlay,
     Panel,
+    /// The only surface Capsula activates, and only when asked to.
+    Text,
 }
 
-/// Configures a nonactivating tool window, reporting pointer boundaries on interactive panels.
-/// Overlay surfaces pass clicks through. This neither shows nor resizes the window.
+/// Configures a tool window, reporting pointer boundaries on hover panels. Overlay and hover
+/// surfaces never activate, and overlays pass clicks through. A text surface activates only
+/// through [`activate_presence_window`]. This neither shows nor resizes the window.
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses a change.
@@ -334,7 +391,10 @@ pub(crate) fn configure_presence_window(
     let pass_through = flag(WS_EX_LAYERED | WS_EX_TRANSPARENT);
     // SAFETY: `hwnd` is this thread's live window; the slot holds flags, not a pointer.
     let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    style = (style & !flag(WS_EX_APPWINDOW)) | flag(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    style = (style & !flag(WS_EX_APPWINDOW | WS_EX_NOACTIVATE)) | flag(WS_EX_TOOLWINDOW);
+    if surface != PresenceSurface::Text {
+        style |= flag(WS_EX_NOACTIVATE);
+    }
     style = if surface == PresenceSurface::Overlay {
         style | pass_through
     } else {
@@ -391,6 +451,9 @@ pub(crate) fn configure_presence_window(
         unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) }?;
     }
 
+    if surface == PresenceSurface::Text {
+        return Ok(());
+    }
     // SAFETY: `hwnd` is live; this only asks whether our subclass is installed.
     if unsafe { GetWindowSubclass(hwnd, Some(hover_subclass), HOVER_SUBCLASS_ID, None) }.as_bool() {
         return Ok(());
@@ -442,6 +505,92 @@ fn place_hidden(hwnd: HWND, [x, y, width, height]: [i32; 4]) -> windows::core::R
     let flags = SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE;
     // SAFETY: `hwnd` is live; it is sized and positioned without being shown or activated.
     unsafe { SetWindowPos(hwnd, None, x, y, width, height, flags) }
+}
+
+/// Whether screenshots and recordings may show a presence window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Capture {
+    Excluded,
+    Allowed,
+}
+
+/// Keeps a presence window out of screenshots and recordings, or lets it back in.
+///
+/// # Errors
+/// Fails when the window has no Win32 handle or Windows refuses the affinity.
+pub(crate) fn set_capture(window: &Window, capture: Capture) -> Result<(), PresenceError> {
+    set_affinity(hwnd_of(window)?, capture)
+}
+
+fn set_affinity(hwnd: HWND, capture: Capture) -> Result<(), PresenceError> {
+    let affinity = match capture {
+        Capture::Excluded => WDA_EXCLUDEFROMCAPTURE,
+        Capture::Allowed => WDA_NONE,
+    };
+    // SAFETY: `hwnd` is this thread's live top-level window.
+    unsafe { SetWindowDisplayAffinity(hwnd, affinity) }?;
+    Ok(())
+}
+
+/// The window that was in front before Capsula activated one of its own, with its process, so
+/// a handle Windows reused for another app's window is never brought forward.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Foreground(HWND, u32);
+
+fn process_of(hwnd: HWND) -> u32 {
+    let mut process = 0;
+    // SAFETY: `process` is writable; a handle that names no window leaves it 0.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process)) };
+    process
+}
+
+/// Brings a text surface to the front so it takes typing. Returns the window it replaced,
+/// or `None` when this window already had the front. Windows allows it right after the
+/// user's own Alt press, which the shortcut includes.
+///
+/// # Errors
+/// Fails when the window has no Win32 handle or Windows keeps the current foreground.
+pub(crate) fn activate_presence_window(
+    window: &Window,
+) -> Result<Option<Foreground>, PresenceError> {
+    let hwnd = hwnd_of(window)?;
+    // SAFETY: reads the foreground handle without taking ownership.
+    let previous = unsafe { GetForegroundWindow() };
+    // SAFETY: `hwnd` is this thread's live window.
+    if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
+        return Err(PresenceError::Activate);
+    }
+    Ok((previous != hwnd && !previous.is_invalid())
+        .then(|| Foreground(previous, process_of(previous))))
+}
+
+/// Gives the front back to `previous`, only while `window` still has it and `previous` is still
+/// the same process's window, so a window the user chose since is never overridden.
+pub(crate) fn restore_foreground(window: &Window, previous: Foreground) {
+    let Ok(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    // SAFETY: reads the foreground handle without taking ownership.
+    if unsafe { GetForegroundWindow() } != hwnd {
+        return;
+    }
+    if previous.1 == 0 || process_of(previous.0) != previous.1 {
+        return;
+    }
+    // SAFETY: we hold the foreground, so handing it back is allowed.
+    if !unsafe { SetForegroundWindow(previous.0) }.as_bool() {
+        tracing::debug!("can't give the foreground back");
+    }
+}
+
+/// The performance counter, the clock `PresentMon`'s `--qpc_time` reports in.
+pub(crate) fn performance_counter() -> i64 {
+    let mut counter = 0;
+    // SAFETY: `counter` is writable; the call can't fail on Windows XP or later.
+    if let Err(error) = unsafe { QueryPerformanceCounter(&raw mut counter) } {
+        tracing::debug!(%error, "can't read the performance counter");
+    }
+    counter
 }
 
 /// The primary monitor's work area, `[x, y, width, height]` in physical pixels.
@@ -639,7 +788,7 @@ fn signed_words(value: usize) -> [i32; 2] {
     clippy::cast_possible_truncation,
     reason = "Win32 structs are a few hundred bytes"
 )]
-const fn struct_size<T>() -> u32 {
+pub(super) const fn struct_size<T>() -> u32 {
     size_of::<T>() as u32
 }
 
@@ -662,6 +811,13 @@ unsafe extern "system" fn proxy_proc(
         unsafe { Rc::increment_strong_count(state) };
         // SAFETY: consumes the strong reference added immediately above, not the owner's reference.
         let state = unsafe { Rc::from_raw(state) };
+        if state.keys.on_message(hwnd, message, wparam, lparam) {
+            return LRESULT(0);
+        }
+        if EscapeHotkey::fired(message, wparam) {
+            send(&state.hover.events, PresenceEvent::Escape);
+            return LRESULT(0);
+        }
         match message {
             WM_CLOSE => {
                 send(&state.hover.events, PresenceEvent::Quit);

@@ -1,9 +1,10 @@
-//! Win32 process discovery and counters for the input-free idle benchmark.
+//! Win32 process discovery, counters and isolated input-session tools.
 #![expect(
     unsafe_code,
     reason = "Win32 calls are confined to the platform module"
 )]
 
+use std::ffi::OsStr;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
@@ -28,6 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::BOOL;
 
+pub(crate) mod input_session;
+
 pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {
     unsafe extern "system" fn collect(window: HWND, param: LPARAM) -> BOOL {
         let state =
@@ -47,6 +50,9 @@ pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {
     }
     if child.try_wait()?.is_some() {
         return Ok(());
+    }
+    if let Ok(proxy) = input_session::owned_window(child, input_session::WindowKind::ProductProxy) {
+        return proxy.close();
     }
     let mut state = (child.id(), Vec::<HWND>::new());
     // SAFETY: collect receives the live exclusive state pointer for this synchronous enumeration.
@@ -118,7 +124,11 @@ pub(crate) fn processes() -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-pub(crate) fn launch(exe: &Path, quit_after_ms: u64, extra: Option<&str>) -> Result<Child> {
+pub(crate) fn launch(
+    exe: &Path,
+    quit_after_ms: u64,
+    extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
+) -> Result<Child> {
     Ok(Command::new(exe)
         .args(extra)
         .arg(format!("--quit-after-ms={quit_after_ms}"))

@@ -1,21 +1,35 @@
-//! The resting dock, transient hover panel and native tray share one UI-thread owner.
+//! The resting dock, transient hover panel, typing panel and native tray share one UI-thread
+//! owner, which also applies keyboard gestures and Esc.
 
+pub(crate) mod diagnostics;
 mod geometry;
+mod gesture;
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use capsula_protocol::constants;
+use gpui_kit::component::input::{Escape as EscapeKey, Input, InputState};
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
+    point, px, size,
 };
 
+use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
+use crate::input::{Effect, Gesture};
 use crate::link::{LinkHandle, LinkState};
-use crate::platform::{self, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface};
+use crate::platform::{
+    self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
+    PresenceNative, PresenceSurface,
+};
 use crate::strings::{Strings, Text};
+pub(crate) use diagnostics::Diagnostics;
+use diagnostics::PendingPaint;
 use geometry::{Layout, PanelVisibility, Position};
 
 /// Keeps the app owner alive even when its panel is hidden.
@@ -30,11 +44,31 @@ struct Presence {
     panel_window: AnyWindowHandle,
     dock: Entity<Dock>,
     panel: Entity<Panel>,
+    /// Created on the first double tap, then hidden and reused so its draft survives.
+    text: Option<TextPanel>,
+    events: Sender<PresenceEvent>,
     link: LinkHandle,
+    state: LinkState,
+    /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
+    gesture: Rc<Cell<Gesture>>,
+    activity: Activity,
+    escape_hold: EscapeHold<EscapeHotkey>,
+    /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
+    escape_fixture: bool,
     layout: Layout,
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
+}
+
+/// The typing surface: the one window Capsula activates, and only on a double tap.
+struct TextPanel {
+    window: AnyWindowHandle,
+    view: Entity<TextView>,
+    input: Entity<InputState>,
+    /// The window in front before the panel took focus, given back when it closes.
+    previous: Option<Foreground>,
+    visible: bool,
 }
 
 impl Presence {
@@ -63,6 +97,7 @@ impl Presence {
             .position(|candidate| *candidate == position)
             .expect("every dock position has a menu entry");
         self.native.place(self.layout.dock, index)?;
+        self.dismiss_text(cx)?;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         if let Err(error) = self.pointer_changed(cx) {
             tracing::debug!(%error, "can't recheck the pointer after moving the dock");
@@ -91,6 +126,18 @@ impl Presence {
     }
 
     fn pointer_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        // The typing panel sits where the hover panel would, and hover never dismisses it.
+        if self.text_open() {
+            return Ok(());
+        }
+        // Stop replaces global Esc, so it stays on screen until Esc is held or not wanted.
+        if self.escape_hold.shows_stop() {
+            self.pointer_settle = None;
+            if self.panel_visibility == PanelVisibility::Hidden {
+                self.set_panel(PanelVisibility::Visible, cx)?;
+            }
+            return Ok(());
+        }
         let point = platform::cursor_position()?;
         if self.layout.contains(point, self.panel_visibility) {
             self.pointer_settle = None;
@@ -120,14 +167,267 @@ impl Presence {
         Ok(())
     }
 
+    fn text_open(&self) -> bool {
+        self.text.as_ref().is_some_and(|text| text.visible)
+    }
+
+    fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
+        let label: SharedString = if self.gesture.get().listening() {
+            cx.global::<Strings>().get(Text::Listening).into()
+        } else {
+            dock_label(self.state, cx)
+        };
+        self.dock.update(cx, |dock, cx| {
+            dock.label = label;
+            cx.notify();
+        });
+    }
+
+    /// Applies gesture effects in order. `at` is the native callback's time.
+    fn apply_effects(
+        &mut self,
+        effects: [Option<Effect>; 3],
+        at: EventTime,
+        dock: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        for effect in effects.into_iter().flatten() {
+            match effect {
+                Effect::Listening => {
+                    self.refresh_dock(cx);
+                    // A deferred Listening the press already outran shows nothing, so isn't timed.
+                    if self.gesture.get().listening() {
+                        let applied_us = at.instant.elapsed().as_micros();
+                        let start_qpc = at.qpc;
+                        diagnostics::record(
+                            cx,
+                            format_args!("listening applied_us={applied_us} start_qpc={start_qpc}"),
+                        );
+                    }
+                }
+                Effect::Resting => {
+                    self.refresh_dock(cx);
+                    diagnostics::record(cx, format_args!("resting"));
+                }
+                Effect::HoldStarted => self.set_capture(Capture::Excluded, dock, cx),
+                Effect::HoldEnded => self.set_capture(Capture::Allowed, dock, cx),
+                Effect::OpenInput => {
+                    if let Err(error) = self.open_text(cx) {
+                        tracing::error!(%error, "can't open the typing panel");
+                    }
+                }
+            }
+            if cx.has_global::<Diagnostics>() {
+                let gesture = self.gesture.get();
+                self.dock.update(cx, |dock, _| {
+                    dock.pending_paint.follow(effect, &gesture, at.instant);
+                });
+            }
+        }
+    }
+
+    /// Hides every Capsula surface from capture before the hold is announced, and shows them
+    /// again when it ends. Slice 6 captures and slice 7 sends `HoldRecognized` after this.
+    fn set_capture(&self, capture: Capture, dock: &Window, cx: &mut Context<'_, Self>) {
+        let mut all = true;
+        if let Err(error) = platform::set_capture(dock, capture) {
+            tracing::warn!(%error, "can't change the dock's capture exclusion");
+            all = false;
+        }
+        if let Err(error) = self.native.set_capture(capture) {
+            tracing::warn!(%error, "can't change the dock proxy's capture exclusion");
+            all = false;
+        }
+        let text = self.text.as_ref().map(|text| text.window);
+        for window in [Some(self.panel_window), text].into_iter().flatten() {
+            match window.update(cx, |_, window, _| platform::set_capture(window, capture)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "can't change a panel's capture exclusion");
+                    all = false;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "a panel is gone");
+                    all = false;
+                }
+            }
+        }
+        match capture {
+            Capture::Excluded => {
+                tracing::info!("hold recognized after capture exclusion");
+                diagnostics::record(cx, format_args!("hold excluded={all}"));
+            }
+            Capture::Allowed => diagnostics::record(cx, format_args!("hold ended restored={all}")),
+        }
+    }
+
+    fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        if self.text.is_none() {
+            self.text = Some(self.create_text(cx)?);
+        }
+        self.pointer_settle = None;
+        self.set_panel(PanelVisibility::Hidden, cx)?;
+        let bounds = self.layout.panel;
+        let Some(text) = self.text.as_mut() else {
+            return Ok(());
+        };
+        text.window
+            .update(cx, |_, window, cx| {
+                platform::place_presence_window(window, bounds)?;
+                window.bounds_changed(cx);
+                Ok::<_, platform::PresenceError>(())
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))??;
+        text.visible = true;
+        let input = text.input.clone();
+        let activated = text
+            .window
+            .update(cx, |_, window, cx| {
+                let previous = platform::activate_presence_window(window)?;
+                input.update(cx, |state, cx| state.focus(window, cx));
+                Ok::<_, platform::PresenceError>(previous)
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))?;
+        let focused = match activated {
+            Ok(Some(previous)) => {
+                text.previous = Some(previous);
+                true
+            }
+            Ok(None) => true,
+            // Still visible; a click activates it.
+            Err(error) => {
+                tracing::warn!(%error, "can't focus the typing panel");
+                false
+            }
+        };
+        diagnostics::record(cx, format_args!("input opened focused={focused}"));
+        Ok(())
+    }
+
+    fn create_text(&self, cx: &mut Context<'_, Self>) -> Result<TextPanel, OpenError> {
+        let stop = self.escape_hold.shows_stop();
+        let events = self.events.clone();
+        let close_events = self.events.clone();
+        let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
+            window.set_window_title(constants::DISPLAY_NAME);
+            window.on_window_should_close(cx, move |_, _| {
+                send(&close_events, PresenceEvent::DismissPanel);
+                false
+            });
+            let input = cx.new(|cx| InputState::new(window, cx));
+            cx.new(|_| TextView {
+                input,
+                stop,
+                events,
+            })
+        })
+        .map_err(|error| OpenError::Gpui(error.into()))?;
+        let events = self.events.clone();
+        window
+            .update(cx, |_, window, cx| {
+                configure_surface(window, PresenceSurface::Text, events, cx)
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))??;
+        Ok(TextPanel {
+            window,
+            input: view.read(cx).input.clone(),
+            view,
+            previous: None,
+            visible: false,
+        })
+    }
+
+    /// Hides the typing panel, keeping its draft, and gives the front back if it still has it.
+    fn dismiss_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let bounds = self.layout.panel;
+        let Some(text) = self.text.as_mut().filter(|text| text.visible) else {
+            return Ok(());
+        };
+        text.visible = false;
+        let previous = text.previous.take();
+        text.window
+            .update(cx, |_, window, cx| {
+                if let Some(previous) = previous {
+                    platform::restore_foreground(window, previous);
+                }
+                platform::place_hidden_presence_window(window, bounds)?;
+                window.bounds_changed(cx);
+                Ok::<_, platform::PresenceError>(())
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))??;
+        diagnostics::record(cx, format_args!("input dismissed"));
+        // The typing panel was covering the hover panel's Stop.
+        if self.escape_hold.shows_stop() {
+            self.pointer_changed(cx)?;
+        }
+        Ok(())
+    }
+
+    /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
+    /// before any brain message; slice 2 adds `Stop` and slice 4 `ClearDrawing` after it.
+    fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        let action = escape::decide(self.activity, panel);
+        match action {
+            Escape::Stop => {
+                self.activity.working = false;
+                self.activity.speaking = false;
+            }
+            Escape::Clear => self.activity.drawing = false,
+            Escape::Dismiss => self.dismiss_text(cx)?,
+            Escape::Ignore => {}
+        }
+        diagnostics::record(cx, format_args!("escape action={action:?}"));
+        self.escape_fixture = false;
+        self.sync_escape(cx)
+    }
+
+    /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
+    /// refuses, in the hover panel and in an open typing panel.
+    fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let wanted = self.activity.holds_global_escape() || self.escape_fixture;
+        if wanted {
+            let native = &self.native;
+            self.escape_hold.acquire(|| native.register_escape());
+        } else {
+            self.escape_hold.release();
+        }
+        let stop = self.escape_hold.shows_stop();
+        diagnostics::record(cx, format_args!("escape wanted={wanted} stop={stop}"));
+        let changed = self.panel.update(cx, |panel, cx| {
+            let changed = panel.stop != stop;
+            if changed {
+                panel.stop = stop;
+                cx.notify();
+            }
+            changed
+        });
+        if let Some(text) = &self.text {
+            text.view.update(cx, |view, cx| {
+                view.stop = stop;
+                cx.notify();
+            });
+        }
+        if changed {
+            self.pointer_changed(cx)?;
+        }
+        Ok(())
+    }
+
     fn quit(&self, cx: &mut Context<'_, Self>) {
         if !self.link.begin_quit() {
             return;
         }
         let link = self.link.clone();
-        let told = cx
-            .background_executor()
-            .spawn(async move { link.finish_quit() });
+        let diagnostics = diagnostics::release(cx);
+        let told = cx.background_executor().spawn(async move {
+            link.finish_quit();
+            drop(diagnostics);
+        });
         cx.spawn(async move |_, cx| {
             told.await;
             cx.update(|cx| {
@@ -150,11 +450,25 @@ fn scaled(value: f32, scale: f32) -> i32 {
 
 struct Dock {
     label: SharedString,
+    /// Used only with `--input-diagnostics`; the next render takes it into a paint-phase marker.
+    pending_paint: PendingPaint,
 }
 
 impl Render for Dock {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        div().size_full().p_1().child(
+        // Recorded in GPUI's paint phase, not at present: PresentMon must join it to the screen.
+        let marker = self.pending_paint.take().map(|at| {
+            canvas(
+                |_, _, _| (),
+                move |_, (), _, cx| {
+                    let painted_us = at.elapsed().as_micros();
+                    diagnostics::record(cx, format_args!("listening painted_us={painted_us}"));
+                },
+            )
+            .absolute()
+            .size_full()
+        });
+        div().size_full().p_1().children(marker).child(
             div()
                 .size_full()
                 .rounded_full()
@@ -173,6 +487,8 @@ impl Render for Dock {
 
 struct Panel {
     state: LinkState,
+    /// Shown only when Esc is wanted globally but Windows refused it.
+    stop: bool,
     events: Sender<PresenceEvent>,
 }
 
@@ -186,6 +502,14 @@ impl Render for Panel {
                 .label(strings.get(Text::Retry))
                 .on_click(move |_, _, _| {
                     send(&events, PresenceEvent::Retry);
+                })
+        });
+        let stop = self.stop.then(|| {
+            let events = self.events.clone();
+            Button::new("stop")
+                .label(strings.get(Text::Stop))
+                .on_click(move |_, _, _| {
+                    send(&events, PresenceEvent::Escape);
                 })
         });
         div()
@@ -202,7 +526,7 @@ impl Render for Panel {
             .child(constants::DISPLAY_NAME)
             .child(strings.get(status_text(self.state)))
             .child(
-                div().flex().gap_2().children(retry).child(
+                div().flex().gap_2().children(stop).children(retry).child(
                     Button::new("quit")
                         .label(strings.get(Text::Quit))
                         .on_click(move |_, _, _| {
@@ -210,6 +534,39 @@ impl Render for Panel {
                         }),
                 ),
             )
+    }
+}
+
+/// The minimum anchored typing surface: one focused input and nothing that can't yet work.
+struct TextView {
+    input: Entity<InputState>,
+    /// The Stop fallback, here too because this panel covers the hover panel's.
+    stop: bool,
+    events: Sender<PresenceEvent>,
+}
+
+impl Render for TextView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let events = self.events.clone();
+        let stop = self.stop.then(|| {
+            let events = self.events.clone();
+            Button::new("stop")
+                .label(cx.global::<Strings>().get(Text::Stop))
+                .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
+        });
+        div()
+            .size_full()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
+            .child(Input::new(&self.input))
+            .children(stop)
     }
 }
 
@@ -247,6 +604,8 @@ pub(crate) enum OpenError {
     Native(#[from] platform::PresenceError),
     #[error("--quit-after-ms must be between 1 and 120000")]
     QuitDelay,
+    #[error("--esc-fixture needs --quit-after-ms or --smoke, so global Esc is always given back")]
+    EscFixtureDeadline,
 }
 
 fn options() -> WindowOptions {
@@ -282,13 +641,21 @@ fn configure_surface(
     Ok(())
 }
 
-/// Opens a small nonactivating dock immediately, with the brain link still connecting.
+/// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
+/// from the first frame. The caller starts the brain link afterwards.
 pub(crate) fn open(
     states: Receiver<LinkState>,
     link: LinkHandle,
+    diagnostics: Option<Diagnostics>,
     cx: &mut App,
 ) -> Result<(), OpenError> {
-    let quit_delay = quit_delay(std::env::args().skip(1))?;
+    let Launch {
+        quit_delay,
+        escape_fixture,
+    } = launch(std::env::args().skip(1))?;
+    if let Some(diagnostics) = diagnostics {
+        cx.set_global(diagnostics);
+    }
     let (events, event_changes) = async_channel::unbounded();
     let strings = cx.global::<Strings>();
     let labels = PresenceLabels {
@@ -306,6 +673,7 @@ pub(crate) fn open(
         window.on_window_should_close(cx, |_, _| false);
         cx.new(|_| Dock {
             label: initial_label,
+            pending_paint: PendingPaint::default(),
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -325,15 +693,19 @@ pub(crate) fn open(
         });
         cx.new(|_| Panel {
             state: LinkState::Connecting,
+            stop: false,
             events: panel_events,
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
+    let hover_events = events.clone();
     panel_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, events, cx)
+            configure_surface(window, PresenceSurface::Panel, hover_events, cx)
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
+    let gesture = Rc::new(Cell::new(Gesture::default()));
+    let owner_gesture = Rc::clone(&gesture);
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -342,7 +714,14 @@ pub(crate) fn open(
             panel_window,
             dock,
             panel,
+            text: None,
+            events,
             link,
+            state: LinkState::Connecting,
+            gesture: owner_gesture,
+            activity: Activity::default(),
+            escape_hold: EscapeHold::default(),
+            escape_fixture,
             layout: Layout {
                 dock: [0; 4],
                 panel: [0; 4],
@@ -353,6 +732,20 @@ pub(crate) fn open(
         }
     });
     owner.update(cx, |this, cx| this.position(Position::default(), cx))?;
+    let deliver = gesture::deliver(gesture, dock_window, owner.downgrade(), cx);
+    owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;
+    owner.update(cx, Presence::sync_escape)?;
+    schedule_diagnostic_launch(&owner, quit_delay, cx);
+    cx.set_global(PresenceApp { _owner: owner });
+    Ok(())
+}
+
+/// `--smoke` shows the panel after a second; `--smoke` and `--quit-after-ms` then quit.
+fn schedule_diagnostic_launch(
+    owner: &Entity<Presence>,
+    quit_delay: Option<Duration>,
+    cx: &mut App,
+) {
     if std::env::args().any(|arg| arg == "--smoke") {
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
@@ -373,8 +766,6 @@ pub(crate) fn open(
         })
         .detach();
     }
-    cx.set_global(PresenceApp { _owner: owner });
-    Ok(())
 }
 
 fn listen(
@@ -393,11 +784,13 @@ fn listen(
                         }
                     }
                     PresenceEvent::Retry => {
-                        if this.panel.read(cx).state == LinkState::Failed {
+                        if this.state == LinkState::Failed {
                             this.link.retry();
                         }
                     }
+                    PresenceEvent::DismissPanel if this.text_open() => this.dismiss_text(cx)?,
                     PresenceEvent::DismissPanel => this.set_panel(PanelVisibility::Hidden, cx)?,
+                    PresenceEvent::Escape => this.escape(cx)?,
                     PresenceEvent::Quit => this.quit(cx),
                 }
                 Ok::<_, OpenError>(())
@@ -414,16 +807,14 @@ fn listen(
         while let Ok(state) = states.recv().await {
             if this
                 .update(cx, |this: &mut Presence, cx| {
-                    let label = dock_label(state, cx);
                     if state == LinkState::Failed {
                         this.native.enable_retry();
                     } else {
                         this.native.disable_retry();
                     }
-                    this.dock.update(cx, |dock, cx| {
-                        dock.label = label;
-                        cx.notify();
-                    });
+                    this.state = state;
+                    // Listening keeps its label until the gesture ends.
+                    this.refresh_dock(cx);
                     this.panel.update(cx, |panel, cx| {
                         panel.state = state;
                         cx.notify();
@@ -438,11 +829,21 @@ fn listen(
     .detach();
 }
 
-fn quit_delay(args: impl Iterator<Item = String>) -> Result<Option<Duration>, OpenError> {
+/// The diagnostic launch flags. Every diagnostic launch quits on its own.
+#[derive(Debug, PartialEq, Eq)]
+struct Launch {
+    quit_delay: Option<Duration>,
+    escape_fixture: bool,
+}
+
+fn launch(args: impl Iterator<Item = String>) -> Result<Launch, OpenError> {
     let mut delay = None;
+    let mut escape_fixture = false;
     for arg in args {
         if arg == "--smoke" {
             delay = Some(Duration::from_secs(10));
+        } else if arg == "--esc-fixture" {
+            escape_fixture = true;
         } else if let Some(value) = arg.strip_prefix("--quit-after-ms=") {
             let millis = value.parse::<u64>().map_err(|_| OpenError::QuitDelay)?;
             if !(1..=120_000).contains(&millis) {
@@ -451,26 +852,60 @@ fn quit_delay(args: impl Iterator<Item = String>) -> Result<Option<Duration>, Op
             delay = Some(Duration::from_millis(millis));
         }
     }
-    Ok(delay)
+    if escape_fixture && delay.is_none() {
+        return Err(OpenError::EscFixtureDeadline);
+    }
+    Ok(Launch {
+        quit_delay: delay,
+        escape_fixture,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::quit_delay;
+    use super::{Launch, OpenError, launch};
     use std::time::Duration;
+
+    fn args(args: &[&str]) -> impl Iterator<Item = String> {
+        args.iter()
+            .map(|arg| (*arg).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 
     #[test]
     fn diagnostic_launches_have_a_bounded_quit_deadline() {
         assert_eq!(
-            quit_delay(["--smoke".to_owned()].into_iter()).unwrap(),
+            launch(args(&["--smoke"])).unwrap().quit_delay,
             Some(Duration::from_secs(10))
         );
         assert_eq!(
-            quit_delay(["--quit-after-ms=75000".to_owned()].into_iter()).unwrap(),
+            launch(args(&["--quit-after-ms=75000"])).unwrap().quit_delay,
             Some(Duration::from_secs(75))
         );
         for invalid in ["0", "120001", "-1", "later"] {
-            assert!(quit_delay([format!("--quit-after-ms={invalid}")].into_iter()).is_err());
+            assert!(launch([format!("--quit-after-ms={invalid}")].into_iter()).is_err());
         }
+    }
+
+    #[test]
+    fn the_esc_fixture_only_runs_with_a_quit_deadline() {
+        assert!(matches!(
+            launch(args(&["--esc-fixture"])),
+            Err(OpenError::EscFixtureDeadline)
+        ));
+        assert_eq!(
+            launch(args(&["--esc-fixture", "--quit-after-ms=500"])).unwrap(),
+            Launch {
+                quit_delay: Some(Duration::from_millis(500)),
+                escape_fixture: true,
+            }
+        );
+        assert!(
+            launch(args(&["--smoke", "--esc-fixture"]))
+                .unwrap()
+                .escape_fixture
+        );
+        assert!(!launch(args(&[])).unwrap().escape_fixture);
     }
 }

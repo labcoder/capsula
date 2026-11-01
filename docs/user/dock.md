@@ -14,5 +14,6 @@ Display-scale changes currently require restarting the shell.
 If the background process can't be reached, the panel and tray offer Retry. Quit in either
 the panel or tray shuts down both processes. Closing the panel alone doesn't quit.
 
-Chat, listening, threads and settings controls appear as those features become available;
-the status panel doesn't offer commands that can't yet work.
+While you hold [the shortcut](shortcut.md), the dock shows Listening. A double tap opens a small
+typing box under the dock; [Esc](escape.md) hides it. Chat, threads and settings controls appear
+as those features become available; the panels don't offer commands that can't yet work.
