@@ -722,9 +722,14 @@ fn summarize(
                 dock,
                 output,
             ),
-            Trial::Input(Phase::Click, _) => {
-                observation::summarize_click(observer, pid, &mut rows, dock, output)
-            }
+            Trial::Input(Phase::Click, _) => observation::summarize_click(
+                observer,
+                pid,
+                &mut rows,
+                dock,
+                output,
+                &diagnostics.click_injections.borrow(),
+            ),
             Trial::ReceiptRest | Trial::ReceiptMotion => {
                 let mode = if trial == Trial::ReceiptRest {
                     receipts::Mode::Rest
@@ -845,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn receipts_follow_hover_and_esc_conflict_is_last() {
+    fn receipts_follow_click_and_esc_conflict_is_last() {
         let hover = TRIALS
             .iter()
             .position(|trial| *trial == Trial::Input(Phase::Click, FixtureEscMode::Free))

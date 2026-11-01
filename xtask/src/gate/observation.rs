@@ -235,15 +235,9 @@ impl Observation {
             "drawn" => self.accept_drawn(text)?,
             "target" => self.accept_target(text)?,
             "hover" => {
-                let (id, counter, visible, click) =
-                    if text.split(' ').any(|field| field.starts_with("click_qpc=")) {
-                        let [id, counter, visible, click] =
-                            fields(text, ["id", "qpc", "visible", "click_qpc"])?;
-                        (id, counter, visible, number::<i64>(click)?)
-                    } else {
-                        let [id, counter, visible] = fields(text, ["id", "qpc", "visible"])?;
-                        (id, counter, visible, 0)
-                    };
+                let [id, counter, visible, click] =
+                    fields(text, ["id", "qpc", "visible", "click_qpc"])?;
+                let click = number::<i64>(click)?;
                 let id = number(id)?;
                 next_id(id, self.hovers.len())?;
                 let qpc = ordered(counter, self.hovers.last().map_or(0, |value| value.qpc))?;

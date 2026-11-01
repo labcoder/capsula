@@ -232,7 +232,7 @@ redirection. Do not run an unredirected session or reuse an old evidence directo
 
 ```bash
 set -o noclobber
-transcript='C:/dev/capsula-ws/gate-runs/approved-unique-session.txt'
+transcript='C:/dev/capsula-ws/runs/gate/approved-unique-session.txt'
 { git rev-parse HEAD && git status --short &&
   ./target/release/xtask.exe gate-session "$transcript"; } >"$transcript" 2>&1
 ```
@@ -314,8 +314,10 @@ cleanup; a phase cannot begin without its complete budget.
 3. Click runs 100 guarded pill clicks, first checking that pointer entry alone did not open
    the panel. Leaving both surfaces must hide it; HWND hide observation polls for at most 300ms
    and is not a display timestamp. Exact native button-down origins and panel paint IDs feed
-   `click-display.txt`, with independent present and display endpoints. Every native click stays
-   in the denominator; missing or unmatched panel shows cannot pass.
+   `click-display.txt`, with independent present and display endpoints. The gated button-down
+   QPC is captured at dispatch, excluding OS routing and time waiting in the UI thread's queue.
+   Non-gating SendInput → present samples include that queue wait and are reported beside it.
+   Every native click stays in the denominator; missing or unmatched panel shows cannot pass.
 4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
    product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
@@ -331,8 +333,10 @@ cleanup; a phase cannot begin without its complete budget.
    dock row is retained; a missing demanded-frame join stays unmeasured, not a zero-duration pass.
    An undisplayed present during drawing demand also fails, even if p99 gaps remain ≤7.7ms.
 5. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
-   through local Esc, reopens, clicks the owned fixture EDIT, and requires the captured typing
-   window to hide while the fixture stays in front. Both reopens use the non-content observation
+   through local Esc, reopens, double-taps again while active, then clicks a second top-level
+   fixture window, distinct from the previous foreground. After the Dismissed mark, typing must
+   be hidden and that second window must still be foreground 300ms later. A guarded EDIT click
+   returns to the original fixture before closing the alternate. Both reopens use the non-content observation
    to check draft preservation. Normal Esc dismissal must return foreground to the fixture;
    there is no SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
 6. Layouts temporarily use German `00000407` and Spanish `0000040A` in the foreground fixture.

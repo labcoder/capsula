@@ -28,10 +28,12 @@ double tap, activated only explicitly, and hidden rather than closed. While it's
 events and dock clicks leave it alone and the status panel stays hidden. `presence/text.rs`
 owns its lifetime and retains a GPUI `observe_window_activation` subscription. A previously
 active, visible typing surface hides on deactivation, preserving its `InputState` and dropping
-the saved foreground without restoring it. Deferred handling rechecks `is_window_active`,
-visibility, prior activation and the open generation; stale, initial and Esc-generated blur
-notifications cannot hide a newly opened surface. Esc and explicit dismiss keep their existing
-conditional foreground restoration.
+the saved foreground without restoring it. Reopening an already visible surface preserves its
+activation latch; only a hidden-to-visible transition resets it. Initial inactive notifications
+leave an unactivated box clickable, and hiding clears the latch before Esc restores focus.
+GPUI's activation state is queued, not a current native foreground query: rapid away/back
+within one queued activation can still hide a now-active box. Revisit that limit if reproduced.
+Esc and explicit dismiss keep their existing conditional foreground restoration.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 
@@ -73,7 +75,7 @@ it sends `WM_CLOSE` to the spawned shell's presence proxy, which requests the no
 Quit path. Pre-dock binaries fall back to closing their single visible status window. Both
 paths verify the spawned shell's PID; neither targets another app.
 `--panel` opens the current shell's panel programmatically before settling, so the sample
-includes the panel's steady-state resources rather than only the never-hovered dock.
+includes the panel's steady-state resources rather than only the dock before any panel opens.
 
 Geometry tests cover all anchors, negative work-area origins, edge containment, the
 hidden-panel boundary and the stretch overlay. Transparency, cross-process click-through, native
@@ -218,13 +220,13 @@ is one line:
   are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size
   element in the panel, present only with the observer, with the latest `hover` id and
   `drawn_epoch=0 drawn_geometry=0`. Frame ids count across both.
-- `target frame=F qpc= kind=stop hover=H rect=x,y,w,h inside=true|false`, from the hover
+- `target frame=F qpc= kind=stop hover=H rect=x,y,w,h inside=true|false`, from the status
   panel's Stop button each time it paints: its painted bounds in physical screen pixels (the
   panel's client origin plus the bounds GPUI laid out, times the scale), not a guessed spot. A
   wrapper hands every phase to the button, so its layout and handling are unchanged. The
   panel's stamp is its first child, so `frame` is the panel frame this paint belongs to and
   the paint lies in its `[paint qpc, drawn qpc]`; `inside` says the bounds lie within the
-  panel's client area. Only the hover panel's Stop is recorded, not the typing panel's.
+  panel's client area. Only the status panel's Stop is recorded, not the typing panel's.
 - `drawn frame=F qpc=`: the paint posts its frame id to the proxy. GPUI on Windows draws and
   calls `Present(0, 0)` synchronously inside the window's paint message, so the proxy, on the same
   thread, dispatches the post only after that returns, for the panel as for the dock. A present

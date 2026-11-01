@@ -13,16 +13,41 @@ enum Hide {
     Deactivated,
 }
 
-struct Deactivation {
-    visible: bool,
+pub(super) struct Typing<T> {
+    input: T,
+    pub(super) visible: bool,
     active_seen: bool,
-    active: bool,
-    generation: u64,
 }
 
-impl Deactivation {
-    fn should_hide(&self, pending_generation: u64) -> bool {
-        self.visible && self.active_seen && !self.active && self.generation == pending_generation
+impl<T> Typing<T> {
+    fn new(input: T) -> Self {
+        Self {
+            input,
+            visible: false,
+            active_seen: false,
+        }
+    }
+
+    fn open(&mut self) {
+        if !self.visible {
+            self.active_seen = false;
+        }
+        self.visible = true;
+    }
+
+    fn activated(&mut self) {
+        if self.visible {
+            self.active_seen = true;
+        }
+    }
+
+    fn close(&mut self, reason: Hide) -> bool {
+        if !self.visible || matches!(reason, Hide::Deactivated) && !self.active_seen {
+            return false;
+        }
+        self.visible = false;
+        self.active_seen = false;
+        true
     }
 }
 
@@ -30,14 +55,11 @@ impl Deactivation {
 pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
-    input: Entity<InputState>,
+    pub(super) typing: Typing<Entity<InputState>>,
     /// The window in front before the panel took focus, given back when it closes.
     previous: Option<Foreground>,
-    pub(super) visible: bool,
     /// Input diagnostics only: the draft at the last dismiss, compared on the next open.
     draft: Option<SharedString>,
-    generation: u64,
-    active_seen: bool,
     activation: Option<gpui_kit::Subscription>,
 }
 
@@ -52,8 +74,6 @@ impl Presence {
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
-        text.generation += 1;
-        text.active_seen = false;
         text.window
             .update(cx, |_, window, cx| {
                 platform::place_presence_window(window, bounds)?;
@@ -61,12 +81,12 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
-        text.visible = true;
+        text.typing.open();
         let draft = text
             .draft
             .take()
-            .map(|saved| diagnostics::draft(&saved, &text.input.read(cx).value()));
-        let input = text.input.clone();
+            .map(|saved| diagnostics::draft(&saved, &text.typing.input.read(cx).value()));
+        let input = text.typing.input.clone();
         let activated = text
             .window
             .update(cx, |_, window, cx| {
@@ -126,25 +146,25 @@ impl Presence {
             let result = window.update(cx, |_, window, cx| {
                 owner.update(cx, |this, cx| {
                     let activation = cx.observe_window_activation(window, |this, window, cx| {
-                        let Some(text) = this.text.as_mut().filter(|text| text.visible) else {
-                            return;
-                        };
                         if window.is_window_active() {
-                            text.active_seen = true;
+                            if let Some(text) = &mut this.text {
+                                text.typing.activated();
+                            }
                             return;
                         }
-                        let generation = text.generation;
                         let owner = cx.weak_entity();
                         cx.defer(move |cx| {
                             let result =
-                                owner.update(cx, |this, cx| this.deactivated(generation, cx));
+                                owner.update(cx, |this, cx| this.hide_text(Hide::Deactivated, cx));
                             if let Ok(Err(error)) = result {
                                 tracing::error!(%error, "can't hide the inactive typing panel");
                             }
                         });
                     });
                     if let Some(text) = &mut this.text {
-                        text.active_seen |= text.visible && window.is_window_active();
+                        if window.is_window_active() {
+                            text.typing.activated();
+                        }
                         text.activation = Some(activation);
                     }
                 })
@@ -155,13 +175,10 @@ impl Presence {
         });
         Ok(TextPanel {
             window,
-            input: view.read(cx).input.clone(),
+            typing: Typing::new(view.read(cx).input.clone()),
             view,
             previous: None,
-            visible: false,
             draft: None,
-            generation: 0,
-            active_seen: false,
             activation: None,
         })
     }
@@ -173,14 +190,16 @@ impl Presence {
 
     fn hide_text(&mut self, reason: Hide, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let bounds = self.layout.panel;
-        let Some(text) = self.text.as_mut().filter(|text| text.visible) else {
+        let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
-        text.visible = false;
-        if cx.has_global::<Diagnostics>() {
-            text.draft = Some(text.input.read(cx).value());
+        // shortcut: rapid native away/back within one queued GPUI activation can hide an active box; revisit if reproducible.
+        if !text.typing.close(reason) {
+            return Ok(());
         }
-        text.active_seen = false;
+        if cx.has_global::<Diagnostics>() {
+            text.draft = Some(text.typing.input.read(cx).value());
+        }
         let previous = text
             .previous
             .take()
@@ -196,34 +215,9 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         diagnostics::record(cx, format_args!("input dismissed"));
-        // The typing panel was covering the hover panel's Stop.
+        // The typing panel was covering the status panel's Stop.
         if self.escape_hold.shows_stop() {
             self.pointer_changed(cx)?;
-        }
-        Ok(())
-    }
-
-    fn deactivated(
-        &mut self,
-        generation: u64,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
-        let Some(text) = self.text.as_ref() else {
-            return Ok(());
-        };
-        let active = text
-            .window
-            .update(cx, |_, window, _| window.is_window_active())
-            .map_err(|error| OpenError::Gpui(error.into()))?;
-        if (Deactivation {
-            visible: text.visible,
-            active_seen: text.active_seen,
-            active,
-            generation: text.generation,
-        })
-        .should_hide(generation)
-        {
-            self.hide_text(Hide::Deactivated, cx)?;
         }
         Ok(())
     }
@@ -231,25 +225,22 @@ impl Presence {
 
 #[cfg(test)]
 mod tests {
-    use super::Deactivation;
+    use super::{Hide, Typing};
 
     #[test]
-    fn only_current_visible_previously_active_input_hides_on_blur() {
-        let mut state = Deactivation {
-            visible: true,
-            active_seen: true,
-            active: false,
-            generation: 2,
-        };
-        assert!(state.should_hide(2));
-        assert!(!state.should_hide(1));
-        state.active = true;
-        assert!(!state.should_hide(2));
-        state.active = false;
-        state.active_seen = false;
-        assert!(!state.should_hide(2));
-        state.active_seen = true;
-        state.visible = false;
-        assert!(!state.should_hide(2));
+    fn reopening_active_input_keeps_blur_dismissal_and_the_draft() {
+        let mut typing = Typing::new(String::from("unfinished draft"));
+        typing.open();
+        typing.activated();
+        typing.open();
+        assert!(typing.close(Hide::Deactivated));
+        assert!(!typing.visible);
+        assert_eq!(typing.input, "unfinished draft");
+        typing.open();
+        assert!(!typing.close(Hide::Deactivated));
+        assert!(typing.visible);
+        assert!(typing.close(Hide::Dismiss));
+        typing.activated();
+        assert!(!typing.close(Hide::Deactivated));
     }
 }

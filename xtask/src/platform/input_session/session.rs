@@ -146,6 +146,22 @@ impl Session {
         })
     }
 
+    /// Shows a separate, unowned fixture window without activating it; sends no input.
+    pub(crate) fn switch_window(&self) -> Result<Window> {
+        self.guard()?;
+        ensure!(
+            self.covered.is_none(),
+            "switch window needs the fixture uncovered"
+        );
+        let result = (|| {
+            let window =
+                super::switch_window::open(self.fixture, self.typing_window()?, self.product()?)?;
+            self.guard()?;
+            Ok(window)
+        })();
+        self.or_abort(result.map_err(|error| super::switch_window::failed(self.fixture, error)))
+    }
+
     pub(crate) fn edit_point(&self) -> Result<POINT> {
         self.guard()?;
         let rect = Window {

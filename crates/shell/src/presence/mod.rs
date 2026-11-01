@@ -1,4 +1,4 @@
-//! The resting dock, its stretch, transient hover panel, typing panel and native tray share one
+//! The resting dock, its stretch, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
 pub(crate) mod diagnostics;
@@ -179,14 +179,14 @@ impl Presence {
                 Ok::<_, OpenError>(())
             });
             if let Ok(Err(error)) = result {
-                tracing::error!(%error, "can't dismiss the hover panel");
+                tracing::error!(%error, "can't dismiss the status panel");
             }
         }));
         Ok(())
     }
 
     fn text_open(&self) -> bool {
-        self.text.as_ref().is_some_and(|text| text.visible)
+        self.text.as_ref().is_some_and(|text| text.typing.visible)
     }
 
     /// Whether the pointer is over the presence's outline, where the hit proxy takes it, or
@@ -309,7 +309,7 @@ impl Presence {
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
-    /// refuses, in the hover panel and in an open typing panel.
+    /// refuses, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let wanted = self.activity.holds_global_escape() || self.escape_fixture;
         if wanted {
@@ -539,7 +539,7 @@ impl Render for Panel {
 /// The minimum anchored typing surface: one focused input and nothing that can't yet work.
 struct TextView {
     input: Entity<InputState>,
-    /// The Stop fallback, here too because this panel covers the hover panel's.
+    /// The Stop fallback, here too because this panel covers the status panel's.
     stop: bool,
     events: Sender<PresenceEvent>,
 }
@@ -709,10 +709,10 @@ pub(crate) fn open(
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
-    let hover_events = events.clone();
+    let status_events = events.clone();
     panel_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, hover_events, cx)
+            configure_surface(window, PresenceSurface::Panel, status_events, cx)
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let gesture = Rc::new(Cell::new(Gesture::default()));

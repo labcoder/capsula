@@ -4,6 +4,7 @@
     reason = "session output contains only counters and pass checks"
 )]
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::RECT;
 
 use crate::platform::{
@@ -54,12 +56,14 @@ pub(crate) struct Counts {
 #[derive(Debug)]
 pub(crate) struct Diagnostics {
     path: PathBuf,
+    pub(crate) click_injections: RefCell<Vec<i64>>,
 }
 
 impl Diagnostics {
     pub(crate) fn in_directory(directory: &Path) -> Self {
         Self {
             path: directory.join("milestones.log"),
+            click_injections: RefCell::default(),
         }
     }
 
@@ -472,7 +476,7 @@ pub(crate) fn exercise(
         }
         match phase {
             Phase::Keyboard => keyboard(session, counts, diagnostics),
-            Phase::Click => click_panel(session, counts, context),
+            Phase::Click => click_panel(session, counts, context, diagnostics),
             Phase::Focus => focus(session, counts, diagnostics),
             Phase::Layouts => layouts(session, counts, diagnostics),
             Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
@@ -576,6 +580,7 @@ fn click_panel(
     session: &mut Session,
     counts: &mut Counts,
     context: &PhaseContext<'_>,
+    diagnostics: &Diagnostics,
 ) -> Result<()> {
     let [enter, leave] = session.hover_points(context.dock, context.overlay)?;
     for index in 0..100 {
@@ -589,6 +594,10 @@ fn click_panel(
         );
         session.click(enter, Target::Product)?;
         let click_qpc = session.last_qpc;
+        diagnostics
+            .click_injections
+            .borrow_mut()
+            .push(click_qpc.context("click SendInput QPC missing")?);
         session.wait(Duration::from_millis(100))?;
         let entered = session.panel_visible()?;
         counts.behavior_fail += u32::from(!entered);
@@ -682,18 +691,7 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
             bail!("draft reopen was hidden, unfocused, empty or not preserved");
         }
         if switch_away {
-            let typing = session.typing_window()?;
-            let point = session.edit_point()?;
-            session.move_pointer(point, Target::Edit)?;
-            session.click(point, Target::Edit)?;
-            let since = session.last_qpc.context("fixture click was not sent")?;
-            diagnostics.observe(session, since, |records| {
-                records.iter().any(|record| record.mark == Mark::Dismissed)
-            })?;
-            ensure!(
-                !typing.is_visible()?,
-                "typing stayed visible after switching away"
-            );
+            switch_from_typing(session, diagnostics)?;
         } else {
             session.tap(0x01)?;
             diagnostics.observe(session, reopened_since, |records| {
@@ -719,6 +717,57 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
     }
     counts.behavior_pass += 1;
     Ok(())
+}
+
+fn switch_from_typing(session: &mut Session, diagnostics: &Diagnostics) -> Result<()> {
+    let typing = session.typing_window()?;
+    session.wait(Duration::from_millis(325))?;
+    let since = short_chord(session)?;
+    session.wait(Duration::from_millis(50))?;
+    short_chord(session)?;
+    diagnostics.observe(session, since, |records| {
+        records
+            .iter()
+            .any(|record| record.mark == Mark::Opened(true))
+    })?;
+    ensure!(
+        typing.is_visible()? && typing.is_foreground_window(),
+        "repeated open hid or unfocused typing"
+    );
+    let alternate = session.switch_window()?;
+    let checked = (|| {
+        let rect = alternate.rect()?;
+        let point = POINT {
+            x: rect.left.midpoint(rect.right),
+            y: rect.top.midpoint(rect.bottom),
+        };
+        session.move_pointer(point, Target::Fixture)?;
+        session.click(point, Target::Fixture)?;
+        let since = session
+            .last_qpc
+            .context("alternate fixture click was not sent")?;
+        diagnostics.observe(session, since, |records| {
+            records.iter().any(|record| record.mark == Mark::Dismissed)
+        })?;
+        session.wait(Duration::from_millis(300))?;
+        ensure!(
+            !typing.is_visible()? && alternate.is_foreground_window(),
+            "typing did not hide or restored the previous foreground after switching away"
+        );
+        let point = session.edit_point()?;
+        session.move_pointer(point, Target::Edit)?;
+        session.click(point, Target::Edit)?;
+        let until = Instant::now() + Duration::from_millis(300);
+        while !session.fixture_foreground() && Instant::now() < until {
+            session.wait(Duration::from_millis(5))?;
+        }
+        ensure!(
+            session.fixture_foreground(),
+            "return click did not foreground the original fixture"
+        );
+        Ok(())
+    })();
+    combine([checked, alternate.close()])
 }
 
 fn layouts(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {

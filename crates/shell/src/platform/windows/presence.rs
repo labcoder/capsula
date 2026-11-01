@@ -421,7 +421,7 @@ impl Drop for PresenceNative {
     }
 }
 
-/// Whether a GPUI surface paints only, owns hover controls, or takes typing.
+/// Whether a GPUI surface paints only, owns status controls, or takes typing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresenceSurface {
     Overlay,
@@ -430,7 +430,7 @@ pub(crate) enum PresenceSurface {
     Text,
 }
 
-/// Configures a tool window, reporting pointer boundaries on hover panels. Overlay and hover
+/// Configures a tool window, reporting pointer boundaries on status panels. Overlay and status
 /// surfaces never activate, and overlays pass clicks through. A text surface activates only
 /// through [`activate_presence_window`]. This neither shows nor resizes the window.
 ///
@@ -901,12 +901,9 @@ unsafe extern "system" fn proxy_proc(
         }
         match message {
             WM_LBUTTONDOWN => {
-                send(
-                    &state.hover.events,
-                    PresenceEvent::DockPressed {
-                        qpc: click_qpc.expect("button-down captured its counter before dispatch"),
-                    },
-                );
+                if let Some(qpc) = click_qpc {
+                    send(&state.hover.events, PresenceEvent::DockPressed { qpc });
+                }
                 return LRESULT(0);
             }
             WM_CLOSE => {

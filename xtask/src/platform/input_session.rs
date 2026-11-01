@@ -30,6 +30,7 @@ mod layouts;
 mod quiet;
 mod registry;
 mod session;
+mod switch_window;
 
 pub(crate) use fixture::fixture;
 use fixture::{CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, property};
@@ -352,6 +353,13 @@ impl Window {
     pub(crate) fn is_foreground(self) -> bool {
         // SAFETY: this reads the current foreground HWND without accessing its content.
         pid(unsafe { GetForegroundWindow() }) == self.pid
+    }
+
+    /// Whether this exact window, rather than another window in its process, is foreground.
+    pub(crate) fn is_foreground_window(self) -> bool {
+        // SAFETY: this reads the foreground HWND without accessing its content.
+        let foreground = unsafe { GetForegroundWindow() };
+        foreground == self.hwnd
     }
 
     pub(crate) fn is_visible(self) -> Result<bool> {

@@ -39,6 +39,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
 use super::guard::{self, StopCause, physical_input};
+use super::switch_window;
 use super::{
     FixtureEscMode, MARKER, MAX_COVER, MAX_LIFETIME, desktop_rect, last_input, pack, size, unpack,
 };
@@ -405,6 +406,8 @@ unsafe extern "system" fn fixture_proc(
             return open_gate(window, wp.0)
                 .map_or(LRESULT(0), |response| LRESULT(response.cast_signed()));
         }
+        switch_window::CREATE => return answer(switch_window::create(window, wp)),
+        switch_window::CLOSE => return answer(switch_window::cleanup()),
         _ => {}
     }
     if message == WM_SETFOCUS && focus_edit().is_err() {
@@ -445,7 +448,7 @@ unsafe extern "system" fn fixture_proc(
         unsafe { PostQuitMessage(1) };
     }
     if message == WM_CLOSE || message == WM_TIMER {
-        let mut failed = false;
+        let mut failed = switch_window::cleanup().is_err();
         if property(window, ESC_HELD) != 0 {
             // SAFETY: this fixture owns hotkey 1 on this window and releases no other registration.
             failed |= unsafe { UnregisterHotKey(Some(window), 1) }.is_err();
@@ -463,6 +466,11 @@ unsafe extern "system" fn fixture_proc(
         return LRESULT(0);
     }
     if message == WM_DESTROY {
+        if switch_window::cleanup().is_err() {
+            // SAFETY: a failed alternate cleanup stops only this fixture's message loop.
+            unsafe { PostQuitMessage(1) };
+            return LRESULT(0);
+        }
         // SAFETY: this stops only the fixture's own message loop.
         unsafe { PostQuitMessage(0) };
         return LRESULT(0);
@@ -573,6 +581,7 @@ pub(crate) fn fixture() -> Result<()> {
     // SAFETY: the class definition and its name remain live throughout registration.
     let atom = unsafe { RegisterClassW(&raw const class) };
     ensure!(atom != 0, "fixture class registration failed");
+    switch_window::register(instance)?;
     let title = HSTRING::from(format!("{DISPLAY_NAME} input fixture"));
     let [x, y, width, height] = FRAME;
     // SAFETY: the registered class has a static callback; there is no borrowed creation data.
@@ -592,7 +601,16 @@ pub(crate) fn fixture() -> Result<()> {
             None,
         )
     }?;
-    let result = run_fixture(root, instance, u32::try_from(lifetime * 1000)?);
+    let result = match (
+        run_fixture(root, instance, u32::try_from(lifetime * 1000)?),
+        switch_window::cleanup(),
+    ) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("alternate cleanup also failed: {cleanup}")))
+        }
+    };
     let restored = restore_layouts();
     // SAFETY: querying a potentially destroyed fixture handle is supported by IsWindow.
     if unsafe { IsWindow(Some(root)) }.as_bool() {

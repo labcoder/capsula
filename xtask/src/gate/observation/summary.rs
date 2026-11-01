@@ -162,11 +162,12 @@ pub(in crate::gate) fn summarize_click(
     rows: &mut PresentRows,
     dock_chain: u64,
     output: &Path,
+    injections: &[i64],
 ) -> Result<()> {
     let (observation, validation) = load(path, pid);
     let frequency = observation.startup.map_or(0, |value| value.frequency);
     let mut report = String::from(
-        "pill button-down QPC-to-present gate; display latency reported separately, not gated\n",
+        "pill button-down dispatch QPC-to-present gate; excludes OS routing and UI-thread queue wait; SendInput-to-present and display reported separately, not gated\n",
     );
     seed_report(&mut report, rows, frequency)?;
     if let Err(error) = &validation {
@@ -175,6 +176,7 @@ pub(in crate::gate) fn summarize_click(
     let mut pinned = None;
     let mut latencies = Vec::new();
     let mut displays = Vec::new();
+    let mut injection_latencies = Vec::new();
     let mut attempted = 0;
     for click in &observation.clicks {
         attempted += 1;
@@ -208,6 +210,17 @@ pub(in crate::gate) fn summarize_click(
         }
         pinned = Some(chain);
         let joined = rows.join_present(chain, frame.paint_qpc, end, frequency);
+        let previous_click = observation.clicks[..attempted - 1]
+            .last()
+            .map_or(0, |previous| previous.qpc);
+        injection_latencies.extend(injection_sample(
+            &mut report,
+            previous_click,
+            click.qpc,
+            injections,
+            &joined,
+            frequency,
+        )?);
         if let Some((ticks, display)) = sample(&mut report, frame, click.qpc, joined, frequency)? {
             latencies.push(ticks);
             displays.extend(display);
@@ -221,14 +234,12 @@ pub(in crate::gate) fn summarize_click(
         frequency,
         Some(8),
     )?;
-    statistics(
-        &mut report,
-        "click_display",
-        &mut displays,
-        attempted,
-        frequency,
-        None,
-    )?;
+    for (label, ticks) in [
+        ("click_display", &mut displays),
+        ("click_send_input", &mut injection_latencies),
+    ] {
+        statistics(&mut report, label, ticks, attempted, frequency, None)?;
+    }
     let shown = observation
         .hovers
         .iter()
@@ -251,6 +262,38 @@ pub(in crate::gate) fn summarize_click(
         output.display()
     );
     Ok(())
+}
+
+fn injection_sample(
+    report: &mut String,
+    previous_click: i64,
+    click: i64,
+    injections: &[i64],
+    joined: &std::result::Result<MatchedPresent, Join>,
+    frequency: i64,
+) -> Result<Option<i64>> {
+    let mut starts = injections
+        .iter()
+        .copied()
+        .filter(|start| *start > previous_click && *start <= click);
+    let start = starts.next().filter(|_| starts.next().is_none());
+    let ticks = start
+        .zip(joined.as_ref().ok())
+        .and_then(|(start, row)| row.present.qpc.checked_sub(start))
+        .filter(|ticks| *ticks > 0 && frequency > 0);
+    if let (Some(start), Some(ticks)) = (start, ticks) {
+        write!(
+            report,
+            "send_input_qpc={start} send_input_to_present_ms={} ",
+            milliseconds(ticks, frequency)?
+        )?;
+    } else {
+        write!(
+            report,
+            "send_input_qpc=unmeasured send_input_to_present_ms=unmeasured "
+        )?;
+    }
+    Ok(ticks)
 }
 
 fn seed_report(report: &mut String, rows: &PresentRows, frequency: i64) -> Result<()> {
@@ -494,9 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn hover_pins_only_unique_panel_chain_and_uses_nearest_rank_percentiles() {
+    fn click_pins_only_unique_panel_chain_and_uses_nearest_rank_percentiles() {
         let directory = directory();
-        scenario(&directory, Kind::Panel);
+        let injections = scenario(&directory, Kind::Panel)
+            .iter()
+            .map(|(start, _)| start - 10)
+            .collect::<Vec<_>>();
         let csv_path = directory.join("present.csv");
         let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
         summarize_click(
@@ -505,6 +551,7 @@ mod tests {
             &mut rows,
             10,
             &directory,
+            &injections,
         )
         .unwrap();
         let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
@@ -513,6 +560,8 @@ mod tests {
             "all state entries pass on the present endpoint"
         );
         assert!(report.contains("summary=click_display n=100 successful=100 attempted=100 p50_ms=15.000000 p95_ms=15.000000 max_ms=15.000000"), "slow display does not fail the present gate");
+        assert!(report.contains("summary=click_send_input n=100 successful=100 attempted=100 p50_ms=12.000000 p95_ms=12.000000 max_ms=12.000000"));
+        assert!(report.contains("send_input_qpc=90 send_input_to_present_ms=12.000000"));
         fs::remove_file(directory.join("click-display.txt")).unwrap();
         let csv = fs::read_to_string(&csv_path).unwrap();
         fs::write(&csv_path, csv.replacen("0x14", "0x15", 1)).unwrap();
@@ -523,7 +572,8 @@ mod tests {
                 42,
                 &mut rows,
                 10,
-                &directory
+                &directory,
+                &injections
             )
             .is_err(),
             "a changed chain cannot pass"
@@ -566,7 +616,7 @@ mod tests {
                 "status=MissingClickPanelEntry",
             ),
             (
-                log.replacen(" click_qpc=100\n", "\n", 1),
+                log.replacen("click_qpc=100", "click_qpc=0", 1),
                 "summary=click n=99 successful=99 attempted=100",
                 "status=MissingClickPanelEntry",
             ),
@@ -580,10 +630,28 @@ mod tests {
                 "summary=click n=100 successful=100 attempted=101",
                 "status=MissingClickPanelEntry",
             ),
+            (
+                finish(
+                    format!("{prefix}hover id=101 qpc=2090 visible=true click_qpc=0\n"),
+                    101,
+                    1,
+                ),
+                "summary=click n=100 successful=100 attempted=100",
+                "shown=101",
+            ),
+            (
+                finish(
+                    format!("{prefix}hover id=101 qpc=2090 visible=true click_qpc=100\n"),
+                    101,
+                    1,
+                ),
+                "summary=click n=99 successful=99 attempted=100",
+                "status=AmbiguousClickPanelEntry",
+            ),
         ] {
             fs::write(&observer, log).unwrap();
             let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
-            assert!(summarize_click(&observer, 42, &mut rows, 10, &directory).is_err());
+            assert!(summarize_click(&observer, 42, &mut rows, 10, &directory, &[]).is_err());
             let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
             assert!(report.contains(status));
             assert!(report.contains(expected));
@@ -594,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_recovers_the_first_panel_present_only_as_a_derived_seed() {
+    fn click_recovers_the_first_panel_present_only_as_a_derived_seed() {
         let directory = directory();
         scenario(&directory, Kind::Panel);
         let csv_path = directory.join("present.csv");
@@ -622,6 +690,7 @@ mod tests {
             &mut rows,
             10,
             &directory,
+            &[],
         )
         .unwrap();
         let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
@@ -673,6 +742,7 @@ mod tests {
                         &mut rows,
                         10,
                         &directory,
+                        &[],
                     )
                     .unwrap();
                     ("click-display.txt", "click_display", 100)
@@ -736,6 +806,7 @@ mod tests {
                             &mut rows,
                             10,
                             &directory,
+                            &[],
                         ),
                         "click-display.txt",
                         "summary=click n=99 successful=99 attempted=100",

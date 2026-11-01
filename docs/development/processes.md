@@ -39,5 +39,5 @@ flowchart LR
 | A shell is started by hand | It finds the running brain through the pipes and the capability |
 | Quit | The shell sends `Quitting`. The brain cancels any pending shell relaunch, ends its jobs, deletes the instance capability and exits, then the shell exits. A shell still connecting starts no brain, and tells one it already started once it connects |
 
-The dock's hover panel is transient: closing it isn't Quit. Quit lives in the tray and hover
+The dock's status panel is transient: closing it isn't Quit. Quit lives in the tray and status
 panel and follows the same bounded, idempotent link shutdown. See [presence](presence.md).
