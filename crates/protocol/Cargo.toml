@@ -1,0 +1,12 @@
+[package]
+name = "capsula-protocol"
+description = "The brain-to-shell messages, ids, secrets and product constants."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
