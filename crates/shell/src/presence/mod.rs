@@ -27,9 +27,12 @@ impl Global for PresenceApp {}
 struct Presence {
     native: PresenceNative,
     dock_window: AnyWindowHandle,
-    panel_window: AnyWindowHandle,
     dock: Entity<Dock>,
-    panel: Entity<Panel>,
+    /// Opened on first show and reused, so a session that never hovers pays for no second
+    /// GPUI window or swap chain.
+    panel: Option<(AnyWindowHandle, Entity<Panel>)>,
+    events: Sender<PresenceEvent>,
+    state: LinkState,
     link: LinkHandle,
     layout: Layout,
     panel_visibility: PanelVisibility,
@@ -75,7 +78,15 @@ impl Presence {
         visibility: PanelVisibility,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.panel_window
+        let panel_window = match (self.panel.as_ref().map(|(window, _)| *window), visibility) {
+            (Some(window), _) => window,
+            (None, PanelVisibility::Hidden) => {
+                self.panel_visibility = visibility;
+                return Ok(());
+            }
+            (None, PanelVisibility::Visible) => self.open_panel(cx)?,
+        };
+        panel_window
             .update(cx, |_, window, cx| {
                 if visibility == PanelVisibility::Visible {
                     platform::place_presence_window(window, self.layout.panel)?;
@@ -88,6 +99,37 @@ impl Presence {
             .map_err(|error| OpenError::Gpui(error.into()))??;
         self.panel_visibility = visibility;
         Ok(())
+    }
+
+    fn open_panel(&mut self, cx: &mut Context<'_, Self>) -> Result<AnyWindowHandle, OpenError> {
+        let panel_events = self.events.clone();
+        let close_events = self.events.clone();
+        let state = self.state;
+        let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
+            window.set_window_title(constants::DISPLAY_NAME);
+            window.on_window_should_close(cx, move |_, _| {
+                send(&close_events, PresenceEvent::DismissPanel);
+                false
+            });
+            cx.new(|_| Panel {
+                state,
+                events: panel_events,
+            })
+        })
+        .map_err(|error| OpenError::Gpui(error.into()))?;
+        let events = self.events.clone();
+        let configured = panel_window
+            .update(cx, |_, window, cx| {
+                let configured = configure_surface(window, PresenceSurface::Panel, events, cx);
+                if configured.is_err() {
+                    window.remove_window();
+                }
+                configured
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))?;
+        configured?;
+        self.panel = Some((panel_window, panel));
+        Ok(panel_window)
     }
 
     fn pointer_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -124,6 +166,10 @@ impl Presence {
         if !self.link.begin_quit() {
             return;
         }
+        tracing::info!(
+            panel_initialized = self.panel.is_some(),
+            "presence shutdown"
+        );
         let link = self.link.clone();
         let told = cx
             .background_executor()
@@ -315,33 +361,15 @@ pub(crate) fn open(
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
-    let panel_events = events.clone();
-    let close_events = events.clone();
-    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
-        window.set_window_title(constants::DISPLAY_NAME);
-        window.on_window_should_close(cx, move |_, _| {
-            send(&close_events, PresenceEvent::DismissPanel);
-            false
-        });
-        cx.new(|_| Panel {
-            state: LinkState::Connecting,
-            events: panel_events,
-        })
-    })
-    .map_err(|error| OpenError::Gpui(error.into()))?;
-    panel_window
-        .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, events, cx)
-        })
-        .map_err(|error| OpenError::Gpui(error.into()))??;
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
             native,
             dock_window,
-            panel_window,
             dock,
-            panel,
+            panel: None,
+            events,
+            state: LinkState::Connecting,
             link,
             layout: Layout {
                 dock: [0; 4],
@@ -353,6 +381,18 @@ pub(crate) fn open(
         }
     });
     owner.update(cx, |this, cx| this.position(Position::default(), cx))?;
+    if std::env::args().any(|arg| arg == "--smoke") {
+        let weak = owner.downgrade();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            if let Ok(Err(error)) =
+                weak.update(cx, |this, cx| this.set_panel(PanelVisibility::Visible, cx))
+            {
+                tracing::error!(%error, "can't show the smoke panel");
+            }
+        })
+        .detach();
+    }
     if let Some(delay) = quit_delay {
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
@@ -381,7 +421,7 @@ fn listen(
                         }
                     }
                     PresenceEvent::Retry => {
-                        if this.panel.read(cx).state == LinkState::Failed {
+                        if this.state == LinkState::Failed {
                             this.link.retry();
                         }
                     }
@@ -408,14 +448,17 @@ fn listen(
                     } else {
                         this.native.disable_retry();
                     }
+                    this.state = state;
                     this.dock.update(cx, |dock, cx| {
                         dock.label = label;
                         cx.notify();
                     });
-                    this.panel.update(cx, |panel, cx| {
-                        panel.state = state;
-                        cx.notify();
-                    });
+                    if let Some((_, panel)) = &this.panel {
+                        panel.update(cx, |panel, cx| {
+                            panel.state = state;
+                            cx.notify();
+                        });
+                    }
                 })
                 .is_err()
             {

@@ -17,6 +17,10 @@ The dock is a small transparent `PopUp` window. Its native styles include layere
 transparent, no-activate and tool-window; app-window is removed. A separate native hit proxy
 owns its resting rectangle. The proxy is visually transparent but receives mouse entry and
 exit. The panel is interactive, nonactivating and excluded from the taskbar in the same way.
+It opens on the first hover and is then hidden and reused, never closed, so a session that
+never hovers creates no second GPUI window or swap chain. The first hover pays that creation
+cost instead; its latency is unmeasured. Retry gating and the panel's status
+read the owner's link state, which exists whether or not the panel does.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 
@@ -31,7 +35,8 @@ until the brain's settings flow and Settings → General arrive. No settings fil
 the shell. Closing a transient panel is not Quit. Quit uses the existing idempotent link
 shutdown and waits off the UI thread before exiting.
 
-`capsula --smoke` requests the same graceful Quit after ten seconds. Initial surfaces are
+`capsula --smoke` shows the panel programmatically after one second and requests the same
+graceful Quit after ten seconds, without moving the pointer or sending input. Initial surfaces are
 small even before placement, so a transparency failure cannot cover the desktop. This is a
 bounded launch check, not a performance benchmark or permission to inject input.
 
@@ -42,6 +47,8 @@ over sixty seconds. CPU is percent of one core; memory is endpoint private bytes
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
 The task checks that the same shell, brain and worker survive the sample and waits for all
 three to exit. Run only in an agreed quiet window; the benchmark sends no input.
+`--baseline <release-directory>` samples older binaries with the same counters and closes the
+spawned shell's own status window with `WM_CLOSE` after the sample; it never targets another app.
 
 Geometry tests cover all anchors, negative work-area origins, edge containment and the
 hidden-panel boundary. Transparency, cross-process click-through, native focus and Alt-Tab

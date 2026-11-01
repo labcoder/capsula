@@ -726,7 +726,8 @@ mod tests {
     #[test]
     fn resting_proxy_refuses_mouse_activation_without_swallowing_the_click() {
         // SAFETY: no pointer-valued message data; Win32 validates the empty HWND if reached.
-        let response = unsafe { proxy_proc(HWND::default(), WM_MOUSEACTIVATE, WPARAM(0), LPARAM(0)) };
+        let response =
+            unsafe { proxy_proc(HWND::default(), WM_MOUSEACTIVATE, WPARAM(0), LPARAM(0)) };
         assert_eq!(response, LRESULT(isize::try_from(MA_NOACTIVATE).unwrap()));
     }
 
