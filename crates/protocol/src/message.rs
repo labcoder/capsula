@@ -17,6 +17,15 @@ pub type Capability = Secret<[u8; CAPABILITY_LEN]>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incarnation(pub u64);
 
+/// One thread of conversation, as the store numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ThreadId(pub u64);
+
+/// One user turn, and the epoch every run-scoped message carries. Ids only grow, even across
+/// restarts, so a stale message can never pass for a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RunId(pub u64);
+
 /// The shell's first frame on each pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {

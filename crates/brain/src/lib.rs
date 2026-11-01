@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod logging;
 pub mod platform;
 mod relaunch;
+pub mod store;
 mod tap;
 
 use std::io;
@@ -48,6 +49,9 @@ pub enum BrainError {
     /// Credential Manager refused the capability.
     #[error(transparent)]
     Credential(#[from] credential::CredentialError),
+    /// The store couldn't be opened or recovered.
+    #[error("can't open the store")]
+    Store(#[from] store::StoreError),
     /// The helpers' Job Object or a helper couldn't be created.
     #[error("can't start the helpers")]
     Helpers(#[source] io::Error),
@@ -63,6 +67,18 @@ pub async fn run() -> Result<(), BrainError> {
     // The pipes come first: a second brain fails here, before it touches anything else.
     let mut pipes = Pipes::create(session)?;
     let exe = std::env::current_exe()?;
+    // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
+    // nothing else runs on the runtime yet.
+    let mut store = store::Store::open(&store::default_path()?)?;
+    let recovered = store.recover()?;
+    tracing::info!(
+        crashed_runs = recovered.crashed_runs,
+        finished_deletions = recovered.finished_deletions,
+        "store recovered"
+    );
+    // shortcut: the store is opened and recovered but unused until the run coordinator's store
+    // thread takes it (slice 2, PR 3).
+    drop(store);
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
