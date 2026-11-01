@@ -19,6 +19,7 @@ crates/brain/      bin capsulad: the headless process
 crates/shell/      bin capsula: the GPUI app
 xtask/             dev tasks in Rust; no scripts in other languages
 docs/development/  how Capsula works inside
+docs/user/         how people use Capsula
 locales/en/        every user-facing string (Fluent)
 ```
 

@@ -105,8 +105,8 @@ impl LinkHandle {
 
     /// Tells a connected brain the user quit, so it ends its helpers and exits instead of
     /// relaunching the shell, then waits for the link to end. A link that's still connecting
-    /// sends `Quitting` itself once connected. Blocks for up to [`QUIT_TIMEOUT`] twice, so call
-    /// it off the UI thread.
+    /// sends `Quitting` itself once connected. Blocks for up to [`CONNECT_TIMEOUT`] plus
+    /// [`QUIT_TIMEOUT`], so call it off the UI thread.
     pub(crate) fn finish_quit(&self) {
         let control = self
             .shared
@@ -117,7 +117,8 @@ impl LinkHandle {
         if let Some(control) = control {
             send_quitting(&control);
         }
-        let deadline = Instant::now() + QUIT_TIMEOUT;
+        // A brain this link already started must connect before it can be told.
+        let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
         // needs more than this one wait.
         while !self.done.is_closed() && Instant::now() < deadline {
@@ -249,7 +250,9 @@ impl Link {
         loop {
             let error = match self.handshake() {
                 Ok(connection) => return Ok(connection),
-                Err(LinkError::NoBrain) if self.quitting() => return Err(LinkError::Quitting),
+                Err(LinkError::NoBrain) if self.quitting() && !launched => {
+                    return Err(LinkError::Quitting);
+                }
                 Err(LinkError::NoBrain) if !launched => {
                     platform::launch_detached(&self.brain).map_err(LinkError::Launch)?;
                     launched = true;

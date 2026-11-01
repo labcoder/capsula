@@ -3,7 +3,7 @@
 status-connecting = Starting…
 status-connected = Ready
 status-reconnecting = Reconnecting…
-status-failed = Can't reach Capsula's background process.
+status-failed = Can't reach the background process.
 
 action-retry = Retry
 action-quit = Quit

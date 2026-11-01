@@ -12,12 +12,14 @@ mod tap;
 
 use std::io;
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use capsula_protocol::BUILD_ID;
 use capsula_protocol::constants::SHELL_EXE;
 use capsula_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
@@ -88,6 +90,8 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
     let mut tap = tap::Tap::from_env();
     let mut crashes = Crashes::default();
     let mut launched = None;
+    // Dropped when serving ends, which cancels a relaunch still waiting out its backoff.
+    let mut relaunches = JoinSet::new();
     loop {
         let session = pipes
             .next_session(identity, &mut tap, &mut launched)
@@ -111,7 +115,7 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
                 tracing::warn!(?delay, "the shell died; relaunching it");
                 let (exited, exit) = oneshot::channel();
                 launched = Some(exit);
-                tokio::spawn(relaunch(identity.shell_image.clone(), delay, exited));
+                relaunches.spawn(relaunch(identity.shell_image.clone(), delay, exited));
             }
         }
     }
@@ -129,11 +133,18 @@ async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) 
         }
     };
     tracing::info!(pid = child.id(), "relaunched the shell");
-    if let Err(error) = tokio::task::spawn_blocking(move || child.wait()).await {
-        tracing::warn!(%error, "lost track of the relaunched shell");
-        return;
-    }
-    if exited.send(()).is_err() {
-        tracing::debug!("the relaunched shell had connected");
+    // A plain thread, not the runtime's blocking pool, so a brain that's done never waits
+    // for this shell to end.
+    let watcher = thread::Builder::new()
+        .name("shell-watch".to_owned())
+        .spawn(move || {
+            if let Err(error) = child.wait() {
+                tracing::warn!(%error, "lost track of the relaunched shell");
+            } else if exited.send(()).is_err() {
+                tracing::debug!("the relaunched shell had connected");
+            }
+        });
+    if let Err(error) = watcher {
+        tracing::warn!(%error, "can't watch the relaunched shell");
     }
 }
