@@ -25,6 +25,9 @@ use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::relaunch::Crashes;
 
+/// How long a relaunched shell the brain can't watch gets to connect [guess].
+const UNWATCHED_GRACE: Duration = Duration::from_secs(60);
+
 /// The argument that starts `capsulad` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
 
@@ -151,8 +154,9 @@ async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) 
         tracing::warn!(%error, "can't watch the relaunched shell");
     }
     if end.await.is_err() {
-        // Unwatched, the shell may still be alive, so it isn't counted as lost.
-        std::future::pending::<()>().await;
+        // Unwatched, the shell may still be alive: give it time to connect before counting it
+        // lost, which at worst starts a second shell that exits on the mutex.
+        tokio::time::sleep(UNWATCHED_GRACE).await;
     }
     if exited.send(()).is_err() {
         tracing::debug!("the relaunched shell had connected");
