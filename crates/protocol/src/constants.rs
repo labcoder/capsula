@@ -19,10 +19,11 @@ pub const DATA_DIR: &str = if cfg!(debug_assertions) {
     "Capsula"
 };
 
-/// Log file name prefixes; the appender adds the date.
-pub const BRAIN_LOG: &str = "capsulad";
+/// Log file name prefixes; the appender adds the date. Neither may start with the other, because
+/// the appender prunes old files by prefix and would count the other process's logs.
+pub const BRAIN_LOG: &str = "capsula-brain";
 /// See [`BRAIN_LOG`].
-pub const SHELL_LOG: &str = "capsula";
+pub const SHELL_LOG: &str = "capsula-shell";
 
 /// Prefix of every per-session kernel object name: pipes and mutexes.
 pub const OBJECT_PREFIX: &str = if cfg!(debug_assertions) {
@@ -44,3 +45,20 @@ pub const INSTANCE_SERVICE: &str = if cfg!(debug_assertions) {
 } else {
     "Capsula instance"
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{BRAIN_LOG, SHELL_LOG};
+
+    #[test]
+    fn log_prefixes_dont_overlap() {
+        assert!(
+            !BRAIN_LOG.starts_with(SHELL_LOG),
+            "{BRAIN_LOG} starts with {SHELL_LOG}"
+        );
+        assert!(
+            !SHELL_LOG.starts_with(BRAIN_LOG),
+            "{SHELL_LOG} starts with {BRAIN_LOG}"
+        );
+    }
+}
