@@ -126,7 +126,8 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
 }
 
 /// Relaunches the shell after `delay`, then reports on `exited` when it ends, so a shell that
-/// dies before connecting counts as a crash too.
+/// dies before connecting counts as a crash too. A relaunch that fails drops `exited`, which
+/// counts the same way, so the backoff retries it and then gives up.
 async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) {
     tokio::time::sleep(delay).await;
     let mut child = match platform::launch_detached(&shell) {

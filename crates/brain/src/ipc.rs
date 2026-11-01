@@ -248,16 +248,17 @@ impl Pipes {
     }
 }
 
-/// Resolves when the relaunched shell has ended; never when there's none to wait for.
+/// Resolves when the relaunched shell has ended, or when the relaunch dropped its sender
+/// because no shell started; never when there's none to wait for.
 async fn exited(launched: &mut Option<oneshot::Receiver<()>>) {
-    let ended = match launched.as_mut() {
-        Some(exit) => exit.await.is_ok(),
-        None => false,
+    let Some(exit) = launched.as_mut() else {
+        return std::future::pending().await;
     };
-    *launched = None;
-    if !ended {
-        std::future::pending::<()>().await;
+    // Either way no shell is coming, so both count as a lost shell.
+    if exit.await.is_err() {
+        tracing::warn!("the shell wasn't relaunched");
     }
+    *launched = None;
 }
 
 fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, IpcError> {
@@ -389,6 +390,24 @@ mod tests {
             .expect("no pipe failed");
         assert_eq!(session, Session::ShellLost);
         assert!(launched.is_none(), "the ended shell isn't waited on again");
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_that_never_started_a_shell_counts_as_lost() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 3 - std::process::id()).expect("the test pipes are free");
+        let (failed, exit) = oneshot::channel::<()>();
+        drop(failed);
+        let mut launched = Some(exit);
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut launched)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::ShellLost);
+        assert!(
+            launched.is_none(),
+            "the failed relaunch isn't waited on again"
+        );
     }
 
     #[tokio::test(start_paused = true)]
