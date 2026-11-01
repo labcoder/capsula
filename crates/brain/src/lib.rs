@@ -65,13 +65,13 @@ pub async fn run() -> Result<(), BrainError> {
         incarnation: Incarnation(getrandom::u64()?),
         shell_image: exe.with_file_name(SHELL_EXE),
     };
-    credential::store(&identity.capability)?;
+    credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let ended = serve(&mut pipes, &identity).await;
     if let Err(error) = jobs.terminate() {
         tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");
     }
-    if let Err(error) = credential::delete() {
+    if let Err(error) = credential::delete(session) {
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
     ended.map_err(BrainError::from)

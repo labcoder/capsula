@@ -9,25 +9,26 @@ use keyring::Entry;
 #[error("Credential Manager failed")]
 pub struct CredentialError(#[from] keyring::Error);
 
-/// Stores the capability, replacing the previous brain's.
+/// Stores the capability for Windows session `session`, replacing the previous brain's there.
 ///
 /// # Errors
 /// Fails when Credential Manager refuses the write.
-pub fn store(capability: &Capability) -> Result<(), CredentialError> {
-    Ok(entry()?.set_secret(capability.expose())?)
+pub fn store(session: u32, capability: &Capability) -> Result<(), CredentialError> {
+    Ok(entry(session)?.set_secret(capability.expose())?)
 }
 
 /// Deletes the capability. Deleting one that isn't there succeeds.
 ///
 /// # Errors
 /// Fails when Credential Manager refuses the delete.
-pub fn delete() -> Result<(), CredentialError> {
-    match entry()?.delete_credential() {
+pub fn delete(session: u32) -> Result<(), CredentialError> {
+    match entry(session)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
 
-fn entry() -> keyring::Result<Entry> {
-    Entry::new(INSTANCE_SERVICE, INSTANCE_ACCOUNT)
+/// One entry per session, because each session runs its own brain.
+fn entry(session: u32) -> keyring::Result<Entry> {
+    Entry::new(INSTANCE_SERVICE, &format!("{INSTANCE_ACCOUNT}-{session}"))
 }

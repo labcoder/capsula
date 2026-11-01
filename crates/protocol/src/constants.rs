@@ -53,7 +53,8 @@ pub const SHELL_MUTEX: &str = if cfg!(debug_assertions) {
     r"Local\capsula-shell"
 };
 
-/// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability.
+/// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
+/// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
 
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for

@@ -7,27 +7,25 @@ use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::PathBuf;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSecurityDescriptorToStringSecurityDescriptorW,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
     SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    DACL_SECURITY_INFORMATION, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
-
-/// A protected DACL with one entry: full access for the pipe's owner, the user who made it.
-/// Without it, the default DACL also lets Everyone and anonymous clients read.
-const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)";
 
 /// Whether a pipe instance is the first with its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +47,14 @@ pub enum Instance {
     reason = "the only expect is on a fixed 24-byte struct size"
 )]
 pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipeServer> {
-    let sddl: Vec<u16> = OWNER_ONLY.encode_utf16().chain(Some(0)).collect();
+    let user = user_sid()?;
+    // A protected DACL with one entry: full access for this user's own SID. Without it, the
+    // default DACL also lets Everyone and anonymous clients read. `OW` (owner) isn't enough,
+    // because an elevated token can make Administrators the owner.
+    let sddl: Vec<u16> = format!("D:P(A;;GA;;;{user})")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and outlives the call; on success `descriptor` holds a
     // LocalAlloc'd buffer that is freed below.
@@ -80,7 +85,7 @@ pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipe
     // SAFETY: the descriptor came from the conversion above and nothing references it now.
     unsafe { LocalFree(descriptor) };
     let server = server?;
-    check_owner_only(&dacl_sddl(&server)?)
+    check_user_only(&dacl_sddl(&server)?, &user)
         .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
     Ok(server)
 }
@@ -135,8 +140,68 @@ fn dacl_sddl(server: &NamedPipeServer) -> io::Result<String> {
     result
 }
 
-/// Accepts a protected DACL with exactly one allow entry, for the owner.
-fn check_owner_only(sddl: &str) -> Result<(), String> {
+/// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
+fn user_sid() -> io::Result<String> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: plain call returning a pseudo-handle that needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `token` receives a handle owned below.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `token` is a fresh handle owned only here.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut len = 0u32;
+    // SAFETY: the sizing call writes only `len`; its expected failure is ignored.
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &raw mut len,
+        )
+    };
+    // u64s, so the TOKEN_USER at the start is aligned.
+    let mut buffer = vec![0u64; usize::try_from(len).expect("u32 fits in usize").div_ceil(8)];
+    // SAFETY: `buffer` holds at least `len` writable bytes.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            len,
+            &raw mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
+    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sid` points into `buffer`, alive here; on success `text` is LocalAlloc'd.
+    if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SID strings are under 200 characters; the bound only stops a runaway scan.
+    let len = (0..256)
+        .take_while(|&i| {
+            // SAFETY: `text` is NUL-terminated and `i` never passes the NUL.
+            let unit = unsafe { text.add(i) };
+            // SAFETY: as above.
+            unsafe { *unit != 0 }
+        })
+        .count();
+    // SAFETY: the `len` units before the NUL are initialized.
+    let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+    // SAFETY: `text` came from ConvertSidToStringSidW and is no longer referenced.
+    unsafe { LocalFree(text.cast()) };
+    Ok(sid)
+}
+
+/// Accepts a protected DACL with exactly one allow entry, for `user`.
+fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
     let dacl = sddl
         .strip_prefix("D:")
         .ok_or_else(|| format!("no DACL in {sddl}"))?;
@@ -146,12 +211,11 @@ fn check_owner_only(sddl: &str) -> Result<(), String> {
         .and_then(|a| a.strip_suffix(')'))
         .map(|a| a.split(';').collect())
         .unwrap_or_default();
-    let owner =
-        matches!(fields.as_slice(), ["A", _, rights, _, _, "OW" | "S-1-3-4"] if !rights.is_empty());
-    if flags.contains('P') && owner && aces.get(1..).is_some_and(|rest| !rest.contains('(')) {
+    let only_user = matches!(fields.as_slice(), ["A", _, rights, _, _, sid] if !rights.is_empty() && *sid == user);
+    if flags.contains('P') && only_user && aces.get(1..).is_some_and(|rest| !rest.contains('(')) {
         Ok(())
     } else {
-        Err(format!("pipe DACL is not owner-only: {sddl}"))
+        Err(format!("pipe DACL is not user-only: {sddl}"))
     }
 }
 
@@ -209,21 +273,41 @@ pub fn session_id() -> io::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instance, check_owner_only, create_owner_only};
+    use super::{Instance, check_user_only, create_owner_only, user_sid};
+
+    const ME: &str = "S-1-5-21-1-2-3-1001";
 
     #[test]
-    fn only_a_protected_single_owner_entry_passes() {
-        assert!(check_owner_only("D:P(A;;FA;;;OW)").is_ok(), "owner only");
-        assert!(check_owner_only("D:(A;;FA;;;OW)").is_err(), "unprotected");
+    fn only_a_protected_single_user_entry_passes() {
         assert!(
-            check_owner_only("D:P(A;;FA;;;OW)(A;;FR;;;WD)").is_err(),
+            check_user_only("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)", ME).is_ok(),
+            "user only"
+        );
+        assert!(
+            check_user_only("D:(A;;FA;;;S-1-5-21-1-2-3-1001)", ME).is_err(),
+            "unprotected"
+        );
+        assert!(
+            check_user_only("D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FR;;;WD)", ME).is_err(),
             "a second entry"
         );
-        assert!(check_owner_only("D:P(A;;FA;;;WD)").is_err(), "everyone");
-        assert!(check_owner_only("D:P").is_err(), "empty DACL");
-        assert!(check_owner_only("O:BA").is_err(), "no DACL");
+        assert!(
+            check_user_only("D:P(A;;FA;;;OW)", ME).is_err(),
+            "the owner alias"
+        );
+        assert!(
+            check_user_only("D:P(A;;FA;;;S-1-5-21-1-2-3-1002)", ME).is_err(),
+            "another user"
+        );
+        assert!(check_user_only("D:P", ME).is_err(), "empty DACL");
+        assert!(check_user_only("O:BA", ME).is_err(), "no DACL");
     }
 
+    #[test]
+    fn the_user_sid_is_a_string_sid() {
+        let sid = user_sid().expect("this process has a user");
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+    }
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
         let name = format!(r"\\.\pipe\capsula-test-{}", std::process::id());
