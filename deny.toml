@@ -37,7 +37,7 @@ exceptions = [
 ]
 
 [licenses.private]
-# Capsula's own crates are unpublished and unlicensed until OSC-111.
+# Capsula's own crates are unpublished, so the license list doesn't apply to them.
 ignore = true
 
 [bans]
