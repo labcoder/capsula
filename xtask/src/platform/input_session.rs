@@ -25,13 +25,16 @@ use windows::core::BOOL;
 
 mod fixture;
 mod gate;
+mod guard;
 mod layouts;
+mod quiet;
 mod registry;
 mod session;
 
 pub(crate) use fixture::fixture;
 use fixture::{CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, property};
 pub(crate) use layouts::Layouts;
+pub(crate) use quiet::quiet;
 pub(crate) use registry::Registry;
 pub(crate) use session::{Session, Target};
 

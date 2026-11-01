@@ -33,6 +33,9 @@ tasks:
                     redirected create-new to this file; one real Ready click,
                     one persistent fixture, at most one hour, no input retries
   input-fixture     internal bounded separate-process EDIT/Ready fixture
+  input-quiet <seconds>
+                    observe raw input on a hidden window for 1..120 seconds;
+                    class, motion and marker only; no keys/text or injected input
   bench idle [--duration 1..60] [--baseline <release-directory> | --panel]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
@@ -72,9 +75,50 @@ fn main() -> Result<()> {
         Some("cold-start") => gate::cold(args),
         #[cfg(windows)]
         Some("input-fixture") => platform::input_session::fixture(),
+        #[cfg(windows)]
+        Some("input-quiet") => platform::input_session::quiet(quiet_seconds(args)?),
         #[cfg(not(windows))]
         Some("bench") => bail!("idle benchmarking requires Windows on Rez"),
         Some(other) => bail!("unknown task {other:?}\n\n{}", usage()),
+    }
+}
+
+#[cfg(windows)]
+fn quiet_seconds(mut args: impl Iterator<Item = String>) -> Result<u64> {
+    let seconds = args
+        .next()
+        .context("input-quiet needs 1..120 seconds")?
+        .parse()?;
+    anyhow::ensure!(
+        (1..=120).contains(&seconds),
+        "input-quiet needs 1..120 seconds"
+    );
+    anyhow::ensure!(args.next().is_none(), "input-quiet accepts only seconds");
+    Ok(seconds)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::quiet_seconds;
+
+    #[test]
+    fn quiet_duration_is_explicit_bounded_and_has_no_extra_arguments() {
+        for seconds in [1, 120] {
+            assert_eq!(
+                quiet_seconds([seconds.to_string()].into_iter()).unwrap(),
+                seconds
+            );
+        }
+        for args in [
+            vec![],
+            vec!["0"],
+            vec!["121"],
+            vec!["-1"],
+            vec!["abc"],
+            vec!["1", "2"],
+        ] {
+            assert!(quiet_seconds(args.into_iter().map(str::to_owned)).is_err());
+        }
     }
 }
 

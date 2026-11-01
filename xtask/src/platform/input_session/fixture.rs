@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 
 use anyhow::{Context as _, Result, ensure};
-use capsula_protocol::constants::{DISPLAY_NAME, FOCUS_INPUT_MARKER, OBJECT_PREFIX};
+use capsula_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -19,10 +19,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     UnregisterHotKey, VK_LBUTTON,
 };
 use windows::Win32::UI::Input::{
-    GetCurrentInputMessageSource, GetRawInputData, HRAWINPUT, IMDT_MOUSE, IMO_HARDWARE,
-    IMO_INJECTED, INPUT_MESSAGE_SOURCE, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE,
-    RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE,
-    RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    GetCurrentInputMessageSource, IMDT_MOUSE, IMO_HARDWARE, IMO_INJECTED, INPUT_MESSAGE_SOURCE,
+    RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS, RIDEV_INPUTSINK, RIDEV_REMOVE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -40,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
+use super::guard::{self, StopCause, physical_input};
 use super::{
     FixtureEscMode, MARKER, MAX_COVER, MAX_LIFETIME, desktop_rect, last_input, pack, size, unpack,
 };
@@ -99,7 +98,7 @@ pub(super) fn property(window: HWND, name: PCWSTR) -> usize {
     unsafe { GetPropW(window, name) }.0.addr()
 }
 
-fn set_property(window: HWND, name: PCWSTR, count: usize) -> Result<()> {
+pub(super) fn set_property(window: HWND, name: PCWSTR, count: usize) -> Result<()> {
     // SAFETY: property values are opaque integers, never dereferenced by this fixture.
     unsafe {
         SetPropW(
@@ -113,52 +112,6 @@ fn set_property(window: HWND, name: PCWSTR, count: usize) -> Result<()> {
 
 fn controls() -> Result<Controls> {
     CONTROLS.get().context("fixture controls are missing")
-}
-
-fn physical_input(param: LPARAM) -> Result<bool> {
-    let mut raw = RAWINPUT::default();
-    let mut bytes = size::<RAWINPUT>();
-    // SAFETY: RAWINPUT is aligned and writable for its stated size; the message owns this raw-input handle.
-    let read = unsafe {
-        GetRawInputData(
-            HRAWINPUT(std::ptr::with_exposed_provenance_mut(
-                param.0.cast_unsigned(),
-            )),
-            RID_INPUT,
-            Some((&raw mut raw).cast()),
-            &raw mut bytes,
-            size::<RAWINPUTHEADER>(),
-        )
-    };
-    ensure!(
-        read != u32::MAX && read >= size::<RAWINPUTHEADER>() && bytes <= size::<RAWINPUT>(),
-        "raw-input guard could not read an event"
-    );
-    physical_event(&raw)
-}
-
-fn physical_event(raw: &RAWINPUT) -> Result<bool> {
-    match raw.header.dwType {
-        value if value == RIM_TYPEKEYBOARD.0 => {
-            // SAFETY: the header identifies the keyboard union member.
-            Ok(usize::try_from(unsafe { raw.data.keyboard }.ExtraInformation)? != MARKER)
-        }
-        value if value == RIM_TYPEMOUSE.0 => {
-            // SAFETY: the header identifies the mouse union member.
-            let mouse = unsafe { raw.data.mouse };
-            let marker = usize::try_from(mouse.ulExtraInformation)?;
-            // SAFETY: both union views describe the same initialized button flags/data bytes.
-            let buttons = unsafe { mouse.Anonymous.ulButtons };
-            Ok(marker != MARKER
-                && (marker != FOCUS_INPUT_MARKER
-                    || mouse.usFlags != MOUSE_MOVE_RELATIVE
-                    || mouse.lLastX != 0
-                    || mouse.lLastY != 0
-                    || buttons != 0
-                    || mouse.ulRawButtons != 0))
-        }
-        _ => Ok(true),
-    }
 }
 
 /// Where the button message being handled came from. A sent message never counts as the
@@ -331,8 +284,15 @@ fn open_gate(root: HWND, input: usize) -> Result<usize> {
         return Ok(2);
     }
     set_property(root, OPEN, 1)?;
+    guard::opened();
     if usize::try_from(last_input()?)? != input || queued_messages() {
-        set_property(root, ABORT, 1)?;
+        guard::stop(
+            root,
+            StopCause::Input(guard::PhysicalInput {
+                class: guard::InputClass::Other,
+                marker: None,
+            }),
+        )?;
         anyhow::bail!("input raced the native gate opening");
     }
     Ok(1)
@@ -348,7 +308,7 @@ fn register_guards(root: HWND) -> Result<()> {
     Ok(())
 }
 
-fn raw_devices(root: HWND, flags: RAWINPUTDEVICE_FLAGS) -> Result<()> {
+pub(super) fn raw_devices(root: HWND, flags: RAWINPUTDEVICE_FLAGS) -> Result<()> {
     let devices = [
         RAWINPUTDEVICE {
             usUsagePage: 1,
@@ -421,6 +381,9 @@ unsafe extern "system" fn fixture_proc(
 ) -> LRESULT {
     let answer = |done: Result<()>| LRESULT(isize::from(done.is_ok()));
     match message {
+        guard::SET_PHASE => {
+            return answer(u8::try_from(wp.0).map(guard::set_phase).map_err(Into::into));
+        }
         LOAD_LAYOUT => {
             return load_layout(window, wp.0).map_or(LRESULT(0), |layout| {
                 LRESULT(layout.0.expose_provenance().cast_signed())
@@ -463,15 +426,17 @@ unsafe extern "system" fn fixture_proc(
     let guard =
         if message == WM_INPUT && (property(window, READY) != 0 || property(window, OPEN) != 0) {
             match physical_input(lp) {
-                Ok(true) if property(window, OPEN) != 0 => set_property(window, ABORT, 1),
-                Ok(true) if property(window, READY) != 0 => set_property(window, INTERRUPTED, 1),
+                Ok(Some(input)) if property(window, OPEN) != 0 => {
+                    guard::stop(window, StopCause::Input(input))
+                }
+                Ok(Some(_)) if property(window, READY) != 0 => set_property(window, INTERRUPTED, 1),
                 Ok(_) => Ok(()),
-                Err(_) => set_property(window, ABORT, 1),
+                Err(_) => guard::stop(window, StopCause::GuardReadFailure),
             }
         } else if message == WM_WTSSESSION_CHANGE
             && wp.0 == usize::try_from(WTS_SESSION_LOCK).expect("session event fits usize")
         {
-            set_property(window, ABORT, 1)
+            guard::stop(window, StopCause::Lock)
         } else {
             Ok(())
         };
@@ -742,7 +707,7 @@ fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> 
     child(
         w!("STATIC"),
         &HSTRING::from(
-            "The dock starts at the top center; Listening is its label.\r\nThis test window is only for verdicts and Ready.\r\nSelect all three verdicts (Unrated is valid), then click Ready.\r\nStay hands-off for one second. Input re-arms before injection;\r\nonce injection opens, input ends the session.",
+            "The dock starts top center; Listening is its label.\r\nSelect all three verdicts (Unrated is valid), then click Ready.\r\nDo not touch mouse or keyboard until this window closes.\r\nAllow about 10 minutes (up to 1 hour), not just one second.\r\nBefore injection input re-arms Ready; afterwards it stops.",
         ),
         WINDOW_STYLE::default(),
         [12, 352, 600, 96],
@@ -890,7 +855,9 @@ mod tests {
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
     };
 
-    use super::{FOCUS_INPUT_MARKER, layout_id, physical_event};
+    use super::super::guard::physical_event;
+    use super::layout_id;
+    use capsula_protocol::constants::FOCUS_INPUT_MARKER;
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {
         let mut raw = RAWINPUT::default();
@@ -906,7 +873,7 @@ mod tests {
             ulExtraInformation: marker,
             ..Default::default()
         };
-        assert!(!physical_event(&mouse_event(calm)).unwrap());
+        assert_eq!(physical_event(&mouse_event(calm)).unwrap(), None);
         for mouse in [
             RAWMOUSE {
                 ulExtraInformation: 0,
@@ -947,7 +914,7 @@ mod tests {
                 ..calm
             },
         ] {
-            assert!(physical_event(&mouse_event(mouse)).unwrap());
+            assert!(physical_event(&mouse_event(mouse)).unwrap().is_some());
         }
     }
 
@@ -959,9 +926,9 @@ mod tests {
             ExtraInformation: u32::try_from(FOCUS_INPUT_MARKER).unwrap(),
             ..Default::default()
         };
-        assert!(physical_event(&raw).unwrap());
+        assert!(physical_event(&raw).unwrap().is_some());
         raw.header.dwType = RIM_TYPEHID.0;
-        assert!(physical_event(&raw).unwrap());
+        assert!(physical_event(&raw).unwrap().is_some());
     }
 
     #[test]
