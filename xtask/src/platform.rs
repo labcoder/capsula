@@ -21,10 +21,11 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS, OpenProcess,
-    PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ, WaitForSingleObject,
+    CREATE_NO_WINDOW, GetCurrentThread, GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ,
+    WaitForSingleObject,
 };
-use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
+use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
 };
@@ -160,6 +161,15 @@ pub(crate) fn capture_dwm(samples: u64, path: &Path) -> Result<Child> {
             .stderr(std::fs::File::create(path.with_extension("stderr.txt"))?)
             .spawn()?,
     )
+}
+
+pub(crate) fn thread_cycles() -> Result<u64> {
+    // SAFETY: the pseudo-handle refers to this live thread and must not be closed.
+    let thread = unsafe { GetCurrentThread() };
+    let mut cycles = 0;
+    // SAFETY: the current-thread handle has query access and cycles is writable.
+    unsafe { QueryThreadCycleTime(thread, &raw mut cycles) }?;
+    Ok(cycles)
 }
 
 #[derive(Debug)]

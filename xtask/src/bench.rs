@@ -117,11 +117,18 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         "workload: {workload:?}; baseline has no scripted stretch: {}",
         baseline.is_some()
     );
+    let cycle_rate = calibrate_rate()?;
     let mut child = platform::launch(&shell, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
-    let measurement = measure(child.id(), seconds, &mut tracked, metrics.as_deref());
+    let measurement = measure(
+        child.id(),
+        seconds,
+        &mut tracked,
+        metrics.as_deref(),
+        cycle_rate,
+    );
     let close = if baseline.is_some() {
         platform::close_shell_window(&mut child).context("closing baseline shell window")
     } else {
@@ -174,6 +181,7 @@ fn measure(
     seconds: u64,
     tracked: &mut Vec<(&'static str, Process)>,
     metrics: Option<&Path>,
+    cycle_rate: f64,
 ) -> Result<()> {
     sleep(Duration::from_secs(30));
     tracked.push(("shell", Process::open(shell_pid)?));
@@ -200,7 +208,7 @@ fn measure(
     } else {
         None
     };
-    let measurement = interval(seconds, tracked);
+    let measurement = interval(seconds, tracked, cycle_rate);
     let capture = (|| -> Result<()> {
         if let Some(mut child) = dwm {
             let status = child
@@ -235,7 +243,7 @@ fn measure(
     Ok(())
 }
 
-fn interval(seconds: u64, tracked: &[(&str, Process)]) -> Result<()> {
+fn interval(seconds: u64, tracked: &[(&str, Process)], cycle_rate: f64) -> Result<()> {
     let start = Instant::now();
     let before = tracked
         .iter()
@@ -256,9 +264,9 @@ fn interval(seconds: u64, tracked: &[(&str, Process)]) -> Result<()> {
         "product process set changed during measurement"
     );
     println!(
-        "release: 30s warmup; sequential endpoint counters included in wall; GetProcessTimes user+kernel CPU / wall; 100% = one core; QueryProcessCycleTime raw cycles; private bytes (not peak)"
+        "release: 30s warmup; sequential endpoint counters included in wall; GetProcessTimes user+kernel CPU / wall; QueryProcessCycleTime raw cycles and cycles_cpu_% = cycles/(measured_rate*wall)*100; 100% = one calibrated core; private bytes (not peak)"
     );
-    println!("role pid wall_s cpu_s cpu_% cycles private_start_B private_end_B");
+    println!("role pid wall_s cpu_s cpu_% cycles cycles_cpu_% private_start_B private_end_B");
     let mut total_cpu = Duration::ZERO;
     let mut total_before = 0;
     let mut total_after = 0;
@@ -277,20 +285,22 @@ fn interval(seconds: u64, tracked: &[(&str, Process)]) -> Result<()> {
         total_before += before.private_bytes;
         total_after += after.private_bytes;
         println!(
-            "{role} {} {:.3} {:.6} {:.3} {cycles} {} {}",
+            "{role} {} {:.3} {:.6} {:.3} {cycles} {:.3} {} {}",
             process.pid,
             wall.as_secs_f64(),
             cpu.as_secs_f64(),
             percent(cpu, wall),
+            cycle_percent(cycles, cycle_rate, wall),
             before.private_bytes,
             after.private_bytes
         );
     }
     println!(
-        "total - {:.3} {:.6} {:.3} {total_cycles} {total_before} {total_after}",
+        "total - {:.3} {:.6} {:.3} {total_cycles} {:.3} {total_before} {total_after}",
         wall.as_secs_f64(),
         total_cpu.as_secs_f64(),
-        percent(total_cpu, wall)
+        percent(total_cpu, wall),
+        cycle_percent(total_cycles, cycle_rate, wall)
     );
     Ok(())
 }
@@ -351,9 +361,52 @@ fn percent(cpu: Duration, wall: Duration) -> f64 {
     cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
 }
 
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "bounded two-second cycle deltas fit exactly in f64"
+)]
+fn calibrate_rate() -> Result<f64> {
+    let mut highest = 0.0_f64;
+    for trial in 1..=3 {
+        let start = Instant::now();
+        let before = platform::thread_cycles()?;
+        while start.elapsed() < Duration::from_secs(2) {
+            std::hint::spin_loop();
+        }
+        let cycles = platform::thread_cycles()?
+            .checked_sub(before)
+            .context("calibration thread cycle counter went backwards")?;
+        let wall = start.elapsed();
+        let rate = cycles as f64 / wall.as_secs_f64();
+        ensure!(
+            rate.is_finite() && rate > 0.0,
+            "invalid measured cycle rate"
+        );
+        highest = highest.max(rate);
+        println!(
+            "calibration trial={trial} wall_s={:.6} cycles={cycles} cycles_per_s={rate:.3}",
+            wall.as_secs_f64()
+        );
+    }
+    println!(
+        "cycle_rate_per_s={highest:.3}; highest of three saturated-thread 2s samples; calibrated cycles CPU is the slice1 gate; GetProcessTimes retained beside it"
+    );
+    Ok(highest)
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "bounded process cycle deltas are well within f64 precision"
+)]
+fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
+    cycles as f64 / (rate * wall.as_secs_f64()) * 100.0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Workload, options, percent, stretch_totals};
+    use super::{Workload, cycle_percent, options, percent, stretch_totals};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -439,6 +492,18 @@ mod tests {
             (percent(Duration::from_secs(120), Duration::from_secs(60)) - 200.0).abs()
                 < f64::EPSILON,
             "two CPU seconds per wall second is 200% of one core"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the requested calibration example is exactly representable as 25.0"
+    )]
+    fn calibrated_cycles_are_percent_of_one_measured_core() {
+        assert_eq!(
+            cycle_percent(2_000_000_000, 4_000_000_000.0, Duration::from_secs(2)),
+            25.0
         );
     }
 }

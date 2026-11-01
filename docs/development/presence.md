@@ -46,6 +46,13 @@ small even before placement, so a transparency failure cannot cover the desktop.
 bounded launch check, not a performance benchmark or permission to inject input.
 
 For idle measurements, build the workspace in release mode, then run `cargo xtask bench idle`.
+Before launching the shell, the benchmark spins one thread in three two-second trials,
+measuring `QueryThreadCycleTime` divided by wall time and printing each rate and the highest.
+Each role and the process-tree total report calibrated cycle CPU as
+`cycles / (highest_rate * wall) * 100`, beside `GetProcessTimes`. The slice 1 CPU gate reads
+the calibrated column because tick-charged process times can alias the 144 Hz workload.
+This is a measured saturated-thread normalization, not a fixed clock-frequency assumption;
+preemption and frequency changes can affect calibration, so retain the rates and both columns.
 It refuses an existing product process, launches the release shell at normal priority with a
 bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
@@ -137,8 +144,8 @@ at Quit a `stretch totals` line for the whole run: frames (`ticks`), in-place ma
 `cargo xtask bench stretch [--duration 1..60] [--baseline <release-directory>]` measures it.
 It launches the current release with `--stretch-fixture` and diagnostics, warms for thirty
 seconds, then samples user plus kernel time, cycles and private bytes of the shell, brain and
-worker over the duration (thirty seconds by default). CPU is percent of one core. Cycles are
-reported beside it, never converted to time. After Quit it requires a totals line with
+worker over the duration (thirty seconds by default). CPU is percent of one core, with the same
+pre-launch cycle-rate calibration as idle and GetProcessTimes beside it. After Quit it requires a totals line with
 `failed=0`. Lifetime counters are printed separately and are never divided into the sample's
 cycles. A bounded 1 Hz `typeperf` samples DWM's CPU and PID alongside. Its first row is blank,
 so it's kept as an invalid warm-up and never read as zero. DWM's bounded window extends past
