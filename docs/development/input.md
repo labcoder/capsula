@@ -64,11 +64,15 @@ sequenceDiagram
 
 ## The typing panel
 
-A double tap opens a small panel where the hover panel would be, with one gpui-kit `Input`.
+A double tap opens a small panel where the status panel would be, with one gpui-kit `Input`.
 It's the only window Capsula activates, as described in [Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Capsula still has the front and that window still exists.
-The panel is hidden, not closed, so its draft survives. Hover never opens over it or dismisses it.
+Switching to another window also hides it and keeps the draft, without restoring the old
+foreground: the user has already chosen the new window. Hidden and stale deactivation events
+do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
+[presence](presence.md). The panel is hidden, not closed, so its draft survives.
+Hover never opens over it or dismisses it.
 It has no Send, history or other controls yet.
 
 ### Taking the front
@@ -124,8 +128,8 @@ effect always happens before any brain message. Slice 2 sends `Stop` and slice 4
 `ClearDrawing` after it.
 
 Esc is held system-wide with `RegisterHotKey` only while Capsula speaks or shows a drawing.
-Listening and an open hover panel never hold it. Slice 1 has neither speech nor drawings, so
-global Esc stays unregistered. If registration is refused, the hover panel shows Stop instead,
+Listening and an open status panel never hold it. Slice 1 has neither speech nor drawings, so
+global Esc stays unregistered. If registration is refused, the status panel shows Stop instead,
 and the refusal is logged without key or text content. An ignored fixture,
 `cargo test -p capsula-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
@@ -156,7 +160,7 @@ creates no file.
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process
-  already holds Esc, `stop=true` and Stop shows at once: the hover panel opens and stays open,
+  already holds Esc, `stop=true` and Stop shows at once: the status panel opens and stays open,
   and an open typing panel shows its own Stop. They return to normal once Esc is held or no
   longer wanted.
 
@@ -164,8 +168,12 @@ A paint isn't a present. The gate harness joins its exact Canvas QPC to the sepa
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
 passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-hover gates panel state-entry QPC → present at p95 ≤8ms. P1's GPUI hover method timed the
-state-machine entry to committed frame submission, not photon time or the OS mouse path.
+Click gates the pill's native button-down QPC → panel present at p95 ≤8ms. A single native
+timestamp supplies both the tagged click receipt and the resulting panel-show `click_qpc`;
+only an exact origin match is eligible. The panel record's own `qpc` stays the monotonic
+state-entry timestamp, separate from that native origin. Legacy observer `hover`/paint IDs identify panel
+changes, not a hover-to-open interaction. Programmatic or Stop-fallback shows cannot substitute
+for a click sample. Hover only drives the stretch.
 Both reports retain display latency separately: missing display feedback is unmeasured there,
 not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
 coverage and motion pacing still require displayed frames. The UI thread only
@@ -225,7 +233,7 @@ redirection. Do not run an unredirected session or reuse an old evidence directo
 
 ```bash
 set -o noclobber
-transcript='C:/dev/capsula-ws/gate-runs/approved-unique-session.txt'
+transcript='C:/dev/capsula-ws/runs/gate/approved-unique-session.txt'
 { git rev-parse HEAD && git status --short &&
   ./target/release/xtask.exe gate-session "$transcript"; } >"$transcript" 2>&1
 ```
@@ -304,9 +312,13 @@ cleanup; a phase cannot begin without its complete budget.
    limits are 1% of one core at idle and 10% during stretch. DWM and private bytes are retained too.
 2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Hover runs 100 guarded crossings. HWND hide observation polls for at most 300ms; its elapsed
-   time is not a display timestamp. Observer IDs and panel paint frames feed the separate display
-   summary with independent present and display endpoints.
+3. Click runs 100 guarded pill clicks, first checking that pointer entry alone did not open
+   the panel. Leaving both surfaces must hide it; HWND hide observation polls for at most 300ms
+   and is not a display timestamp. Exact native button-down origins and panel paint IDs feed
+   `click-display.txt`, with independent present and display endpoints. The gated button-down
+   QPC is captured at dispatch, excluding OS routing and time waiting in the UI thread's queue.
+   Non-gating SendInput → present samples include that queue wait and are reported beside it.
+   Every native click stays in the denominator; missing or unmatched panel shows cannot pass.
 4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
    product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
@@ -315,14 +327,19 @@ cleanup; a phase cannot begin without its complete budget.
    retracting edge. Dropped-only or otherwise unavailable display evidence makes the phase
    incomplete even when native routing succeeded.
    The left-edge resting points keep the bulb inside the pill on the middle-left fixture.
+   Body clicks now toggle the status panel; candidate points exclude its rectangle so that
+   later receipt trials cannot target the panel instead of the proxy or covering EDIT.
    Motion frame gaps use exact current-row changes to delimit drawing demand; warmup, capture
    edges and unchanged-pixel gaps are not missed frames. Every displayed gap and undisplayed
    dock row is retained; a missing demanded-frame join stays unmeasured, not a zero-duration pass.
    An undisplayed present during drawing demand also fails, even if p99 gaps remain ≤7.7ms.
-5. Focus opens the typing surface by a completed double tap, types a known draft, dismisses it
-   through local Esc, reopens it without typing, and uses the non-content observation to check
-   draft preservation. Normal dismissal must return foreground to the fixture; there is no
-   SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
+5. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
+   through local Esc, reopens, double-taps again while active, then clicks a second top-level
+   fixture window, distinct from the previous foreground. After the Dismissed mark, typing must
+   be hidden and that second window must still be foreground 300ms later. A guarded EDIT click
+   returns to the original fixture before closing the alternate. Both reopens use the non-content observation
+   to check draft preservation. Normal Esc dismissal must return foreground to the fixture;
+   there is no SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
 6. Layouts temporarily use German `00000407` and Spanish `0000040A` in the foreground fixture.
    Each checks the expected `@`/`€` pair without printing text, no Listening over the AltGr-only
    interval, and a positive left-modifier chord. The original HKL and loaded-layout inventory are
@@ -341,7 +358,7 @@ For instrumented phases, a PID-filtered warm trace has an 8-second fixed backsto
 input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
 eligible dock swapchain before the main trace starts.
 
-Every main-trace swapchain has the same first-present seed rule, including the hover panel.
+Every main-trace swapchain has the same first-present seed rule, including the status panel.
 Joins consider that derived seed alongside raw rows, using the same uniqueness, drop and reuse
 checks. Reports retain each sample's CSV/seed provenance and the seed derivation; raw CSV rows
 stay unchanged. A seed is eligible only when the first emitted row is displayed, its

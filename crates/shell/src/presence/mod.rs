@@ -1,4 +1,4 @@
-//! The resting dock, its stretch, transient hover panel, typing panel and native tray share one
+//! The resting dock, its stretch, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
 pub(crate) mod diagnostics;
@@ -8,7 +8,9 @@ mod launch;
 pub(crate) mod observer;
 mod outline;
 mod paint;
+mod panels;
 mod stretch;
+mod text;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -42,6 +44,7 @@ use observer::{Drawn, Surface};
 use outline::Outline;
 use paint::{OutlinePaint, PanelStamp, Target};
 use stretch::Stretch;
+use text::TextPanel;
 
 /// Keeps the app owner alive even when its panel is hidden.
 struct PresenceApp {
@@ -71,18 +74,6 @@ struct Presence {
     scale: f32,
     pointer_settle: Option<Task<()>>,
     stretch: Stretch,
-}
-
-/// The typing surface: the one window Capsula activates, and only on a double tap.
-struct TextPanel {
-    window: AnyWindowHandle,
-    view: Entity<TextView>,
-    input: Entity<InputState>,
-    /// The window in front before the panel took focus, given back when it closes.
-    previous: Option<Foreground>,
-    visible: bool,
-    /// Input diagnostics only: the draft at the last dismiss, compared on the next open.
-    draft: Option<SharedString>,
 }
 
 impl Presence {
@@ -131,7 +122,16 @@ impl Presence {
         visibility: PanelVisibility,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        observer::hover(cx, visibility);
+        self.set_panel_from(visibility, None, cx)
+    }
+
+    fn set_panel_from(
+        &mut self,
+        visibility: PanelVisibility,
+        trigger_qpc: Option<i64>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        observer::hover(cx, visibility, trigger_qpc);
         self.panel_window
             .update(cx, |_, window, cx| {
                 if visibility == PanelVisibility::Visible {
@@ -148,24 +148,17 @@ impl Presence {
     }
 
     fn pointer_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        // The typing panel sits where the hover panel would, and hover never dismisses it.
-        if self.text_open() {
-            return Ok(());
+        let visibility = panels::pointer(self.panel_visibility, self.panel_owner());
+        if visibility != self.panel_visibility {
+            self.set_panel(visibility, cx)?;
         }
-        // Stop replaces global Esc, so it stays on screen until Esc is held or not wanted.
-        if self.escape_hold.shows_stop() {
+        if self.text_open() || self.escape_hold.shows_stop() {
             self.pointer_settle = None;
-            if self.panel_visibility == PanelVisibility::Hidden {
-                self.set_panel(PanelVisibility::Visible, cx)?;
-            }
             return Ok(());
         }
         let point = platform::cursor_position()?;
         if self.hovered(point, self.panel_visibility) {
             self.pointer_settle = None;
-            if self.panel_visibility == PanelVisibility::Hidden {
-                self.set_panel(PanelVisibility::Visible, cx)?;
-            }
             return Ok(());
         }
         if self.panel_visibility == PanelVisibility::Hidden {
@@ -178,19 +171,22 @@ impl Presence {
             let result = this.update(cx, |this, cx| {
                 let point = platform::cursor_position()?;
                 if !this.hovered(point, PanelVisibility::Visible) {
-                    this.set_panel(PanelVisibility::Hidden, cx)?;
+                    let visibility = panels::left(this.panel_owner());
+                    if !this.text_open() && visibility != this.panel_visibility {
+                        this.set_panel(visibility, cx)?;
+                    }
                 }
                 Ok::<_, OpenError>(())
             });
             if let Ok(Err(error)) = result {
-                tracing::error!(%error, "can't dismiss the hover panel");
+                tracing::error!(%error, "can't dismiss the status panel");
             }
         }));
         Ok(())
     }
 
     fn text_open(&self) -> bool {
-        self.text.as_ref().is_some_and(|text| text.visible)
+        self.text.as_ref().is_some_and(|text| text.typing.visible)
     }
 
     /// Whether the pointer is over the presence's outline, where the hit proxy takes it, or
@@ -289,122 +285,6 @@ impl Presence {
         }
     }
 
-    fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        if self.text.is_none() {
-            self.text = Some(self.create_text(cx)?);
-        }
-        self.pointer_settle = None;
-        self.set_panel(PanelVisibility::Hidden, cx)?;
-        let bounds = self.layout.panel;
-        let Some(text) = self.text.as_mut() else {
-            return Ok(());
-        };
-        text.window
-            .update(cx, |_, window, cx| {
-                platform::place_presence_window(window, bounds)?;
-                window.bounds_changed(cx);
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
-        text.visible = true;
-        let draft = text
-            .draft
-            .take()
-            .map(|saved| diagnostics::draft(&saved, &text.input.read(cx).value()));
-        let input = text.input.clone();
-        let activated = text
-            .window
-            .update(cx, |_, window, cx| {
-                let previous = platform::activate_presence_window(window)?;
-                input.update(cx, |state, cx| state.focus(window, cx));
-                Ok::<_, platform::PresenceError>(previous)
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))?;
-        let focused = match activated {
-            Ok(Some(previous)) => {
-                text.previous = Some(previous);
-                true
-            }
-            Ok(None) => true,
-            // Still visible; a click activates it.
-            Err(error) => {
-                tracing::warn!(%error, "can't focus the typing panel");
-                false
-            }
-        };
-        diagnostics::record(cx, format_args!("input opened focused={focused}"));
-        if let Some([nonempty, preserved]) = draft {
-            diagnostics::record(
-                cx,
-                format_args!("input draft nonempty={nonempty} preserved={preserved}"),
-            );
-        }
-        Ok(())
-    }
-
-    fn create_text(&self, cx: &mut Context<'_, Self>) -> Result<TextPanel, OpenError> {
-        let stop = self.escape_hold.shows_stop();
-        let events = self.events.clone();
-        let close_events = self.events.clone();
-        let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
-            window.set_window_title(constants::DISPLAY_NAME);
-            window.on_window_should_close(cx, move |_, _| {
-                send(&close_events, PresenceEvent::DismissPanel);
-                false
-            });
-            let input = cx.new(|cx| InputState::new(window, cx));
-            cx.new(|_| TextView {
-                input,
-                stop,
-                events,
-            })
-        })
-        .map_err(|error| OpenError::Gpui(error.into()))?;
-        let events = self.events.clone();
-        window
-            .update(cx, |_, window, cx| {
-                configure_surface(window, PresenceSurface::Text, events, cx)
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
-        Ok(TextPanel {
-            window,
-            input: view.read(cx).input.clone(),
-            view,
-            previous: None,
-            visible: false,
-            draft: None,
-        })
-    }
-
-    /// Hides the typing panel, keeping its draft, and gives the front back if it still has it.
-    fn dismiss_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let bounds = self.layout.panel;
-        let Some(text) = self.text.as_mut().filter(|text| text.visible) else {
-            return Ok(());
-        };
-        text.visible = false;
-        if cx.has_global::<Diagnostics>() {
-            text.draft = Some(text.input.read(cx).value());
-        }
-        let previous = text.previous.take();
-        text.window
-            .update(cx, |_, window, cx| {
-                if let Some(previous) = previous {
-                    platform::restore_foreground(window, previous);
-                }
-                platform::place_hidden_presence_window(window, bounds)?;
-                window.bounds_changed(cx);
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
-        diagnostics::record(cx, format_args!("input dismissed"));
-        // The typing panel was covering the hover panel's Stop.
-        if self.escape_hold.shows_stop() {
-            self.pointer_changed(cx)?;
-        }
-        Ok(())
-    }
-
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// before any brain message; slice 2 adds `Stop` and slice 4 `ClearDrawing` after it.
     fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -429,7 +309,7 @@ impl Presence {
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
-    /// refuses, in the hover panel and in an open typing panel.
+    /// refuses, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let wanted = self.activity.holds_global_escape() || self.escape_fixture;
         if wanted {
@@ -659,7 +539,7 @@ impl Render for Panel {
 /// The minimum anchored typing surface: one focused input and nothing that can't yet work.
 struct TextView {
     input: Entity<InputState>,
-    /// The Stop fallback, here too because this panel covers the hover panel's.
+    /// The Stop fallback, here too because this panel covers the status panel's.
     stop: bool,
     events: Sender<PresenceEvent>,
 }
@@ -829,10 +709,10 @@ pub(crate) fn open(
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
-    let hover_events = events.clone();
+    let status_events = events.clone();
     panel_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, hover_events, cx)
+            configure_surface(window, PresenceSurface::Panel, status_events, cx)
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let gesture = Rc::new(Cell::new(Gesture::default()));
@@ -912,6 +792,13 @@ fn listen(
         while let Ok(event) = event_changes.recv().await {
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
+                    PresenceEvent::DockPressed { qpc } => {
+                        let visibility = panels::pressed(this.panel_visibility, this.panel_owner());
+                        this.pointer_settle = None;
+                        if visibility != this.panel_visibility {
+                            this.set_panel_from(visibility, Some(qpc), cx)?;
+                        }
+                    }
                     PresenceEvent::PointerChanged => {
                         this.follow_pointer(cx);
                         this.pointer_changed(cx)?;

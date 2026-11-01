@@ -171,7 +171,7 @@ fn rejects_unknown_fields_refs_losses_and_invalid_span_unions() {
 #[test]
 fn stop_targets_require_actual_panel_bounds_and_completed_matching_frames() {
     let prefix = format!(
-        "{GEOMETRY}{COMMIT}hover id=1 qpc=20 visible=true\npaint frame=1 qpc=21 kind=panel hover=1 drawn_epoch=0 drawn_geometry=0 mask_epoch=1\ntarget frame=1 qpc=22 kind=stop hover=1 rect=1,3,2,3 inside=true\ntarget frame=1 qpc=23 kind=stop hover=1 rect=2,4,2,3 inside=true\n{STARTUP}drawn frame=1 qpc=25\n"
+        "{GEOMETRY}{COMMIT}hover id=1 qpc=20 visible=true click_qpc=0\npaint frame=1 qpc=21 kind=panel hover=1 drawn_epoch=0 drawn_geometry=0 mask_epoch=1\ntarget frame=1 qpc=22 kind=stop hover=1 rect=1,3,2,3 inside=true\ntarget frame=1 qpc=23 kind=stop hover=1 rect=2,4,2,3 inside=true\n{STARTUP}drawn frame=1 qpc=25\n"
     );
     let valid = finish(prefix.clone(), 1, 0);
     let target = parsed(&valid).unwrap().stop_target.unwrap();
@@ -186,6 +186,7 @@ fn stop_targets_require_actual_panel_bounds_and_completed_matching_frames() {
         "only the latest validated target is exposed"
     );
     for text in [
+        valid.replace(" click_qpc=0", ""),
         valid.replace("inside=true", "inside=false"),
         valid.replace("kind=stop hover=1", "kind=stop hover=2"),
         valid.replace("target frame=1", "target frame=2"),

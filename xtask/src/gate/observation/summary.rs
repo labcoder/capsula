@@ -127,17 +127,47 @@ fn dock_frame(observation: &Observation, canvas: i64) -> std::result::Result<&Fr
     }
 }
 
-pub(in crate::gate) fn summarize_hover(
+fn clicked_panel_frame(
+    observation: &Observation,
+    click_qpc: i64,
+) -> std::result::Result<&Frame, &'static str> {
+    let mut shows = observation
+        .hovers
+        .iter()
+        .filter(|change| change.visible && change.click_qpc == Some(click_qpc));
+    let change = shows.next().ok_or("MissingClickPanelEntry")?;
+    if shows.next().is_some() {
+        return Err("AmbiguousClickPanelEntry");
+    }
+    let mut frames = observation
+        .frames
+        .iter()
+        .filter(|frame| frame.kind == Kind::Panel && frame.hover == change.id);
+    let frame = frames.next().ok_or("MissingFrame")?;
+    if frames
+        .next()
+        .is_some_and(|next| next.paint_qpc == frame.paint_qpc)
+    {
+        return Err("AmbiguousFirstFrame");
+    }
+    if frame.paint_qpc < change.qpc {
+        return Err("InvalidPanelClock");
+    }
+    Ok(frame)
+}
+
+pub(in crate::gate) fn summarize_click(
     path: &Path,
     pid: u32,
     rows: &mut PresentRows,
     dock_chain: u64,
     output: &Path,
+    injections: &[i64],
 ) -> Result<()> {
     let (observation, validation) = load(path, pid);
     let frequency = observation.startup.map_or(0, |value| value.frequency);
     let mut report = String::from(
-        "hover state-entry-to-present gate; excludes OS mouse routing and photon time; display latency reported separately, not gated\n",
+        "pill button-down dispatch QPC-to-present gate; excludes OS routing and UI-thread queue wait; SendInput-to-present and display reported separately, not gated\n",
     );
     seed_report(&mut report, rows, frequency)?;
     if let Err(error) = &validation {
@@ -146,25 +176,19 @@ pub(in crate::gate) fn summarize_hover(
     let mut pinned = None;
     let mut latencies = Vec::new();
     let mut displays = Vec::new();
+    let mut injection_latencies = Vec::new();
     let mut attempted = 0;
-    for hover in observation.hovers.iter().filter(|hover| hover.visible) {
+    for click in &observation.clicks {
         attempted += 1;
-        write!(report, "hover={} start_qpc={} ", hover.id, hover.qpc)?;
-        let mut frames = observation
-            .frames
-            .iter()
-            .filter(|frame| frame.kind == Kind::Panel && frame.hover == hover.id);
-        let Some(frame) = frames.next() else {
-            writeln!(report, "status=MissingFrame")?;
-            continue;
+        write!(report, "click={attempted} start_qpc={} ", click.qpc)?;
+        let frame = match clicked_panel_frame(&observation, click.qpc) {
+            Ok(frame) => frame,
+            Err(status) => {
+                writeln!(report, "status={status}")?;
+                continue;
+            }
         };
-        if frames
-            .next()
-            .is_some_and(|next| next.paint_qpc == frame.paint_qpc)
-        {
-            writeln!(report, "status=AmbiguousFirstFrame")?;
-            continue;
-        }
+        write!(report, "panel_change={} ", frame.hover)?;
         if validation.is_err() {
             writeln!(report, "status=ObservationInvalid")?;
             continue;
@@ -173,10 +197,6 @@ pub(in crate::gate) fn summarize_hover(
             writeln!(report, "status=MissingCompletion frame={}", frame.id)?;
             continue;
         };
-        if frame.paint_qpc < hover.qpc {
-            writeln!(report, "status=InvalidHoverClock")?;
-            continue;
-        }
         let chain = match rows.non_dock_swapchain(dock_chain, frame.paint_qpc, end, frequency) {
             Ok(chain) => chain,
             Err(status) => {
@@ -190,40 +210,90 @@ pub(in crate::gate) fn summarize_hover(
         }
         pinned = Some(chain);
         let joined = rows.join_present(chain, frame.paint_qpc, end, frequency);
-        if let Some((ticks, display)) = sample(&mut report, frame, hover.qpc, joined, frequency)? {
+        let previous_click = observation.clicks[..attempted - 1]
+            .last()
+            .map_or(0, |previous| previous.qpc);
+        injection_latencies.extend(injection_sample(
+            &mut report,
+            previous_click,
+            click.qpc,
+            injections,
+            &joined,
+            frequency,
+        )?);
+        if let Some((ticks, display)) = sample(&mut report, frame, click.qpc, joined, frequency)? {
             latencies.push(ticks);
             displays.extend(display);
         }
     }
     let budget_pass = statistics(
         &mut report,
-        "hover",
+        "click",
         &mut latencies,
         attempted,
         frequency,
         Some(8),
     )?;
-    statistics(
-        &mut report,
-        "hover_display",
-        &mut displays,
-        attempted,
-        frequency,
-        None,
-    )?;
-    let pass = validation.is_ok() && attempted == 100 && latencies.len() == 100 && budget_pass;
+    for (label, ticks) in [
+        ("click_display", &mut displays),
+        ("click_send_input", &mut injection_latencies),
+    ] {
+        statistics(&mut report, label, ticks, attempted, frequency, None)?;
+    }
+    let shown = observation
+        .hovers
+        .iter()
+        .filter(|change| change.visible)
+        .count();
+    let pass = validation.is_ok()
+        && attempted == 100
+        && shown == 100
+        && latencies.len() == 100
+        && budget_pass;
     writeln!(
         report,
-        "expected_enters=100 panel_swapchain={pinned:?} gate={}",
+        "expected_clicks=100 shown={shown} panel_swapchain={pinned:?} gate={}",
         if pass { "pass" } else { "unmeasured_or_fail" }
     )?;
-    save_report(&output.join("hover-display.txt"), &report)?;
+    save_report(&output.join("click-display.txt"), &report)?;
     ensure!(
         pass,
-        "hover present gate incomplete or over budget; see {}",
+        "click present gate incomplete or over budget; see {}",
         output.display()
     );
     Ok(())
+}
+
+fn injection_sample(
+    report: &mut String,
+    previous_click: i64,
+    click: i64,
+    injections: &[i64],
+    joined: &std::result::Result<MatchedPresent, Join>,
+    frequency: i64,
+) -> Result<Option<i64>> {
+    let mut starts = injections
+        .iter()
+        .copied()
+        .filter(|start| *start > previous_click && *start <= click);
+    let start = starts.next().filter(|_| starts.next().is_none());
+    let ticks = start
+        .zip(joined.as_ref().ok())
+        .and_then(|(start, row)| row.present.qpc.checked_sub(start))
+        .filter(|ticks| *ticks > 0 && frequency > 0);
+    if let (Some(start), Some(ticks)) = (start, ticks) {
+        write!(
+            report,
+            "send_input_qpc={start} send_input_to_present_ms={} ",
+            milliseconds(ticks, frequency)?
+        )?;
+    } else {
+        write!(
+            report,
+            "send_input_qpc=unmeasured send_input_to_present_ms=unmeasured "
+        )?;
+    }
+    Ok(ticks)
 }
 
 fn seed_report(report: &mut String, rows: &PresentRows, frequency: i64) -> Result<()> {
@@ -369,7 +439,17 @@ mod tests {
             let start = 100 + index * 20;
             let paint = start + 1;
             if hover {
-                writeln!(text, "hover id={} qpc={start} visible=true", index + 1).unwrap();
+                writeln!(
+                    text,
+                    "click qpc={start} point=2,2 mask_epoch=1 marker=0x43505331"
+                )
+                .unwrap();
+                writeln!(
+                    text,
+                    "hover id={} qpc={paint} visible=true click_qpc={start}",
+                    index + 1
+                )
+                .unwrap();
             }
             let (kind, epoch, geometry, hover_id, chain) = if hover {
                 ("panel", 0, 0, index + 1, 20)
@@ -457,42 +537,49 @@ mod tests {
     }
 
     #[test]
-    fn hover_pins_only_unique_panel_chain_and_uses_nearest_rank_percentiles() {
+    fn click_pins_only_unique_panel_chain_and_uses_nearest_rank_percentiles() {
         let directory = directory();
-        scenario(&directory, Kind::Panel);
+        let injections = scenario(&directory, Kind::Panel)
+            .iter()
+            .map(|(start, _)| start - 10)
+            .collect::<Vec<_>>();
         let csv_path = directory.join("present.csv");
         let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
-        summarize_hover(
+        summarize_click(
             &directory.join("observer.log"),
             42,
             &mut rows,
             10,
             &directory,
+            &injections,
         )
         .unwrap();
-        let report = fs::read_to_string(directory.join("hover-display.txt")).unwrap();
+        let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
         assert!(
-            report.contains("summary=hover n=100 successful=100 attempted=100 p50_ms=2.000000 p95_ms=2.000000 max_ms=2.000000 budget_ms=8 budget_pass=true"),
+            report.contains("summary=click n=100 successful=100 attempted=100 p50_ms=2.000000 p95_ms=2.000000 max_ms=2.000000 budget_ms=8 budget_pass=true"),
             "all state entries pass on the present endpoint"
         );
-        assert!(report.contains("summary=hover_display n=100 successful=100 attempted=100 p50_ms=15.000000 p95_ms=15.000000 max_ms=15.000000"), "slow display does not fail the present gate");
-        fs::remove_file(directory.join("hover-display.txt")).unwrap();
+        assert!(report.contains("summary=click_display n=100 successful=100 attempted=100 p50_ms=15.000000 p95_ms=15.000000 max_ms=15.000000"), "slow display does not fail the present gate");
+        assert!(report.contains("summary=click_send_input n=100 successful=100 attempted=100 p50_ms=12.000000 p95_ms=12.000000 max_ms=12.000000"));
+        assert!(report.contains("send_input_qpc=90 send_input_to_present_ms=12.000000"));
+        fs::remove_file(directory.join("click-display.txt")).unwrap();
         let csv = fs::read_to_string(&csv_path).unwrap();
         fs::write(&csv_path, csv.replacen("0x14", "0x15", 1)).unwrap();
         let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
         assert!(
-            summarize_hover(
+            summarize_click(
                 &directory.join("observer.log"),
                 42,
                 &mut rows,
                 10,
-                &directory
+                &directory,
+                &injections
             )
             .is_err(),
             "a changed chain cannot pass"
         );
         assert!(
-            fs::read_to_string(directory.join("hover-display.txt"))
+            fs::read_to_string(directory.join("click-display.txt"))
                 .unwrap()
                 .contains("status=PanelSwapchainChanged"),
             "chain failure evidence is retained"
@@ -511,7 +598,71 @@ mod tests {
     }
 
     #[test]
-    fn hover_recovers_the_first_panel_present_only_as_a_derived_seed() {
+    fn click_gate_requires_native_button_down_origin_and_every_click_in_the_denominator() {
+        let directory = directory();
+        scenario(&directory, Kind::Panel);
+        let observer = directory.join("observer.log");
+        let log = fs::read_to_string(&observer).unwrap();
+        let prefix = log.split("close commits=").next().unwrap();
+        let extra = finish(
+            format!("{prefix}click qpc=2090 point=2,2 mask_epoch=1 marker=0x43505331\n"),
+            101,
+            1,
+        );
+        for (log, expected, status) in [
+            (
+                log.replacen("click_qpc=100", "click_qpc=101", 1),
+                "summary=click n=99 successful=99 attempted=100",
+                "status=MissingClickPanelEntry",
+            ),
+            (
+                log.replacen("click_qpc=100", "click_qpc=0", 1),
+                "summary=click n=99 successful=99 attempted=100",
+                "status=MissingClickPanelEntry",
+            ),
+            (
+                log.replacen("hover id=1 qpc=101", "hover id=1 qpc=102", 1),
+                "summary=click n=99 successful=99 attempted=100",
+                "status=InvalidPanelClock",
+            ),
+            (
+                extra,
+                "summary=click n=100 successful=100 attempted=101",
+                "status=MissingClickPanelEntry",
+            ),
+            (
+                finish(
+                    format!("{prefix}hover id=101 qpc=2090 visible=true click_qpc=0\n"),
+                    101,
+                    1,
+                ),
+                "summary=click n=100 successful=100 attempted=100",
+                "shown=101",
+            ),
+            (
+                finish(
+                    format!("{prefix}hover id=101 qpc=2090 visible=true click_qpc=100\n"),
+                    101,
+                    1,
+                ),
+                "summary=click n=99 successful=99 attempted=100",
+                "status=AmbiguousClickPanelEntry",
+            ),
+        ] {
+            fs::write(&observer, log).unwrap();
+            let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
+            assert!(summarize_click(&observer, 42, &mut rows, 10, &directory, &[]).is_err());
+            let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
+            assert!(report.contains(status));
+            assert!(report.contains(expected));
+            assert!(report.contains("gate=unmeasured_or_fail"));
+            fs::remove_file(directory.join("click-display.txt")).unwrap();
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn click_recovers_the_first_panel_present_only_as_a_derived_seed() {
         let directory = directory();
         scenario(&directory, Kind::Panel);
         let csv_path = directory.join("present.csv");
@@ -533,18 +684,19 @@ mod tests {
         .unwrap();
         let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
         assert_eq!(rows.rows().len(), 99, "no invented raw CSV row");
-        summarize_hover(
+        summarize_click(
             &directory.join("observer.log"),
             42,
             &mut rows,
             10,
             &directory,
+            &[],
         )
         .unwrap();
-        let report = fs::read_to_string(directory.join("hover-display.txt")).unwrap();
+        let report = fs::read_to_string(directory.join("click-display.txt")).unwrap();
         let first = report
             .lines()
-            .find(|line| line.starts_with("hover=1 "))
+            .find(|line| line.starts_with("click=1 "))
             .unwrap();
         assert!(first.contains("source=Seed(SeedSource { csv_row: 2, present: Present { qpc: 122"));
         assert!(
@@ -552,7 +704,7 @@ mod tests {
                 .contains("between_presents_ms: Some(20.0), between_display_change_ms: Some(20.0)")
         );
         assert!(first.contains("present_qpc=102 status=Presented present_latency_ms=2.000000 display_status=Displayed displayed_qpc=115 display_latency_ms=15.000000"));
-        assert!(report.contains("summary=hover n=100 successful=100 attempted=100"));
+        assert!(report.contains("summary=click n=100 successful=100 attempted=100"));
         assert!(report.contains("gate=pass"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -584,15 +736,16 @@ mod tests {
                     ("keyboard-display.txt", "chords_display", 101)
                 }
                 Kind::Panel => {
-                    summarize_hover(
+                    summarize_click(
                         &directory.join("observer.log"),
                         42,
                         &mut rows,
                         10,
                         &directory,
+                        &[],
                     )
                     .unwrap();
-                    ("hover-display.txt", "hover_display", 100)
+                    ("click-display.txt", "click_display", 100)
                 }
             };
             let report = fs::read_to_string(directory.join(file)).unwrap();
@@ -647,15 +800,16 @@ mod tests {
                         "total_successful=100 attempted=101",
                     ),
                     Kind::Panel => (
-                        summarize_hover(
+                        summarize_click(
                             &directory.join("observer.log"),
                             42,
                             &mut rows,
                             10,
                             &directory,
+                            &[],
                         ),
-                        "hover-display.txt",
-                        "summary=hover n=99 successful=99 attempted=100",
+                        "click-display.txt",
+                        "summary=click n=99 successful=99 attempted=100",
                     ),
                 };
                 assert!(result.is_err(), "{kind:?} {status} cannot pass");

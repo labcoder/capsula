@@ -131,6 +131,54 @@ impl Session {
         foreground == self.fixture.hwnd
     }
 
+    pub(crate) fn typing_window(&self) -> Result<Window> {
+        self.guard()?;
+        let product = self.product()?;
+        // SAFETY: reads the current foreground handle without changing it.
+        let hwnd = unsafe { GetForegroundWindow() };
+        ensure!(
+            pid(hwnd) == product.pid && class_name(hwnd) == GPUI_WINDOW && Some(hwnd) != self.panel,
+            "foreground is not the bound product's typing window"
+        );
+        Ok(Window {
+            hwnd,
+            pid: product.pid,
+        })
+    }
+
+    /// Shows a separate, unowned fixture window without activating it; sends no input.
+    pub(crate) fn switch_window(&self) -> Result<Window> {
+        self.guard()?;
+        ensure!(
+            self.covered.is_none(),
+            "switch window needs the fixture uncovered"
+        );
+        let result = (|| {
+            let window =
+                super::switch_window::open(self.fixture, self.typing_window()?, self.product()?)?;
+            self.guard()?;
+            Ok(window)
+        })();
+        self.or_abort(result.map_err(|error| super::switch_window::failed(self.fixture, error)))
+    }
+
+    pub(crate) fn edit_point(&self) -> Result<POINT> {
+        self.guard()?;
+        let rect = Window {
+            hwnd: self.edit,
+            pid: self.fixture.pid,
+        }
+        .rect()?;
+        ensure!(
+            rect.left < rect.right && rect.top < rect.bottom,
+            "fixture EDIT has no area"
+        );
+        Ok(POINT {
+            x: rect.left.midpoint(rect.right),
+            y: rect.top.midpoint(rect.bottom),
+        })
+    }
+
     /// The fixture EDIT's click receipts so far.
     pub(crate) fn fixture_receipt(&self) -> Result<Receipt> {
         self.fixture.receipt()
