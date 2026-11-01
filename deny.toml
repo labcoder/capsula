@@ -37,7 +37,7 @@ exceptions = [
 ]
 
 [licenses.private]
-# Capsula's own crates are unpublished and unlicensed until OSC-111.
+# Capsula's own crates are AGPL-3.0-only, a license the list above keeps out of dependencies.
 ignore = true
 
 [bans]
