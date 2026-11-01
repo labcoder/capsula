@@ -140,20 +140,21 @@ async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) 
     tracing::info!(pid = child.id(), "relaunched the shell");
     // A plain thread, not the runtime's blocking pool, so a brain that's done never waits
     // for this shell to end.
+    let (ended, end) = oneshot::channel();
     let watcher = thread::Builder::new()
         .name("shell-watch".to_owned())
-        .spawn(move || {
-            if let Err(error) = child.wait() {
-                tracing::warn!(%error, "lost track of the relaunched shell");
-                // Dropping `exited` would count a shell that may be alive as lost.
-                std::mem::forget(exited);
-            } else if exited.send(()).is_err() {
-                tracing::debug!("the relaunched shell had connected");
-            }
+        .spawn(move || match child.wait() {
+            Ok(_) => ended.send(()).unwrap_or_default(),
+            Err(error) => tracing::warn!(%error, "lost track of the relaunched shell"),
         });
     if let Err(error) = watcher {
         tracing::warn!(%error, "can't watch the relaunched shell");
-        // The closure, and `exited` with it, is gone; wait as if the shell were alive.
+    }
+    if end.await.is_err() {
+        // Unwatched, the shell may still be alive, so it isn't counted as lost.
         std::future::pending::<()>().await;
+    }
+    if exited.send(()).is_err() {
+        tracing::debug!("the relaunched shell had connected");
     }
 }
