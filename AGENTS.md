@@ -13,12 +13,12 @@ A local-first desktop AI presence: a GPUI shell (`capsula.exe`) and a headless b
 
 ## Layout
 ```
-crates/protocol/   brain-shell messages, ids, Secret, and constants.rs (every product name)
+crates/protocol/   shared data: Secret, and constants.rs (every product name)
 crates/scene/      the drawing format, validator and layout (empty until slice 4)
 crates/brain/      bin capsulad: the headless process
 crates/shell/      bin capsula: the GPUI app
 xtask/             dev tasks in Rust; no scripts in other languages
-docs/development/  how Capsula works inside; docs/user/ how people use it
+docs/development/  how Capsula works inside
 locales/en/        every user-facing string (Fluent)
 ```
 

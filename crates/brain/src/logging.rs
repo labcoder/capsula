@@ -26,7 +26,7 @@ pub enum LoggingError {
     AlreadyStarted(#[from] tracing::subscriber::SetGlobalDefaultError),
 }
 
-/// Starts logging to files named `<prefix>.<date>.log` and routes panics there.
+/// Starts logging to files named `<prefix>.<date>.log` and records panics there.
 ///
 /// Writes are synchronous: there are a few lines per state change and none per frame, and a
 /// panic message has to reach the file before a release build aborts.
@@ -55,6 +55,12 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
         .with_max_level(level)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
-    std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
+    // The payload can hold any value an assertion printed, so only the location is logged.
+    std::panic::set_hook(Box::new(|info| {
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()));
+        tracing::error!(location = at.as_deref().unwrap_or("unknown"), "panic");
+    }));
     Ok(())
 }
