@@ -517,7 +517,7 @@ pub(super) fn hover(cx: &mut App, visibility: PanelVisibility, trigger_qpc: Opti
     });
 }
 
-/// Records where the hover panel's Stop button painted, in physical screen pixels, as the
+/// Records where the status panel's Stop button painted, in physical screen pixels, as the
 /// target a harness click aims at. Its frame is the panel's, stamped first in the same draw;
 /// `inside` says the bounds lie within the panel's client area.
 pub(super) fn target(window: &Window, cx: &mut App, bounds: Bounds<Pixels>) {

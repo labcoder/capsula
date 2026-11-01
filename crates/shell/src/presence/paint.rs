@@ -165,7 +165,7 @@ impl Element for PanelStamp {
     }
 }
 
-/// The hover panel's Stop button, unchanged: every phase goes to the button, and with
+/// The status panel's Stop button, unchanged: every phase goes to the button, and with
 /// `--gate-observer` its painted bounds are recorded as the harness's click target.
 #[derive(Debug)]
 pub(super) struct Target<E>(pub(super) E);

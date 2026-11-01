@@ -70,7 +70,8 @@ panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Capsula still has the front and that window still exists.
 Switching to another window also hides it and keeps the draft, without restoring the old
 foreground: the user has already chosen the new window. Hidden and stale deactivation events
-do not dismiss a newly active panel. The panel is hidden, not closed, so its draft survives.
+do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
+[presence](presence.md). The panel is hidden, not closed, so its draft survives.
 Hover never opens over it or dismisses it.
 It has no Send, history or other controls yet.
 

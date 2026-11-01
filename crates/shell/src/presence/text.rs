@@ -13,21 +13,13 @@ enum Hide {
     Deactivated,
 }
 
-pub(super) struct Typing<T> {
-    input: T,
+#[derive(Default)]
+pub(super) struct Typing {
     pub(super) visible: bool,
     active_seen: bool,
 }
 
-impl<T> Typing<T> {
-    fn new(input: T) -> Self {
-        Self {
-            input,
-            visible: false,
-            active_seen: false,
-        }
-    }
-
+impl Typing {
     fn open(&mut self) {
         if !self.visible {
             self.active_seen = false;
@@ -55,7 +47,8 @@ impl<T> Typing<T> {
 pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
-    pub(super) typing: Typing<Entity<InputState>>,
+    pub(super) typing: Typing,
+    input: Entity<InputState>,
     /// The window in front before the panel took focus, given back when it closes.
     previous: Option<Foreground>,
     /// Input diagnostics only: the draft at the last dismiss, compared on the next open.
@@ -85,8 +78,8 @@ impl Presence {
         let draft = text
             .draft
             .take()
-            .map(|saved| diagnostics::draft(&saved, &text.typing.input.read(cx).value()));
-        let input = text.typing.input.clone();
+            .map(|saved| diagnostics::draft(&saved, &text.input.read(cx).value()));
+        let input = text.input.clone();
         let activated = text
             .window
             .update(cx, |_, window, cx| {
@@ -175,7 +168,8 @@ impl Presence {
         });
         Ok(TextPanel {
             window,
-            typing: Typing::new(view.read(cx).input.clone()),
+            typing: Typing::default(),
+            input: view.read(cx).input.clone(),
             view,
             previous: None,
             draft: None,
@@ -193,12 +187,12 @@ impl Presence {
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
-        // shortcut: rapid native away/back within one queued GPUI activation can hide an active box; revisit if reproducible.
+        // shortcut: rapid native away/back within one queued GPUI activation can hide an active box, revisit if reproducible.
         if !text.typing.close(reason) {
             return Ok(());
         }
         if cx.has_global::<Diagnostics>() {
-            text.draft = Some(text.typing.input.read(cx).value());
+            text.draft = Some(text.input.read(cx).value());
         }
         let previous = text
             .previous
@@ -228,14 +222,13 @@ mod tests {
     use super::{Hide, Typing};
 
     #[test]
-    fn reopening_active_input_keeps_blur_dismissal_and_the_draft() {
-        let mut typing = Typing::new(String::from("unfinished draft"));
+    fn reopening_active_input_keeps_blur_dismissal() {
+        let mut typing = Typing::default();
         typing.open();
         typing.activated();
         typing.open();
         assert!(typing.close(Hide::Deactivated));
         assert!(!typing.visible);
-        assert_eq!(typing.input, "unfinished draft");
         typing.open();
         assert!(!typing.close(Hide::Deactivated));
         assert!(typing.visible);
