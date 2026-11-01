@@ -48,4 +48,5 @@ locales/en/        every user-facing string (Fluent)
 - Screenshots go only to the model the user chose.
 - Never read or store Claude Code's credentials.
 - Clean room: nothing from HeyClicky's code, protocol, schemas, prompts, assets or identifiers.
-- New dependencies must pass `deny.toml`'s license list. Nothing GPL-family ships.
+- Capsula is `AGPL-3.0-only`, but no one else's GPL, LGPL or AGPL code ships in it: new
+  dependencies must pass `deny.toml`'s license list.
