@@ -11,11 +11,23 @@ use anyhow::{Context as _, Result, bail};
 use capsula_protocol::constants::PIPE_TAP_ENV;
 use capsula_protocol::tap::{self, Direction};
 
+#[cfg(windows)]
+mod bench;
+#[cfg(windows)]
+mod platform;
+
 fn usage() -> String {
     format!(
         "usage: cargo xtask <task>
 
 tasks:
+  bench idle [--duration 1..60] [--baseline <release-directory> | --panel]
+                    release idle CPU/private bytes on Rez (default 60s)
+                    refuses existing product processes; normal-priority launch,
+                    30s settle, GetProcessTimes + private bytes, bounded autoquit;
+                    CPU is percent of one core, not the whole machine
+                    baseline uses that directory and closes its own shell window
+                    panel opens the current shell's panel before settling, without input
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
@@ -34,6 +46,10 @@ fn main() -> Result<()> {
                 .next()
                 .with_context(|| format!("pipe-dump needs a file\n\n{}", usage()))?,
         ),
+        #[cfg(windows)]
+        Some("bench") => bench::run(args),
+        #[cfg(not(windows))]
+        Some("bench") => bail!("idle benchmarking requires Windows on Rez"),
         Some(other) => bail!("unknown task {other:?}\n\n{}", usage()),
     }
 }
