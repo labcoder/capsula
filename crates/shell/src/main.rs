@@ -39,6 +39,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let flags = match presence::Launch::parse(std::env::args().skip(1)) {
+        Ok(flags) => flags,
+        Err(error) => {
+            tracing::error!(%error, "can't start with these flags");
+            return ExitCode::FAILURE;
+        }
+    };
+    let observer = match presence::Observer::prepare(flags.observer()) {
+        Ok(observer) => observer,
+        Err(error) => {
+            tracing::error!(%error, "can't create the --gate-observer file");
+            return ExitCode::FAILURE;
+        }
+    };
     let diagnostics = match presence::Diagnostics::prepare() {
         Ok(diagnostics) => diagnostics,
         Err(error) => {
@@ -52,19 +66,30 @@ fn main() -> ExitCode {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
-            let started = presence::open(state_changes, link.clone(), diagnostics, cx)
-                .map_err(|error| tracing::error!(%error, "can't open the dock"))
-                .and_then(|()| {
-                    start
-                        .spawn()
-                        .map_err(|error| tracing::error!(%error, "can't start the link"))
-                });
+            let started = presence::open(
+                state_changes,
+                link.clone(),
+                &flags,
+                diagnostics,
+                observer,
+                cx,
+            )
+            .map_err(|error| tracing::error!(%error, "can't open the dock"))
+            .and_then(|()| {
+                start
+                    .spawn()
+                    .map_err(|error| tracing::error!(%error, "can't start the link"))
+            });
             if started.is_err() {
                 link.begin_quit();
                 let diagnostics = presence::diagnostics::release(cx);
+                let observer = presence::observer::release(cx);
                 let told = cx.background_executor().spawn(async move {
                     link.finish_quit();
                     drop(diagnostics);
+                    if let Some(observer) = observer {
+                        observer.finish();
+                    }
                 });
                 cx.spawn(async move |cx| {
                     told.await;

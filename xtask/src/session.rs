@@ -6,26 +6,35 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use capsula_protocol::constants::{BRAIN_EXE, OBJECT_PREFIX, SHELL_EXE};
+use windows::Win32::Foundation::RECT;
 
 use crate::platform::{
     self,
     input_session::{
-        self as native, FixtureEscMode, InputEdge, Layout, Layouts, Session, Window, WindowKind,
+        self as native, FixtureEscMode, InputEdge, Layout, Layouts, Session, Target, Window,
+        WindowKind,
     },
 };
 
 mod diagnostics;
-use diagnostics::{Mark, Record, pair_paints};
+use diagnostics::pair_paints;
+pub(crate) use diagnostics::{Mark, Record};
+
+#[derive(Debug)]
+pub(crate) struct PhaseContext<'a> {
+    pub(crate) dock: RECT,
+    pub(crate) overlay: RECT,
+    pub(crate) observer: &'a Path,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
+pub(crate) enum Phase {
     Keyboard,
     Hover,
     Focus,
@@ -33,46 +42,28 @@ enum Phase {
     Esc,
 }
 
-impl Phase {
-    fn parse(value: Option<&str>) -> Result<Self> {
-        match value {
-            Some("keyboard") => Ok(Self::Keyboard),
-            Some("hover") => Ok(Self::Hover),
-            Some("focus") => Ok(Self::Focus),
-            Some("layouts") => Ok(Self::Layouts),
-            Some("esc") => Ok(Self::Esc),
-            _ => bail!("use input-session <keyboard|hover|focus|layouts|esc>"),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
-struct Counts {
-    attempts: u32,
-    sent: u32,
-    behavior_pass: u32,
-    behavior_fail: u32,
+pub(crate) struct Counts {
+    pub(crate) attempts: u32,
+    pub(crate) sent: u32,
+    pub(crate) behavior_pass: u32,
+    pub(crate) behavior_fail: u32,
+    altgr_windows: Vec<(i64, i64)>,
 }
 
 #[derive(Debug)]
-struct Diagnostics {
+pub(crate) struct Diagnostics {
     path: PathBuf,
 }
 
 impl Diagnostics {
-    fn new() -> Result<Self> {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "{OBJECT_PREFIX}-input-{}-{stamp}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory)?;
-        Ok(Self {
+    pub(crate) fn in_directory(directory: &Path) -> Self {
+        Self {
             path: directory.join("milestones.log"),
-        })
+        }
     }
 
-    fn argument(&self) -> OsString {
+    pub(crate) fn argument(&self) -> OsString {
         let mut argument = OsString::from("--input-diagnostics=");
         argument.push(&self.path);
         argument
@@ -90,7 +81,24 @@ impl Diagnostics {
             .collect()
     }
 
-    fn observe(
+    pub(crate) fn canvas_pairs(&self) -> Result<Vec<(i64, i64)>> {
+        let (pairs, _) = pair_paints(&self.read()?)?;
+        Ok(pairs
+            .into_iter()
+            .map(|(start, paint, _)| (start, paint))
+            .collect())
+    }
+
+    pub(crate) fn await_started(&self, session: &Session) -> Result<()> {
+        self.observe(session, 0, |records| {
+            records
+                .iter()
+                .any(|record| matches!(record.mark, Mark::EscapeState { .. }))
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn observe(
         &self,
         session: &Session,
         since: i64,
@@ -114,129 +122,9 @@ impl Diagnostics {
             session.wait(Duration::from_millis(1))?;
         }
     }
-
-    fn remove(&self) -> Result<()> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        fs::remove_dir(self.path.parent().context("diagnostic directory missing")?)?;
-        Ok(())
-    }
 }
 
-pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
-    let phase = Phase::parse(args.next().as_deref())?;
-    ensure!(
-        args.next().is_none(),
-        "input-session accepts exactly one phase"
-    );
-    let end = Instant::now() + Duration::from_secs(110);
-    run_once(phase, FixtureEscMode::Free, end)?;
-    if phase == Phase::Esc {
-        run_once(phase, FixtureEscMode::Reserved, end)?;
-    }
-    Ok(())
-}
-
-fn run_once(phase: Phase, contested: FixtureEscMode, end: Instant) -> Result<()> {
-    let checkpoint = native::input_checkpoint()?;
-    ensure!(
-        Instant::now() + Duration::from_secs(25) < end,
-        "insufficient phase budget for another owned launch and cleanup"
-    );
-    ensure!(
-        platform::processes()?.is_empty(),
-        "refusing input session: product processes already exist"
-    );
-    let exe = std::env::current_exe()?;
-    let release = exe
-        .parent()
-        .and_then(|path| path.parent())
-        .context("xtask is not inside a Cargo profile directory")?
-        .join("release");
-    let shell_exe = release.join(SHELL_EXE);
-    ensure!(
-        shell_exe.is_file() && release.join(BRAIN_EXE).is_file(),
-        "build both release binaries before the approved session"
-    );
-    let diagnostics = Diagnostics::new()?;
-    let mut fixture = match native::spawn_fixture(&exe, contested) {
-        Ok(fixture) => fixture,
-        Err(error) => {
-            return combine([
-                Err(error.context("starting separate-process fixture")),
-                diagnostics.remove(),
-            ]);
-        }
-    };
-    let mut fixture_window = None;
-    let mut shell_window = None;
-    let mut shell = None;
-    let mut helpers = Vec::new();
-    let mut counts = Counts::default();
-    let measurement = (|| {
-        fixture_window = Some(discover(&mut fixture, WindowKind::Fixture)?);
-        let mut options = vec![diagnostics.argument()];
-        if phase == Phase::Esc {
-            options.push(OsString::from("--esc-fixture"));
-        }
-        let cleanup_start = end
-            .checked_sub(Duration::from_secs(15))
-            .context("cleanup reserve exceeds phase deadline")?;
-        let launch_at = Instant::now();
-        let quit_budget = cleanup_start
-            .checked_duration_since(launch_at)
-            .context("no shell autoquit budget remains")?
-            .min(Duration::from_secs(90));
-        let input_end = launch_at
-            .checked_add(quit_budget)
-            .and_then(|quit| quit.checked_sub(Duration::from_secs(1)))
-            .context("no bounded input interval remains")?;
-        shell = Some(platform::launch(
-            &shell_exe,
-            u64::try_from(quit_budget.as_millis())?,
-            options,
-        )?);
-        let child = shell
-            .as_mut()
-            .context("shell launch did not return a child")?;
-        shell_window = Some(discover(child, WindowKind::ProductProxy)?);
-        helpers = owned_helpers(child.id())?;
-        let fixture = fixture_window.context("fixture window missing")?;
-        let shell = shell_window.context("shell proxy missing")?;
-        let mut session = Session::new(fixture, shell, input_end)?;
-        session.activate_fixture(checkpoint)?;
-        diagnostics.observe(&session, 0, |records| {
-            records
-                .iter()
-                .any(|record| matches!(record.mark, Mark::EscapeState { .. }))
-        })?;
-        exercise(phase, contested, &mut session, &mut counts, &diagnostics)
-    })();
-    let cleanup = cleanup(
-        &mut fixture,
-        fixture_window,
-        shell.as_mut(),
-        shell_window,
-        helpers,
-        end,
-    );
-    let final_diagnostics = check_flushed(phase, contested, &diagnostics, &mut counts);
-    println!(
-        "phase={phase:?} contested={contested:?} attempts={} accepted_sequences={} sequence_failures={} behavior_pass={} behavior_fail={}; Alt-Tab unverified",
-        counts.attempts,
-        counts.sent,
-        counts.attempts - counts.sent,
-        counts.behavior_pass,
-        counts.behavior_fail
-    );
-    let removed = diagnostics.remove();
-    combine([measurement, cleanup, final_diagnostics, removed])
-}
-
-fn check_flushed(
+pub(crate) fn check_flushed(
     phase: Phase,
     contested: FixtureEscMode,
     diagnostics: &Diagnostics,
@@ -268,18 +156,7 @@ fn check_flushed(
         );
     }
     if phase == Phase::Layouts {
-        let quiet = records.iter().all(|record| {
-            !matches!(
-                record.mark,
-                Mark::Applied { .. } | Mark::Painted(_) | Mark::Hold(_) | Mark::Opened(_)
-            )
-        });
-        counts.behavior_pass += u32::from(quiet);
-        counts.behavior_fail += u32::from(!quiet);
-        ensure!(
-            quiet,
-            "AltGr layout checks emitted Listening/hold/input-open milestones"
-        );
+        check_layout_diagnostics(&records, counts)?;
     }
     if phase == Phase::Focus {
         let actions = records
@@ -292,7 +169,7 @@ fn check_flushed(
             })
             .count();
         ensure!(
-            actions == 1
+            actions == 2
                 && records
                     .iter()
                     .any(|record| record.mark == Mark::EscapeDismiss),
@@ -335,11 +212,46 @@ fn check_flushed(
     Ok(())
 }
 
+fn check_layout_diagnostics(records: &[Record], counts: &mut Counts) -> Result<()> {
+    let count = |mark: Mark| records.iter().filter(|record| record.mark == mark).count();
+    let quiet = records.iter().all(|record| match record.mark {
+        Mark::Applied { start_qpc, .. } => !counts
+            .altgr_windows
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&start_qpc)),
+        Mark::Hold(_) | Mark::Opened(_) => false,
+        _ => true,
+    });
+    counts.behavior_pass += u32::from(quiet);
+    counts.behavior_fail += u32::from(!quiet);
+    ensure!(
+        quiet,
+        "AltGr-only windows emitted Listening or layouts emitted an unintended hold/input opening"
+    );
+    if counts.sent == 4 {
+        ensure!(
+            counts.altgr_windows.len() == 2
+                && records
+                    .iter()
+                    .filter(|record| matches!(record.mark, Mark::Applied { .. }))
+                    .count()
+                    == 2
+                && count(Mark::Resting) == 2,
+            "positive left-modifier chords did not complete under both layouts"
+        );
+    }
+    for (start, end) in &counts.altgr_windows {
+        println!("altgr_only_window start_qpc={start} next_left_chord_qpc={end}");
+    }
+    Ok(())
+}
+
 fn exercise_escape(
     contested: FixtureEscMode,
     session: &mut Session,
     counts: &mut Counts,
     diagnostics: &Diagnostics,
+    context: &PhaseContext<'_>,
 ) -> Result<()> {
     diagnostics.observe(session, 0, |records| {
         records.iter().any(|record| {
@@ -358,10 +270,10 @@ fn exercise_escape(
             "contested Escape fallback panel was not visible before any pointer movement"
         );
         counts.attempts += 1;
-        let [enter, leave] = session.hover_points()?;
-        session.move_pointer(enter, session.shell)?;
+        let [enter, leave] = session.hover_points(context.dock, context.overlay)?;
+        session.move_pointer(enter, Target::Product)?;
         session.wait(Duration::from_millis(100))?;
-        session.move_pointer(leave, session.fixture)?;
+        session.move_pointer(leave, Target::Edit)?;
         counts.sent += 1;
         session.wait(Duration::from_millis(300))?;
         let visible = session.panel_visible()?;
@@ -380,7 +292,7 @@ fn exercise_escape(
     counts.attempts += 1;
     session.tap(0x01)?;
     let since = session
-        .first_qpc
+        .last_qpc
         .context("scoped Escape injection QPC missing")?;
     counts.sent += 1;
     diagnostics.observe(session, since, |records| {
@@ -415,9 +327,7 @@ fn exercise_escape(
     Ok(())
 }
 
-fn cleanup(
-    fixture: &mut Child,
-    fixture_window: Option<Window>,
+pub(crate) fn stop_product(
     shell: Option<&mut Child>,
     shell_window: Option<Window>,
     helpers: Vec<(&str, platform::Process, u32)>,
@@ -427,13 +337,9 @@ fn cleanup(
     if let Some(window) = shell_window {
         cleanup.push(window.close());
     }
-    if let Some(window) = fixture_window {
-        cleanup.push(window.close());
-    }
     if let Some(child) = shell {
         cleanup.push(wait_child(child, end));
     }
-    cleanup.push(wait_child(fixture, end));
     for (role, process, expected) in helpers {
         cleanup.push((|| {
             loop {
@@ -456,7 +362,7 @@ fn cleanup(
     combine(cleanup)
 }
 
-fn owned_helpers(shell_pid: u32) -> Result<Vec<(&'static str, platform::Process, u32)>> {
+pub(crate) fn owned_helpers(shell_pid: u32) -> Result<Vec<(&'static str, platform::Process, u32)>> {
     let until = Instant::now() + Duration::from_secs(3);
     loop {
         let processes = platform::processes()?;
@@ -487,7 +393,7 @@ fn owned_helpers(shell_pid: u32) -> Result<Vec<(&'static str, platform::Process,
     }
 }
 
-fn discover(child: &mut Child, kind: WindowKind) -> Result<Window> {
+pub(crate) fn discover(child: &mut Child, kind: WindowKind) -> Result<Window> {
     let end = Instant::now() + Duration::from_secs(3);
     loop {
         let found = native::owned_window(child, kind);
@@ -498,7 +404,7 @@ fn discover(child: &mut Child, kind: WindowKind) -> Result<Window> {
     }
 }
 
-fn wait_child(child: &mut Child, end: Instant) -> Result<()> {
+pub(crate) fn wait_child(child: &mut Child, end: Instant) -> Result<()> {
     loop {
         if let Some(status) = child.try_wait()? {
             println!("owned pid {} exit={status}", child.id());
@@ -516,7 +422,7 @@ fn wait_child(child: &mut Child, end: Instant) -> Result<()> {
     }
 }
 
-fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
+pub(crate) fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
     let errors = results
         .into_iter()
         .filter_map(Result::err)
@@ -538,39 +444,33 @@ fn short_chord(session: &mut Session) -> Result<i64> {
     Ok(make_qpc)
 }
 
-fn exercise(
+pub(crate) fn exercise(
     phase: Phase,
     contested: FixtureEscMode,
     session: &mut Session,
     counts: &mut Counts,
     diagnostics: &Diagnostics,
+    context: &PhaseContext<'_>,
 ) -> Result<()> {
+    println!("phase_observer={}", context.observer.display());
     let result = (|| {
         if phase != Phase::Esc {
             session.wait(Duration::from_millis(100))?;
         }
         match phase {
             Phase::Keyboard => keyboard(session, counts, diagnostics),
-            Phase::Hover => hover(session, counts),
+            Phase::Hover => hover(session, counts, context),
             Phase::Focus => focus(session, counts, diagnostics),
-            Phase::Layouts => layouts(session, counts),
-            Phase::Esc => exercise_escape(contested, session, counts, diagnostics),
+            Phase::Layouts => layouts(session, counts, diagnostics),
+            Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
         }
     })();
     let release = session.release_injected();
-    let cursor = if release.is_ok() {
-        session.restore_cursor()
-    } else {
-        Ok("skipped_injected_key_release_failed")
-    };
-    if let Ok(status) = &cursor {
-        println!("cursor_restore={status}");
-    }
     println!(
         "SendInput accepted_batches={} first_qpc={:?} last_qpc={:?} qpc_frequency={}; injection timestamps only, NOT WM_INPUT-to-present latency",
         session.batches, session.first_qpc, session.last_qpc, session.qpc_frequency
     );
-    combine([result, release, cursor.map(|_| ())])
+    combine([result, release])
 }
 
 fn keyboard(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {
@@ -659,12 +559,12 @@ fn keyboard(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostic
     Ok(())
 }
 
-fn hover(session: &mut Session, counts: &mut Counts) -> Result<()> {
-    let [enter, leave] = session.hover_points()?;
+fn hover(session: &mut Session, counts: &mut Counts, context: &PhaseContext<'_>) -> Result<()> {
+    let [enter, leave] = session.hover_points(context.dock, context.overlay)?;
     for index in 0..100 {
         session.wait(Duration::from_micros(1000 + (index * 997) % 6944))?;
         counts.attempts += 1;
-        session.move_pointer(enter, session.shell)?;
+        session.move_pointer(enter, Target::Product)?;
         let enter_qpc = session.last_qpc;
         session.wait(Duration::from_millis(100))?;
         let entered = session.panel_visible()?;
@@ -673,7 +573,7 @@ fn hover(session: &mut Session, counts: &mut Counts) -> Result<()> {
             entered,
             "hover entry did not make an owned panel HWND visible"
         );
-        session.move_pointer(leave, session.fixture)?;
+        session.move_pointer(leave, Target::Edit)?;
         let leave_qpc = session.last_qpc;
         let leave_at = Instant::now();
         let until = leave_at + Duration::from_millis(300);
@@ -708,14 +608,13 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
     if !records
         .iter()
         .any(|record| record.mark == Mark::Opened(true))
-        || !session.shell.is_foreground()
+        || !session.product()?.is_foreground()
     {
         counts.behavior_fail += 1;
         bail!("completed short double tap did not foreground the product; no text injected");
     }
     session.tap(0x1e)?;
     session.tap(0x01)?;
-    counts.sent += 1;
     diagnostics.observe(session, since, |records| {
         records.iter().any(|record| record.mark == Mark::Dismissed)
             && records
@@ -726,8 +625,47 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
         counts.behavior_fail += 1;
         bail!("Escape did not return foreground to the fixture");
     }
+    session.wait(Duration::from_millis(325))?;
+    let reopened_since = short_chord(session)?;
+    session.wait(Duration::from_millis(50))?;
+    short_chord(session)?;
+    let reopened = diagnostics.observe(session, reopened_since, |records| {
+        records
+            .iter()
+            .any(|record| matches!(record.mark, Mark::Opened(_)))
+            && records
+                .iter()
+                .any(|record| matches!(record.mark, Mark::Draft { .. }))
+    })?;
+    if !reopened
+        .iter()
+        .any(|record| record.mark == Mark::Opened(true))
+        || !session.product()?.is_foreground()
+        || !reopened.iter().any(|record| {
+            record.mark
+                == (Mark::Draft {
+                    nonempty: true,
+                    preserved: true,
+                })
+        })
+    {
+        counts.behavior_fail += 1;
+        bail!("draft reopen was unfocused, not foreground, empty or not preserved");
+    }
+    session.tap(0x01)?;
+    diagnostics.observe(session, reopened_since, |records| {
+        records.iter().any(|record| record.mark == Mark::Dismissed)
+            && records
+                .iter()
+                .any(|record| record.mark == Mark::EscapeDismiss)
+    })?;
+    ensure!(
+        session.fixture.is_foreground(),
+        "draft dismissal did not return foreground to the fixture"
+    );
     let (_, before) = session.fixture.counts()?;
     session.tap(0x01)?;
+    counts.sent += 1;
     session.wait(Duration::from_millis(100))?;
     let (_, after) = session.fixture.counts()?;
     if after != before + 1 {
@@ -738,14 +676,15 @@ fn focus(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) 
     Ok(())
 }
 
-fn layouts(session: &mut Session, counts: &mut Counts) -> Result<()> {
-    let layouts = Layouts::capture(session)?;
+fn layouts(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {
+    let layouts = Layouts::capture(session);
     let exercise = (|| {
         for selection in [Layout::German, Layout::Spanish] {
             counts.attempts += 1;
             Layouts::load(session, selection)?;
             session.clear_fixture()?;
             session.modifier(0x138, InputEdge::Down)?;
+            let altgr_start = session.last_qpc.context("AltGr injection QPC missing")?;
             session.tap(match selection {
                 Layout::German => 0x10,
                 Layout::Spanish => 0x03,
@@ -759,6 +698,17 @@ fn layouts(session: &mut Session, counts: &mut Counts) -> Result<()> {
             } else {
                 counts.behavior_fail += 1;
             }
+            counts.attempts += 1;
+            let since = short_chord(session)?;
+            counts.altgr_windows.push((altgr_start, since));
+            counts.sent += 1;
+            diagnostics.observe(session, since, |records| {
+                records
+                    .iter()
+                    .any(|record| matches!(record.mark, Mark::Applied { .. }))
+                    && records.iter().any(|record| record.mark == Mark::Resting)
+            })?;
+            counts.behavior_pass += 1;
         }
         ensure!(
             counts.behavior_fail == 0,
@@ -770,27 +720,4 @@ fn layouts(session: &mut Session, counts: &mut Counts) -> Result<()> {
     let restore = layouts.restore(session);
     combine([exercise, release, restore])?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Phase;
-
-    #[test]
-    fn only_explicit_known_phases_are_accepted() {
-        for (name, phase) in [
-            ("keyboard", Phase::Keyboard),
-            ("hover", Phase::Hover),
-            ("focus", Phase::Focus),
-            ("layouts", Phase::Layouts),
-            ("esc", Phase::Esc),
-        ] {
-            assert_eq!(Phase::parse(Some(name)).unwrap(), phase, "known phase");
-        }
-        assert!(Phase::parse(None).is_err(), "phase is required");
-        assert!(
-            Phase::parse(Some("all")).is_err(),
-            "no unbounded combined session"
-        );
-    }
 }

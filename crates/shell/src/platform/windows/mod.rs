@@ -2,12 +2,16 @@
 
 mod hit_mask;
 mod keyboard;
+mod observer;
 mod pipe;
 mod presence;
 mod process;
 
 pub(crate) use hit_mask::MaskUpdate;
 pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
+pub(crate) use observer::{
+    ProxyHandle, ProxyNote, client_origin, performance_frequency, window_handle,
+};
 pub(crate) use pipe::{PipeClient, session_id};
 pub(crate) use presence::{
     Capture, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,

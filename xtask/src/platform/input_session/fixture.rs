@@ -1,43 +1,91 @@
-//! Separate-process EDIT fixture and its physical-input/session guards.
+//! Separate-process EDIT fixture: the owner's feel verdicts and physical Ready, then the
+//! physical-input/session guards, click receipts, Esc lease and cover placement.
 
-use std::cell::RefCell;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, ActivateKeyboardLayout, GetKeyboardLayout,
-    GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL, LoadKeyboardLayoutW, UnloadKeyboardLayout,
-};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_APP};
+use std::cell::{Cell, RefCell};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use capsula_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetFocus, MOD_NOREPEAT, RegisterHotKey, SetFocus, UnregisterHotKey,
+    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, ActivateKeyboardLayout, EnableWindow, GetCapture, GetFocus,
+    GetKeyState, GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
+    LoadKeyboardLayoutW, MOD_NOREPEAT, RegisterHotKey, SetFocus, UnloadKeyboardLayout,
+    UnregisterHotKey, VK_LBUTTON,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
+    GetCurrentInputMessageSource, GetRawInputData, HRAWINPUT, IMDT_MOUSE, IMO_HARDWARE,
+    IMO_INJECTED, INPUT_MESSAGE_SOURCE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
     RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW, GetMessageW,
-    GetPropW, IsWindow, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNOACTIVATE, SetPropW,
-    SetTimer, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_INPUT, WM_KEYDOWN, WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WTS_SESSION_LOCK,
+    BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_STYLE, GetClientRect, GetForegroundWindow,
+    GetMessageExtraInfo, GetMessageTime, GetMessageW, GetPropW, GetWindowLongPtrW, ISMEX_NOSEND,
+    InSendMessageEx, IsWindow, MSG, MoveWindow, PostQuitMessage, RegisterClassW, SW_HIDE,
+    SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_INPUT, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use super::{MARKER, size};
+use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
+use super::{
+    FixtureEscMode, MARKER, MAX_COVER, MAX_LIFETIME, desktop_rect, last_input, pack, size, unpack,
+};
 
 pub(super) const ABORT: PCWSTR = w!("InputSessionAbort");
 pub(super) const CHANGES: PCWSTR = w!("InputSessionChanges");
 pub(super) const ESCAPES: PCWSTR = w!("InputSessionEscapes");
+/// Set once Ready armed the guards.
 pub(super) const READY: PCWSTR = w!("InputSessionReady");
-const ESC_HELD: PCWSTR = w!("InputSessionEscHeld");
+/// `GetLastInputInfo` just before the guards were armed.
+pub(super) const ARMED_INPUT: PCWSTR = w!("InputSessionArmedInput");
+pub(super) const FEEL: PCWSTR = w!("InputSessionFeel");
+pub(super) const ESC_HELD: PCWSTR = w!("InputSessionEscHeld");
+pub(super) const CLICKS: PCWSTR = w!("InputSessionClicks");
+pub(super) const CLICK_QPC: PCWSTR = w!("InputSessionClickQpc");
+pub(super) const CLICK_POINT: PCWSTR = w!("InputSessionClickPoint");
+
+pub(super) const LOAD_LAYOUT: u32 = WM_APP + 17;
+pub(super) const RESTORE_LAYOUTS: u32 = WM_APP + 18;
+pub(super) const ESCAPE_LEASE: u32 = WM_APP + 19;
+pub(super) const COVER: u32 = WM_APP + 20;
+pub(super) const UNCOVER: u32 = WM_APP + 21;
+
+/// How often one fixture may take or give back its Esc reservation.
+const MAX_ESCAPE_TOGGLES: u32 = 64;
+
+/// The framed window, and its EDIT inside it.
+const FRAME: [i32; 4] = [80, 80, 640, 400];
+const EDIT_FRAME: [i32; 4] = [12, 84, 600, 260];
+
+const GESTURES: [&str; 3] = ["Hold", "Double-tap", "Stretch"];
+
+#[derive(Debug, Clone, Copy)]
+struct Controls {
+    edit: HWND,
+    ready: HWND,
+    verdicts: [HWND; 3],
+}
+
+thread_local! {
+    static CONTROLS: Cell<Option<Controls>> = const { Cell::new(None) };
+    static PRESS: Cell<Press> = Cell::new(Press::default());
+    static ESCAPE_TOGGLES: Cell<u32> = const { Cell::new(0) };
+}
+
+pub(super) fn class_name() -> String {
+    format!("{OBJECT_PREFIX}-input-fixture")
+}
 
 pub(super) fn property(window: HWND, name: PCWSTR) -> usize {
     // SAFETY: the name is a static NUL-terminated property key; no pointer is dereferenced.
@@ -54,6 +102,10 @@ fn set_property(window: HWND, name: PCWSTR, count: usize) -> Result<()> {
         )
     }?;
     Ok(())
+}
+
+fn controls() -> Result<Controls> {
+    CONTROLS.get().context("fixture controls are missing")
 }
 
 fn physical_input(param: LPARAM) -> Result<bool> {
@@ -89,6 +141,143 @@ fn physical_input(param: LPARAM) -> Result<bool> {
     Ok(usize::try_from(marker)? != MARKER)
 }
 
+/// Where the button message being handled came from. A sent message never counts as the
+/// mouse, whatever input came before it.
+fn origin() -> Origin {
+    // SAFETY: reports whether this thread is inside a message sent by another thread.
+    if unsafe { InSendMessageEx(None) } != ISMEX_NOSEND {
+        return Origin::Other;
+    }
+    let mut source = INPUT_MESSAGE_SOURCE::default();
+    // SAFETY: source is a writable output describing the message this thread is handling.
+    if unsafe { GetCurrentInputMessageSource(&raw mut source) }.is_err() {
+        return Origin::Other;
+    }
+    if source.originId == IMO_INJECTED {
+        Origin::Injected
+    } else if source.originId == IMO_HARDWARE && source.deviceType == IMDT_MOUSE {
+        Origin::Mouse
+    } else {
+        Origin::Other
+    }
+}
+
+/// Whether the input state, which only real input changes, shows the left button down.
+fn button_held() -> bool {
+    // SAFETY: reads this thread's synchronous input state for one button; nothing is changed.
+    let state = unsafe { GetKeyState(i32::from(VK_LBUTTON.0)) };
+    state < 0
+}
+
+/// A mouse message's client point.
+fn client_point(lp: LPARAM) -> POINT {
+    let [x0, x1, y0, y1, ..] = lp.0.to_le_bytes();
+    POINT {
+        x: i32::from(i16::from_le_bytes([x0, x1])),
+        y: i32::from(i16::from_le_bytes([y0, y1])),
+    }
+}
+
+fn inside(window: HWND, point: POINT) -> bool {
+    let mut client = RECT::default();
+    // SAFETY: client is writable and the window is this thread's live button.
+    unsafe { GetClientRect(window, &raw mut client) }.is_ok()
+        && point.x >= client.left
+        && point.x < client.right
+        && point.y >= client.top
+        && point.y < client.bottom
+}
+
+unsafe extern "system" fn ready_proc(
+    window: HWND,
+    message: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    root: usize,
+) -> LRESULT {
+    let root = HWND(std::ptr::with_exposed_provenance_mut(root));
+    if message == WM_LBUTTONDOWN {
+        let mut press = PRESS.get();
+        press.down(MouseSnapshot {
+            origin: origin(),
+            held: button_held(),
+            inside: inside(window, client_point(lp)),
+            capture_released: false,
+        });
+        PRESS.set(press);
+    }
+    if message != WM_LBUTTONUP {
+        // SAFETY: this callback is installed by SetWindowSubclass and forwards the unchanged message.
+        return unsafe { DefSubclassProc(window, message, wp, lp) };
+    }
+    let mut up = MouseSnapshot {
+        origin: origin(),
+        held: button_held(),
+        inside: inside(window, client_point(lp)),
+        capture_released: false,
+    };
+    // SAFETY: reads the tick of the message being handled; nothing changes.
+    let up_time = unsafe { GetMessageTime() }.cast_unsigned();
+    // SAFETY: the button handles its own release first, which ends its normal capture.
+    let result = unsafe { DefSubclassProc(window, message, wp, lp) };
+    // SAFETY: reads this thread's capture without changing it.
+    up.capture_released = unsafe { GetCapture() } != window;
+    let mut press = PRESS.get();
+    let ready = press.up(up);
+    PRESS.set(press);
+    if ready && property(root, READY) == 0 && arm(root, up_time).is_err() {
+        // SAFETY: a failed arm stops only this fixture's own message loop.
+        unsafe { PostQuitMessage(1) };
+    }
+    result
+}
+
+/// Freezes the verdicts, focuses the EDIT, arms the physical-input and session guards, and only
+/// then publishes Ready. Input after the Ready release that the guards came too late to see
+/// moves the last-input time past `up_time`, and aborts; anything later reaches the guards,
+/// whose queued `WM_INPUT` aborts before the quiet second can pass.
+fn arm(root: HWND, up_time: u32) -> Result<()> {
+    let controls = controls()?;
+    let mut selections = [0; 3];
+    for (selection, verdict) in selections.iter_mut().zip(controls.verdicts) {
+        // SAFETY: an in-process query of this thread's own combo box.
+        let selected = unsafe { SendMessageW(verdict, CB_GETCURSEL, None, None) };
+        *selection = usize::try_from(selected.0)?;
+        // SAFETY: disables this thread's own combo box; it returns the prior state, not an error.
+        let _was_disabled = unsafe { EnableWindow(verdict, false) };
+    }
+    set_property(root, FEEL, Feel::encode(selections))?;
+    // SAFETY: the owner's click made this fixture active; focus moves only inside it.
+    unsafe { SetFocus(Some(controls.edit)) }?;
+    // SAFETY: disables this thread's own button; it returns the prior state, not an error.
+    let _was_disabled = unsafe { EnableWindow(controls.ready, false) };
+    let devices = [
+        RAWINPUTDEVICE {
+            usUsagePage: 1,
+            usUsage: 6,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: root,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 1,
+            usUsage: 2,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: root,
+        },
+    ];
+    // SAFETY: both device entries target this process's live window and use the documented structure size.
+    unsafe { RegisterRawInputDevices(&devices, size::<RAWINPUTDEVICE>()) }?;
+    // SAFETY: notifications target this process's live window and current session only.
+    unsafe { WTSRegisterSessionNotification(root, NOTIFY_FOR_THIS_SESSION) }?;
+    let armed = last_input()?;
+    if armed != up_time {
+        set_property(root, ABORT, 1)?;
+    }
+    set_property(root, ARMED_INPUT, usize::try_from(armed)?)?;
+    set_property(root, READY, 1)
+}
+
 unsafe extern "system" fn edit_proc(
     window: HWND,
     message: u32,
@@ -97,15 +286,41 @@ unsafe extern "system" fn edit_proc(
     _id: usize,
     root: usize,
 ) -> LRESULT {
-    if message == WM_KEYDOWN && wp.0 == 0x1b {
-        let root = HWND(std::ptr::with_exposed_provenance_mut(root));
-        if set_property(root, ESCAPES, property(root, ESCAPES) + 1).is_err() {
-            // SAFETY: this stops only the fixture's own message loop.
-            unsafe { PostQuitMessage(1) };
-        }
+    let root = HWND(std::ptr::with_exposed_provenance_mut(root));
+    let counted = if message == WM_KEYDOWN && wp.0 == 0x1b {
+        set_property(root, ESCAPES, property(root, ESCAPES) + 1)
+    } else if message == WM_LBUTTONDOWN && property(root, READY) != 0 {
+        receive_click(window, root, lp)
+    } else {
+        Ok(())
+    };
+    if counted.is_err() {
+        // SAFETY: this stops only the fixture's own message loop.
+        unsafe { PostQuitMessage(1) };
     }
     // SAFETY: this callback is installed by SetWindowSubclass and forwards the unchanged message.
     unsafe { DefSubclassProc(window, message, wp, lp) }
+}
+
+/// Records a button-down the EDIT received from the session's tagged input: when, where on
+/// screen, and how many so far. Untagged clicks leave no count, time or point.
+fn receive_click(edit: HWND, root: HWND, lp: LPARAM) -> Result<()> {
+    // SAFETY: reads the extra info of the input message being handled; nothing changes.
+    let tagged = unsafe { GetMessageExtraInfo() }.0.cast_unsigned() == MARKER;
+    if !tagged {
+        // Only the session's own clicks count; an owner's click aborts through raw input.
+        return Ok(());
+    }
+    let mut qpc = 0;
+    // SAFETY: qpc is a writable counter output.
+    unsafe { QueryPerformanceCounter(&raw mut qpc) }?;
+    let mut point = client_point(lp);
+    // SAFETY: point is writable and the EDIT is this thread's live window.
+    let converted = unsafe { ClientToScreen(edit, &raw mut point) }.as_bool();
+    ensure!(converted, "click point conversion failed");
+    set_property(root, CLICK_QPC, usize::try_from(qpc)?)?;
+    set_property(root, CLICK_POINT, usize::try_from(pack(point.x, point.y))?)?;
+    set_property(root, CLICKS, property(root, CLICKS) + 1)
 }
 
 unsafe extern "system" fn fixture_proc(
@@ -114,15 +329,27 @@ unsafe extern "system" fn fixture_proc(
     wp: WPARAM,
     lp: LPARAM,
 ) -> LRESULT {
-    if message == LOAD_LAYOUT {
-        return load_layout(window, wp.0).map_or(LRESULT(0), |layout| {
-            LRESULT(layout.0.expose_provenance().cast_signed())
-        });
+    let answer = |done: Result<()>| LRESULT(isize::from(done.is_ok()));
+    match message {
+        LOAD_LAYOUT => {
+            return load_layout(window, wp.0).map_or(LRESULT(0), |layout| {
+                LRESULT(layout.0.expose_provenance().cast_signed())
+            });
+        }
+        RESTORE_LAYOUTS => return answer(restore_layouts()),
+        ESCAPE_LEASE => {
+            let mode = if wp.0 == 0 {
+                FixtureEscMode::Free
+            } else {
+                FixtureEscMode::Reserved
+            };
+            return answer(escape_lease(window, mode));
+        }
+        COVER => return answer(cover(window, wp, lp)),
+        UNCOVER => return answer(uncover(window)),
+        _ => {}
     }
-    if message == RESTORE_LAYOUTS {
-        return LRESULT(isize::from(restore_layouts().is_ok()));
-    }
-    if message == WM_SETFOCUS && focus_edit(window).is_err() {
+    if message == WM_SETFOCUS && focus_edit().is_err() {
         // SAFETY: failed fixture focus stops only this fixture's own message loop.
         unsafe { PostQuitMessage(1) };
     }
@@ -166,10 +393,96 @@ unsafe extern "system" fn fixture_proc(
     unsafe { DefWindowProcW(window, message, wp, lp) }
 }
 
+/// Takes or gives back the Esc reservation, at most [`MAX_ESCAPE_TOGGLES`] times.
+fn escape_lease(root: HWND, mode: FixtureEscMode) -> Result<()> {
+    let reserve = mode.is_reserved();
+    if (property(root, ESC_HELD) != 0) == reserve {
+        return Ok(());
+    }
+    let toggles = ESCAPE_TOGGLES.get();
+    ensure!(toggles < MAX_ESCAPE_TOGGLES, "Esc lease toggled too often");
+    ESCAPE_TOGGLES.set(toggles + 1);
+    if reserve {
+        // SAFETY: only the bounded fixture's own window holds this temporary registration.
+        unsafe { RegisterHotKey(Some(root), 1, MOD_NOREPEAT, 0x1b) }?;
+    } else {
+        // SAFETY: releases only this fixture's own Esc registration.
+        unsafe { UnregisterHotKey(Some(root), 1) }?;
+    }
+    set_property(root, ESC_HELD, usize::from(reserve))
+}
+
+/// Restyles the fixture's own window and places it without activation or a Z-order change.
+fn place(root: HWND, style: WINDOW_STYLE, [x, y, width, height]: [i32; 4]) -> Result<()> {
+    // SAFETY: changes only this thread's own top-level window style.
+    let _previous = unsafe { SetWindowLongPtrW(root, GWL_STYLE, isize::try_from(style.0)?) };
+    // SAFETY: reads back this thread's own window style.
+    let applied = u32::try_from(unsafe { GetWindowLongPtrW(root, GWL_STYLE) } & 0xffff_ffff)?;
+    ensure!(applied & style.0 == style.0, "fixture style change failed");
+    // SAFETY: moves only this thread's own window; NOACTIVATE and NOZORDER keep focus and order.
+    unsafe {
+        SetWindowPos(
+            root,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )
+    }?;
+    Ok(())
+}
+
+fn cover(root: HWND, wp: WPARAM, lp: LPARAM) -> Result<()> {
+    ensure!(property(root, READY) != 0, "cover needs Ready first");
+    let [x, y] = unpack(u64::try_from(wp.0)?);
+    let [width, height] = unpack(u64::try_from(lp.0)?);
+    let [left, top, desktop_width, desktop_height] = desktop_rect();
+    ensure!(
+        (1..=MAX_COVER).contains(&width)
+            && (1..=MAX_COVER).contains(&height)
+            && x >= left
+            && y >= top
+            && x + width <= left + desktop_width
+            && y + height <= top + desktop_height,
+        "cover placement out of bounds"
+    );
+    let controls = controls()?;
+    for control in controls.verdicts.into_iter().chain([controls.ready]) {
+        // SAFETY: hides this thread's own control; it returns the prior visibility.
+        let _was_visible = unsafe { ShowWindow(control, SW_HIDE) };
+    }
+    place(root, WS_POPUP | WS_VISIBLE, [x, y, width, height])?;
+    // SAFETY: resizes this thread's own EDIT to fill the borderless fixture.
+    unsafe { MoveWindow(controls.edit, 0, 0, width, height, true) }?;
+    Ok(())
+}
+
+fn uncover(root: HWND) -> Result<()> {
+    let controls = controls()?;
+    place(root, WS_OVERLAPPEDWINDOW | WS_VISIBLE, FRAME)?;
+    let [x, y, width, height] = EDIT_FRAME;
+    // SAFETY: puts this thread's own EDIT back in its framed place.
+    unsafe { MoveWindow(controls.edit, x, y, width, height, true) }?;
+    for control in controls.verdicts.into_iter().chain([controls.ready]) {
+        // SAFETY: shows this thread's own control without activating anything.
+        let _was_visible = unsafe { ShowWindow(control, SW_SHOWNA) };
+    }
+    Ok(())
+}
+
 pub(crate) fn fixture() -> Result<()> {
+    let lifetime = std::env::args()
+        .find_map(|arg| arg.strip_prefix("--lifetime-secs=").map(str::parse::<u64>))
+        .context("the fixture needs --lifetime-secs")??;
+    ensure!(
+        (1..=MAX_LIFETIME.as_secs()).contains(&lifetime),
+        "fixture lifetime must be 1 s to 1 h"
+    );
     // SAFETY: this obtains the fixture executable's own loaded module.
     let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }?.into();
-    let class_name = HSTRING::from(format!("{OBJECT_PREFIX}-input-fixture"));
+    let class_name = HSTRING::from(class_name());
     let class = WNDCLASSW {
         lpfnWndProc: Some(fixture_proc),
         hInstance: instance,
@@ -180,6 +493,7 @@ pub(crate) fn fixture() -> Result<()> {
     let atom = unsafe { RegisterClassW(&raw const class) };
     ensure!(atom != 0, "fixture class registration failed");
     let title = HSTRING::from(format!("{DISPLAY_NAME} input fixture"));
+    let [x, y, width, height] = FRAME;
     // SAFETY: the registered class has a static callback; there is no borrowed creation data.
     let root = unsafe {
         CreateWindowExW(
@@ -187,17 +501,17 @@ pub(crate) fn fixture() -> Result<()> {
             &class_name,
             &title,
             WS_OVERLAPPEDWINDOW,
-            80,
-            80,
-            640,
-            400,
+            x,
+            y,
+            width,
+            height,
             None,
             None,
             Some(instance),
             None,
         )
     }?;
-    let result = run_fixture(root, instance);
+    let result = run_fixture(root, instance, u32::try_from(lifetime * 1000)?);
     let restored = restore_layouts();
     // SAFETY: querying a potentially destroyed fixture handle is supported by IsWindow.
     if unsafe { IsWindow(Some(root)) }.as_bool() {
@@ -213,68 +527,99 @@ pub(crate) fn fixture() -> Result<()> {
     }
 }
 
-fn run_fixture(root: HWND, instance: HINSTANCE) -> Result<()> {
-    // SAFETY: EDIT is a standard control and its parent is our own live window.
-    let edit = unsafe {
+fn child(
+    class: PCWSTR,
+    text: &HSTRING,
+    style: WINDOW_STYLE,
+    [x, y, width, height]: [i32; 4],
+    root: HWND,
+    instance: HINSTANCE,
+) -> Result<HWND> {
+    // SAFETY: a standard control class, parented to this thread's own live window.
+    Ok(unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
-            w!("EDIT"),
-            w!(""),
-            WS_CHILD | WS_VISIBLE | WS_BORDER,
-            12,
-            12,
-            580,
-            300,
+            class,
+            text,
+            WS_CHILD | WS_VISIBLE | style,
+            x,
+            y,
+            width,
+            height,
             Some(root),
             None,
             Some(instance),
             None,
         )
-    }?;
+    }?)
+}
+
+fn verdict_box(index: usize, gesture: &str, root: HWND, instance: HINSTANCE) -> Result<HWND> {
+    let x = 12 + 200 * i32::try_from(index)?;
+    let combo = child(
+        w!("COMBOBOX"),
+        &HSTRING::new(),
+        WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST.cast_unsigned()),
+        [x, 12, 190, 160],
+        root,
+        instance,
+    )?;
+    for verdict in Verdict::ALL {
+        let item = HSTRING::from(format!("{gesture}: {verdict:?}"));
+        // SAFETY: an in-process message; the combo box copies the live string.
+        let added = unsafe {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(item.as_ptr().expose_provenance().cast_signed())),
+            )
+        };
+        ensure!(added.0 >= 0, "verdict list setup failed");
+    }
+    // SAFETY: an in-process message selecting the first item, Unrated.
+    let selected = unsafe { SendMessageW(combo, CB_SETCURSEL, None, None) };
+    ensure!(selected.0 == 0, "verdict default selection failed");
+    Ok(combo)
+}
+
+fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> {
+    let edit = child(
+        w!("EDIT"),
+        &HSTRING::new(),
+        WS_BORDER,
+        EDIT_FRAME,
+        root,
+        instance,
+    )?;
+    let ready = child(
+        w!("BUTTON"),
+        &HSTRING::from("Ready"),
+        WINDOW_STYLE(BS_PUSHBUTTON.cast_unsigned()),
+        [12, 48, 120, 28],
+        root,
+        instance,
+    )?;
+    let mut verdicts = [HWND::default(); 3];
+    for (index, (slot, gesture)) in verdicts.iter_mut().zip(GESTURES).enumerate() {
+        *slot = verdict_box(index, gesture, root, instance)?;
+    }
+    CONTROLS.set(Some(Controls {
+        edit,
+        ready,
+        verdicts,
+    }));
+    let root_data = root.0.expose_provenance();
     // SAFETY: this live EDIT belongs to this thread; the callback's root handle remains live until destruction.
-    let installed =
-        unsafe { SetWindowSubclass(edit, Some(edit_proc), 1, root.0.expose_provenance()) }
-            .as_bool();
-    ensure!(installed, "fixture edit subclass failed");
-    let devices = [
-        RAWINPUTDEVICE {
-            usUsagePage: 1,
-            usUsage: 6,
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: root,
-        },
-        RAWINPUTDEVICE {
-            usUsagePage: 1,
-            usUsage: 2,
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: root,
-        },
-    ];
-    // SAFETY: both device entries target this process's live window and use the documented structure size.
-    unsafe { RegisterRawInputDevices(&devices, size::<RAWINPUTDEVICE>()) }?;
-    // SAFETY: notifications target this process's live window and current session only.
-    unsafe { WTSRegisterSessionNotification(root, NOTIFY_FOR_THIS_SESSION) }?;
+    let edit_hooked = unsafe { SetWindowSubclass(edit, Some(edit_proc), 1, root_data) }.as_bool();
+    // SAFETY: this live button belongs to this thread; the callback's root handle remains live until destruction.
+    let ready_hooked =
+        unsafe { SetWindowSubclass(ready, Some(ready_proc), 1, root_data) }.as_bool();
+    ensure!(edit_hooked && ready_hooked, "fixture subclass failed");
     // SAFETY: this window owns timer 1 and the callback is delivered through its message loop.
-    let timer = unsafe { SetTimer(Some(root), 1, 105_000, None) };
+    let timer = unsafe { SetTimer(Some(root), 1, lifetime_ms, None) };
     ensure!(timer != 0, "fixture autoexit timer failed");
-    for key in 1..256 {
-        // SAFETY: querying the down state does not generate input or record key identities.
-        if unsafe { GetAsyncKeyState(key) } < 0 {
-            set_property(root, ABORT, 1)?;
-            break;
-        }
-    }
-    ensure!(
-        property(root, ABORT) == 0,
-        "physical activity before fixture readiness"
-    );
-    if std::env::args().any(|arg| arg == "--reserve-escape") {
-        // SAFETY: only the bounded fixture's own window holds this temporary registration.
-        unsafe { RegisterHotKey(Some(root), 1, MOD_NOREPEAT, 0x1b) }?;
-        set_property(root, ESC_HELD, 1)?;
-    }
-    set_property(root, READY, 1)?;
-    // SAFETY: guards are armed; this shows only our fixture without activating it. False means previously hidden.
+    // SAFETY: shows only our fixture without activating it. False means previously hidden.
     let _was_visible = unsafe { ShowWindow(root, SW_SHOWNOACTIVATE) };
     let mut message = MSG::default();
     loop {
@@ -295,9 +640,9 @@ fn run_fixture(root: HWND, instance: HINSTANCE) -> Result<()> {
     }
 }
 
-fn focus_edit(root: HWND) -> Result<()> {
-    // SAFETY: only the standard EDIT child of this fixture's own window is searched.
-    let edit = unsafe { FindWindowExW(Some(root), None, w!("EDIT"), None) }?;
+/// Keeps keyboard focus on the EDIT whenever the fixture is activated.
+fn focus_edit() -> Result<()> {
+    let edit = controls()?.edit;
     // SAFETY: the fixture is already receiving focus; only its live child receives keyboard focus.
     if let Err(error) = unsafe { SetFocus(Some(edit)) } {
         // SAFETY: this reads focus on the fixture thread; a NULL previous focus is not itself failure.
@@ -306,9 +651,6 @@ fn focus_edit(root: HWND) -> Result<()> {
     }
     Ok(())
 }
-
-pub(super) const LOAD_LAYOUT: u32 = WM_APP + 17;
-pub(super) const RESTORE_LAYOUTS: u32 = WM_APP + 18;
 
 thread_local! {
     static LAYOUTS: RefCell<Option<FixtureLayouts>> = const { RefCell::new(None) };

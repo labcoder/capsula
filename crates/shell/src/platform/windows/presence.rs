@@ -2,7 +2,7 @@
 //! proxy, and the window styles that keep presence windows out of the taskbar and focus. The
 //! proxy's alpha mask lives in `hit_mask.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
@@ -49,6 +49,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
+use super::observer::{self, Observe, ProxyHandle};
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -78,6 +79,8 @@ pub(crate) enum PresenceEvent {
     Escape,
     /// The user picked Quit in the tray menu.
     Quit,
+    /// `--gate-observer` only: the harness asked for one dock repaint.
+    Repaint,
 }
 
 /// The localized text of the tray icon and its menu.
@@ -128,6 +131,9 @@ pub(crate) enum PresenceError {
     /// The hit mask was empty, couldn't be allocated, or was smaller than the proxy.
     #[error("the hit mask doesn't fit the proxy")]
     MaskSize,
+    /// A frame id didn't fit a message parameter.
+    #[error("the frame id doesn't fit a message")]
+    FrameId,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
@@ -181,6 +187,8 @@ struct ProxyState {
     retry_enabled: Cell<bool>,
     /// Set by `watch_pointer`; the next pointer move over the proxy sends `PointerMoved`.
     watch: Cell<bool>,
+    /// Set only by `--gate-observer`.
+    observe: OnceCell<Observe>,
 }
 
 /// The tray icon and the dock's hit-test proxy: an invisible, non-activating per-pixel-alpha
@@ -227,6 +235,7 @@ impl PresenceNative {
             position: Cell::new(1),
             retry_enabled: Cell::new(false),
             watch: Cell::new(false),
+            observe: OnceCell::new(),
         });
         // Every field Drop cleans up starts empty, so a failure below undoes only what was done.
         let mut native = Self {
@@ -341,6 +350,15 @@ impl PresenceNative {
     /// Fails when Windows refuses the affinity.
     pub(crate) fn set_capture(&self, capture: Capture) -> Result<(), PresenceError> {
         set_affinity(self.hwnd, capture)
+    }
+
+    /// `--gate-observer` only: stamps frame completions, harness repaint requests and tagged
+    /// clicks on the proxy and hands them to `observe`. Returns where frame ids go.
+    pub(crate) fn observe(&self, observe: Observe) -> ProxyHandle {
+        if self.state().observe.set(observe).is_err() {
+            tracing::warn!("the proxy is already observed");
+        }
+        ProxyHandle(self.hwnd)
     }
 
     pub(crate) fn enable_retry(&self) {
@@ -665,7 +683,7 @@ fn place(hwnd: HWND, [x, y, width, height]: [i32; 4]) -> windows::core::Result<(
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, flags) }
 }
 
-fn hwnd_of(window: &Window) -> Result<HWND, PresenceError> {
+pub(super) fn hwnd_of(window: &Window) -> Result<HWND, PresenceError> {
     let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window)?.as_raw() else {
         return Err(PresenceError::NotWin32);
     };
@@ -806,7 +824,7 @@ fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
 }
 
 /// The signed low and high words Win32 packs into one parameter.
-fn signed_words(value: usize) -> [i32; 2] {
+pub(super) fn signed_words(value: usize) -> [i32; 2] {
     let word = |shift: u32| {
         u16::try_from((value >> shift) & 0xFFFF)
             .unwrap_or(0)
@@ -844,6 +862,9 @@ unsafe extern "system" fn proxy_proc(
         // SAFETY: consumes the strong reference added immediately above, not the owner's reference.
         let state = unsafe { Rc::from_raw(state) };
         if state.keys.on_message(hwnd, message, wparam, lparam) {
+            return LRESULT(0);
+        }
+        if observer::on_message(state.observe.get(), message, wparam) {
             return LRESULT(0);
         }
         if EscapeHotkey::fired(message, wparam) {

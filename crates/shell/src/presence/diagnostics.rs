@@ -80,6 +80,13 @@ pub(super) fn record(cx: &mut App, line: Arguments<'_>) {
     }
 }
 
+/// Compares the draft a typing panel was dismissed with to what it holds on reopening:
+/// `[nonempty, preserved]`. An empty draft is never preserved, so it can't pass as kept.
+pub(super) fn draft(saved: &str, current: &str) -> [bool; 2] {
+    let nonempty = !saved.is_empty();
+    [nonempty, nonempty && saved == current]
+}
+
 /// Takes the writer's guard, so Quit drops it off the UI thread: dropping it waits for the
 /// worker to write what's queued.
 pub(crate) fn release(cx: &mut App) -> Option<WorkerGuard> {
@@ -92,7 +99,7 @@ pub(crate) fn release(cx: &mut App) -> Option<WorkerGuard> {
 mod tests {
     use std::time::Instant;
 
-    use super::PendingPaint;
+    use super::{PendingPaint, draft};
     use crate::input::{Edge, Effect, Event, Gesture, Key};
 
     fn listening(at: Instant) -> Gesture {
@@ -135,5 +142,14 @@ mod tests {
         pending.follow(Effect::HoldStarted, &gesture, at);
         assert_eq!(pending.take(), Some(at));
         assert_eq!(pending.take(), None);
+    }
+
+    #[test]
+    fn only_an_unchanged_nonempty_draft_is_preserved() {
+        assert_eq!(draft("", ""), [false, false]);
+        assert_eq!(draft("note", "note"), [true, true]);
+        assert_eq!(draft("note", ""), [true, false]);
+        assert_eq!(draft("note", "not"), [true, false]);
+        assert_eq!(draft("", "typed after"), [false, false]);
     }
 }

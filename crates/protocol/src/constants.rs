@@ -57,6 +57,14 @@ pub const SHELL_MUTEX: &str = if cfg!(debug_assertions) {
 /// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
 
+/// The `dwExtraInfo` the approved input-session harness puts on every input it injects, so the
+/// shell's gate observer and the harness's own fixture tell it from the user's input.
+pub const INPUT_SESSION_MARKER: usize = 0x4350_5331;
+
+/// `capsula --gate-observer` only: posted to the dock's hit proxy (`proxy_hwnd` in the observer's
+/// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
+pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
+
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
 /// `cargo xtask pipe-dump`. Capabilities are zeroed in the recording.
 pub const PIPE_TAP_ENV: &str = "CAPSULA_PIPE_TAP";
