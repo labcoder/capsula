@@ -643,6 +643,9 @@ unsafe extern "system" fn proxy_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_MOUSEACTIVATE {
+        return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX));
+    }
     // SAFETY: on the window's thread; the slot holds 0 or the state `PresenceNative` owns.
     let slot = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
     let state = std::ptr::with_exposed_provenance::<ProxyState>(slot.cast_unsigned());
@@ -716,7 +719,16 @@ unsafe extern "system" fn hover_subclass(
 
 #[cfg(test)]
 mod tests {
-    use super::signed_words;
+    use super::{proxy_proc, signed_words};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{MA_NOACTIVATE, WM_MOUSEACTIVATE};
+
+    #[test]
+    fn resting_proxy_refuses_mouse_activation_without_swallowing_the_click() {
+        // SAFETY: no pointer-valued message data; Win32 validates the empty HWND if reached.
+        let response = unsafe { proxy_proc(HWND::default(), WM_MOUSEACTIVATE, WPARAM(0), LPARAM(0)) };
+        assert_eq!(response, LRESULT(isize::try_from(MA_NOACTIVATE).unwrap()));
+    }
 
     #[test]
     fn packed_pointer_coordinates_preserve_negative_monitor_origins() {

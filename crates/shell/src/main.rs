@@ -1,5 +1,5 @@
 //! `capsula`, Capsula's shell. It has no console window.
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod credential;
 mod link;
