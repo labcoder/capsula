@@ -12,10 +12,23 @@ path = "src/main.rs"
 
 [dependencies]
 capsula-protocol.workspace = true
+getrandom.workspace = true
+keyring.workspace = true
+serde.workspace = true
+subtle = "2"
 thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

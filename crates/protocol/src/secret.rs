@@ -2,10 +2,14 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A value that prints as `***`. Read it only at the moment of use, through [`Secret::expose`].
 ///
 /// It deliberately has no `Display`, so it can't be formatted into user text or a log line.
-#[derive(Clone, PartialEq, Eq)]
+/// It serializes as the bare value, because the handshake has to carry it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Secret<T>(T);
 
 impl<T> Secret<T> {
