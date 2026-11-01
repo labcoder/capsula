@@ -49,9 +49,9 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
         existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
     );
 
-    let mut child = platform::launch(&shell, (seconds + 15) * 1000)
+    let mut child = platform::launch(&shell, (seconds + 40) * 1000)
         .context("launching release shell at normal priority")?;
-    let deadline = Instant::now() + Duration::from_secs(seconds + 35);
+    let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
     let measurement = measure(child.id(), seconds, &mut tracked);
     let cleanup = wait_for_exit(&mut child, &tracked, deadline);
@@ -65,18 +65,18 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 }
 
 fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Process)>) -> Result<()> {
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(30));
     tracked.push(("shell", Process::open(shell_pid)?));
     let entries = platform::processes()?;
     let brain = entries
         .iter()
         .find(|entry| !entry.shell && entry.parent == shell_pid)
-        .context("shell did not start a brain within the 5s settle period")?;
+        .context("shell did not start a brain within the 30s settle period")?;
     tracked.push(("brain", Process::open(brain.pid)?));
     let worker = entries
         .iter()
         .find(|entry| !entry.shell && entry.parent == brain.pid)
-        .context("brain did not start a screen worker within the 5s settle period")?;
+        .context("brain did not start a screen worker within the 30s settle period")?;
     tracked.push(("screen-worker", Process::open(worker.pid)?));
     ensure!(
         entries.len() == 3,
@@ -102,7 +102,7 @@ fn measure(shell_pid: u32, seconds: u64, tracked: &mut Vec<(&'static str, Proces
         "product process set changed during measurement"
     );
     println!(
-        "idle release: 5s settle; sequential endpoint counters included in wall; user+kernel CPU / wall; 100% = one core; private bytes (not peak)"
+        "idle release: 30s settle; sequential endpoint counters included in wall; user+kernel CPU / wall; 100% = one core; private bytes (not peak)"
     );
     println!("role pid wall_s cpu_s cpu_% private_start_B private_end_B");
     let mut total_cpu = Duration::ZERO;

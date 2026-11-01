@@ -23,7 +23,7 @@ fn usage() -> String {
 tasks:
   bench idle [--duration 1..60]  release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
-                    5s settle, GetProcessTimes + private bytes, bounded autoquit;
+                    30s settle, GetProcessTimes + private bytes, bounded autoquit;
                     CPU is percent of one core, not the whole machine
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file

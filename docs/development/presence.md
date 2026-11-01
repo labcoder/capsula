@@ -37,7 +37,7 @@ bounded launch check, not a performance benchmark or permission to inject input.
 
 For idle measurements, build the workspace in release mode, then run `cargo xtask bench idle`.
 It refuses an existing product process, launches the release shell at normal priority with a
-bounded graceful-quit deadline, settles for five seconds, and samples user plus kernel time
+bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
 The task checks that the same shell, brain and worker survive the sample and waits for all
