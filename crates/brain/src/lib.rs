@@ -3,6 +3,7 @@
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
 
+pub mod coordinator;
 pub mod credential;
 pub mod ipc;
 pub mod logging;

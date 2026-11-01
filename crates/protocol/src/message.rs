@@ -46,11 +46,48 @@ impl Hello {
     }
 }
 
+/// The most steps one run may draw (architecture v1 §5.2).
+pub const MAX_STEPS: usize = 64;
+
+/// The longest placeholder step label, in bytes [guess].
+pub const MAX_STEP_LABEL: usize = 256;
+
+/// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
+/// and tested; slice 4 replaces it with the `scene` v1 step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Step {
+    /// What the step shows, at most [`MAX_STEP_LABEL`] bytes.
+    pub label: String,
+}
+
+/// Where a run is, as the shell shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Phase {
+    /// Accepted; nothing has streamed yet.
+    Thinking,
+    /// Text or steps are arriving.
+    Answering,
+    /// Finished.
+    Done,
+    /// Stopped before it finished.
+    Interrupted,
+    /// Ended by an error.
+    Failed,
+}
+
 /// Shell to brain, on the control pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlToBrain {
     /// The handshake; first and only once.
     Hello(Hello),
+    /// The first Esc, after the shell has already stopped locally. `revealed` lists the steps
+    /// whose entrance had finished, at most [`MAX_STEPS`], so the thread records what stayed.
+    Stop {
+        /// The run the shell stopped.
+        run: RunId,
+        /// Indices of the steps that stayed on screen.
+        revealed: Vec<u32>,
+    },
     /// The user chose Quit: the brain ends its helpers, deletes the capability and exits, and
     /// doesn't relaunch the shell.
     Quitting,
@@ -64,6 +101,15 @@ pub enum ControlToShell {
         /// This brain's incarnation.
         incarnation: Incarnation,
     },
+    /// A run's phase changed.
+    RunState {
+        /// The run.
+        run: RunId,
+        /// Its thread.
+        thread: ThreadId,
+        /// Its new phase.
+        phase: Phase,
+    },
     /// The shell is from another build. The brain exits after sending this, so the shell can
     /// start the brain from its own folder.
     BuildMismatch {
@@ -72,9 +118,37 @@ pub enum ControlToShell {
     },
 }
 
-/// Shell to brain, on the data pipe. Slice 2 adds the streams.
+/// Shell to brain, on the data pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataToBrain {
     /// The handshake, repeated so the data pipe is authenticated on its own.
     Hello(Hello),
+    /// Typed chat: a new turn in `thread`, or in a new thread when it's `None`.
+    TextSubmit {
+        /// The thread to continue.
+        thread: Option<ThreadId>,
+        /// What the user typed.
+        text: String,
+    },
+}
+
+/// Brain to shell, on the data pipe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataToShell {
+    /// More of the assistant's answer.
+    AssistantText {
+        /// The run it belongs to.
+        run: RunId,
+        /// The new text.
+        delta: String,
+    },
+    /// One step, sent only once the brain has committed it.
+    StepCommit {
+        /// The run it belongs to.
+        run: RunId,
+        /// Its place in the run's drawing, from 0.
+        index: u32,
+        /// The step.
+        step: Step,
+    },
 }

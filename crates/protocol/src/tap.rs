@@ -5,7 +5,7 @@
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, payload_len};
-use crate::message::{ControlToBrain, ControlToShell, DataToBrain};
+use crate::message::{ControlToBrain, ControlToShell, DataToBrain, DataToShell};
 
 /// Which way a frame travelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,10 +40,9 @@ impl Record {
             (Pipe::Data, Direction::ToBrain) => {
                 decode::<DataToBrain>(&self.payload).map(|m| format!("{m:?}"))
             }
-            (Pipe::Data, Direction::ToShell) => Ok(format!(
-                "{} bytes (no data messages to the shell yet)",
-                self.payload.len()
-            )),
+            (Pipe::Data, Direction::ToShell) => {
+                decode::<DataToShell>(&self.payload).map(|m| format!("{m:?}"))
+            }
         };
         decoded.unwrap_or_else(|error| format!("undecodable {} bytes: {error}", self.payload.len()))
     }
