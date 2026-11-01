@@ -152,3 +152,89 @@ so it's kept as an invalid warm-up and never read as zero. DWM's bounded window 
 the CPU sample; use its CSV timestamps. It's whole-desktop context, not Capsula's CPU. A baseline (older main)
 gets neither fixture nor diagnostics: it has no stretch, so the pair compares a stretching
 presence with a still one, not like for like. Run only in an agreed quiet window.
+
+## Gate observer
+
+`capsula --gate-observer=<file>` records what the dock really did, for the gate harness. Like
+the fixtures it needs `--quit-after-ms` or `--smoke`, or the shell refuses to start, and so
+does `--receipt-fixture`, which also needs the observer and only starts the dock middle-left
+for the gate's click-receipt phases. The tray's nine positions are unchanged. A normal run has no observer, no file and no writer thread;
+the only per-frame cost is checking that the observer is absent.
+
+```mermaid
+sequenceDiagram
+    participant UI as UI thread
+    participant Proxy as Hit proxy (same thread)
+    participant W as Writer thread
+    UI->>UI: tick: UpdateLayeredWindow
+    UI->>W: commit + geometry (exact rows)
+    UI->>UI: draw: OutlinePaint paint
+    UI->>W: paint frame=F
+    UI->>Proxy: PostMessage(frame F)
+    UI->>UI: Present returns, WM_PAINT ends
+    Proxy->>W: drawn frame=F (dispatched after)
+```
+
+`main` creates the file, a bounded queue of 256 fixed-size records and the writer thread before
+GPUI starts. The UI thread only stamps the performance counter and moves a record into the
+queue without waiting; the writer formats it and flushes whenever it catches up. Each record
+is one line:
+
+- `startup version=1 pid= dock_hwnd= panel_hwnd= proxy_hwnd= scale= position= work_area= dock= overlay=
+  panel= qpc_frequency= row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331`. It
+  follows the first position's commit and the paints GPUI makes while it opens each window.
+  Rectangles are `x,y,width,height` in physical pixels.
+- `geometry id=G origin_y=Y rows=N trimmed=true|false spans=…`, sent the first time a mask
+  proposal's rows differ from the last one sent. Each of the `N` rows from `Y` is
+  `drawn,owned,owned` separated by `;`, each span `left:right` (half-open) or `-`. They come
+  from the same `row_span` the dock paints and `row_spans` the mask is given, not from a copy.
+  Taller than 512 rows, it's `… overflow` with no rows, never truncated.
+- `commit seq= begin_qpc= qpc= result=shape|moved|unchanged|failed proposal=G epoch=E
+  geometry=A proxy=…`, after every `UpdateLayeredWindow` call. `begin_qpc` is read right before
+  the call and `qpc` when it returned, so `[begin_qpc, qpc]` holds the whole upload; when Windows
+  starts routing by the new mask inside it isn't known. A gate excludes a click whose input
+  interval overlaps a changed-epoch upload's. Without the observer, no counter is read. `proposal` is the
+  uploaded geometry; `epoch` and `geometry` are the accepted state after it. Only an accepted
+  change of rows (initial, stretched, trimmed) advances the epoch; a failure logs its proposal
+  and leaves both.
+- `hover id=H qpc= visible=true|false`, on every hover panel show or hide, stamped before
+  the native call that places the panel.
+- `paint frame=F qpc= kind=dock|panel hover= drawn_epoch= drawn_geometry= mask_epoch=`. A dock
+  frame is stamped in `OutlinePaint`'s paint with `hover=0`; `drawn_geometry`'s `drawn` spans
+  are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size
+  element in the panel, present only with the observer, with the latest `hover` id and
+  `drawn_epoch=0 drawn_geometry=0`. Frame ids count across both.
+- `target frame=F qpc= kind=stop hover=H rect=x,y,w,h inside=true|false`, from the hover
+  panel's Stop button each time it paints: its painted bounds in physical screen pixels (the
+  panel's client origin plus the bounds GPUI laid out, times the scale), not a guessed spot. A
+  wrapper hands every phase to the button, so its layout and handling are unchanged. The
+  panel's stamp is its first child, so `frame` is the panel frame this paint belongs to and
+  the paint lies in its `[paint qpc, drawn qpc]`; `inside` says the bounds lie within the
+  panel's client area. Only the hover panel's Stop is recorded, not the typing panel's.
+- `drawn frame=F qpc=`: the paint posts its frame id to the proxy. GPUI on Windows draws and
+  calls `Present(0, 0)` synchronously inside the window's paint message, so the proxy, on the same
+  thread, dispatches the post only after that returns, for the panel as for the dock. A present
+  in `[paint qpc, drawn qpc]` on that surface's swap chain is that frame's; this bounds when it
+  was submitted, not when it was shown. `open_window` paints each window once before the proxy
+  exists, and presents it on a later frame. Up to 8 such frames are kept and posted from that
+  window's next frame after `startup`, ahead of its present, so the dock's cold first frame
+  keeps a wider but still bounding interval. A ninth counts as `post_failed`.
+- `click qpc= point=x,y mask_epoch= marker=0x43505331`: a left press on the proxy whose extra
+  info is `INPUT_SESSION_MARKER`. `point` is the press's physical screen point from
+  `GetMessagePos`, as Windows routed it, not the client point converted with the proxy's
+  origin at dispatch, which a move in between would shift. Other clicks are never read or
+  recorded.
+- `repaint qpc=`: the harness posted `OBSERVER_REPAINT_MESSAGE` to the proxy, and the dock is
+  asked to repaint with no input. Without the observer, the proxy ignores it.
+- `close commits= frames= dropped= overflow= post_failed= unposted=`, then the writer's `end
+  lines= write_errors=`. A missing close or end line, or any nonzero `dropped`, `overflow`,
+  `post_failed` or `write_errors`, makes the run invalid for the gate. `unposted` counts early
+  frames whose window never drew again, such as the hidden panel's; they have no `drawn` line,
+  so a gate that joins one of them is invalid. At Quit the observer stops before it takes these
+  counts: later frames, commits and proxy notes record nothing, so the counts match the lines
+  above them, and frames still in flight keep no `drawn` line. The writer then writes every
+  record it already accepted, then `close` and `end`.
+
+Records hold geometry, handles and times only: no text, prompts, screenshots or other apps'
+content. Unit tests cover the exact rows, the overflow, the epoch rule and every line's format;
+display timing and click receipt need an approved session.

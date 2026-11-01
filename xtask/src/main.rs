@@ -14,6 +14,8 @@ use capsula_protocol::tap::{self, Direction};
 #[cfg(windows)]
 mod bench;
 #[cfg(windows)]
+mod gate;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod session;
@@ -23,10 +25,14 @@ fn usage() -> String {
         "usage: cargo xtask <task>
 
 tasks:
-  input-session <keyboard|hover|focus|layouts|esc>
-                    approved input session only; owned fixture, physical-input abort,
-                    bounded cleanup; SendInput QPC is not input-to-present timing
-  input-fixture     internal separate-process text fixture (105s autoexit)
+  cold-start <path-session.txt>
+                    approved input-free ten-launch cold gate; create-new redirect
+                    stdout and stderr to this file; separate from owner Ready session
+  gate-session <path-session.txt>
+                    approved final-main gate; stdout and stderr must already be
+                    redirected create-new to this file; one real Ready click,
+                    one persistent fixture, at most one hour, no input retries
+  input-fixture     internal bounded separate-process EDIT/Ready fixture
   bench idle [--duration 1..60] [--baseline <release-directory> | --panel]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
@@ -61,7 +67,9 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Some("bench") => bench::run(args),
         #[cfg(windows)]
-        Some("input-session") => session::run(args),
+        Some("gate-session") => gate::run(args),
+        #[cfg(windows)]
+        Some("cold-start") => gate::cold(args),
         #[cfg(windows)]
         Some("input-fixture") => platform::input_session::fixture(),
         #[cfg(not(windows))]

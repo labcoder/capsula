@@ -88,7 +88,7 @@ for milliseconds, so run it only in an approved session.
 
 ## Diagnostics for the input session
 
-Two opt-in flags serve the approved input-session harness. A normal run uses neither, and
+Two opt-in flags serve the approved gate-session harness. A normal run uses neither, and
 creates no file.
 
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
@@ -102,6 +102,11 @@ creates no file.
   - `hold excluded=true|false` and `hold ended restored=true|false`: whether every surface,
     the dock's native proxy included, took the capture affinity
   - `input opened focused=true|false` and `input dismissed`
+  - `input draft nonempty=true|false preserved=true|false`, after an `input opened` that follows
+    a dismiss: whether the draft held at that dismiss was nonempty, and whether the input still
+    holds exactly it. Only diagnostic runs keep that draft, in memory until the compare; no text,
+    hash or length is logged, and an empty draft never counts as preserved. The first open logs
+    no draft line.
   - `escape action=Stop|Clear|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
@@ -110,8 +115,10 @@ creates no file.
   and an open typing panel shows its own Stop. They return to normal once Esc is held or no
   longer wanted.
 
-A paint isn't a present. The Listening-on-screen gate needs that paint joined to its present
-by PresentMon, and that join isn't built, so the endpoint stays unmeasured. The UI thread only
+A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
+posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
+Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
+passes the display gate. The UI thread only
 queues lines; `tracing-appender`'s worker thread writes and flushes them, and drops lines if
 its queue ever fills rather than blocking. `main` creates the file and the worker before GPUI
 starts, and Quit drains the worker off the UI thread, so the UI thread never touches the disk.
@@ -126,3 +133,136 @@ its original layout on request and on exit, including after a lost acknowledgeme
 runner then checks the loaded-layout list. The approved session separately compares the
 owner's persistent language registry settings before and after the layouts phase; a change
 stops the session and is reported, never silently repaired with registry writes.
+
+## One approved final-main gate session
+
+The separate `cold-start <path-session.txt>` task runs ten input-free cold launches in its own
+approved quiet window before the owner session. It uses the same create-new transcript and
+adjacent evidence-directory contract below, but never arms Ready or enters the input phase
+sequence. It is not an extra loop inside `gate-session`.
+
+The cold trace starts before process launch with the product executable-name filter; all its
+rows must later match that one owned PID. A completed PID-filtered warm capture identifies the
+dock swapchain. The first nondropped row on that chain after the first Dock paint must be inside
+a recorded Dock paint/completion interval; an unavailable first row is never replaced by a later
+one. Startup scenes can overlap but all contain the dock, so this endpoint does not claim a
+specific geometry frame. Process creation comes from `GetProcessTimes`, mapped from its UTC
+FILETIME through a precise-UTC/QPC bracket of at most 1ms. The anchor estimate is not a physical
+lower bound, because creation-timestamp granularity is outside that bracket. Ten conservative
+upper bounds produce nearest-rank p50/p95/max against 400ms. These are fresh
+processes, not a cache-flushed boot: binaries are hashed before each launch and OS caches are not
+purged. No input, foreground transfer, elevation or fixture is involved.
+
+`gate-session` replaces the old per-phase `input-session` launcher. Preparation, a green build,
+or a Good feel verdict does not authorize desktop input. Invoke it only after fresh owner
+approval and the Captain's GO, with the release binaries and xtask already built and no builds
+or other heavy work running. It refuses existing product processes and never retries a failed
+input phase.
+
+The complete stdout **and** stderr transcript is required evidence. In Git Bash, choose a fresh
+absolute filename outside the repository, whose name ends in `-session.txt`, then use create-new
+redirection. Do not run an unredirected session or reuse an old evidence directory:
+
+```bash
+set -o noclobber
+transcript='C:/dev/capsula-ws/gate-runs/approved-unique-session.txt'
+{ git rev-parse HEAD && git status --short &&
+  ./target/release/xtask.exe gate-session "$transcript"; } >"$transcript" 2>&1
+```
+
+Run the release driver at normal priority; `nice -n 10` is only for builds and tests, never
+the measurement command. The parent directory must already exist. The runner verifies that both actual disk output
+handles resolve to the requested file before launching anything, then atomically creates its
+adjacent `approved-unique/` directory. The transcript retains every calibration trial and every
+role's raw cycle/time row. Phase directories retain diagnostics, observer records, PresentMon
+commands/CSVs/exit status, recipient receipts, totals, limits and failed samples. Nothing deletes
+outliers or removes these files during cleanup. Binary SHA-256 identities and before/after
+display/background-process metadata identify the measurement environment.
+
+### Feel, Ready and the persistent fixture
+
+One owned EDIT/Ready fixture remains alive throughout the session. Injection starts disabled.
+The initial release shell is bounded to 120 seconds while the owner has about 90 seconds to try
+the 300ms hold, double tap and stretch by hand and choose independent categorical feel verdicts.
+During feel the owner also presses Alt-Tab once and separately reports whether a product window
+appears; this verdict may be an external owner reply, not a fourth GUI feel field. The nine
+placements remain runtime-unmeasured; this session adds no placement sweep or flag.
+The owner then physically clicks Ready, releases the button and steps away. Synthetic clicks,
+posted messages and keyboard activation cannot arm Ready. The native fixture arms only after
+button-up, then requires one guarded second with unchanged last-input time before injection
+opens. There is no synthetic foreground transfer or replacement Ready click between phases.
+
+Good, Off, Broken and Unrated remain separate human results, not approval tokens or substitutes
+for measured gates. An Off or Unrated result needs owner disposition, but does not cancel already
+authorized measurements after Ready. If Ready is absent, the session stops without injecting.
+
+### Fixed automated order and bounds
+
+Each automated phase launches a fresh stable shell PID at normal priority under the same
+fixture lease. Idle alone gets a 120-second product bound; every other phase gets 90 seconds,
+with its input cutoff at least 13 seconds before cleanup (77 seconds for instrumented phases).
+The whole session has a one-hour limit and reserves another 30 seconds for final
+cleanup; a phase cannot begin without its complete budget.
+
+1. The idle CPU row and three separate stretch CPU rows each calibrate three saturated 2-second
+   trials and settle for 30 seconds. Idle samples for 60 seconds; each stretch samples for 30.
+   These phases send no motion or input
+   and omit the gate observer. Calibrated cycles are the CPU gate, with GetProcessTimes alongside;
+   limits are 1% of one core at idle and 10% during stretch. DWM and private bytes are retained too.
+2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
+   restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
+3. Hover runs 100 guarded crossings. HWND hide observation polls for at most 300ms; its elapsed
+   time is not a display timestamp. Observer IDs and panel paint frames feed the separate display
+   summary.
+4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
+   product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
+   screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
+   The left-edge resting points keep the bulb inside the pill on the middle-left fixture.
+   Motion frame gaps use exact current-row changes to delimit drawing demand; warmup, capture
+   edges and unchanged-pixel gaps are not missed frames. Every displayed gap and undisplayed
+   dock row is retained; a missing demanded-frame join stays unmeasured, not a zero-duration pass.
+5. Focus opens the typing surface by a completed double tap, types a known draft, dismisses it
+   through local Esc, reopens it without typing, and uses the non-content observation to check
+   draft preservation. Normal dismissal must return foreground to the fixture; there is no
+   SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
+6. Layouts temporarily use German `00000407` and Spanish `0000040A` in the foreground fixture.
+   Each checks the expected `@`/`€` pair without printing text, no Listening over the AltGr-only
+   interval, and a positive left-modifier chord. The original HKL and loaded-layout inventory are
+   restored. Recursive read-only registry snapshots include missing-key/read status and are
+   compared even on failure; any difference stops the session and is never repaired.
+7. Free and fixture-contested global Esc use separate products but the same fixture. Contested
+   fallback visibility must exist before pointer movement and persist after leave.
+8. A separate bounded contested-Esc product exercises the rendered Stop button, using its
+   observed rectangle and exact owned panel HWND rather than a guessed coordinate. After the
+   guarded click, wanted/Stop visibility must clear. The fixture then releases its own Esc
+   reservation so ordinary Escape can reach the EDIT
+   with an EscapeIgnore acknowledgement. The idle fixture proves clearing this affordance,
+   not cancellation of a nonexistent backend request.
+
+For instrumented phases, a PID-filtered warm trace has an 8-second fixed backstop. Three
+input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
+eligible dock swapchain before the main trace starts. Main trace backstops are fixed per phase:
+
+| Phase | Main backstop |
+| --- | ---: |
+| Keyboard | 50s |
+| Hover, resting receipts | 30s |
+| Motion receipts | 40s |
+| Focus, layouts | 20s |
+| Free Esc, contested persistence, Stop button | 10s |
+
+CPU rows have no main input trace. Normal completion stops only this harness's uniquely named
+ETW session earlier. The trace is
+finished and validated even if the trial fails, before the owned product exits and flushes its
+observer close/end records. A fresh PID requires a fresh warm validation.
+Immediately after the main trace starts, the input deadline is tightened to the earlier of the
+product cutoff and two seconds before that phase's trace bound. Acknowledged downs are
+released and the EDIT is uncovered before any potentially slow trace-finish wait, on both
+success and failure.
+
+Any physical input after Ready, lock/desktop change, foreign foreground/capture/menu/move loop,
+or phase error stops the whole session. Cleanup releases only acknowledged injected downs,
+restores owned fixture layout state, closes only owned windows/processes gracefully, and retains
+all errors. It never force-kills another process or repairs language settings. Cursor restoration
+is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
+Actual Alt-Tab into owner applications remains manual or unmeasured.

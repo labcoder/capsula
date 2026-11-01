@@ -11,7 +11,7 @@ use std::time::Instant;
 use gpui_kit::{Context, WeakEntity, Window};
 
 use super::outline::{self, Outline, Ownership};
-use super::{PanelVisibility, Presence, diagnostics, scaled};
+use super::{PanelVisibility, Presence, diagnostics, observer, scaled};
 use crate::platform::{self, MaskUpdate, PresenceError};
 
 /// The bulb's radius, in logical pixels.
@@ -224,7 +224,9 @@ impl Presence {
     /// whether the upload was accepted.
     pub(super) fn reshape(&mut self, proposal: Ownership, cx: &mut Context<'_, Self>) -> bool {
         let window = outline::retained(self.stretch.proxy, proposal.bounds(), self.stretch.margin);
+        let begin_qpc = observer::begin(cx);
         let update = self.native.reshape(window, |y| proposal.row_spans(y));
+        let observed = observer::commit(cx, begin_qpc, &proposal, window, &update);
         self.stretch.active.record(&update);
         self.stretch.totals.record(&update);
         let before = self.stretch.mask.owned;
@@ -251,6 +253,7 @@ impl Presence {
             if dock.origin != origin || !dock.outline.same_pixels(&drawn) {
                 dock.outline = drawn;
                 dock.origin = origin;
+                dock.drawn = observed;
                 cx.notify();
             }
         });

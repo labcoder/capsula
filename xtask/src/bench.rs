@@ -16,6 +16,89 @@ use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
 use crate::platform::{self, Process};
 
+#[derive(Debug)]
+pub(crate) struct GateCpu {
+    pub(crate) cycles_percent: f64,
+    pub(crate) time_percent: f64,
+    pub(crate) private_bytes: usize,
+}
+
+pub(crate) fn gate_cpu(
+    shell_pid: u32,
+    metrics: &Path,
+    cycle_rate: f64,
+    sample: Duration,
+    guard: impl Fn() -> Result<()>,
+) -> Result<GateCpu> {
+    ensure!(
+        cycle_rate.is_finite() && cycle_rate > 0.0,
+        "invalid gate cycle rate"
+    );
+    ensure!(
+        matches!(sample.as_secs(), 30 | 60) && sample.subsec_nanos() == 0,
+        "gate sample must be30s stretch or60s idle"
+    );
+    let seconds = sample.as_secs();
+    guarded_wait(Duration::from_secs(30), &guard)?;
+    let mut tracked = Vec::new();
+    track(shell_pid, &mut tracked)?;
+    let mut dwm = platform::capture_dwm(seconds + 1, &metrics.join("dwm.csv"))?;
+    let deadline = Instant::now() + Duration::from_secs(seconds + 5);
+    let measured = interval(seconds, &tracked, cycle_rate, &guard);
+    let captured = (|| -> Result<()> {
+        let mut failed_guard = None;
+        loop {
+            if let Some(status) = dwm.try_wait()? {
+                ensure!(status.success(), "DWM capture failed: {status}");
+                break;
+            }
+            if failed_guard.is_none() {
+                failed_guard = guard().err();
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "DWM capture exceeded its fixed sample bound"
+            );
+            sleep(Duration::from_millis(10));
+        }
+        if let Some(error) = failed_guard {
+            return Err(error);
+        }
+        let data = fs::read(metrics.join("dwm.csv"))?;
+        let rows = data
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.starts_with(b"\""))
+            .count();
+        ensure!(
+            u64::try_from(rows)? == seconds + 2,
+            "DWM capture lacks header and raw samples: {rows}"
+        );
+        println!(
+            "DWM retains the invalid first sample; timestamps define its wider whole-desktop window, not product attribution"
+        );
+        Ok(())
+    })();
+    match (measured, captured) {
+        (Ok(cpu), Ok(())) => Ok(cpu),
+        (measured, captured) => bail!(
+            "CPU: {:?}; DWM capture: {:?}",
+            measured.err(),
+            captured.err()
+        ),
+    }
+}
+
+fn guarded_wait(duration: Duration, guard: &impl Fn() -> Result<()>) -> Result<()> {
+    let end = Instant::now() + duration;
+    loop {
+        guard()?;
+        let Some(left) = end.checked_duration_since(Instant::now()) else {
+            return Ok(());
+        };
+        sleep(left.min(Duration::from_millis(10)));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workload {
     Idle,
@@ -184,22 +267,7 @@ fn measure(
     cycle_rate: f64,
 ) -> Result<()> {
     sleep(Duration::from_secs(30));
-    tracked.push(("shell", Process::open(shell_pid)?));
-    let entries = platform::processes()?;
-    let brain = entries
-        .iter()
-        .find(|entry| !entry.shell && entry.parent == shell_pid)
-        .context("shell did not start a brain within the 30s settle period")?;
-    tracked.push(("brain", Process::open(brain.pid)?));
-    let worker = entries
-        .iter()
-        .find(|entry| !entry.shell && entry.parent == brain.pid)
-        .context("brain did not start a screen worker within the 30s settle period")?;
-    tracked.push(("screen-worker", Process::open(worker.pid)?));
-    ensure!(
-        entries.len() == 3,
-        "product process set changed during startup; refusing a contaminated measurement"
-    );
+    track(shell_pid, tracked)?;
     let dwm = if let Some(path) = metrics {
         Some(
             platform::capture_dwm(seconds + 1, &path.join("dwm.csv"))
@@ -208,7 +276,7 @@ fn measure(
     } else {
         None
     };
-    let measurement = interval(seconds, tracked, cycle_rate);
+    let measurement = interval(seconds, tracked, cycle_rate, &|| Ok(())).map(|_| ());
     let capture = (|| -> Result<()> {
         if let Some(mut child) = dwm {
             let status = child
@@ -243,13 +311,39 @@ fn measure(
     Ok(())
 }
 
-fn interval(seconds: u64, tracked: &[(&str, Process)], cycle_rate: f64) -> Result<()> {
+fn track(shell_pid: u32, tracked: &mut Vec<(&'static str, Process)>) -> Result<()> {
+    tracked.push(("shell", Process::open(shell_pid)?));
+    let entries = platform::processes()?;
+    let brain = entries
+        .iter()
+        .find(|entry| !entry.shell && entry.parent == shell_pid)
+        .context("shell did not start a brain within the 30s settle period")?;
+    tracked.push(("brain", Process::open(brain.pid)?));
+    let worker = entries
+        .iter()
+        .find(|entry| !entry.shell && entry.parent == brain.pid)
+        .context("brain did not start a screen worker within the 30s settle period")?;
+    tracked.push(("screen-worker", Process::open(worker.pid)?));
+    ensure!(
+        entries.len() == 3,
+        "product process set changed during startup; refusing a contaminated measurement"
+    );
+    Ok(())
+}
+
+fn interval(
+    seconds: u64,
+    tracked: &[(&str, Process)],
+    cycle_rate: f64,
+    guard: &impl Fn() -> Result<()>,
+) -> Result<GateCpu> {
+    guard()?;
     let start = Instant::now();
     let before = tracked
         .iter()
         .map(|(_, process)| process.sample())
         .collect::<Result<Vec<_>>>()?;
-    sleep(Duration::from_secs(seconds));
+    guarded_wait(Duration::from_secs(seconds), guard)?;
     let after = tracked
         .iter()
         .map(|(_, process)| process.sample())
@@ -302,7 +396,11 @@ fn interval(seconds: u64, tracked: &[(&str, Process)], cycle_rate: f64) -> Resul
         percent(total_cpu, wall),
         cycle_percent(total_cycles, cycle_rate, wall)
     );
-    Ok(())
+    Ok(GateCpu {
+        cycles_percent: cycle_percent(total_cycles, cycle_rate, wall),
+        time_percent: percent(total_cpu, wall),
+        private_bytes: total_after,
+    })
 }
 
 fn wait_for_exit(child: &mut Child, tracked: &[(&str, Process)], deadline: Instant) -> Result<()> {
@@ -361,17 +459,26 @@ fn percent(cpu: Duration, wall: Duration) -> f64 {
     cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
 }
 
+fn calibrate_rate() -> Result<f64> {
+    gate_calibrate(|| Ok(()))
+}
+
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
     reason = "bounded two-second cycle deltas fit exactly in f64"
 )]
-fn calibrate_rate() -> Result<f64> {
+pub(crate) fn gate_calibrate(guard: impl Fn() -> Result<()>) -> Result<f64> {
     let mut highest = 0.0_f64;
     for trial in 1..=3 {
         let start = Instant::now();
         let before = platform::thread_cycles()?;
+        let mut next_guard = Duration::ZERO;
         while start.elapsed() < Duration::from_secs(2) {
+            if start.elapsed() >= next_guard {
+                guard()?;
+                next_guard = start.elapsed() + Duration::from_millis(10);
+            }
             std::hint::spin_loop();
         }
         let cycles = platform::thread_cycles()?

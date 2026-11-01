@@ -3,13 +3,14 @@
 use anyhow::{Context as _, Result, bail, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Mark {
+pub(crate) enum Mark {
     Applied { us: u64, start_qpc: i64 },
     Painted(u64),
     Resting,
     Hold(bool),
     HoldEnded(bool),
     Opened(bool),
+    Draft { nonempty: bool, preserved: bool },
     Dismissed,
     EscapeStop,
     EscapeClear,
@@ -20,9 +21,9 @@ pub(super) enum Mark {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Record {
-    pub(super) qpc: i64,
-    pub(super) mark: Mark,
+pub(crate) struct Record {
+    pub(crate) qpc: i64,
+    pub(crate) mark: Mark,
 }
 
 impl Record {
@@ -54,6 +55,14 @@ impl Record {
             Mark::HoldEnded(value.parse()?)
         } else if let Some(value) = event.strip_prefix("input opened focused=") {
             Mark::Opened(value.parse()?)
+        } else if let Some(value) = event.strip_prefix("input draft nonempty=") {
+            let (nonempty, preserved) = value
+                .split_once(" preserved=")
+                .context("invalid draft diagnostic checkpoint")?;
+            Mark::Draft {
+                nonempty: nonempty.parse()?,
+                preserved: preserved.parse()?,
+            }
         } else if let Some(value) = event.strip_prefix("escape wanted=") {
             let (wanted, stop) = value
                 .split_once(" stop=")
@@ -228,6 +237,50 @@ mod tests {
             assert!(
                 Record::parse(&format!("qpc=1 stretch {event}")).is_err(),
                 "invalid stretch event: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn draft_checkpoints_retain_false_verdicts_and_reject_malformed_fields() {
+        assert_eq!(
+            Record::parse("qpc=5 input draft nonempty=true preserved=true")
+                .unwrap()
+                .mark,
+            Mark::Draft {
+                nonempty: true,
+                preserved: true
+            }
+        );
+        assert_eq!(
+            Record::parse("qpc=6 input draft nonempty=false preserved=false")
+                .unwrap()
+                .mark,
+            Mark::Draft {
+                nonempty: false,
+                preserved: false
+            }
+        );
+        assert_eq!(
+            Record::parse("qpc=7 input draft nonempty=false preserved=true")
+                .unwrap()
+                .mark,
+            Mark::Draft {
+                nonempty: false,
+                preserved: true
+            }
+        );
+        for line in [
+            "qpc=5 input draft nonempty=true",
+            "qpc=5 input draft nonempty=1 preserved=true",
+            "qpc=5 input draft nonempty=true preserved=maybe",
+            "qpc=5 input draft preserved=true nonempty=true",
+            "qpc=5 input draft nonempty=true preserved=true extra=false",
+            "qpc=5 input draft nonempty=true preserved=true preserved=false",
+        ] {
+            assert!(
+                Record::parse(line).is_err(),
+                "malformed draft checkpoint: {line}"
             );
         }
     }
