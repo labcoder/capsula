@@ -25,6 +25,9 @@ use crate::tap::Tap;
 
 /// How long a connected client has to complete each step of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
+/// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
+const NO_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the brain checks a shell against.
 #[derive(Debug)]
@@ -63,6 +66,8 @@ pub(crate) enum Session {
     BuildMismatch,
     /// The shell went away without `Quitting`: it crashed or was killed.
     ShellLost,
+    /// No shell connected for [`NO_SHELL_TIMEOUT`].
+    NoShell,
 }
 
 /// Why a client was turned away or a session broke.
@@ -155,6 +160,7 @@ impl Pipes {
             tokio::select! {
                 accepted = self.control.connect() => accepted?,
                 () = exited(launched) => return Ok(Session::ShellLost),
+                () = tokio::time::sleep(NO_SHELL_TIMEOUT) => return Ok(Session::NoShell),
             }
             let session = self.session(identity, tap).await;
             self.renew()?;
@@ -380,5 +386,16 @@ mod tests {
             .expect("no pipe failed");
         assert_eq!(session, Session::ShellLost);
         assert!(launched.is_none(), "the ended shell isn't waited on again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_brain_no_shell_reaches_gives_up() {
+        let mut pipes =
+            Pipes::create(u32::MAX - 1 - std::process::id()).expect("the test pipes are free");
+        let session = pipes
+            .next_session(&identity(), &mut Tap::from_env(), &mut None)
+            .await
+            .expect("no pipe failed");
+        assert_eq!(session, Session::NoShell);
     }
 }

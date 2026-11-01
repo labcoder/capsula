@@ -107,6 +107,10 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
                 tracing::info!("a shell from another build connected; exiting");
                 return Ok(());
             }
+            Session::NoShell => {
+                tracing::info!("no shell connected; exiting");
+                return Ok(());
+            }
             Session::ShellLost => {
                 let Some(delay) = crashes.record(Instant::now()) else {
                     tracing::error!("the shell keeps crashing; not relaunching it");
