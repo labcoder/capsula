@@ -34,6 +34,12 @@ locales/en/        every user-facing string (Fluent)
 - A hot-path change (rendering, the pipe, stream parsing, audio) carries a before-and-after
   measurement from Rez.
 
+## Commits
+- Conventional Commits for commits and PR titles: `type(scope): summary`, with type feat, fix,
+  docs, refactor, perf, test, build, ci or chore, a crate or area as scope, and a short
+  lowercase imperative summary. PRs are squash-merged under their title.
+- Commits are the owner's: no AI attribution, no `Co-authored-by` or "Generated with" lines.
+
 ## Rules that protect users
 - No telemetry. Nothing leaves the machine except calls to accounts the user set up.
 - Secrets live only in Windows Credential Manager: never in logs, command lines, files or the
