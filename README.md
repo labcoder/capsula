@@ -2,7 +2,7 @@
 
 ## License
 
-Copyright (C) 2026 Oscar Sanchez
+Copyright (C) 2026 Oscar Sanchez (https://oscarsanchez.com)
 
 Capsula is free software: you can redistribute it and/or modify it under the terms of version 3 of the GNU Affero General Public License, as published by the Free Software Foundation (`AGPL-3.0-only`).
 
