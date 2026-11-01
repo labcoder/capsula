@@ -46,6 +46,21 @@ pub const INSTANCE_SERVICE: &str = if cfg!(debug_assertions) {
     "Capsula instance"
 };
 
+/// The shell's single-instance mutex, per session.
+pub const SHELL_MUTEX: &str = if cfg!(debug_assertions) {
+    r"Local\capsula-dev-shell"
+} else {
+    r"Local\capsula-shell"
+};
+
+/// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
+/// session id is appended, since each session runs its own brain.
+pub const INSTANCE_ACCOUNT: &str = "capability";
+
+/// Dev builds only: set this to a file path and the brain records every pipe frame there, for
+/// `cargo xtask pipe-dump`. Capabilities are zeroed in the recording.
+pub const PIPE_TAP_ENV: &str = "CAPSULA_PIPE_TAP";
+
 #[cfg(test)]
 mod tests {
     use super::{BRAIN_LOG, SHELL_LOG};

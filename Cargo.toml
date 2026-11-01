@@ -12,7 +12,10 @@ publish = false
 [workspace.dependencies]
 capsula-protocol = { path = "crates/protocol" }
 fluent-bundle = "0.16"
+getrandom = { version = "0.3", features = ["std"] }
 gpui-kit = "0.8.1"
+keyring = { version = "3", features = ["windows-native"] }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"
