@@ -39,8 +39,10 @@ fn raw_bytes(db: &Path) -> Vec<u8> {
     for suffix in ["", "-wal", "-shm"] {
         let mut path = db.as_os_str().to_owned();
         path.push(suffix);
-        if let Ok(file) = std::fs::read(&path) {
-            bytes.extend(file);
+        match std::fs::read(&path) {
+            Ok(file) => bytes.extend(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("can't scan {}: {error}", path.display()),
         }
     }
     bytes.make_ascii_lowercase();
@@ -87,6 +89,13 @@ fn plant(store: &mut Store) -> ThreadId {
         )
         .expect("step");
     thread
+}
+
+/// Whether the WAL holds frames that weren't checkpointed, as after a crash.
+fn wal_is_full(db: &Path) -> bool {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(wal).is_ok_and(|meta| meta.len() > 0)
 }
 
 fn rows(conn: &Connection, table: &str) -> i64 {
@@ -176,6 +185,42 @@ fn a_thread_being_deleted_takes_no_new_work() {
 }
 
 #[test]
+fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
+    let scratch = Scratch::new("runs");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let a = store.create_thread("a").expect("thread");
+    let b = store.create_thread("b").expect("thread");
+    let run_b = store.start_run(b).expect("run");
+    assert!(matches!(
+        store.append(a, Some(run_b), EventKind::User, Some("x"), None),
+        Err(StoreError::NoRun)
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET state = 'interrupted' WHERE id = ?1",
+            [super::sql_id(run_b.0).expect("id")],
+        )
+        .expect("end");
+    assert!(matches!(
+        store.append(b, Some(run_b), EventKind::SceneStep, Some("late"), None),
+        Err(StoreError::NoRun)
+    ));
+    store
+        .append(b, None, EventKind::User, Some("kept"), None)
+        .expect("event");
+    assert!(
+        store
+            .conn
+            .execute("UPDATE events SET text = 'changed'", [])
+            .is_err(),
+        "events are append-only"
+    );
+    store.begin_delete(b).expect("begin");
+    store.finish_delete(b).expect("b deletes cleanly");
+}
+
+#[test]
 fn recovery_fails_active_runs_and_keeps_ended_ones() {
     let scratch = Scratch::new("recover");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -198,14 +243,16 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
             None,
         )
         .expect("committed text");
-    drop(store);
+    // The brain dies: its connection never closes, so nothing is checkpointed.
+    let crashed = store;
+    assert!(wal_is_full(&scratch.db()));
 
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
         store.recover().expect("recover"),
         Recovered {
             crashed_runs: 1,
-            finished_deletions: 0
+            ..Recovered::default()
         }
     );
     let state = |run: RunId| -> (String, Option<String>) {
@@ -225,6 +272,7 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
     );
     assert_eq!(store.search("partial", 10).expect("search"), vec![thread]);
     assert_eq!(store.recover().expect("again"), Recovered::default());
+    drop(crashed);
 }
 
 #[test]
@@ -238,6 +286,7 @@ fn run_ids_are_never_reused_after_a_deletion() {
     drop(store);
     let mut store = Store::open(&scratch.db()).expect("reopen");
     let next = store.create_thread("u").expect("thread");
+    assert!(next > thread, "thread ids aren't reused either");
     assert!(store.start_run(next).expect("run") > highest);
 }
 
@@ -286,20 +335,23 @@ fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
     let mut store = Store::open(&scratch.db()).expect("store");
     let thread = plant(&mut store);
     store.begin_delete(thread).expect("begin");
-    // The brain dies here, between the two transactions.
-    drop(store);
+    // The brain dies here, between the two transactions, without closing its connection.
+    let crashed = store;
+    assert!(wal_is_full(&scratch.db()));
 
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
         store.recover().expect("recover"),
         Recovered {
-            crashed_runs: 1,
-            finished_deletions: 1
-        }
+            finished_deletions: 1,
+            ..Recovered::default()
+        },
+        "the deleted thread's run isn't counted as crashed"
     );
     assert!(!contains_marker(&scratch.db()));
     assert!(matches!(
         store.finish_delete(thread),
         Err(StoreError::NoThread)
     ));
+    drop(crashed);
 }

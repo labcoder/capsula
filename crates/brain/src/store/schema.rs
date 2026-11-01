@@ -10,8 +10,10 @@ const MIGRATIONS: &[&str] = &[V1];
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
 const V1: &str = "
+-- AUTOINCREMENT on threads and runs keeps the highest id ever issued, so a deleted thread's
+-- id and its runs' ids never come back for a new one that late work could be mistaken for.
 CREATE TABLE threads (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL,
@@ -19,7 +21,6 @@ CREATE TABLE threads (
     deletion_generation INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
--- AUTOINCREMENT keeps the highest run id ever issued, so ids never repeat after a deletion.
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread INTEGER NOT NULL REFERENCES threads (id),
@@ -29,16 +30,19 @@ CREATE TABLE runs (
     ended_ms INTEGER
 ) STRICT;
 CREATE INDEX runs_thread ON runs (thread);
+CREATE UNIQUE INDEX runs_id_thread ON runs (id, thread);
 CREATE INDEX runs_active ON runs (state) WHERE state = 'active';
 
 CREATE TABLE events (
     id INTEGER PRIMARY KEY,
     thread INTEGER NOT NULL REFERENCES threads (id),
-    run INTEGER REFERENCES runs (id),
+    run INTEGER,
     kind TEXT NOT NULL,
     text TEXT,
     body TEXT,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    -- An event's run belongs to the same thread, or deleting that run's thread would fail.
+    FOREIGN KEY (run, thread) REFERENCES runs (id, thread)
 ) STRICT;
 CREATE INDEX events_thread ON events (thread, id);
 CREATE INDEX events_run ON events (run);
@@ -46,6 +50,10 @@ CREATE INDEX events_run ON events (run);
 CREATE VIRTUAL TABLE events_fts USING fts5 (text, content = 'events', content_rowid = 'id');
 -- Deleted rows leave the index at once instead of lingering in old segments until a merge.
 INSERT INTO events_fts (events_fts, rank) VALUES ('secure-delete', 1);
+-- An update would leave the external-content index holding the old text past a deletion.
+CREATE TRIGGER events_append_only BEFORE UPDATE ON events BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
 CREATE TRIGGER events_fts_insert AFTER INSERT ON events WHEN new.text IS NOT NULL BEGIN
     INSERT INTO events_fts (rowid, text) VALUES (new.id, new.text);
 END;

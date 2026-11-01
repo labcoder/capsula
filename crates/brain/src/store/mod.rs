@@ -34,9 +34,15 @@ pub enum StoreError {
         /// The newest schema this build knows.
         known: usize,
     },
+    /// SQLite kept a rollback journal instead of WAL, which would keep deleted pages around.
+    #[error("SQLite refused WAL and is in {0} mode")]
+    NoWal(String),
     /// The thread doesn't exist or is being deleted, so it takes no new work.
     #[error("no such live thread")]
     NoThread,
+    /// The run isn't an active run of that thread, so its late work is refused.
+    #[error("no such active run in the thread")]
+    NoRun,
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
@@ -85,6 +91,8 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
+    /// Deletions that failed again; their threads stay hidden and the next start retries them.
+    pub failed_deletions: usize,
 }
 
 /// The open store. Not `Sync`: one thread owns it.
@@ -118,12 +126,13 @@ impl Store {
         // journal_mode answers with a row, so it's read rather than set.
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if mode != "wal" {
-            tracing::warn!(mode, "SQLite refused WAL");
+            return Err(StoreError::NoWal(mode));
         }
         conn.execute_batch(
             "PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
-             PRAGMA secure_delete = ON;",
+             PRAGMA secure_delete = ON;
+             PRAGMA temp_store = MEMORY;",
         )?;
         schema::migrate(&mut conn)?;
         Ok(Self { conn })
@@ -135,25 +144,31 @@ impl Store {
     /// # Errors
     /// Fails when SQLite fails.
     pub fn recover(&mut self) -> Result<Recovered, StoreError> {
-        let crashed_runs = self.conn.execute(
-            "UPDATE runs SET state = 'failed', reason = 'crash', ended_ms = ?1
-             WHERE state = 'active'",
-            params![now_ms()],
-        )?;
+        let mut recovered = Recovered::default();
+        // Deletions first, so their runs aren't counted as crashed.
         let pending: Vec<i64> = self
             .conn
             .prepare("SELECT id FROM threads WHERE state = 'deleting'")?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
-        for &thread in &pending {
-            self.remove(thread)?;
+        for thread in pending {
+            // One stuck deletion mustn't keep the brain from starting; the thread stays hidden.
+            match self.remove(thread) {
+                Ok(()) => recovered.finished_deletions += 1,
+                Err(error) => {
+                    tracing::error!(thread, %error, "a pending deletion failed again");
+                    recovered.failed_deletions += 1;
+                }
+            }
         }
+        recovered.crashed_runs = self.conn.execute(
+            "UPDATE runs SET state = 'failed', reason = 'crash', ended_ms = ?1
+             WHERE state = 'active'",
+            params![now_ms()],
+        )?;
         // A checkpoint a reader blocked last time gets another chance here.
         self.checkpoint()?;
-        Ok(Recovered {
-            crashed_runs,
-            finished_deletions: pending.len(),
-        })
+        Ok(recovered)
     }
 
     /// Creates a thread.
@@ -204,11 +219,12 @@ impl Store {
         Ok(RunId(row_id(self.conn.last_insert_rowid())))
     }
 
-    /// Appends an event to a live thread. `text` is what search finds; `body` is the typed
-    /// record as JSON.
+    /// Appends an event to a live thread, and to one of its active runs when `run` is given.
+    /// `text` is what search finds; `body` is the typed record as JSON.
     ///
     /// # Errors
-    /// Fails with [`StoreError::NoThread`] when the thread isn't live.
+    /// Fails with [`StoreError::NoThread`] when the thread isn't live, and with
+    /// [`StoreError::NoRun`] when the run isn't an active run of that thread.
     pub fn append(
         &mut self,
         thread: ThreadId,
@@ -227,6 +243,18 @@ impl Store {
         )?;
         if touched == 0 {
             return Err(StoreError::NoThread);
+        }
+        if let Some(run) = run {
+            let active: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM runs WHERE id = ?1 AND thread = ?2 AND state = 'active'",
+                    params![run, thread],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if active.is_none() {
+                return Err(StoreError::NoRun);
+            }
         }
         tx.execute(
             "INSERT INTO events (thread, run, kind, text, body, created_ms)

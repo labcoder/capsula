@@ -8,18 +8,19 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 | Pragma | Why |
 |---|---|
-| `journal_mode=WAL` | Readers don't block the writer |
+| `journal_mode=WAL` | Readers don't block the writer, and the checkpoint after a delete truncates the WAL. A store that refuses WAL doesn't open |
 | `synchronous=FULL` | Every commit is durable, so "saved" means the transaction committed |
 | `foreign_keys=ON` | Rows can't point at a missing thread or run |
 | `secure_delete=ON` | Deleted content is overwritten with zeros, not left in free pages |
+| `temp_store=MEMORY` | Statement journals, which hold the pages a delete removes, never spill to `%TEMP%` |
 
 ## Tables
 
 | Table | Holds |
 |---|---|
-| `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation` |
+| `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
-| `events` | Append-only: thread, run, kind (`user`, `assistant_text`, `scene_step`), searchable `text`, JSON `body` |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row leaves the index at once |
 
 Later slices add assets, sends, the tool ledger, actions, summaries and cleanup jobs, each as a
@@ -54,6 +55,7 @@ SSD wear levelling, backups and the pagefile are beyond what deleting rows can r
 
 The brain opens the store and runs the recovery scan before it serves any shell:
 
+- threads left `deleting` by a crash between the two transactions finish deleting. One that fails
+  again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;
 - runs still `active` become `failed` with reason `crash`, keeping what they committed;
-- threads left `deleting` by a crash between the two transactions finish deleting;
 - the WAL is checkpointed again, in case a reader blocked the last one.
