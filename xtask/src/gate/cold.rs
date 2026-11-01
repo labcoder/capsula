@@ -179,7 +179,7 @@ fn launch(images: &Images, output: &Path, guard: &impl Fn() -> Result<()>) -> Re
     fs::write(
         output.join("result.txt"),
         format!(
-            "{sample:?}\nmethod=creation to PresentMon's first-present seed, derived from the first dock CSV row and uniquely bounded by a Dock paint/completion that began before the first harness repaint. Missing or unbounded seeds are unmeasured; later ordinary/warm-up rows are never substituted. Seed provenance is retained in seed.txt; display latency is reported separately, not gated. Prelaunch name filtering remains; suspended launch was not adopted. Latencies use OS-reported creation UTC mapped to QPC, with the full clock bracket retained. anchor_estimate_ms is not a physical lower bound: OS creation-timestamp granularity is outside the anchor bracket; only present conservative upper_ms gates.\n"
+            "{sample:?}\nmethod=creation to PresentMon's first-present seed, derived from the first dock CSV row and bounded by at least one Dock paint/completion. Every containing interval must begin before the first harness repaint; overlapping startup intervals are allowed. Missing or unbounded seeds are unmeasured; later ordinary/warm-up rows are never substituted. Seed provenance is retained in seed.txt; display latency is reported separately, not gated. Prelaunch name filtering remains; suspended launch was not adopted. Latencies use OS-reported creation UTC mapped to QPC, with the full clock bracket retained. anchor_estimate_ms is not a physical lower bound: OS creation-timestamp granularity is outside the anchor bracket; only present conservative upper_ms gates.\n"
         ),
     )?;
     Ok(sample)
@@ -222,13 +222,12 @@ fn measure(
     let frame = frames
         .next()
         .context("first dock seed has no frame bound; no later substitution")?;
+    ensure!(!row.dropped, "first dock seed is dropped");
     ensure!(
-        frames.next().is_none() && !row.dropped,
-        "first dock seed is ambiguous or dropped"
-    );
-    ensure!(
-        frame.paint_qpc < first_repaint,
-        "first dock seed frame was painted after the harness repaint"
+        std::iter::once(frame)
+            .chain(frames)
+            .all(|frame| frame.paint_qpc < first_repaint),
+        "first dock seed has a frame painted at or after the harness repaint"
     );
     ensure!(
         row.qpc >= clock.latest,
@@ -321,9 +320,10 @@ mod tests {
         assert!(measure(&data, &seed, None, &clock, 115).is_err());
         seed.dropped = false;
         data.frames[1].paint_qpc = 104;
-        assert!(
-            measure(&data, &seed, None, &clock, 115).is_err(),
-            "overlapping frame bounds are ambiguous"
+        assert_eq!(
+            measure(&data, &seed, None, &clock, 115).unwrap().present,
+            105,
+            "overlapping startup bounds describe the same first present"
         );
         assert!(
             measure(&data, &seed, None, &clock, 103).is_err(),

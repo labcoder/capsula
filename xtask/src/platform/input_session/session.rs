@@ -26,6 +26,7 @@ use super::fixture::{
     REARM, UNCOVER,
 };
 use super::gate::{Feel, Gate, Lease, Quiet};
+use super::guard::{self, StopMetadata};
 use super::{
     FixtureEscMode, InputEdge, MARKER, MAX_COVER, Receipt, Window, class_name, desktop_rect,
     input_desktop_available, last_input, mouse_and_keyboard_only, normalized, pack, pid, property,
@@ -71,6 +72,7 @@ pub(crate) struct Session {
     product_end: Option<Instant>,
     edit: HWND,
     lease: Cell<Lease>,
+    first_stop: Cell<Option<StopMetadata>>,
     end: Instant,
     held: [bool; 512],
     button_down: bool,
@@ -106,6 +108,7 @@ impl Session {
             product_end: None,
             edit,
             lease: Cell::new(Lease::new(fixture.pid)),
+            first_stop: Cell::new(None),
             end,
             held: [false; 512],
             button_down: false,
@@ -137,7 +140,30 @@ impl Session {
         self.lease.get().gate()
     }
 
+    /// Sets a bounded caller-defined numeric phase; zero means unspecified. Sends no input.
+    pub(crate) fn set_phase(&self, phase: u8) -> Result<()> {
+        self.or_abort(request(
+            self.fixture,
+            guard::SET_PHASE,
+            WPARAM(usize::from(phase)),
+            LPARAM(0),
+        ))?;
+        Ok(())
+    }
+
+    /// Retains the first native stop snapshot even after the fixture closes.
+    pub(crate) fn stop_metadata(&self) -> Option<StopMetadata> {
+        if let Some(first) = self.first_stop.get() {
+            return Some(first);
+        }
+        self.fixture.validate().ok()?;
+        let first = guard::snapshot(self.fixture.hwnd);
+        self.first_stop.set(first);
+        first
+    }
+
     fn abort(&self) {
+        self.first_stop.set(self.stop_metadata());
         let mut lease = self.lease.get();
         lease.abort();
         self.lease.set(lease);
@@ -350,7 +376,8 @@ impl Session {
         );
         ensure!(
             property(self.fixture.hwnd, OPEN) != 0 && property(self.fixture.hwnd, ABORT) == 0,
-            "physical input or session lock: session aborted, no retry"
+            "native input gate stopped (first cause: {:?}); session aborted, no retry",
+            self.stop_metadata().map(|stop| stop.cause)
         );
         // SAFETY: only the PID is inspected, never another application's window content.
         let foreground = pid(unsafe { GetForegroundWindow() });

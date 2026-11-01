@@ -263,8 +263,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         let registry = Registry::snapshot();
         fs::write(output.join("registry-before.txt"), format!("{registry:#?}"))?;
         let measured = (|| {
-            for trial in TRIALS {
+            for (index, trial) in TRIALS.into_iter().enumerate() {
                 session.guard()?;
+                session.set_phase(u8::try_from(index + 1)?)?;
                 run_trial(trial, session, &images, &output, end)?;
             }
             Ok(())
@@ -289,6 +290,16 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     } else {
         Ok(())
     };
+    let stop = session.as_ref().and_then(Session::stop_metadata);
+    let guard_report = stop.map_or_else(String::new, |metadata| {
+        let phase = metadata
+            .phase
+            .checked_sub(1)
+            .and_then(|index| TRIALS.get(usize::from(index)))
+            .map_or("feel-ready", |trial| trial.name());
+        format!("guard_stop phase={phase} metadata={metadata:?}\n")
+    });
+    print!("{guard_report}");
     let closed = fixture_window.map_or(Ok(()), Window::close);
     let exited = session::wait_child(&mut fixture, end);
     let environment = gate_capture::desktop_metadata().and_then(|metadata| {
@@ -298,7 +309,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     fs::write(
         output.join("session-result.txt"),
         format!(
-            "runtime_s={:.3}\nautomation_result={final_result:?}\nhuman_feel_is_separate=true\nalt_tab=owner_manual_separate_verdict\nplacements=runtime_unmeasured\n",
+            "runtime_s={:.3}\nautomation_result={final_result:?}\nhuman_feel_is_separate=true\nalt_tab=owner_manual_separate_verdict\nplacements=runtime_unmeasured\n{guard_report}",
             started.elapsed().as_secs_f64()
         ),
     )?;
@@ -307,7 +318,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 
 fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
     println!(
-        "Injection is disabled. The dock is at the top center by default; Listening appears as its label. Try hold, double tap and stretch on the dock. This test window is only for the three verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and step away for one quiet second. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
+        "Injection is disabled. The dock is at the top center by default; Listening appears as its label. Try hold, double tap and stretch on the dock. This test window is only for the three verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and do not touch the mouse or keyboard until this window closes (about 10 minutes, at most one hour). The first quiet second only opens injection. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
     );
     let feel_directory = output.join("feel");
     fs::create_dir(&feel_directory)?;

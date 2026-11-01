@@ -196,10 +196,12 @@ rows must later match that one owned PID. A completed PID-filtered warm capture 
 dock swapchain. PresentMon 2.6 swallows the first present of each swapchain as a seed. From that
 chain's first CSV row, the harness derives seed present = `QPCTime − msBetweenPresents` and
 seed displayed = `first row displayed − msBetweenDisplayChange`, in checked QPC arithmetic.
-The derived seed must fit exactly one recorded Dock paint/completion interval whose paint
-began before the first harness repaint; its cutoff is retained in `first-harness-repaint.txt`.
+The derived seed must fit at least one recorded Dock paint/completion interval, and every
+containing interval must have begun before the first harness repaint; its cutoff is retained
+in `first-harness-repaint.txt`. Overlapping startup intervals are allowed because cold start
+measures creation to the first present, not a particular frame.
 The matching paint need not be the first recorded paint: only the first actual present is the
-seed. Missing, invalid, ambiguous, overlapping or dropped seed evidence is unmeasured; no later
+seed. Missing, invalid, post-repaint or dropped seed evidence is unmeasured; no later
 ordinary row or warm-up repaint substitutes. `seed.txt` retains the first raw row and intervals.
 The 400ms gate is creation → first eligible dock **present**, with
 display latency reported beside it when available. The existing prelaunch name trace remains:
@@ -254,7 +256,9 @@ otherwise authorized automated phases; failure to retain the summary itself stil
 During feel the owner also presses Alt-Tab once and separately reports whether a product window
 appears; this verdict may be an external owner reply, not a fourth GUI feel field. The nine
 placements remain runtime-unmeasured; this session adds no placement sweep or flag.
-The owner then physically clicks Ready, releases the button and steps away. Synthetic clicks,
+The owner then physically clicks Ready, releases the button and stays hands-off until the
+fixture window closes (allow about 10 minutes, at most one hour). The first quiet second
+only opens injection; it is not permission to touch the mouse or keyboard again. Synthetic clicks,
 posted messages and keyboard activation cannot arm Ready. The native fixture arms only after
 button-up, then requires one guarded second with unchanged last-input time before injection
 opens. There is no synthetic foreground transfer or replacement Ready click between phases.
@@ -262,6 +266,20 @@ Physical input or loss of fixture focus during that pre-injection second returns
 waiting for a fresh physical Ready. The original 90s feel deadline does not restart; neither
 does the one-hour session limit. Once injection has opened, the existing sticky-abort rule
 applies and no Ready can reopen it. API/guard failures and a session lock still stop safely.
+The first native guard stop retains its cause (session lock, physical input, or raw-input read
+failure), phase and milliseconds since injection opened. Input metadata is limited to keyboard,
+mouse movement with signed deltas, button, wheel or other, and the extra-information marker
+when that device provides one. No key codes, button identities, wheel values or text are logged.
+The transcript and `session-result.txt` retain this snapshot before the fixture closes; later
+events cannot overwrite the first cause. These diagnostics do not relax or retry a stopped gate.
+
+Before an approved session, `cargo xtask input-quiet <seconds>` observes the same raw-input guard
+on a hidden window for an explicit 1–120 seconds. It prints content-free event classification,
+motion deltas and marker, including whether the guard would exempt a tagged event. Raw-input
+read failures are reported, not mistaken for a quiet desktop. It sends no input, never activates
+a window or launches the product, and removes its registrations when it ends. Running it on Rez
+still needs the Captain's measurement window; building it does not start it.
+
 The product's separate `FOCUS_INPUT_MARKER` is accepted only on a zero-motion relative mouse
 event with no buttons or wheel; marked movement, absolute positioning and other devices remain
 physical input. Post-open owned product focus is still required by the focus phase. Pre-open
