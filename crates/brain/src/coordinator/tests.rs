@@ -2,7 +2,9 @@ use capsula_protocol::message::{
     ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, Step, ThreadId,
 };
 
-use super::{Coordinator, Effect, EngineEvent, Input, MAX_TEXT, Stale, StoreOp, WALL_CLOCK};
+use super::{
+    Coordinator, Effect, EngineEvent, Input, MAX_DELTA, MAX_TEXT, Stale, StoreOp, WALL_CLOCK,
+};
 use crate::store::{EventKind, Failure, Interruption, RunEnd};
 
 const T: ThreadId = ThreadId(4);
@@ -252,9 +254,18 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         core.handle(engine(R, EngineEvent::Text("old".to_owned()))),
         Err(Stale)
     );
-    assert!(
-        core.handle(engine(RunId(11), EngineEvent::Done)).is_ok(),
-        "the new run is current"
+    core.handle(Input::TurnStored { run: RunId(11) })
+        .expect("the new run is current");
+    assert_eq!(
+        core.handle(engine(RunId(11), EngineEvent::Done))
+            .expect("current"),
+        vec![
+            Effect::Store(StoreOp::EndRun {
+                run: RunId(11),
+                end: RunEnd::Done
+            }),
+            state(RunId(11), T, Phase::Done),
+        ]
     );
 }
 
@@ -384,4 +395,114 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
         vec![state(R, ThreadId(99), Phase::Failed)],
         "nothing more is written for a turn the store refused"
     );
+}
+
+fn ends_failed(effects: &[Effect], failure: Failure) -> bool {
+    !effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Data(_) | Effect::Store(StoreOp::CommitStep { .. })
+        )
+    }) && effects.contains(&Effect::Store(StoreOp::EndRun {
+        run: R,
+        end: RunEnd::Failed(failure),
+    }))
+}
+
+#[test]
+fn over_budget_steps_and_oversized_labels_commit_and_send_nothing() {
+    let mut core = started();
+    for index in 0..MAX_STEPS {
+        core.handle(engine(R, EngineEvent::Step(step(&index.to_string()))))
+            .expect("within the step budget");
+    }
+    let over = core
+        .handle(engine(R, EngineEvent::Step(step("one too many"))))
+        .expect("current");
+    assert!(ends_failed(&over, Failure::Budget), "{over:?}");
+
+    let mut core = started();
+    let label = "x".repeat(MAX_STEP_LABEL + 1);
+    let over = core
+        .handle(engine(R, EngineEvent::Step(step(&label))))
+        .expect("current");
+    assert!(ends_failed(&over, Failure::Engine), "{over:?}");
+}
+
+#[test]
+fn done_waits_for_the_last_step_to_be_committed_and_shown() {
+    let mut core = started();
+    core.handle(engine(R, EngineEvent::Step(step("last"))))
+        .expect("current");
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Done)).expect("current"),
+        Vec::new(),
+        "nothing ends while a step is in the store"
+    );
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Text("after done".to_owned()))),
+        Err(Stale)
+    );
+    assert_eq!(
+        core.handle(Input::StepStored {
+            run: R,
+            index: 0,
+            step: step("last")
+        })
+        .expect("current"),
+        vec![
+            Effect::Data(DataToShell::StepCommit {
+                run: R,
+                index: 0,
+                step: step("last"),
+            }),
+            Effect::Store(StoreOp::EndRun {
+                run: R,
+                end: RunEnd::Done
+            }),
+            state(R, T, Phase::Done),
+        ]
+    );
+}
+
+#[test]
+fn a_store_failure_mid_run_still_records_the_failure() {
+    let mut core = started();
+    assert_eq!(
+        core.handle(Input::StoreFailed { run: R }).expect("current"),
+        vec![
+            Effect::CancelEngine { run: R },
+            Effect::Store(StoreOp::EndRun {
+                run: R,
+                end: RunEnd::Failed(Failure::Store),
+            }),
+            state(R, T, Phase::Failed),
+        ]
+    );
+}
+
+#[test]
+fn a_repeated_turn_ack_never_starts_a_second_engine() {
+    let mut core = started();
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
+}
+
+#[test]
+fn a_long_delta_goes_out_in_frames_that_fit_the_data_pipe() {
+    let mut core = started();
+    // Three-byte characters, so a plain byte split would land inside one.
+    let delta = "€".repeat(MAX_DELTA / 3 * 2 + 5);
+    let sent = core
+        .handle(engine(R, EngineEvent::Text(delta.clone())))
+        .expect("current");
+    let pieces: Vec<&str> = sent
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Data(DataToShell::AssistantText { delta, .. }) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pieces.len(), 3);
+    assert!(pieces.iter().all(|piece| piece.len() <= MAX_DELTA));
+    assert_eq!(pieces.concat(), delta);
 }

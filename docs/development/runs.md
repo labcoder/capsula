@@ -39,7 +39,10 @@ sequenceDiagram
 ```
 
 - **The turn is stored before the engine starts** (OSC-105 boundary 8).
-- **A step reaches the shell only after it's committed.**
+- **A step reaches the shell only after it's committed.** When the engine says it's done while
+  a step is still in the store, the run ends right after that step is shown.
+- **Text goes out in pieces of at most 64 KiB**, split on character boundaries, so every frame
+  fits the data pipe.
 - **Streamed text is stored before each step and at the end**, as one event each time.
   shortcut: text after the last step is lost if the brain dies mid-run; store it on a timer once
   real engines stream long answers (slice 3).
@@ -60,9 +63,10 @@ the store runs operations in order.
 | The shell took no data for 2 s | `interrupted(view_stalled)` | yes |
 | A budget ran out | `failed(budget)` | yes |
 | The engine failed or sent an oversized step | `failed(engine)` | yes |
-| The store refused the turn | `failed(store)`, nothing more written | yes |
+| The store refused the turn | `failed(store)`, nothing more written, since there's no run row | yes |
+| A later store write failed | `failed(store)` | yes |
 
-`revealed` keeps only indices of committed steps, each once, in order.
+`revealed` keeps only indices of steps the run produced, each once, in order.
 
 ## Budgets
 

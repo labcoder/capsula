@@ -81,7 +81,8 @@ pub enum ControlToBrain {
     /// The handshake; first and only once.
     Hello(Hello),
     /// The first Esc, after the shell has already stopped locally. `revealed` lists the steps
-    /// whose entrance had finished, at most [`MAX_STEPS`], so the thread records what stayed.
+    /// whose entrance had finished, so the thread records what stayed; the brain keeps only
+    /// indices of steps the run produced, and the control cap bounds the list.
     Stop {
         /// The run the shell stopped.
         run: RunId,

@@ -22,6 +22,8 @@ use crate::store::{EventKind, Failure, Interruption, RunEnd};
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
 /// The most visible text one run may stream [S3].
 pub const MAX_TEXT: usize = 1024 * 1024;
+/// The largest piece of text one `AssistantText` frame carries, well under the data pipe's cap.
+pub const MAX_DELTA: usize = 64 * 1024;
 /// How many characters of a new thread's first turn become its title [guess].
 const TITLE_CHARS: usize = 80;
 
@@ -188,16 +190,20 @@ enum Notify {
 struct Run {
     id: RunId,
     thread: ThreadId,
-    /// The user's text, until the turn is stored and the engine starts with it.
+    /// The user's text, until the turn is stored and the engine starts with it; `None` once
+    /// the engine has started.
     turn: Option<String>,
     /// Set when the store refused the turn, so nothing more is written for it.
     store_failed: bool,
-    started: bool,
     answering: bool,
     /// Streamed text not yet stored; it's stored before each step and at the end.
     unstored: String,
     text_bytes: usize,
     steps: usize,
+    /// Steps sent to the store and not yet acknowledged.
+    pending: usize,
+    /// The engine said `Done` while steps were pending; the run ends with the last one.
+    finishing: bool,
 }
 
 /// The core loop's state.
@@ -245,17 +251,23 @@ impl Coordinator {
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
             Input::TurnStored { run } => {
                 let current = self.current(run)?;
-                current.started = true;
-                let text = current.turn.take().unwrap_or_default();
+                let text = current.turn.take().ok_or(Stale)?;
                 effects.push(Effect::StartEngine { run, text });
             }
             Input::StepStored { run, index, step } => {
-                self.current(run)?;
+                let current = self.current(run)?;
+                current.pending = current.pending.saturating_sub(1);
+                let finished = current.finishing && current.pending == 0;
                 effects.push(Effect::Data(DataToShell::StepCommit { run, index, step }));
+                if finished {
+                    let done = self.take(run)?;
+                    end(done, RunEnd::Done, None, Notify::Shell, &mut effects);
+                }
             }
             Input::StoreFailed { run } => {
                 let mut current = self.take(run)?;
-                current.store_failed = true;
+                // Only a turn that never committed has no run row to end.
+                current.store_failed = current.turn.is_some();
                 end(
                     current,
                     RunEnd::Failed(Failure::Store),
@@ -322,11 +334,12 @@ impl Coordinator {
             thread,
             turn: Some(text),
             store_failed: false,
-            started: false,
             answering: false,
             unstored: String::new(),
             text_bytes: 0,
             steps: 0,
+            pending: 0,
+            finishing: false,
         });
     }
 
@@ -337,6 +350,10 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let current = self.current(run)?;
+        // An engine that said Done has nothing more to say.
+        if current.finishing {
+            return Err(Stale);
+        }
         match event {
             EngineEvent::Text(delta) => {
                 if current.text_bytes + delta.len() > MAX_TEXT {
@@ -353,7 +370,19 @@ impl Coordinator {
                 current.text_bytes += delta.len();
                 current.unstored.push_str(&delta);
                 answering(current, effects);
-                effects.push(Effect::Data(DataToShell::AssistantText { run, delta }));
+                let mut rest = delta.as_str();
+                while !rest.is_empty() {
+                    let mut cut = rest.len().min(MAX_DELTA);
+                    while !rest.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    let (piece, tail) = rest.split_at(cut);
+                    effects.push(Effect::Data(DataToShell::AssistantText {
+                        run,
+                        delta: piece.to_owned(),
+                    }));
+                    rest = tail;
+                }
             }
             EngineEvent::Step(step) => {
                 let failure = if step.label.len() > MAX_STEP_LABEL {
@@ -383,7 +412,9 @@ impl Coordinator {
                     step,
                 }));
                 current.steps += 1;
+                current.pending += 1;
             }
+            EngineEvent::Done if current.pending > 0 => current.finishing = true,
             EngineEvent::Done => {
                 let done = self.take(run)?;
                 end(done, RunEnd::Done, None, Notify::Shell, effects);
@@ -425,7 +456,7 @@ fn end(
     effects: &mut Vec<Effect>,
 ) {
     let mut run = run;
-    if run.started && outcome != RunEnd::Done {
+    if run.turn.is_none() && outcome != RunEnd::Done {
         effects.push(Effect::CancelEngine { run: run.id });
     }
     // The store runs its operations in order, so this lands after the turn even when the turn
