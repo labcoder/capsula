@@ -9,16 +9,27 @@ const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
 /// Every string the shell shows. A unit test checks each one is in the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Text {
-    StatusStarting,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 1] = [Self::StatusStarting];
+    const ALL: [Self; 4] = [
+        Self::Connecting,
+        Self::Connected,
+        Self::Reconnecting,
+        Self::Failed,
+    ];
 
     const fn id(self) -> &'static str {
         match self {
-            Self::StatusStarting => "status-starting",
+            Self::Connecting => "status-connecting",
+            Self::Connected => "status-connected",
+            Self::Reconnecting => "status-reconnecting",
+            Self::Failed => "status-failed",
         }
     }
 }
@@ -84,6 +95,6 @@ mod tests {
                 "{text:?} has no value in locales/en/shell.ftl",
             );
         }
-        assert_eq!(strings.get(Text::StatusStarting), "Starting…");
+        assert_eq!(strings.get(Text::Connected), "Ready");
     }
 }

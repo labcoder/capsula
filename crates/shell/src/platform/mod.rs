@@ -8,4 +8,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub(crate) use windows::{ShowError, show_without_activating};
+pub(crate) use windows::{
+    PipeClient, ShowError, launch_detached, lock_single_instance, session_id,
+    show_without_activating,
+};
