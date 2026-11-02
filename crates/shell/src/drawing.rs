@@ -96,6 +96,13 @@ impl Drawing {
         self.recovery = Recovery::Awaiting { held: Vec::new() };
     }
 
+    /// A new brain numbers its runs afresh, so no shown scene belongs to one of them.
+    pub(crate) fn forget_runs(&mut self) {
+        for scene in self.shown.values_mut() {
+            scene.run = None;
+        }
+    }
+
     /// The connection ended. Shown scenes stay until the next `Scenes` reconciles them.
     pub(crate) fn disconnected(&mut self) {
         self.recovery = Recovery::Offline;

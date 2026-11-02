@@ -9,8 +9,8 @@
 
 use capsula_protocol::frame::Pipe;
 use capsula_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
-    ThreadId,
+    ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
+    SceneDescriptor, ThreadId,
 };
 
 use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
@@ -80,6 +80,8 @@ pub(crate) struct Runs {
     selection_pending: usize,
     shown: Option<Shown>,
     drawing: Drawing,
+    /// The brain the last connection reached.
+    incarnation: Option<Incarnation>,
 }
 
 impl Runs {
@@ -180,6 +182,21 @@ impl Runs {
         }
         self.pending += 1;
         Ok(())
+    }
+
+    /// The brain this connection reached. A new one can reuse the run id of a turn the last
+    /// one never stored, so nothing the last one numbered may fence or match its runs.
+    pub(crate) fn met(&mut self, incarnation: Incarnation) {
+        if self.incarnation.replace(incarnation) == Some(incarnation) {
+            return;
+        }
+        self.answered = RunId(0);
+        self.fence = RunId(0);
+        // The answer stays on screen, but run 0 is none of the new brain's runs.
+        if let Some(shown) = &mut self.shown {
+            shown.run = RunId(0);
+        }
+        self.drawing.forget_runs();
     }
 
     /// The link connected, as connection `generation`.
@@ -345,8 +362,8 @@ fn keep_end(text: &mut String, max: usize) {
 mod tests {
     use capsula_protocol::frame::Pipe;
     use capsula_protocol::message::{
-        ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
-        SceneId, Step, ThreadId,
+        ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
+        SceneDescriptor, SceneId, Step, ThreadId,
     };
 
     use super::{Applied, Refused, Runs, TEXT_KEPT};
@@ -401,6 +418,41 @@ mod tests {
         assert_eq!(runs.apply_data(page, BYTES), BYTES);
         assert!(runs.held.is_empty());
         assert!(runs.shown().is_none());
+    }
+
+    #[test]
+    fn a_new_brain_reusing_a_run_id_is_shown_and_stopped_afresh() {
+        let mut runs = Runs::default();
+        runs.met(Incarnation(1));
+        runs.connected(1);
+        submit(&mut runs, "first");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, step(5, 0));
+        data(&mut runs, text(5, "old"));
+        state(&mut runs, 5, Phase::Done);
+        data(&mut runs, end(5));
+        runs.disconnected();
+        runs.met(Incarnation(2));
+        runs.connected(2);
+        submit(&mut runs, "after a crash before the turn was stored");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, text(5, "new"));
+        assert_eq!(runs.shown().map(|shown| shown.text.as_str()), Some("new"));
+        assert!(
+            runs.drawing.revealed(RunId(5)).is_empty(),
+            "the last brain's scene isn't this run's to stop"
+        );
+        runs.disconnected();
+        runs.met(Incarnation(2));
+        runs.connected(3);
+        submit(&mut runs, "same brain");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, text(5, " stale"));
+        assert_eq!(
+            runs.shown().map(|shown| shown.text.as_str()),
+            Some("new"),
+            "the same brain's old run stays fenced"
+        );
     }
 
     #[test]

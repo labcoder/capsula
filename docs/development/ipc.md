@@ -198,8 +198,10 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   that would end the connection. It refuses blank turns, which the brain ignores, and turns too
   long for a data frame.
 - **Broken input.** A malformed frame on either pipe, a repeated `Welcome`, or scenes or
-  chunks that break the rules above end the connection, and the link reconnects as after any loss. A lost brain fences every run it knew
-  and forgets the unanswered turns.
+  chunks that break the rules above end the connection, and the link reconnects as after any
+  loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
+  a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
+  id out again, and the answer and scenes still shown belong to none of the new brain's runs.
 
 ## Starting and reconnecting
 
