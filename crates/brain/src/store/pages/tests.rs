@@ -183,9 +183,14 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
         .expect("continued");
     assert_eq!(ids(&rows), vec![2]);
     assert_eq!(next, None);
-    for rank in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    for (search, rank) in [
+        ("red fox", f64::NAN),
+        ("red fox", f64::INFINITY),
+        ("red fox", f64::NEG_INFINITY),
+        ("\0", f64::NAN),
+    ] {
         let page = PageOf::Threads {
-            search: Some("red fox".to_owned()),
+            search: Some(search.to_owned()),
             after: Some(ThreadCursor {
                 updated_ms: 0,
                 id: ThreadId(1),
@@ -194,6 +199,33 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
         };
         assert!(matches!(store.read_page(1, page), Err(StoreError::Read)));
     }
+}
+
+#[test]
+fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
+    let scratch = Scratch::new("pages-search-rescored");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for _ in 0..54 {
+        add(&mut store, "needle", "needle");
+    }
+    let (thread, run) = (ThreadId(55), RunId(55));
+    store
+        .begin_turn(thread, Some("active"), run, "needle")
+        .expect("an active run");
+    let (rows, next) = store.search_page("needle", 50).expect("first");
+    assert_eq!(ids(&rows), (6..=55).rev().collect::<Vec<_>>());
+    let other = "other ".repeat(57);
+    let answer = NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some(&other),
+        body: None,
+    };
+    store.append(thread, run, &[answer]).expect("an answer");
+    let (rows, next) = store
+        .search_page_after("needle", next, 50)
+        .expect("continued");
+    assert_eq!(ids(&rows), vec![5, 4, 3, 2, 1]);
+    assert_eq!(next, None);
 }
 
 #[test]

@@ -136,22 +136,25 @@ impl Store {
         Ok((rows, next))
     }
 
-    /// Up to `limit + 1` matches after `after`, each with its own continuation key. The key
-    /// carries its thread's rank, so a continuation still works once that thread stops matching.
-    /// A rank that isn't finite, read or sent, fails the page.
+    /// Up to `limit + 1` matches after `after`, each with its own continuation key. A
+    /// continuation compares against its thread's rank as it is now, since any indexed write
+    /// moves every rank; the key carries the rank it had, for when its events are gone. A rank
+    /// that isn't finite, read or sent, fails the page.
     fn search_rows(
         &self,
         words: &str,
         after: Option<ThreadCursor>,
         limit: usize,
     ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
-        // shortcut: search ranks are live; snapshot them when writes must preserve result order.
-        if words.contains('\0') {
-            return Ok(Vec::new());
-        }
         let rank = after.map(|key| f64::from_bits(key.rank_bits));
         if rank.is_some_and(|rank| !rank.is_finite()) {
             return Err(StoreError::Read);
+        }
+        // shortcut: once the cursor's thread is removed its old rank is compared with ranks
+        // the removal moved, so rows can be skipped or repeated; snapshot a search's ranks when
+        // continuations must survive deletions.
+        if words.contains('\0') {
+            return Ok(Vec::new());
         }
         // shortcut: every page scores every matching event before taking its rows, ahead of the
         // next write: about 65 ms at 20k matching events and 335 ms at 100k on Rez; OSC-152 moves
@@ -161,14 +164,18 @@ impl Store {
             .conn
             .prepare(
                 "WITH matches AS MATERIALIZED (
-                 SELECT t.id, t.title, t.updated_ms, min(f.rank) AS score
+                 SELECT t.id, t.title, t.updated_ms, t.state = 'live' AS live,
+                 min(f.rank) AS score
                  FROM events_fts f JOIN events e ON e.id = f.rowid
-                 JOIN threads t ON t.id = e.thread AND t.state = 'live'
+                 JOIN threads t ON t.id = e.thread
                  WHERE events_fts MATCH ?1 GROUP BY t.id
+             ),
+             anchor AS (
+                 SELECT coalesce((SELECT score FROM matches WHERE id = ?2), ?3) AS score
              )
-             SELECT id, title, updated_ms, score FROM matches
-             WHERE ?2 IS NULL OR score > ?3 OR (score = ?3 AND id < ?2)
-             ORDER BY score, id DESC LIMIT ?4",
+             SELECT m.id, m.title, m.updated_ms, m.score FROM matches m, anchor a
+             WHERE m.live AND (?2 IS NULL OR m.score > a.score OR (m.score = a.score AND m.id < ?2))
+             ORDER BY m.score, m.id DESC LIMIT ?4",
             )
             .map_err(|_| StoreError::Read)?;
         let rows = query

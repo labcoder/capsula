@@ -20,9 +20,11 @@ Search uses the store's literal FTS phrase matching, not query syntax, and settl
 [guess]. Results are ranked by the best matching event, with descending thread id breaking
 ties. Clearing the search restores updated-time ordering. Overlong searches are refused before
 they can leave an unanswered, unencodable request.
-A search continuation carries the last thread's rank, as exact float bits, so it continues
-even when that thread has since stopped matching or been deleted. Ranks are live, not a
-snapshot: reopen after matching events change to refresh the ranked list. A cursor whose rank
+A search continuation compares with the last thread's rank as the store scores it now, so it
+continues after a write moves every rank. Ranks are live, not a snapshot: any change to indexed
+text, a match or not, can move them, so reopen to refresh the ranked list. The cursor also
+carries the rank as exact float bits, used only once the thread's events are gone; a deletion
+moves the other ranks too, so that continuation can skip or repeat rows. A cursor whose rank
 isn't finite fails the page.
 
 ## Requests and staleness
