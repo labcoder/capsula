@@ -1,6 +1,9 @@
 //! The pipe tap: a dev-only recording of every frame the brain sends and receives, which
 //! `cargo xtask pipe-dump` decodes with the same message types. Each record is the pipe, the
 //! direction, a `u32` little-endian length and the payload.
+//!
+//! A recording holds the user's turns and the assistant's text, so it's a transcript: keep it
+//! local and delete it like one.
 
 use std::io::{self, Read, Write};
 

@@ -52,16 +52,18 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
     );
     let answer = format!("ANSWER {}", MARKER.to_uppercase());
     store
-        .append(thread, run, EventKind::AssistantText, Some(&answer), None)
+        .append(
+            thread,
+            run,
+            &[(EventKind::AssistantText, Some(&answer), None)],
+        )
         .expect("text");
     let body = format!(r#"{{"label":"{MARKER}"}}"#);
     store
         .append(
             thread,
             run,
-            EventKind::SceneStep,
-            Some("label"),
-            Some(&body),
+            &[(EventKind::SceneStep, Some("label"), Some(&body))],
         )
         .expect("step");
     (thread, run)
@@ -192,7 +194,11 @@ fn a_thread_being_deleted_takes_no_new_work() {
         Err(StoreError::NoThread)
     ));
     assert!(matches!(
-        store.append(thread, run, EventKind::AssistantText, Some("late"), None),
+        store.append(
+            thread,
+            run,
+            &[(EventKind::AssistantText, Some("late"), None)]
+        ),
         Err(StoreError::NoThread)
     ));
     assert!(matches!(
@@ -208,28 +214,26 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
     let (a, _) = turn(&mut store, Err("a"), "x");
     let (b, run_b) = turn(&mut store, Err("b"), "y");
     assert!(matches!(
-        store.append(a, run_b, EventKind::AssistantText, Some("x"), None),
+        store.append(a, run_b, &[(EventKind::AssistantText, Some("x"), None)]),
         Err(StoreError::NoRun)
     ));
     assert!(matches!(
         store.append(
             b,
             RunId(u64::MAX),
-            EventKind::AssistantText,
-            Some("x"),
-            None
+            &[(EventKind::AssistantText, Some("x"), None)]
         ),
         Err(StoreError::NoRun)
     ));
     store
-        .end_run(run_b, RunEnd::Interrupted(Interruption::Stop))
+        .end_run(b, run_b, &[], RunEnd::Interrupted(Interruption::Stop))
         .expect("end");
     assert!(matches!(
-        store.append(b, run_b, EventKind::SceneStep, Some("late"), None),
+        store.append(b, run_b, &[(EventKind::SceneStep, Some("late"), None)]),
         Err(StoreError::NoRun)
     ));
     assert!(matches!(
-        store.end_run(run_b, RunEnd::Done),
+        store.end_run(b, run_b, &[], RunEnd::Done),
         Err(StoreError::NoRun)
     ));
     assert_eq!(
@@ -257,16 +261,14 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, ended) = turn(&mut store, Err("t"), "one");
     store
-        .end_run(ended, RunEnd::Failed(Failure::Budget))
+        .end_run(thread, ended, &[], RunEnd::Failed(Failure::Budget))
         .expect("end");
     let (_, active) = turn(&mut store, Ok(thread), "two");
     store
         .append(
             thread,
             active,
-            EventKind::AssistantText,
-            Some("partial"),
-            None,
+            &[(EventKind::AssistantText, Some("partial"), None)],
         )
         .expect("committed text");
     // The brain dies: its connection never closes, so nothing is checkpointed.
@@ -454,7 +456,8 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
         .busy_timeout(std::time::Duration::ZERO)
         .expect("timeout");
     let (first, _) = plant(&mut store);
-    let (second, _) = plant(&mut store);
+    // Without the marker, so the raw scan below can only find the first thread's residue.
+    let (second, _) = turn(&mut store, Err("plain"), "plain");
     store.begin_delete(first).expect("begin");
     store.begin_delete(second).expect("begin");
     let reader = Connection::open(scratch.db()).expect("reader");
@@ -481,4 +484,31 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
     reader.execute_batch("COMMIT").expect("end snapshot");
     assert_eq!(store.recover().expect("retry"), Recovered::default());
     assert!(!contains_marker(&scratch.db()));
+}
+
+#[test]
+fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
+    let scratch = Scratch::new("ending");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = turn(&mut store, Err("t"), "hi");
+    let (other, _) = turn(&mut store, Err("u"), "hey");
+    let tail = [(EventKind::AssistantText, Some("tail"), None)];
+    assert!(matches!(
+        store.end_run(other, run, &tail, RunEnd::Done),
+        Err(StoreError::NoRun)
+    ));
+    store.begin_delete(thread).expect("begin");
+    assert!(matches!(
+        store.end_run(thread, run, &tail, RunEnd::Done),
+        Err(StoreError::NoThread)
+    ));
+    assert_eq!(run_row(&store, run), ("active".to_owned(), None));
+    assert_eq!(rows(&store.conn, "events"), 2, "only the two turns");
+    store
+        .end_run(thread, run, &[], RunEnd::Failed(Failure::Store))
+        .expect("an outcome alone needs no live thread");
+    assert_eq!(
+        run_row(&store, run),
+        ("failed".to_owned(), Some("store".to_owned()))
+    );
 }

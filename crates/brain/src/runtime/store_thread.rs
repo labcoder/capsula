@@ -23,9 +23,7 @@ impl StoreThread {
             .spawn(move || {
                 // Every queued op runs, even with nobody left to hear the acknowledgement.
                 for op in queue {
-                    if let Some(ack) = apply(&mut store, op)
-                        && acks.send(ack).is_err()
-                    {
+                    if acks.send(apply(&mut store, op)).is_err() {
                         tracing::debug!("an acknowledgement had no listener");
                     }
                 }
@@ -47,64 +45,71 @@ impl StoreThread {
     }
 }
 
-/// Runs one operation. Errors are logged by kind and run id only, never content.
-fn apply(store: &mut Store, op: StoreOp) -> Option<Input> {
-    match op {
+/// Runs one operation in one transaction and answers it. Errors are logged by kind and run id
+/// only, never content.
+fn apply(store: &mut Store, op: StoreOp) -> Input {
+    let run = op.run();
+    let (result, stored, what) = match op {
         StoreOp::BeginTurn {
             thread,
             title,
             run,
             text,
-        } => Some(
-            match store.begin_turn(thread, title.as_deref(), run, &text) {
-                Ok(()) => Input::TurnStored { run },
-                Err(error) => {
-                    tracing::warn!(%error, run = run.0, "the turn wasn't stored");
-                    Input::StoreFailed { run }
-                }
-            },
+        } => (
+            store.begin_turn(thread, title.as_deref(), run, &text),
+            Input::TurnStored { run },
+            "turn",
         ),
-        StoreOp::Append {
-            thread,
-            run,
-            kind,
-            text,
-            body,
-        } => store
-            .append(thread, run, kind, text.as_deref(), body.as_deref())
-            .err()
-            .map(|error| {
-                tracing::warn!(%error, run = run.0, "an event wasn't stored");
-                Input::StoreFailed { run }
-            }),
         StoreOp::CommitStep {
             thread,
             run,
+            text,
             index,
             step,
         } => {
             let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
-            Some(
-                match store.append(
-                    thread,
-                    run,
-                    EventKind::SceneStep,
-                    Some(&step.label),
-                    Some(&body),
-                ) {
-                    Ok(()) => Input::StepStored { run, index, step },
-                    Err(error) => {
-                        tracing::warn!(%error, run = run.0, "a step wasn't stored");
-                        Input::StoreFailed { run }
-                    }
-                },
+            let mut events = Vec::with_capacity(2);
+            if let Some(text) = &text {
+                events.push((EventKind::AssistantText, Some(text.as_str()), None));
+            }
+            events.push((
+                EventKind::SceneStep,
+                Some(step.label.as_str()),
+                Some(body.as_str()),
+            ));
+            (
+                store.append(thread, run, &events),
+                Input::StepStored { run, index, step },
+                "step",
             )
         }
-        StoreOp::EndRun { run, end } => {
-            if let Err(error) = store.end_run(run, end) {
-                tracing::warn!(%error, run = run.0, "a run's outcome wasn't stored");
+        StoreOp::EndRun {
+            thread,
+            run,
+            text,
+            revealed,
+            end,
+        } => {
+            let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
+            let mut events = Vec::with_capacity(2);
+            if let Some(text) = &text {
+                events.push((EventKind::AssistantText, Some(text.as_str()), None));
             }
-            None
+            if let Some(revealed) = &revealed {
+                events.push((EventKind::Revealed, None, Some(revealed.as_str())));
+            }
+            (
+                store.end_run(thread, run, &events, end),
+                Input::RunStored { run },
+                "outcome",
+            )
+        }
+    };
+    match result {
+        Ok(()) => stored,
+        Err(error) => {
+            tracing::warn!(%error, run = run.0, what, "a store operation failed");
+            Input::StoreFailed { run }
         }
     }
 }
