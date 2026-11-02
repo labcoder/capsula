@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use capsula_protocol::constants;
+use kumochi_protocol::constants;
 
 use crate::runtime::Brain;
 use crate::runtime::fixture::Fixture;

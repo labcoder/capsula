@@ -4,8 +4,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Incarnation, Phase, RunId,
     ThreadId,
 };
@@ -14,7 +14,7 @@ use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
 use crate::platform::{PipeClient, test_pair};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow,
 };
 
@@ -104,7 +104,11 @@ const TOTAL: usize = 960_000;
 const PATIENCE: Duration = Duration::from_secs(5);
 
 fn pair(label: &str) -> (PipeClient, PipeClient) {
-    let name = format!(r"\\.\pipe\capsula-test-{}-{label}", std::process::id());
+    let name = format!(
+        r"\\.\pipe\{}-test-{}-{label}",
+        kumochi_protocol::constants::OBJECT_PREFIX,
+        std::process::id()
+    );
     test_pair(&name).expect("a test pipe")
 }
 
@@ -670,7 +674,7 @@ fn report(name: &str, samples: &mut [Duration]) {
 }
 
 /// Rez measurement for the pull request, not a check: run it with
-/// `cargo test --release -p capsula-shell -- --ignored --nocapture measure_`. The shell side
+/// `cargo test --release -p kumochi-shell -- --ignored --nocapture measure_`. The shell side
 /// is the link as the UI uses it: a Stop queued for the control writer and its answer taken
 /// from the event channel, and text taken from the event channel, granting credit for each
 /// frame.

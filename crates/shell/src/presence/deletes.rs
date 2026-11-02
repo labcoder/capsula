@@ -4,8 +4,8 @@
 
 use std::time::Duration;
 
-use capsula_protocol::message::{Deleted, RunId, ThreadId};
 use gpui_kit::Context;
+use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 
 use super::Presence;
 

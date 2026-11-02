@@ -9,14 +9,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use capsula_protocol::message::{RunId, Step};
+use kumochi_protocol::message::{RunId, Step};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::coordinator::{EngineEvent, Input, MAX_TEXT};
 
 /// The script runs use unless a dev build names another in [`constants::FIXTURE_ENV`].
 ///
-/// [`constants::FIXTURE_ENV`]: capsula_protocol::constants::FIXTURE_ENV
+/// [`constants::FIXTURE_ENV`]: kumochi_protocol::constants::FIXTURE_ENV
 pub(crate) const DEFAULT: &str = include_str!("../../fixtures/default.txt");
 
 /// A script line that doesn't parse.
@@ -171,7 +171,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use capsula_protocol::message::{RunId, Step};
+    use kumochi_protocol::message::{RunId, Step};
     use tokio::sync::mpsc;
 
     use super::{DEFAULT, Fixture, Line, start};

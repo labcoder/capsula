@@ -1,5 +1,5 @@
 [package]
-name = "capsula-protocol"
+name = "kumochi-protocol"
 description = "The brain-to-shell messages, ids, secrets and product constants."
 version.workspace = true
 edition.workspace = true

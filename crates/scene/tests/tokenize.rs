@@ -1,6 +1,6 @@
 //! Streaming grammar, cursor boundaries, allocation checks and Rez measurements.
 
-use capsula_scene::{
+use kumochi_scene::{
     limits::{MAX_DRAWING_BYTES, MAX_RECORD_BYTES},
     tokenize::{TokenError, Tokenizer},
 };
@@ -290,7 +290,7 @@ fn measurement_drawing() -> Vec<u8> {
     for record in &records {
         let bytes = serde_json::to_vec(record).expect("generated record encodes");
         assert!(
-            capsula_scene::parse_record(&bytes).is_ok(),
+            kumochi_scene::parse_record(&bytes).is_ok(),
             "benchmark uses typed-valid records"
         );
     }

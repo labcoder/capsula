@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
+use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
 use super::{Coordinator, Effect, Stale, StoreOp};
 use crate::store::SceneState;
@@ -98,7 +98,7 @@ impl Coordinator {
     pub(super) fn begin_scene(
         &mut self,
         scene: SceneId,
-        (thread, run): (capsula_protocol::message::ThreadId, RunId),
+        (thread, run): (kumochi_protocol::message::ThreadId, RunId),
         evict: Option<SceneId>,
     ) {
         self.scenes.retain(|state| Some(state.scene) != evict);

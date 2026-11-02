@@ -3,7 +3,7 @@
 //! before it has been read, a turn naming the thread is refused before it gets a run. The answer
 //! retires the thread's runs and scenes, so nothing of them reaches the store or the shell again.
 
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
 

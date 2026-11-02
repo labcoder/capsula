@@ -1,8 +1,8 @@
 //! Deletes across a connection's end and the next: the drain, both orders of a resend and its
 //! answer, an answer the shell never read, and a hide that never committed.
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, RunId, ThreadId};
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, RunId, ThreadId};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
@@ -439,7 +439,7 @@ async fn next_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
 }
 
 fn turn_in(thread: ThreadId) -> Vec<u8> {
-    let turn = capsula_protocol::message::DataToBrain::TextSubmit {
+    let turn = kumochi_protocol::message::DataToBrain::TextSubmit {
         thread: Some(thread),
         text: "more".to_owned(),
     };

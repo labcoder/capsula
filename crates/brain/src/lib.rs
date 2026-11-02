@@ -1,4 +1,4 @@
-//! Capsula's brain: runs, tools, connections, the store and the helpers' Job Object.
+//! Kumochi's brain: runs, tools, connections, the store and the helpers' Job Object.
 //!
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
@@ -20,9 +20,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use capsula_protocol::BUILD_ID;
-use capsula_protocol::constants::{self, SHELL_EXE};
-use capsula_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
+use kumochi_protocol::BUILD_ID;
+use kumochi_protocol::constants::{self, SHELL_EXE};
+use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
@@ -37,7 +37,7 @@ use crate::runtime::fixture::{self, Fixture};
 /// in the one-minute crash window [guess].
 const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
 
-/// The argument that starts `capsulad` as the screen worker.
+/// The argument that starts `kumochid` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
 
 /// Why the brain stopped with an error.

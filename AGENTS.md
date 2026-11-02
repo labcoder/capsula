@@ -1,7 +1,7 @@
-# Capsula
+# Kumochi
 
-A local-first desktop AI presence: a GPUI shell (`capsula.exe`) and a headless brain
-(`capsulad.exe`). Windows first. How it works inside: `docs/development/architecture.md`.
+A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless brain
+(`kumochid.exe`). Windows first. How it works inside: `docs/development/architecture.md`.
 
 ## Commands
 - Build: `cargo build --workspace` (the toolchain is pinned in `rust-toolchain.toml`)
@@ -15,17 +15,17 @@ A local-first desktop AI presence: a GPUI shell (`capsula.exe`) and a headless b
 ```
 crates/protocol/   shared data: Secret, and constants.rs (every product name)
 crates/scene/      the drawing format, validator and layout
-crates/brain/      bin capsulad: the headless process
-crates/shell/      bin capsula: the GPUI app
+crates/brain/      bin kumochid: the headless process
+crates/shell/      bin kumochi: the GPUI app
 xtask/             dev tasks in Rust; no scripts in other languages
-docs/development/  how Capsula works inside
-docs/user/         how people use Capsula
+docs/development/  how Kumochi works inside
+docs/user/         how people use Kumochi
 locales/en/        every user-facing string (Fluent)
 ```
 
 ## Code rules
 - Names that change with the product live only in `crates/protocol/src/constants.rs`.
-  Debug builds use the "Dev" names, so they never touch an installed Capsula.
+  Debug builds use the "Dev" names, so they never touch an installed Kumochi.
 - `unsafe` only in a crate's `platform` module, one operation per block, each with `// SAFETY:`.
 - No `unwrap()` outside tests. `thiserror` between modules; `anyhow` only in `xtask`.
 - tokio runs in the brain only. The shell's UI thread never blocks.
@@ -49,5 +49,5 @@ locales/en/        every user-facing string (Fluent)
 - Screenshots go only to the model the user chose.
 - Never read or store Claude Code's credentials.
 - Clean room: nothing from HeyClicky's code, protocol, schemas, prompts, assets or identifiers.
-- Capsula is `AGPL-3.0-only`, but no one else's GPL, LGPL or AGPL code ships in it: new
+- Kumochi is `AGPL-3.0-only`, but no one else's GPL, LGPL or AGPL code ships in it: new
   dependencies must pass `deny.toml`'s license list.

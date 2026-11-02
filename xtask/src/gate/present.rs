@@ -446,7 +446,7 @@ mod tests {
 
     fn row(qpc: i64, swapchain: u64, disposition: Disposition, display_ms: &str) -> String {
         format!(
-            "capsula.exe,35620,0x{swapchain:X},DXGI,0,0,{},0.30478100000000,0.3374,60.3792,0,Composed: Flip,0.7355,{display_ms},62.6153,0,0.3765,0.352,{qpc}\r\n",
+            "app.exe,35620,0x{swapchain:X},DXGI,0,0,{},0.30478100000000,0.3374,60.3792,0,Composed: Flip,0.7355,{display_ms},62.6153,0,0.3765,0.352,{qpc}\r\n",
             u8::from(matches!(disposition, Dropped))
         )
     }
@@ -635,18 +635,18 @@ mod tests {
             valid.replace(",1,62", ",NaN,62"),
             format!("{valid}{}", row(1000, 10, Presented, "1")),
             valid.replace(",0.352,", ","),
-            valid.replace("capsula.exe", "\"unterminated"),
+            valid.replace("app.exe", "\"unterminated"),
         ] {
             assert!(parse(&text, 35620).is_err(), "must reject {text:?}");
         }
-        let quoted = valid.replace("capsula.exe", "\"capsula, \"\"dev\"\".exe\"");
+        let quoted = valid.replace("app.exe", "\"app, \"\"dev\"\".exe\"");
         assert_eq!(
             parse(&quoted, 35620).unwrap().rows.len(),
             1,
             "CSV escaped quotes and commas"
         );
         assert!(
-            parse(&valid.replace("capsula.exe", "\"capsula\"junk"), 35620).is_err(),
+            parse(&valid.replace("app.exe", "\"app\"junk"), 35620).is_err(),
             "quoted field must end at delimiter"
         );
     }

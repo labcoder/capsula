@@ -11,7 +11,7 @@ fn directory() -> std::path::PathBuf {
         .as_nanos();
     let directory = std::env::temp_dir().join(format!(
         "{}-receipt-test-{}-{stamp}",
-        capsula_protocol::constants::OBJECT_PREFIX,
+        kumochi_protocol::constants::OBJECT_PREFIX,
         std::process::id()
     ));
     fs::create_dir(&directory).unwrap();

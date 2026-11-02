@@ -1,7 +1,7 @@
 //! File logging through `tracing`, to `%LOCALAPPDATA%\\<product>\\logs`, one file a day for a week.
 //!
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
-//! needs redacting after the fact. Secrets are [`capsula_protocol::Secret`]s and print as `***`.
+//! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
 
 use tracing::Level;
 use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};

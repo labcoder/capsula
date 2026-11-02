@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use capsula_protocol::message::{Phase, RunId, SceneId, Step, ThreadId};
+use kumochi_protocol::message::{Phase, RunId, SceneId, Step, ThreadId};
 
 use super::{
     R, S, T, ack, commit_in_scene, committed, end_run, end_run_clearing, engine, run_end, started,

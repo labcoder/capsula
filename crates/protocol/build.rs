@@ -1,4 +1,4 @@
-//! Stamps `CAPSULA_COMMIT` for the build id, so a brain and a shell built from different commits
+//! Stamps `KUMOCHI_COMMIT` for the build id, so a brain and a shell built from different commits
 //! refuse each other.
 
 use std::process::Command;
@@ -17,5 +17,5 @@ fn main() {
     if let Some(reflog) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {
         println!("cargo::rerun-if-changed={reflog}");
     }
-    println!("cargo::rustc-env=CAPSULA_COMMIT={commit}");
+    println!("cargo::rustc-env=KUMOCHI_COMMIT={commit}");
 }

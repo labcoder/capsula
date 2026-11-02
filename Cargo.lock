@@ -737,64 +737,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsula-brain"
-version = "0.1.0"
-dependencies = [
- "capsula-protocol",
- "getrandom 0.3.4",
- "keyring",
- "rusqlite",
- "serde",
- "serde_json",
- "subtle",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "capsula-protocol"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "capsula-scene"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "capsula-shell"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "capsula-brain",
- "capsula-protocol",
- "fluent-bundle",
- "gpui-kit",
- "keyring",
- "raw-window-handle",
- "thiserror 2.0.21",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "unic-langid",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3415,6 +3357,64 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
+]
+
+[[package]]
+name = "kumochi-brain"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "keyring",
+ "kumochi-protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "kumochi-protocol"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "kumochi-scene"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "kumochi-shell"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "fluent-bundle",
+ "gpui-kit",
+ "keyring",
+ "kumochi-brain",
+ "kumochi-protocol",
+ "raw-window-handle",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "unic-langid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -8255,8 +8255,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "capsula-protocol",
  "keyring",
+ "kumochi-protocol",
  "rusqlite",
  "serde",
  "windows 0.62.2",

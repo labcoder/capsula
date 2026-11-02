@@ -3,7 +3,7 @@
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
-use capsula_protocol::message::{ControlToBrain, DataToShell};
+use kumochi_protocol::message::{ControlToBrain, DataToShell};
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.

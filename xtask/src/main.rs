@@ -1,4 +1,4 @@
-//! Capsula's dev tasks, run as `cargo xtask <task>`. Dev tasks live here, in Rust, not in scripts.
+//! Kumochi's dev tasks, run as `cargo xtask <task>`. Dev tasks live here, in Rust, not in scripts.
 #![expect(
     clippy::print_stdout,
     reason = "a command-line tool's output is its stdout"
@@ -8,8 +8,8 @@ use std::fs::File;
 use std::io::BufReader;
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::constants::PIPE_TAP_ENV;
-use capsula_protocol::tap::{self, Direction};
+use kumochi_protocol::constants::PIPE_TAP_ENV;
+use kumochi_protocol::tap::{self, Direction};
 
 #[cfg(windows)]
 mod bench;

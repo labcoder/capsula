@@ -8,12 +8,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
-use capsula_protocol::frame::{self, HEADER_LEN, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
+use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
+use kumochi_protocol::message::{
     CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello,
 };
-use capsula_protocol::{BUILD_ID, Secret};
+use kumochi_protocol::{BUILD_ID, Secret};
 use serde::de::DeserializeOwned;
 
 use crate::platform::gate_pipe::{self, PipeClient};

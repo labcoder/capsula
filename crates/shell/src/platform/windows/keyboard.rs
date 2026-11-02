@@ -407,7 +407,7 @@ mod tests {
     }
 
     /// Holds Esc system-wide for milliseconds, so it runs only in an approved desktop session:
-    /// `cargo test -p capsula-shell -- --ignored escape_hold`.
+    /// `cargo test -p kumochi-shell -- --ignored escape_hold`.
     #[test]
     #[ignore = "holds the desktop's Esc briefly; run only in an approved session"]
     fn escape_hold_registers_shows_stop_when_taken_and_releases() {

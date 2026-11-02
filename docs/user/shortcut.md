@@ -1,9 +1,9 @@
 # The shortcut
 
-Capsula listens for **left Ctrl + left Alt**, from any app, without taking those keys from it.
+Kumochi listens for **left Ctrl + left Alt**, from any app, without taking those keys from it.
 
 - **Press and hold** both keys. The dock shows Listening as soon as both are down. After about
-  300 ms the press counts as a hold. Talking to Capsula with a hold arrives in a later release;
+  300 ms the press counts as a hold. Talking to Kumochi with a hold arrives in a later release;
   for now, releasing the keys just returns the dock to its status.
 - **Double tap** both keys, two short presses with their releases less than 300 ms apart. A small
   typing box opens under the dock and takes focus. Press Esc to hide it. Whatever you typed is

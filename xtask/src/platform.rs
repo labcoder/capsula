@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use windows::Win32::Foundation::{
     ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
