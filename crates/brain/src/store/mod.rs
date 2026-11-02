@@ -8,6 +8,7 @@
 
 mod pages;
 mod purge;
+mod scenes;
 mod schema;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -21,6 +22,8 @@ use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use purge::{Copied, Leftovers, Owed, Swap};
+pub(crate) use scenes::cleared_body;
+pub use scenes::{SceneState, SceneTarget};
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +69,9 @@ pub enum StoreError {
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
+    /// A stored scene row didn't decode; it's skipped. Only its id is named, never its content.
+    #[error("stored scene row {0} doesn't decode")]
+    SceneRow(i64),
 }
 
 /// What an event records. Media are referenced by asset id once assets arrive.
@@ -79,6 +85,10 @@ pub enum EventKind {
     SceneStep,
     /// The steps that stayed on screen when the user stopped the run, as a JSON list.
     Revealed,
+    /// A scene began; the event's id is the scene's.
+    SceneBegin,
+    /// A scene left the visible set; the body names it.
+    SceneCleared,
 }
 
 impl EventKind {
@@ -88,6 +98,8 @@ impl EventKind {
             Self::AssistantText => "assistant_text",
             Self::SceneStep => "scene_step",
             Self::Revealed => "revealed",
+            Self::SceneBegin => "scene_begin",
+            Self::SceneCleared => "scene_cleared",
         }
     }
 }

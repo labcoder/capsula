@@ -1,6 +1,7 @@
 //! Applying session-fenced link events to the two independent page lists and runs.
 
 use super::{Context, OpenError, Presence, diagnostics};
+use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
 use capsula_protocol::message::{ControlToBrain, DataToShell};
 
@@ -55,11 +56,36 @@ impl Presence {
                                 self.request_pages(cx);
                                 credit
                             }
+                            DataToShell::SceneSnapshot {
+                                scene,
+                                revision,
+                                chunk,
+                                last,
+                            } => {
+                                let chunk = Chunk {
+                                    scene,
+                                    revision,
+                                    steps: chunk,
+                                    last,
+                                    bytes,
+                                };
+                                match self.runs.apply_snapshot(generation, chunk) {
+                                    Ok(credit) => credit,
+                                    Err(error) => {
+                                        self.end(&error);
+                                        0
+                                    }
+                                }
+                            }
                             message => self.runs.apply_data(message, bytes),
                         };
                         self.grant(credit);
                     }
                 }
+                LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
+                    Ok(effect) => self.effect(effect),
+                    Err(error) => self.end(&error),
+                },
             }
         }
         self.runs_changed(cx)
@@ -76,8 +102,24 @@ impl Presence {
         }
     }
 
+    /// Grants a drawing change's credit, then queues its `ClearDrawing`.
+    pub(super) fn effect(&self, effect: Effect) {
+        self.grant(effect.credit);
+        if let Some(clear) = effect.clear {
+            self.tell(clear);
+        }
+    }
+
+    /// Ends a connection whose brain broke the drawing's protocol; the link reconnects.
+    fn end(&self, error: &Broken) {
+        tracing::warn!(%error, "the brain broke the drawing's protocol; ending the connection");
+        if let Some(session) = &self.session {
+            self.link.end(session);
+        }
+    }
+
     /// Grants the connection credit for data frames the UI has taken.
-    fn grant(&self, credit: u32) {
+    pub(super) fn grant(&self, credit: u32) {
         if let Some(session) = self.session.as_ref().filter(|_| credit > 0) {
             session.grant(credit);
         }
@@ -89,8 +131,12 @@ impl Presence {
         } else {
             self.native.disable_retry();
         }
-        if state == LinkState::Connected {
-            self.runs.connected();
+        if let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|_| state == LinkState::Connected)
+        {
+            self.runs.connected(session.generation());
             self.threads.update(cx, |state, cx| {
                 state.connected();
                 cx.notify();

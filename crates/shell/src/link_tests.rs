@@ -338,7 +338,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     // A UI that took A's frame only now, with B already installed.
     a.grant(bytes);
     let mut runs = Runs::default();
-    runs.connected();
+    runs.connected(a.generation());
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&a, turn)),
         Err(Refused::Offline),
@@ -346,7 +346,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     );
     assert!(!handle.send_control(&a, ControlToBrain::Pong));
     runs.disconnected();
-    runs.connected();
+    runs.connected(b.generation());
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&b, turn)),
         Ok(())

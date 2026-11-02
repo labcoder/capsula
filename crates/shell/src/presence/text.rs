@@ -248,19 +248,21 @@ impl Presence {
 }
 
 impl Presence {
-    /// Shows the newest run's steps and the end of its answer in the typing panel.
+    /// Shows the drawing's steps and the end of the newest answer in the typing panel.
     pub(super) fn refresh_conversation(&self, cx: &mut Context<'_, Self>) {
         let Some(text) = &self.text else {
             return;
         };
-        let (steps, answer) = self.runs.shown().map_or_else(Default::default, |shown| {
-            let steps: Vec<SharedString> = shown
-                .steps
-                .iter()
-                .map(|(_, step)| step.label.clone().into())
-                .collect();
-            (steps, answer_tail(&shown.text).into())
-        });
+        let steps: Vec<SharedString> = self
+            .runs
+            .scenes()
+            .flat_map(|scene| &scene.steps)
+            .map(|(_, step)| step.label.clone().into())
+            .collect();
+        let answer: SharedString = self
+            .runs
+            .shown()
+            .map_or_else(Default::default, |shown| answer_tail(&shown.text).into());
         text.view.update(cx, |view, cx| {
             if view.steps != steps || view.answer != answer {
                 view.steps = steps;

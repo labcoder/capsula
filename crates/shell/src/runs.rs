@@ -1,6 +1,6 @@
 //! The runs as the shell shows them: which one is moving, which turns Esc has cancelled before
-//! their run was named, which runs it has fenced off, and the placeholder view of the newest one.
-//! Plain state, no GPUI, so every rule is unit-tested.
+//! their run was named, which runs it has fenced off, and the newest one's answer. Their steps
+//! go to the [`Drawing`]. Plain state, no GPUI, so every rule is unit-tested.
 //!
 //! The fence is checked when a message is applied, not when it's received (architecture v1
 //! §3.3), so messages already queued in the shell when Esc fences their run are dropped too.
@@ -9,9 +9,11 @@
 
 use capsula_protocol::frame::Pipe;
 use capsula_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, MAX_STEPS, Phase, RunId, Step,
+    ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
     ThreadId,
 };
+
+use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
 
 /// The most answer text the placeholder keeps, from the end [guess].
 const TEXT_KEPT: usize = 4096;
@@ -37,8 +39,6 @@ pub(crate) struct Shown {
     pub(crate) run: RunId,
     /// The end of its answer, at most [`TEXT_KEPT`] bytes.
     pub(crate) text: String,
-    /// Its committed steps, by index.
-    pub(crate) steps: Vec<(u32, Step)>,
 }
 
 /// What applying a `RunState` asks of the caller.
@@ -65,8 +65,6 @@ pub(crate) struct Runs {
     live: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
     fence: RunId,
-    /// The highest run whose drawing Esc cleared; its steps are dropped when applied.
-    cleared: RunId,
     /// The highest run any `RunState` named: each new one answers the oldest pending turn.
     answered: RunId,
     /// Turns sent and not answered yet.
@@ -81,6 +79,7 @@ pub(crate) struct Runs {
     /// Turns sent before the latest explicit selection must not replace that choice.
     selection_pending: usize,
     shown: Option<Shown>,
+    drawing: Drawing,
 }
 
 impl Runs {
@@ -95,11 +94,14 @@ impl Runs {
         self.stoppable().is_some() || self.pending > self.cancelled
     }
 
-    /// Steps are on screen.
+    /// Steps are on screen, or a recovery Esc could cancel is under way.
     pub(crate) fn drawing(&self) -> bool {
-        self.shown
-            .as_ref()
-            .is_some_and(|shown| !shown.steps.is_empty())
+        self.drawing.active()
+    }
+
+    /// The scenes on screen, oldest first.
+    pub(crate) fn scenes(&self) -> impl Iterator<Item = &Scene> {
+        self.drawing.shown().map(|(_, scene)| scene)
     }
 
     pub(crate) fn shown(&self) -> Option<&Shown> {
@@ -120,25 +122,32 @@ impl Runs {
         self.cancelled = self.pending;
         let run = self.stoppable()?;
         self.fence = run;
-        let revealed = self
-            .shown
-            .as_ref()
-            .filter(|shown| shown.run == run)
-            .map(|shown| shown.steps.iter().map(|(index, _)| *index).collect())
-            .unwrap_or_default();
-        Some(ControlToBrain::Stop { run, revealed })
+        Some(ControlToBrain::Stop {
+            run,
+            revealed: self.drawing.revealed(run),
+        })
     }
 
-    /// The second Esc, or Esc while nothing moves: clears the drawing and returns the
-    /// `ClearDrawing` to send after. The text stays.
-    pub(crate) fn clear(&mut self) -> Option<ControlToBrain> {
-        let shown = self
-            .shown
-            .as_mut()
-            .filter(|shown| !shown.steps.is_empty())?;
-        shown.steps.clear();
-        self.cleared = self.cleared.max(shown.run);
-        Some(ControlToBrain::ClearDrawing { run: shown.run })
+    /// The second Esc, or Esc while nothing moves: clears the drawing, recovery included, and
+    /// returns the `ClearDrawing` to send after. The text stays.
+    pub(crate) fn clear(&mut self) -> Effect {
+        self.drawing.clear()
+    }
+
+    /// The connection's `Scenes`.
+    ///
+    /// # Errors
+    /// [`Broken`] when the list breaks the protocol.
+    pub(crate) fn apply_scenes(&mut self, scenes: &[SceneDescriptor]) -> Result<Effect, Broken> {
+        self.drawing.apply_scenes(scenes)
+    }
+
+    /// A snapshot chunk from connection `generation`; returns the credit to grant now.
+    ///
+    /// # Errors
+    /// [`Broken`] when the chunk breaks the protocol.
+    pub(crate) fn apply_snapshot(&mut self, generation: u64, chunk: Chunk) -> Result<u32, Broken> {
+        self.drawing.apply_snapshot(generation, chunk)
     }
 
     /// Sends a typed turn through `send`, which says whether it went, unless it would be refused.
@@ -173,9 +182,10 @@ impl Runs {
         Ok(())
     }
 
-    /// The link connected.
-    pub(crate) fn connected(&mut self) {
+    /// The link connected, as connection `generation`.
+    pub(crate) fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.drawing.connected(generation);
     }
 
     /// The link lost the brain: nothing of the runs it knew can arrive any more, and the turns
@@ -188,6 +198,7 @@ impl Runs {
         self.selection_pending = 0;
         self.cancelled = 0;
         self.held.clear();
+        self.drawing.disconnected();
     }
 
     /// A `RunState`. A run newer than any before answers the oldest pending turn exactly once,
@@ -262,20 +273,21 @@ impl Runs {
                     keep_end(&mut shown.text, TEXT_KEPT);
                 }
             }
-            DataToShell::StepCommit { run, index, step } => {
-                if run <= self.cleared {
-                    return;
-                }
-                if let Some(shown) = self.view(run)
-                    && shown.steps.len() < MAX_STEPS
-                {
-                    shown.steps.push((index, step));
+            DataToShell::StepCommit {
+                run,
+                scene,
+                index,
+                step,
+            } => {
+                if self.view(run).is_some() {
+                    self.drawing.step(run, scene, index, step);
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
-            | DataToShell::PageFailed { .. } => {}
+            | DataToShell::PageFailed { .. }
+            | DataToShell::SceneSnapshot { .. } => {}
         }
     }
 
@@ -312,7 +324,8 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         | DataToShell::RunEnd { run } => Some(*run),
         DataToShell::ThreadList { .. }
         | DataToShell::Page { .. }
-        | DataToShell::PageFailed { .. } => None,
+        | DataToShell::PageFailed { .. }
+        | DataToShell::SceneSnapshot { .. } => None,
     }
 }
 
@@ -332,10 +345,12 @@ fn keep_end(text: &mut String, max: usize) {
 mod tests {
     use capsula_protocol::frame::Pipe;
     use capsula_protocol::message::{
-        ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, Step, ThreadId,
+        ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
+        SceneId, Step, ThreadId,
     };
 
     use super::{Applied, Refused, Runs, TEXT_KEPT};
+    use crate::drawing::{Chunk, Effect};
     use crate::escape::{Activity, Escape, Panel, decide};
 
     /// Every data frame in these tests is this size on the pipe.
@@ -391,7 +406,7 @@ mod tests {
     #[test]
     fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "old pending turn");
         runs.select_thread(None);
         runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
@@ -432,6 +447,7 @@ mod tests {
     fn step(run: u64, index: u32) -> DataToShell {
         DataToShell::StepCommit {
             run: RunId(run),
+            scene: SceneId(run),
             index,
             step: Step {
                 label: format!("step {index}"),
@@ -462,18 +478,19 @@ mod tests {
         runs.submit(typed, |_| true).expect("sent");
     }
 
-    /// Connected, with `run` answering in thread 1.
+    /// Connected, with no scene to recover and `run` answering in thread 1.
     fn answering(run: u64) -> Runs {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
+        runs.apply_scenes(&[]).expect("valid");
         state(&mut runs, run, Phase::Answering);
         runs
     }
 
     fn indices(runs: &Runs) -> Vec<u32> {
-        runs.shown()
-            .map(|shown| shown.steps.iter().map(|(index, _)| *index).collect())
-            .unwrap_or_default()
+        runs.scenes()
+            .flat_map(|scene| scene.steps.iter().map(|(index, _)| *index))
+            .collect()
     }
 
     fn shown_text(runs: &Runs) -> Option<(RunId, &str)> {
@@ -512,9 +529,8 @@ mod tests {
         data(&mut runs, step(5, 0));
         state(&mut runs, 5, Phase::Answering);
         assert!(!runs.working());
-        let shown = runs.shown().expect("shown");
-        assert_eq!(shown.text, "kept ");
-        assert!(shown.steps.is_empty());
+        assert_eq!(runs.shown().expect("shown").text, "kept ");
+        assert!(indices(&runs).is_empty());
     }
 
     #[test]
@@ -527,10 +543,15 @@ mod tests {
         assert!(!runs.working());
         assert_eq!(
             runs.clear(),
-            Some(ControlToBrain::ClearDrawing { run: RunId(5) })
+            Effect {
+                clear: Some(ControlToBrain::ClearDrawing {
+                    scene_ids: vec![SceneId(5)]
+                }),
+                credit: 0
+            }
         );
         assert!(!runs.drawing());
-        assert_eq!(runs.clear(), None, "nothing left to clear");
+        assert_eq!(runs.clear(), Effect::default(), "nothing left to clear");
         data(&mut runs, step(5, 1));
         assert_eq!(indices(&runs), Vec::<u32>::new());
         assert_eq!(
@@ -556,7 +577,7 @@ mod tests {
     #[test]
     fn data_before_its_run_state_is_held_until_the_state_names_it() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "hi");
         assert_eq!(
             data(&mut runs, text(3, "early")),
@@ -579,7 +600,7 @@ mod tests {
     #[test]
     fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "a");
         assert!(runs.working(), "a sent turn is work");
         assert_eq!(runs.stop(), None, "nothing to name yet");
@@ -611,7 +632,7 @@ mod tests {
     #[test]
     fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "first");
         state(&mut runs, 4, Phase::Answering);
         data(&mut runs, text(4, "shown"));
@@ -680,12 +701,12 @@ mod tests {
     #[test]
     fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "a");
         assert_eq!(runs.stop(), None, "a isn't named yet");
         assert_eq!(data(&mut runs, text(1, "a's text")), 0, "held");
         runs.disconnected();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "b");
         assert_eq!(
             state(&mut runs, 2, Phase::Answering),
@@ -710,7 +731,7 @@ mod tests {
         let action = decide(activity, Panel::Open);
         let message = match action {
             Escape::Stop => runs.stop(),
-            Escape::Clear => runs.clear(),
+            Escape::Clear => runs.clear().clear,
             Escape::Dismiss | Escape::Ignore => None,
         };
         (action, message)
@@ -728,7 +749,9 @@ mod tests {
             press(&mut runs),
             (
                 Escape::Clear,
-                Some(ControlToBrain::ClearDrawing { run: RunId(4) })
+                Some(ControlToBrain::ClearDrawing {
+                    scene_ids: vec![SceneId(4)]
+                })
             ),
             "a cancelled turn isn't work, so the drawing clears"
         );
@@ -757,7 +780,7 @@ mod tests {
     #[test]
     fn only_a_newer_run_sets_the_next_turn_s_thread() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         let mut sent = Vec::new();
         for typed in ["one", "two"] {
             runs.submit(typed, |turn| {
@@ -796,7 +819,7 @@ mod tests {
     #[test]
     fn a_fenced_older_run_s_late_failure_keeps_the_thread() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         submit(&mut runs, "one");
         submit(&mut runs, "two");
         runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
@@ -821,7 +844,7 @@ mod tests {
     #[test]
     fn submits_stay_under_the_brain_s_turn_cap() {
         let mut runs = Runs::default();
-        runs.connected();
+        runs.connected(1);
         let sends = std::cell::Cell::new(0);
         let send = |_| {
             sends.set(sends.get() + 1);
@@ -841,7 +864,7 @@ mod tests {
     fn blank_long_offline_and_unsent_turns_are_refused_and_not_counted() {
         let mut runs = Runs::default();
         assert_eq!(runs.submit("hi", |_| true), Err(Refused::Offline));
-        runs.connected();
+        runs.connected(1);
         assert_eq!(runs.submit(" \n\t ", |_| true), Err(Refused::Blank));
         let long = "x".repeat(Pipe::Data.max_payload());
         assert_eq!(runs.submit(&long, |_| true), Err(Refused::TooLong));
@@ -861,7 +884,7 @@ mod tests {
         assert_eq!(runs.submit("hi", |_| true), Err(Refused::Offline));
         data(&mut runs, text(5, "from before"));
         assert!(runs.shown().is_none());
-        runs.connected();
+        runs.connected(1);
         assert_eq!(
             state(&mut runs, 6, Phase::Answering).credit,
             0,
@@ -869,6 +892,42 @@ mod tests {
         );
         assert!(runs.shown().is_none());
         assert!(runs.working());
+    }
+
+    #[test]
+    fn esc_stops_a_run_moving_during_recovery_before_it_clears() {
+        let mut runs = Runs::default();
+        runs.connected(1);
+        let scene = SceneDescriptor {
+            scene: SceneId(3),
+            revision: 2,
+            committed: 2,
+        };
+        runs.apply_scenes(&[scene]).expect("valid");
+        let chunk = Chunk {
+            scene: SceneId(3),
+            revision: 2,
+            steps: vec![Step {
+                label: "restored".to_owned(),
+            }],
+            last: false,
+            bytes: BYTES,
+        };
+        assert_eq!(runs.apply_snapshot(1, chunk), Ok(BYTES));
+        submit(&mut runs, "new turn");
+        state(&mut runs, 5, Phase::Answering);
+        assert!(runs.drawing(), "the recovery is still receiving");
+        assert_eq!(press(&mut runs), (Escape::Stop, Some(stop(5))));
+        assert_eq!(
+            press(&mut runs),
+            (
+                Escape::Clear,
+                Some(ControlToBrain::ClearDrawing {
+                    scene_ids: vec![SceneId(3)]
+                })
+            )
+        );
+        assert!(!runs.drawing());
     }
 
     #[test]

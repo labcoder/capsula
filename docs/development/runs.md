@@ -80,9 +80,12 @@ An ended run stays with the coordinator until the store answers for its outcome,
 never lost:
 
 - if the turn failed, there's no run row, and nothing more is written;
-- if a step or the outcome failed, the outcome is written as `failed(store)`, alone; if that
-  fails too, the run stays `active` and the next start's recovery marks it
-  `failed(crash)`.
+- if a step or the outcome failed, the outcome is written as `failed(store)` without its text,
+  but with the Stop's `revealed` set and its scene's clear, so the drawing keeps what the shell
+  kept; if that fails too, the run stays `active` and the next start's recovery marks it
+  `failed(crash)`. Its scene's clear, or its kept selection, is then retried on its own until
+  it commits, and a Quit is incomplete until it has, unless the Quit's own clear durably
+  removes that scene: a kept selection that keeps failing still ends in a complete Quit then.
 
 | Cause | Outcome | Shell told |
 |---|---|---|
@@ -109,9 +112,16 @@ never lost:
   the outcome is stored.
 - A terminal `RunState` can be followed by `RunState Failed` for the same run, when its
   writes later fail. The shell shows the failure; nothing else follows it.
-- A `Stop` that arrives after the run's outcome went to the store is stale: the run still ends
-  `done`. One that arrives while the engine has finished but its last step is still being stored
-  interrupts the run, since the shell never showed that step.
+- A `Stop` for a run that already ended doesn't change its outcome: it still ends `done`,
+  `failed` or `interrupted(replaced)`, and its data still drains. But the shell could still
+  stop it while it drew the run's last steps, so the scene keeps only what the shell kept. While
+  the run's writes are pending, the selection goes with its outcome once they settle, or with
+  the late first step that begins its scene; once they're done and the scene is visible, the
+  brain writes the selection on its own, or the scene's clear when nothing stayed. A scene is
+  trimmed once: a later `Stop` for its run is stale. So is one that comes while a run that
+  ended because its shell went away is still being stored, since only that shell drew it. One
+  that arrives while the engine has finished but its last step is still being stored interrupts
+  the run, since the shell never showed that step.
 
 ## Budgets
 
@@ -147,4 +157,9 @@ shortcut: a store that never answers leaves a finished run unconfirmed. At the n
 still active in the store become `failed(crash)`; outcomes already committed stay, and work not
 yet committed may be lost. Fine while the store is local SQLite.
 
-The step is a labelled placeholder until slice 4's scene format.
+On Quit the brain shuts down by one deadline instead, described in [processes](processes.md).
+
+The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
+its first step's write begins the scene and returns its id, and the steps after it wait in the
+run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
+steps, and the run still settles.

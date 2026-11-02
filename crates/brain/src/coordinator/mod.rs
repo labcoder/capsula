@@ -8,6 +8,7 @@
 //! how a late completion after `Stop` is refused. A run that ended stays accountable to the
 //! store until its outcome is written, so a failed write is still reported.
 
+mod scenes;
 #[cfg(test)]
 mod tests;
 
@@ -15,10 +16,11 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use capsula_protocol::message::{
-    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, Step, ThreadId,
+    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, SceneId, Step,
+    ThreadId,
 };
 
-use crate::store::{Failure, Interruption, RunEnd};
+use crate::store::{Failure, Interruption, RunEnd, SceneState, SceneTarget};
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
@@ -84,6 +86,8 @@ pub enum Input {
         index: u32,
         /// The step.
         step: Step,
+        /// Its scene; a run's first step learns its new scene's id here.
+        scene: SceneId,
     },
     /// The store committed a run's outcome.
     RunStored {
@@ -106,6 +110,27 @@ pub enum Input {
     Deadline {
         /// The run.
         run: RunId,
+    },
+    /// The shell cleared these scenes locally.
+    Clear {
+        /// The scenes, at most four.
+        scenes: Vec<SceneId>,
+    },
+    /// A `ClearScenes` write finished.
+    ScenesCleared {
+        /// The scenes it named.
+        scenes: Vec<SceneId>,
+        /// Whether it committed.
+        ok: bool,
+    },
+    /// The shell quit: every visible scene is cleared, so only a crash brings drawings back.
+    ClearVisible,
+    /// A `KeepScene` write finished.
+    SceneKept {
+        /// The scene it named.
+        scene: SceneId,
+        /// Whether it committed.
+        ok: bool,
     },
 }
 
@@ -188,6 +213,8 @@ pub enum StoreOp {
         run: RunId,
         /// Text streamed before the step, if any.
         text: Option<String>,
+        /// A new scene for a run's first step, or the run's scene.
+        scene: SceneTarget,
         /// Its index.
         index: u32,
         /// The step.
@@ -203,16 +230,30 @@ pub enum StoreOp {
         text: Option<String>,
         /// The steps that stayed on screen, when the user stopped the run.
         revealed: Option<Vec<u32>>,
+        /// The run's scene, when a Stop kept none of its steps.
+        clear: Option<SceneId>,
         /// How it ended.
         end: RunEnd,
+    },
+    /// The scenes that left the visible set, in one transaction.
+    ClearScenes {
+        /// The scenes.
+        scenes: Vec<SceneId>,
+    },
+    /// The steps of a scene's run that stayed, for a Stop no outcome recorded.
+    KeepScene {
+        /// The scene.
+        scene: SceneId,
+        /// Indices of the steps that stayed.
+        revealed: Vec<u32>,
     },
 }
 
 impl StoreOp {
-    /// The run a write belongs to; page reads have no run.
+    /// The run a write belongs to; page reads and clears have none.
     pub fn run(&self) -> Option<RunId> {
         match self {
-            Self::ReadPage { .. } => None,
+            Self::ReadPage { .. } | Self::ClearScenes { .. } | Self::KeepScene { .. } => None,
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
@@ -230,6 +271,14 @@ impl StoreOp {
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
+            Self::ClearScenes { scenes } => Input::ScenesCleared {
+                scenes: scenes.clone(),
+                ok: false,
+            },
+            Self::KeepScene { scene, .. } => Input::SceneKept {
+                scene: *scene,
+                ok: false,
+            },
         }
     }
 }
@@ -259,9 +308,15 @@ struct Run {
     /// Streamed text not yet stored; it's stored with the next step or the outcome.
     unstored: String,
     text_bytes: usize,
-    /// Steps sent to the store, and how many of them it acknowledged, in order.
+    /// Steps the run produced, and how many the store acknowledged, in order.
     steps: u32,
     acked: u32,
+    /// The run's scene, once its first step is committed.
+    scene: Option<SceneId>,
+    /// The scene the first step's write evicts, until it's acknowledged.
+    evict: Option<SceneId>,
+    /// Steps after the first, with the text streamed before each, until the scene has its id.
+    waiting: VecDeque<(Option<String>, u32, Step)>,
     /// One entry per pending step: the frames the engine produced after it, sent once it's
     /// acknowledged, so the shell sees the engine's order.
     held: VecDeque<Vec<DataToShell>>,
@@ -280,11 +335,20 @@ struct Ending {
     failed: bool,
     /// The outcome was sent to the store.
     written: bool,
+    /// The scene a Stop kept nothing of, cleared in the outcome's transaction.
+    clear: Option<SceneId>,
+    /// The Stop's selection was applied to the visible set; it stays for every outcome write.
+    trimmed: bool,
 }
 
 impl Run {
+    /// Steps sent to the store; the ones waiting for the scene's id aren't.
+    fn sent(&self) -> u32 {
+        self.steps - u32::try_from(self.waiting.len()).expect("at most MAX_STEPS wait")
+    }
+
     fn outstanding(&self) -> bool {
-        self.turn.is_some() || self.acked < self.steps
+        self.turn.is_some() || self.acked < self.sent()
     }
 }
 
@@ -296,16 +360,27 @@ pub struct Coordinator {
     current: Option<Run>,
     /// Runs that ended, until the store answers for their outcome.
     ending: Vec<Run>,
+    /// The visible set, oldest first, at most four.
+    scenes: Vec<SceneState>,
+    /// Cleared scenes whose `scene_cleared` isn't committed yet, and whether a write for each
+    /// is in the store; a failed one is retried with the next store operation.
+    clearing: Vec<(SceneId, bool)>,
+    /// Visible scenes whose kept selection no outcome recorded, the same way.
+    keeping: Vec<(SceneId, Vec<u32>, bool)>,
 }
 
 impl Coordinator {
-    /// Starts from the store's high-water marks, so ids keep growing across restarts.
-    pub fn new(last_thread: ThreadId, last_run: RunId) -> Self {
+    /// Starts from the store's high-water marks, so ids keep growing across restarts, and from
+    /// the visible set the store recovered.
+    pub fn new(last_thread: ThreadId, last_run: RunId, scenes: Vec<SceneState>) -> Self {
         Self {
             last_thread,
             last_run,
             current: None,
             ending: Vec::new(),
+            scenes,
+            clearing: Vec::new(),
+            keeping: Vec::new(),
         }
     }
 
@@ -348,6 +423,9 @@ impl Coordinator {
                     self.turn(thread, text, &mut effects);
                 }
             }
+            Input::Stop { run, revealed } if self.current_run() != Some(run) => {
+                self.late_stop(run, revealed, &mut effects)?;
+            }
             Input::Stop { run, mut revealed } => {
                 let current = self.take(run)?;
                 revealed.retain(|&index| index < current.acked);
@@ -375,29 +453,15 @@ impl Coordinator {
                     effects.push(Effect::StartEngine { run, text });
                 }
             }
-            Input::StepStored { run, index, step } => {
-                self.step_stored(run, index, step, &mut effects)?;
+            Input::StepStored {
+                run,
+                index,
+                step,
+                scene,
+            } => {
+                self.step_stored(run, index, step, scene, &mut effects)?;
             }
-            Input::RunStored { run } => {
-                let at = self.ending_at(run)?;
-                let ending = self.ending[at]
-                    .ending
-                    .as_ref()
-                    .expect("an ending run has an Ending");
-                if !ending.written {
-                    return Err(Stale);
-                }
-                let done = self.ending.swap_remove(at);
-                if let Some(Ending {
-                    outcome: RunEnd::Done,
-                    notify: Notify::Shell,
-                    failed: false,
-                    ..
-                }) = done.ending
-                {
-                    told(&done, Phase::Done, &mut effects);
-                }
-            }
+            Input::RunStored { run } => self.run_stored(run, &mut effects)?,
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
             Input::ShellLost => {
                 for run in &mut self.ending {
@@ -424,9 +488,39 @@ impl Coordinator {
                 let over = RunEnd::Failed(Failure::Budget);
                 self.end(current, over, None, Notify::Shell, &mut effects);
             }
+            Input::Clear { scenes } => self.clear(&scenes, &mut effects),
+            Input::ScenesCleared { scenes, ok: true } => self.cleared(&scenes),
+            Input::ScenesCleared { scenes, ok: false } => self.clear_failed(&scenes),
+            Input::ClearVisible => self.clear_visible(&mut effects),
+            Input::SceneKept { scene, ok: true } => self.kept(scene),
+            Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
         }
         self.begin_turns(&mut effects);
+        self.retry_with(&mut effects);
         Ok(effects)
+    }
+
+    /// A run's outcome is stored: it leaves the ending list, and the shell hears Done.
+    fn run_stored(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        let at = self.ending_at(run)?;
+        let ending = self.ending[at]
+            .ending
+            .as_ref()
+            .expect("an ending run has an Ending");
+        if !ending.written {
+            return Err(Stale);
+        }
+        let done = self.ending.swap_remove(at);
+        if let Some(Ending {
+            outcome: RunEnd::Done,
+            notify: Notify::Shell,
+            failed: false,
+            ..
+        }) = done.ending
+        {
+            told(&done, Phase::Done, effects);
+        }
+        Ok(())
     }
 
     fn turn(&mut self, thread: Option<ThreadId>, text: String, effects: &mut Vec<Effect>) {
@@ -458,6 +552,9 @@ impl Coordinator {
             text_bytes: 0,
             steps: 0,
             acked: 0,
+            scene: None,
+            evict: None,
+            waiting: VecDeque::new(),
             held: VecDeque::new(),
             finishing: false,
             ending: None,
@@ -546,36 +643,7 @@ impl Coordinator {
                     rest = tail;
                 }
             }
-            EngineEvent::Step(step) => {
-                let failure = if step.label.len() > MAX_STEP_LABEL {
-                    Some(Failure::Engine)
-                } else if usize::try_from(current.steps).is_ok_and(|steps| steps >= MAX_STEPS) {
-                    Some(Failure::Budget)
-                } else {
-                    None
-                };
-                if let Some(failure) = failure {
-                    let failed = self.take(run)?;
-                    self.end(
-                        failed,
-                        RunEnd::Failed(failure),
-                        None,
-                        Notify::Shell,
-                        effects,
-                    );
-                    return Ok(());
-                }
-                answering(current, effects);
-                effects.push(Effect::Store(StoreOp::CommitStep {
-                    thread: current.thread,
-                    run,
-                    text: unstored(current),
-                    index: current.steps,
-                    step,
-                }));
-                current.steps += 1;
-                current.held.push_back(Vec::new());
-            }
+            EngineEvent::Step(step) => self.step(run, step, effects)?,
             EngineEvent::Done if current.acked < current.steps => current.finishing = true,
             EngineEvent::Done => {
                 let done = self.take(run)?;
@@ -595,24 +663,101 @@ impl Coordinator {
         Ok(())
     }
 
+    /// An engine step: committed in order, or failing the run when it's over a limit. A run's
+    /// first step begins its scene; the steps after it wait for the scene's id.
+    fn step(&mut self, run: RunId, step: Step, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        let current = self.current(run)?;
+        let failure = if step.label.len() > MAX_STEP_LABEL {
+            Some(Failure::Engine)
+        } else if usize::try_from(current.steps).is_ok_and(|steps| steps >= MAX_STEPS) {
+            Some(Failure::Budget)
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            let failed = self.take(run)?;
+            self.end(
+                failed,
+                RunEnd::Failed(failure),
+                None,
+                Notify::Shell,
+                effects,
+            );
+            return Ok(());
+        }
+        answering(current, effects);
+        let evict = if current.steps == 0 {
+            self.evict()
+        } else {
+            None
+        };
+        let current = self.current(run)?;
+        let (text, index) = (unstored(current), current.steps);
+        current.steps += 1;
+        current.held.push_back(Vec::new());
+        let scene = match current.scene {
+            Some(scene) => SceneTarget::Existing(scene),
+            None if index == 0 => {
+                current.evict = evict;
+                SceneTarget::New { evict }
+            }
+            // The scene's id comes with the first step's ack; the core loop never waits.
+            None => {
+                current.waiting.push_back((text, index, step));
+                return Ok(());
+            }
+        };
+        effects.push(Effect::Store(StoreOp::CommitStep {
+            thread: current.thread,
+            run,
+            text,
+            scene,
+            index,
+            step,
+        }));
+        Ok(())
+    }
+
     /// The store acknowledges steps in order, so anything but the next pending index is stale.
+    /// The first ack gives the run its scene and sends the steps that waited for it.
     fn step_stored(
         &mut self,
         run: RunId,
         index: u32,
         step: Step,
+        scene: SceneId,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let found = self.find(run)?;
-        if found.turn.is_some() || index != found.acked || index >= found.steps {
+        if found.turn.is_some() || index != found.acked || index >= found.sent() {
             return Err(Stale);
         }
         found.acked += 1;
-        if found.ending.is_some() {
+        let first = found.scene.is_none();
+        let scene = *found.scene.get_or_insert(scene);
+        let (thread, evict) = (found.thread, found.evict.take());
+        // Late acks after a Stop count in the revision but never come back into the kept set.
+        let stopped = found
+            .ending
+            .as_ref()
+            .is_some_and(|ending| ending.outcome == RunEnd::Interrupted(Interruption::Stop));
+        let ending = found.ending.is_some();
+        let waiting = std::mem::take(&mut found.waiting);
+        if first {
+            self.begin_scene(scene, (thread, run), evict);
+        }
+        self.scene_stored(scene, (!stopped).then_some(&step));
+        if ending {
             self.settle(run, effects);
             return Ok(());
         }
-        effects.push(Effect::Data(DataToShell::StepCommit { run, index, step }));
+        effects.push(Effect::Data(DataToShell::StepCommit {
+            run,
+            scene,
+            index,
+            step,
+        }));
+        let found = self.find(run)?;
         effects.extend(
             found
                 .held
@@ -621,6 +766,16 @@ impl Coordinator {
                 .flatten()
                 .map(Effect::Data),
         );
+        for (text, index, step) in waiting {
+            effects.push(Effect::Store(StoreOp::CommitStep {
+                thread,
+                run,
+                text,
+                scene: SceneTarget::Existing(scene),
+                index,
+                step,
+            }));
+        }
         if found.finishing && found.acked == found.steps {
             let done = self.take(run)?;
             self.end(done, RunEnd::Done, None, Notify::Shell, effects);
@@ -662,8 +817,14 @@ impl Coordinator {
         }
         if ended.turn.is_some() || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
-            // a run left active is marked failed(crash) at the next start.
+            // a run left active is marked failed(crash) at the next start. Its scene's clear or
+            // kept selection is still owed, so it's retried on its own.
+            let kept = ended
+                .scene
+                .zip(ending.revealed.take().filter(|_| ending.trimmed));
+            let clear = ending.clear;
             self.ending.swap_remove(at);
+            self.owe(clear, kept);
             return Ok(());
         }
         if ending.written {
@@ -690,6 +851,9 @@ impl Coordinator {
         if run.turn.is_none() && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
         }
+        // Steps waiting for the scene's id were never sent, so no ack is owed for them.
+        run.steps = run.sent();
+        run.waiting.clear();
         if matches!(
             outcome,
             RunEnd::Interrupted(Interruption::Stop | Interruption::Replaced)
@@ -710,13 +874,17 @@ impl Coordinator {
             notify,
             failed: outcome == RunEnd::Failed(Failure::Store),
             written: false,
+            clear: None,
+            trimmed: false,
         });
         let id = run.id;
         self.ending.push(run);
         self.settle(id, effects);
     }
 
-    /// Writes an ended run's outcome once nothing earlier of it is pending.
+    /// Writes an ended run's outcome once nothing earlier of it is pending. A Stop's revealed
+    /// set becomes its scene's kept set here, once every step write has settled; a scene left
+    /// with nothing kept is cleared in the same transaction.
     fn settle(&mut self, run: RunId, effects: &mut Vec<Effect>) {
         let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) else {
             return;
@@ -724,17 +892,24 @@ impl Coordinator {
         if ended.outstanding() {
             return;
         }
-        let (thread, text) = (ended.thread, unstored(ended));
+        let (thread, text, scene) = (ended.thread, unstored(ended), ended.scene);
         let Some(ending) = ended.ending.as_mut().filter(|ending| !ending.written) else {
             return;
         };
         ending.written = true;
+        if let (Some(revealed), Some(scene)) = (&ending.revealed, scene)
+            && !ending.trimmed
+        {
+            ending.trimmed = true;
+            ending.clear = scenes::keep(&mut self.scenes, scene, revealed);
+        }
         let op = if ending.failed {
             StoreOp::EndRun {
                 thread,
                 run,
                 text: None,
-                revealed: None,
+                revealed: ending.revealed.clone(),
+                clear: ending.clear,
                 end: RunEnd::Failed(Failure::Store),
             }
         } else {
@@ -742,7 +917,8 @@ impl Coordinator {
                 thread,
                 run,
                 text,
-                revealed: ending.revealed.take(),
+                revealed: ending.revealed.clone(),
+                clear: ending.clear,
                 end: ending.outcome,
             }
         };

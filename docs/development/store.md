@@ -20,7 +20,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 |---|---|
 | `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
-| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; only a scene's `scene_cleared`, and the `revealed` of a Stop that came after its run ended, are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 
@@ -31,6 +31,15 @@ user turn (a new thread when there is one, the run, and the user's text) is one 
 Later slices add assets, sends, the tool ledger, actions, summaries and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
+
+**Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
+event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a
+rolled-back id is never seen because no id leaves the brain before its commit. Each `scene_step`
+body names its `scene`, `index` and `label`, and `scene_cleared`'s body names its `scene`. A
+clear is one immediate transaction, so a busy store makes it wait rather than fail. At start,
+after the recovery scan, one read rebuilds the visible set (see [processes](processes.md)) from
+live threads only: a step that doesn't decode is skipped and logged by row id, never its
+content. The threads panel's pages leave `scene_begin` and `scene_cleared` out.
 
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
 and never returns a thread being deleted.

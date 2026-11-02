@@ -7,11 +7,12 @@
 
 mod data;
 pub(crate) mod fixture;
+mod recovery;
 mod store_thread;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use std::time::Duration;
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, MAX_PENDING_TURNS,
-    RunId, ThreadId,
+    MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
 };
 use capsula_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -29,10 +30,11 @@ use tokio::time::Instant;
 
 use crate::coordinator::{Coordinator, Effect, Input};
 use crate::ipc;
-use crate::store::Store;
+use crate::store::{SceneState, Store};
 use crate::tap::Tap;
-use data::DataQueue;
+use data::{DataQueue, Owner};
 use fixture::Fixture;
+use recovery::Recovery;
 use store_thread::StoreThread;
 
 /// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
@@ -51,18 +53,38 @@ const MAX_ENDING: usize = 16;
 const DATA_CAP: usize = 512 * 1024;
 /// Engine events queued before the engine waits [guess].
 const ENGINE_QUEUE: usize = 16;
-/// How long closing waits for ended runs to reach the store, then for the store to close [guess].
+/// How long closing waits for ended runs to reach the store, then for the store to close, and
+/// how long a whole Quit may take from the moment it's accepted [guess].
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long a new connection may wait for the visible set to settle before `Scenes` [guess].
+const SCENES_WAIT: Duration = Duration::from_secs(2);
+/// How long the control pipe is still read after another pipe ended, so a `Quitting` already
+/// in it is accepted [guess].
+const QUIT_GRACE: Duration = Duration::from_millis(250);
 
 /// How a shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
-    /// The shell sent `Quitting`.
-    Quit,
+    /// The shell sent `Quitting`; shutting down must finish by `deadline`.
+    Quit {
+        /// [`CLOSE_WAIT`] after the Quit was accepted.
+        deadline: Instant,
+    },
     /// The shell went away or stopped answering.
     Lost,
     /// The shell broke the protocol after the handshake.
     Broken(&'static str),
+    /// The visible set didn't settle in time, so no `Scenes` was sent; the shell reconnects.
+    Unavailable,
+}
+
+/// Whether a Quit's last clear committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Quit {
+    /// Every visible scene's clear is durable.
+    Complete,
+    /// The deadline passed or a write failed; the scenes come back at the next start.
+    Incomplete,
 }
 
 /// The coordinator and the systems that outlive one shell connection.
@@ -81,6 +103,8 @@ pub(crate) struct Brain {
     deadline: Option<(RunId, Instant)>,
     /// Page completions belong only to the connection that requested them.
     epoch: u64,
+    /// What a recovery chunk packs up to; tests lower it to force several chunks.
+    chunk_target: usize,
 }
 
 impl Brain {
@@ -92,6 +116,7 @@ impl Brain {
     pub(crate) fn new(
         store: Store,
         high_water: (ThreadId, RunId),
+        scenes: Vec<SceneState>,
         fixture: Fixture,
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
@@ -100,7 +125,7 @@ impl Brain {
             StoreThread::spawn(store, inputs_tx.clone(), store_thread::Schedule::default())?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
-            coordinator: Coordinator::new(last_thread, last_run),
+            coordinator: Coordinator::new(last_thread, last_run, scenes),
             store: Some(store),
             fixture: Arc::new(fixture),
             inputs_tx,
@@ -110,7 +135,54 @@ impl Brain {
             engine: None,
             deadline: None,
             epoch: 0,
+            chunk_target: recovery::CHUNK_TARGET,
         })
+    }
+
+    /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
+    /// as shell loss would, drains every accepted store write, clears the visible set and what's
+    /// still clearing in one write, waits for its commit, then closes the store. No stage starts
+    /// a budget of its own. Only a committed clear is a complete quit; otherwise the scenes come
+    /// back at the next start, as after a crash.
+    pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
+        self.offline(Input::ShellLost);
+        let cleared = tokio::time::timeout_at(deadline, async {
+            while self.coordinator.ending_runs() > 0 || self.coordinator.clears_in_flight() {
+                let Some(input) = self.inputs.recv().await else {
+                    return false;
+                };
+                self.offline(input);
+            }
+            self.offline(Input::ClearVisible);
+            while self.coordinator.clears_in_flight() {
+                let Some(input) = self.inputs.recv().await else {
+                    return false;
+                };
+                let failed = matches!(input, Input::ScenesCleared { ok: false, .. });
+                self.offline(input);
+                if failed {
+                    return false;
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false);
+        if let Some(store) = self.store.take() {
+            match tokio::time::timeout_at(deadline, store.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => tracing::error!("the store thread panicked"),
+                Err(_) => tracing::warn!("the store thread didn't finish in time"),
+            }
+        }
+        if cleared {
+            Quit::Complete
+        } else {
+            tracing::warn!(
+                "the quit was incomplete; the visible scenes come back at the next start"
+            );
+            Quit::Incomplete
+        }
     }
 
     /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
@@ -162,6 +234,12 @@ impl Brain {
 
     /// Serves one authenticated shell until it quits, leaves or stops answering. Whatever run
     /// was active ends as `interrupted(shell_lost)`.
+    ///
+    /// A `Quitting` the control reader takes latches the quit, so whichever task ends first the
+    /// connection ends as [`Ended::Quit`]. When another pipe ends first, the control reader's
+    /// own read goes on for [`QUIT_GRACE`], so a `Quitting` already in the pipe, even one
+    /// partly read, is still accepted; the controls it forwards meanwhile keep being applied, so
+    /// its channel never fills. Controls forwarded before the Quit apply before `serve` returns.
     pub(crate) async fn serve<C, D>(&mut self, control: C, data: D, tap: &mut Tap) -> Ended
     where
         C: AsyncRead + AsyncWrite + Unpin,
@@ -180,35 +258,72 @@ impl Brain {
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
         let room = Notify::new();
+        let quit = Cell::new(None);
 
-        let control_reader = read_control(&mut control_in, &controls_tx);
-        let data_reader = read_data(
-            &mut data_in,
-            &turns_tx,
-            &pages_tx,
-            &queue,
-            &ready,
-            self.epoch,
-        );
-        let control_writer = write_control(&mut control_out, &mut out);
-        let data_writer = write_data(&mut data_out, &queue, &ready, &room);
-        let link = Link {
-            out: &out_tx,
-            queue: &queue,
-            ready: &ready,
-            tap: &mut *tap,
+        let control_reader = read_control(&mut control_in, &controls_tx, &quit);
+        tokio::pin!(control_reader);
+        let mut reading = true;
+        let ended = {
+            let data_reader = read_data(
+                &mut data_in,
+                &turns_tx,
+                &pages_tx,
+                &queue,
+                &ready,
+                self.epoch,
+            );
+            let control_writer = write_control(&mut control_out, &mut out);
+            let data_writer = write_data(&mut data_out, &queue, &ready, &room);
+            let link = Link {
+                out: &out_tx,
+                queue: &queue,
+                ready: &ready,
+                tap: &mut *tap,
+            };
+            let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
+            tokio::select! {
+                ended = &mut control_reader => {
+                    reading = false;
+                    ended
+                }
+                ended = data_reader => ended,
+                ended = control_writer => ended,
+                ended = data_writer => ended,
+                ended = core => ended,
+            }
         };
-        let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
-        let ended = tokio::select! {
-            ended = control_reader => ended,
-            ended = data_reader => ended,
-            ended = control_writer => ended,
-            ended = data_writer => ended,
-            ended = core => ended,
+        if reading && quit.get().is_none() {
+            let grace = tokio::time::sleep(QUIT_GRACE);
+            tokio::pin!(grace);
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(message) = controls.recv() => self.control_offline(message, tap),
+                    _ = &mut control_reader => break,
+                    () = &mut grace => break,
+                }
+            }
+        }
+        let ended = match quit.get() {
+            Some(deadline) => {
+                while let Ok(message) = controls.try_recv() {
+                    self.control_offline(message, tap);
+                }
+                Ended::Quit { deadline }
+            }
+            None => ended,
         };
         self.offline(Input::ShellLost);
         self.deadline = None;
         ended
+    }
+
+    /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
+    fn control_offline(&mut self, message: ControlToBrain, tap: &mut Tap) {
+        tap.record(Pipe::Control, Direction::ToBrain, &message);
+        if let Ok(Some(input)) = control_input(message) {
+            self.offline(input);
+        }
     }
 
     /// The core loop: frames from the shell, completions from the systems, the deadline and
@@ -218,6 +333,12 @@ impl Brain {
     /// events while the data queue is full, so memory stays bounded however slow the store or
     /// the shell is. A turn is the only way to add a run, and so a `RunEnd`, so the frames
     /// queued past the cap are bounded too. `room` wakes the loop when the queue drains.
+    ///
+    /// Each connection starts awaiting `Scenes`: Stop, Clear and Pong are served, but no turn is
+    /// taken until the visible set has settled and `Scenes` has named it, so the list is never
+    /// one the store has already moved past. If it hasn't settled within [`SCENES_WAIT`], the
+    /// connection ends as unavailable instead. After `Scenes`, the snapshots go out a chunk at
+    /// a time whenever the data queue has room, ahead of engine events.
     async fn core(
         &mut self,
         controls: &mut mpsc::Receiver<ControlToBrain>,
@@ -230,30 +351,49 @@ impl Brain {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
         let mut held_pages = VecDeque::new();
+        let mut recovery: Option<Recovery> = None;
+        let barrier = Instant::now() + SCENES_WAIT;
+        // A clear whose write failed while no shell was connected is retried now at the latest.
+        let retried = self.coordinator.retry_clears();
+        if self.apply(retried, Some(&mut link)).is_err() {
+            return Ended::Lost;
+        }
         loop {
+            if recovery.is_none() && self.coordinator.settled() {
+                let Ok(described) = self.describe(&mut link) else {
+                    return Ended::Lost;
+                };
+                recovery = Some(described);
+            }
+            let described = recovery.is_some();
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns = take_engine && self.coordinator.ending_runs() < MAX_ENDING;
+            let take_turns =
+                described && take_engine && self.coordinator.ending_runs() < MAX_ENDING;
+            let feed = take_engine && recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
                 Some(message) = controls.recv() => {
                     link.tap.record(Pipe::Control, Direction::ToBrain, &message);
-                    match message {
-                        ControlToBrain::Stop { run, revealed } => Input::Stop { run, revealed },
-                        ControlToBrain::Pong => {
-                            ping_sent = None;
-                            continue;
-                        }
-                        // The readers end the connection on Hello and Quitting. The thread keeps
-                        // a cleared drawing for replay; slice 4 records the clear.
-                        ControlToBrain::Hello(_)
-                        | ControlToBrain::Quitting
-                        | ControlToBrain::ClearDrawing { .. } => continue,
+                    if message == ControlToBrain::Pong {
+                        ping_sent = None;
+                    }
+                    match control_input(message) {
+                        Ok(Some(input)) => input,
+                        Ok(None) => continue,
+                        Err(ended) => return ended,
                     }
                 }
                 () = std::future::ready(()), if take_engine && !held_pages.is_empty() => {
                     held_pages.pop_front().expect("a held page is ready")
+                }
+                () = std::future::ready(()), if feed => {
+                    let chunk = recovery.as_mut().and_then(Recovery::next_chunk);
+                    if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
+                        return Ended::Lost;
+                    }
+                    continue;
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
@@ -267,24 +407,21 @@ impl Brain {
                         None => continue,
                     }
                 }
+                () = tokio::time::sleep_until(barrier), if !described => {
+                    tracing::warn!("the visible scenes didn't settle in time; ending the connection");
+                    return Ended::Unavailable;
+                }
                 _ = ticks.tick(), if running.is_some() => {
-                    let now = Instant::now();
-                    if ping_sent.is_some_and(|sent| now.duration_since(sent) > PONG_WITHIN) {
-                        tracing::warn!("the shell stopped answering pings");
-                        return Ended::Lost;
-                    }
-                    if ping_sent.is_none() {
-                        ping_sent = Some(now);
-                        if link.control(&ControlToShell::Ping).is_err() {
-                            return Ended::Lost;
-                        }
-                    }
-                    match running {
-                        Some(run) if link.queue.borrow().stalled(now.into_std()) => Input::Stalled { run },
-                        _ => continue,
+                    match watchdog(&mut ping_sent, running, &mut link) {
+                        Ok(Some(input)) => input,
+                        Ok(None) => continue,
+                        Err(ended) => return ended,
                     }
                 }
             };
+            if let (Input::Clear { scenes }, Some(recovery)) = (&input, &mut recovery) {
+                recovery.drop_scenes(scenes);
+            }
             if let Input::PageRead { epoch, .. } = &input {
                 if *epoch != self.epoch {
                     continue;
@@ -306,6 +443,14 @@ impl Brain {
                 return Ended::Lost;
             }
         }
+    }
+
+    /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
+    fn describe(&self, link: &mut Link<'_, '_>) -> Result<Recovery, Full> {
+        let visible = self.coordinator.visible();
+        let scenes = visible.iter().map(descriptor).collect();
+        link.control(&ControlToShell::Scenes { scenes })?;
+        Ok(Recovery::new(visible, self.chunk_target))
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
@@ -372,14 +517,44 @@ impl Brain {
     }
 }
 
+/// One watchdog tick while `running`: pings the shell, ends the connection when a ping has gone
+/// unanswered too long, and stalls the run when the shell stopped taking data.
+fn watchdog(
+    ping_sent: &mut Option<Instant>,
+    running: Option<RunId>,
+    link: &mut Link<'_, '_>,
+) -> Result<Option<Input>, Ended> {
+    let now = Instant::now();
+    if ping_sent.is_some_and(|sent| now.duration_since(sent) > PONG_WITHIN) {
+        tracing::warn!("the shell stopped answering pings");
+        return Err(Ended::Lost);
+    }
+    if ping_sent.is_none() {
+        *ping_sent = Some(now);
+        if link.control(&ControlToShell::Ping).is_err() {
+            return Err(Ended::Lost);
+        }
+    }
+    Ok(running
+        .filter(|_| link.queue.borrow().stalled(now.into_std()))
+        .map(|run| Input::Stalled { run }))
+}
+
+/// Reads the control pipe. A `Quitting` latches `quit` before the reader returns, so the
+/// connection ends as a quit whatever ends first.
 async fn read_control(
     pipe: &mut (impl AsyncRead + Unpin),
     frames: &mpsc::Sender<ControlToBrain>,
+    quit: &Cell<Option<Instant>>,
 ) -> Ended {
     loop {
         match ipc::read::<ControlToBrain>(pipe, Pipe::Control).await {
             Ok(Some(ControlToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some(ControlToBrain::Quitting)) => return Ended::Quit,
+            Ok(Some(ControlToBrain::Quitting)) => {
+                let deadline = Instant::now() + CLOSE_WAIT;
+                quit.set(Some(deadline));
+                return Ended::Quit { deadline };
+            }
             Ok(Some(message)) => {
                 if frames.send(message).await.is_err() {
                     return Ended::Lost;
@@ -391,6 +566,29 @@ async fn read_control(
                 return Ended::Lost;
             }
         }
+    }
+}
+
+/// The input a control frame asks of the coordinator, if any; a clear of more scenes than can
+/// be visible breaks the connection. The readers end the connection on Hello and Quitting, and
+/// the core answers Pong itself.
+fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
+    Ok(match message {
+        ControlToBrain::Stop { run, revealed } => Some(Input::Stop { run, revealed }),
+        ControlToBrain::ClearDrawing { scene_ids } if scene_ids.len() > MAX_VISIBLE_SCENES => {
+            return Err(Ended::Broken("more scenes cleared than can be visible"));
+        }
+        ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
+        ControlToBrain::Pong | ControlToBrain::Hello(_) | ControlToBrain::Quitting => None,
+    })
+}
+
+/// A visible scene as `Scenes` names it.
+fn descriptor(state: &SceneState) -> SceneDescriptor {
+    SceneDescriptor {
+        scene: state.scene,
+        revision: state.revision,
+        committed: u32::try_from(state.kept.len()).expect("at most MAX_STEPS kept"),
     }
 }
 
@@ -508,19 +706,20 @@ impl Link<'_, '_> {
 
     /// Data frames carry content, so the tap never records them.
     fn data(&mut self, message: &DataToShell) -> Result<(), Full> {
-        let run = match message {
+        let owner = match message {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
-            | DataToShell::RunEnd { run } => Some(*run),
+            | DataToShell::RunEnd { run } => Owner::Run(*run),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
-            | DataToShell::PageFailed { .. } => None,
+            | DataToShell::PageFailed { .. } => Owner::Page,
+            DataToShell::SceneSnapshot { .. } => Owner::Scene,
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");
             return Err(Full);
         };
-        self.queue.borrow_mut().push(run, frame);
+        self.queue.borrow_mut().push(owner, frame);
         self.ready.notify_one();
         Ok(())
     }

@@ -135,8 +135,9 @@ local effect always happens first, and nothing waits on the brain:
   - Turns sent and not yet answered by a `RunState` count as work too. Esc cancels every one
     sent before the press: when a cancelled turn's run is first named, it's fenced before any of
     its output is applied and gets its own `Stop`. A turn sent after the press isn't covered.
-- **Clear**, the next Esc, removes the run's steps, keeps its text, keeps its late steps out, and
-  queues `ClearDrawing`. The brain ignores it until slice 4 draws.
+- **Clear**, the next Esc, removes the shown scenes, and any recovery under way, keeps the text,
+  keeps the scenes' late steps out, and queues one `ClearDrawing` naming them. The brain records
+  the clear, so they don't come back. See [the drawing](presence.md#the-drawing).
 - With no brain connected, or a control queue the brain isn't reading, the local effect still
   happens and the unsent message is logged, without content.
 
