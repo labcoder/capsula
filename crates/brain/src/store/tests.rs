@@ -485,7 +485,8 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
         .busy_timeout(std::time::Duration::ZERO)
         .expect("timeout");
     let (first, _) = plant(&mut store);
-    let (second, _) = plant(&mut store);
+    // Without the marker, so the raw scan below can only find the first thread's residue.
+    let (second, _) = turn(&mut store, Err("plain"), "plain");
     store.begin_delete(first).expect("begin");
     store.begin_delete(second).expect("begin");
     let reader = Connection::open(scratch.db()).expect("reader");
