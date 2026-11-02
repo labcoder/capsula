@@ -9,10 +9,12 @@ tested as plain unit tests.
 ## Ids and staleness
 
 The coordinator hands out thread and run ids, starting above the store's high-water marks, so an
-id is never reused, even across restarts and deletions. One run is current at a time. Any input
-that names another run is **stale**: it returns `Stale` and changes nothing. That's how a step
-an engine finishes after `Stop` is refused, and the store refuses it again, since it only takes
-events for active runs.
+id is never reused, even across restarts and deletions. One run is current at a time. An engine
+event, a control input or a timer that names any other run is **stale**: it returns `Stale` and
+changes nothing. That's how a step an engine finishes after `Stop` is refused, and the store
+refuses it again, since it only takes events for active runs. Store replies are the exception:
+those for a run that is still ending are accepted, so its outcome is still written and a failure
+still reported (see [the store contract](#the-store-contract)).
 
 ## One run, start to end
 
@@ -41,6 +43,11 @@ sequenceDiagram
 
 - **The turn is stored before the engine starts** (OSC-105 boundary 8). A blank turn (empty or
   whitespace only) starts nothing.
+- **A thread's events stay in run order.** A new turn's write waits until every older run's
+  outcome is queued, so a replaced run's last text lands before the new turn and the new engine
+  starts only after its predecessor is stored. The shell still hears the old run's `Interrupted`
+  and the new run's `Thinking` at once. A held turn that is stopped or replaced in turn is
+  still stored, then its outcome, in order.
 - **A step is sent only after it's committed.** When the engine says it's done while a step is
   still in the store, the run ends right after that step is stored and sent.
 - **Data keeps the engine's order.** Text the engine produces after a pending step waits behind
@@ -110,7 +117,8 @@ never lost:
 
 Budgets are absolute for the run and never reset (OSC-105 boundary 5): 120 s of wall clock, 1 MiB
 of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, and the text or
-step that went over is never sent. Model rounds, tool calls and speech budgets arrive with the
+step that went over is never sent. The wall clock covers the engine only: once it says it's done,
+the deadline no longer applies, even while its last step is still being stored. Model rounds, tool calls and speech budgets arrive with the
 engines that use them.
 
 ## The fixture engine

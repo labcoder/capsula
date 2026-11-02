@@ -207,6 +207,8 @@ struct Run {
     thread: ThreadId,
     /// The user's text, until the turn is stored; `None` once it is.
     turn: Option<String>,
+    /// The turn's write, held until every older run's outcome is queued.
+    begin: Option<StoreOp>,
     answering: bool,
     /// Streamed text not yet stored; it's stored with the next step or the outcome.
     unstored: String,
@@ -302,6 +304,9 @@ impl Coordinator {
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
             Input::TurnStored { run } => {
                 let found = self.find(run)?;
+                if found.begin.is_some() {
+                    return Err(Stale);
+                }
                 let text = found.turn.take().ok_or(Stale)?;
                 if found.ending.is_some() {
                     self.settle(run, &mut effects);
@@ -350,11 +355,16 @@ impl Coordinator {
                 self.end(current, stalled, None, Notify::Shell, &mut effects);
             }
             Input::Deadline { run } => {
+                // The engine finished within its budget; only its last step is being stored.
+                if self.current(run)?.finishing {
+                    return Err(Stale);
+                }
                 let current = self.take(run)?;
                 let over = RunEnd::Failed(Failure::Budget);
                 self.end(current, over, None, Notify::Shell, &mut effects);
             }
         }
+        self.begin_turns(&mut effects);
         Ok(effects)
     }
 
@@ -371,25 +381,17 @@ impl Coordinator {
             self.last_thread = ThreadId(self.last_thread.0 + 1);
             (self.last_thread, Some(title(&text)))
         };
-        effects.push(Effect::Store(StoreOp::BeginTurn {
+        let begin = StoreOp::BeginTurn {
             thread,
             title,
             run,
             text: text.clone(),
-        }));
-        effects.push(Effect::Control(ControlToShell::RunState {
-            run,
-            thread,
-            phase: Phase::Thinking,
-        }));
-        effects.push(Effect::ArmDeadline {
-            run,
-            after: WALL_CLOCK,
-        });
+        };
         self.current = Some(Run {
             id: run,
             thread,
             turn: Some(text),
+            begin: Some(begin),
             answering: false,
             unstored: String::new(),
             text_bytes: 0,
@@ -399,6 +401,35 @@ impl Coordinator {
             finishing: false,
             ending: None,
         });
+        self.begin_turns(effects);
+        effects.push(Effect::Control(ControlToShell::RunState {
+            run,
+            thread,
+            phase: Phase::Thinking,
+        }));
+        effects.push(Effect::ArmDeadline {
+            run,
+            after: WALL_CLOCK,
+        });
+    }
+
+    /// Queues held turns whose older runs all have their outcomes queued, so the store keeps a
+    /// thread's events in run order and a replacement's engine starts only after its predecessor
+    /// is stored.
+    fn begin_turns(&mut self, effects: &mut Vec<Effect>) {
+        let oldest_unwritten = self
+            .ending
+            .iter()
+            .filter(|ended| ended.ending.as_ref().is_some_and(|ending| !ending.written))
+            .map(|ended| ended.id)
+            .min();
+        for run in self.ending.iter_mut().chain(self.current.as_mut()) {
+            if oldest_unwritten.is_none_or(|oldest| run.id <= oldest)
+                && let Some(begin) = run.begin.take()
+            {
+                effects.push(Effect::Store(begin));
+            }
+        }
     }
 
     fn engine(
@@ -531,6 +562,9 @@ impl Coordinator {
 
     /// The oldest unanswered operation of `run` failed: the turn, a step, or the outcome.
     fn store_failed(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        if self.find(run)?.begin.is_some() {
+            return Err(Stale);
+        }
         if let Ok(current) = self.current(run) {
             if !current.outstanding() {
                 return Err(Stale);
