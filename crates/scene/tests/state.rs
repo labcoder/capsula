@@ -323,7 +323,7 @@ fn stale_admissions_bind_scene_global_instance_and_global_generation() {
     a.commit(candidate, &mut global)
         .expect("rejected admission did not invalidate candidate");
     let candidate = admit(&a, &global, &step(&text("later", "later")));
-    a.clear(&mut global);
+    a.clear(&mut global).expect("matching budget context");
     assert_eq!(
         a.commit(candidate, &mut global),
         Err(capsula_scene::StaleAdmission)
@@ -368,7 +368,7 @@ fn stop_zero_and_invalid_cuts_are_atomic_and_revisions_never_decrease() {
         (1, 0, 0)
     );
     let generation = global.generation();
-    state.clear(&mut global);
+    state.clear(&mut global).expect("matching budget context");
     assert_eq!(global.generation(), generation);
     rejected(
         &state,
