@@ -1026,7 +1026,9 @@ async fn a_second_stop_of_a_finished_run_never_trims_its_scene_again() {
 /// The first step commits, then the next two wait on the store's lock while the run ends:
 /// replaced by a new turn, or failed by its engine.
 const STEPS_HELD_THEN_REPLACED: &str = "0 step a\n0 text t\n0 step b\n0 step c\n5000 text never";
-const STEPS_HELD_THEN_FAILED: &str = "0 step a\n0 text t\n0 step b\n0 step c\n100 fail";
+// shortcut: the fixture fails the run on a timer, since a script can't wait for a store ack,
+// so step a's write must commit within it; add a fixture event that waits on one if it flakes.
+const STEPS_HELD_THEN_FAILED: &str = "0 step a\n0 text t\n0 step b\n0 step c\n2000 fail";
 
 /// Ends a run while two of its step writes wait on the store, then stops it with `revealed`, as
 /// Esc does while the shell drains the ended run. Returns the committed count the next
