@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use capsula_protocol::message::{
-    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, Step, ThreadId,
+    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, Step, ThreadId,
 };
 
 use crate::store::{Failure, Interruption, RunEnd};
@@ -32,6 +32,24 @@ const TITLE_CHARS: usize = 80;
 /// Something that happened, for the coordinator to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
+    /// Read a page for one shell connection, without changing any run.
+    ReadPage {
+        /// The connection that requested the page.
+        epoch: u64,
+        /// The shell's request counter.
+        request: u32,
+        /// The page to read.
+        page: PageOf,
+    },
+    /// A page read finished; a failed read ends its connection in the runtime.
+    PageRead {
+        /// The connection that requested the page.
+        epoch: u64,
+        /// The shell's request counter.
+        request: u32,
+        /// The page, or `None` when the read failed.
+        reply: Option<DataToShell>,
+    },
     /// The user typed a turn, in `thread` or in a new thread.
     Turn {
         /// The thread to continue, or `None` for a new one.
@@ -107,8 +125,7 @@ pub enum EngineEvent {
 /// Something for the systems around the coordinator to do, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
-    /// Write to the store. The store runs operations in order, each in one transaction, and
-    /// answers every one: `TurnStored`, `StepStored` or `RunStored`, or `StoreFailed`.
+    /// Run a store operation in order, with one acknowledgement for every read or write.
     Store(StoreOp),
     /// Send on the control pipe.
     Control(ControlToShell),
@@ -140,9 +157,18 @@ pub enum Effect {
     },
 }
 
-/// A store write, one transaction each.
+/// A store operation: an autocommit read, or a write in one transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreOp {
+    /// An autocommit read that neither stops nor postpones a purge.
+    ReadPage {
+        /// The connection that requested the page.
+        epoch: u64,
+        /// The shell's request counter.
+        request: u32,
+        /// The page to read.
+        page: PageOf,
+    },
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
@@ -183,12 +209,27 @@ pub enum StoreOp {
 }
 
 impl StoreOp {
-    /// The run the operation belongs to.
-    pub fn run(&self) -> RunId {
+    /// The run a write belongs to; page reads have no run.
+    pub fn run(&self) -> Option<RunId> {
         match self {
+            Self::ReadPage { .. } => None,
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
-            | Self::EndRun { run, .. } => *run,
+            | Self::EndRun { run, .. } => Some(*run),
+        }
+    }
+
+    /// Answers an operation that couldn't reach the store.
+    pub fn failed(&self) -> Input {
+        match self {
+            Self::ReadPage { epoch, request, .. } => Input::PageRead {
+                epoch: *epoch,
+                request: *request,
+                reply: None,
+            },
+            Self::BeginTurn { run, .. }
+            | Self::CommitStep { run, .. }
+            | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
         }
     }
 }
@@ -289,17 +330,29 @@ impl Coordinator {
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
+            Input::ReadPage {
+                epoch,
+                request,
+                page,
+            } => {
+                let op = StoreOp::ReadPage {
+                    epoch,
+                    request,
+                    page,
+                };
+                return Ok(vec![Effect::Store(op)]);
+            }
+            Input::PageRead { reply, .. } => {
+                return Ok(reply.into_iter().map(Effect::Data).collect());
+            }
             Input::Turn { thread, text } => {
                 if !text.trim().is_empty() {
                     self.turn(thread, text, &mut effects);
                 }
             }
-            Input::Stop { run, revealed } => {
+            Input::Stop { run, mut revealed } => {
                 let current = self.take(run)?;
-                let mut revealed: Vec<u32> = revealed
-                    .into_iter()
-                    .filter(|&index| index < current.acked)
-                    .collect();
+                revealed.retain(|&index| index < current.acked);
                 revealed.sort_unstable();
                 revealed.dedup();
                 let stopped = RunEnd::Interrupted(Interruption::Stop);

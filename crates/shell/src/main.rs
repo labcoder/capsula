@@ -10,6 +10,7 @@ mod platform;
 mod presence;
 mod runs;
 mod strings;
+mod threads;
 
 use std::process::ExitCode;
 

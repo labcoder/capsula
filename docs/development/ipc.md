@@ -61,7 +61,13 @@ flowchart LR
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
 | Control | `RunState`, `Ping` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
-| Data | `AssistantText`, `StepCommit`, `RunEnd` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+
+| Page message | Direction | Fields |
+|---|---|---|
+| `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }` or `PageOf::Events { thread, before }` |
+| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`), `next` |
+| `Page` | Brain to shell, data | `request`, `thread`, events (`id`, optional `run`, `kind`, `text`, `cut`), `before` |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
@@ -85,7 +91,11 @@ flowchart LR
   so the queue can reach the cap plus one event, the text held behind a step, and one small
   `RunEnd` per run still ending. That bound excludes typed turns not yet taken: up to 64
   `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
-  as broken.
+  as broken. Separately, at most four page requests may remain unanswered [guess], counting
+  replies waiting on credit or a blocked write; a fifth breaks the connection. Pages are at most
+  50 rows and 32 KiB per encoded frame [guess]. The shell keeps only one request per list, two
+  total. Their frames use at most 64 KiB plus bounded queue metadata, so pages alone cannot
+  stop turn admission. See [panels](panels.md) for continuations, repair, and stale replies.
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
@@ -101,21 +111,23 @@ unsent after its local effect already happened.
 Each connection reaches the UI as `Connected` with a session that carries the shell's own
 connection generation, not the brain's incarnation, since the same brain may be reconnected to.
 Sends and grants go through that session, and data events carry its generation, so a turn,
-`Stop` or grant meant for a connection that has ended does nothing on the next one.
+page request, `Stop` or grant meant for a connection that has ended does nothing on the next one.
 
 | Channel | Bound | When it's full |
 |---|---|---|
 | Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong` and `Quitting` |
-| Data out | 64 turns plus 8 for credit | Not reached: the shell refuses a turn first, below |
+| Data out | 64 turns plus 8 for pages and credit | Not reached: the shell refuses a turn first and keeps at most two page requests unanswered |
 | Brain to UI | unbounded, one channel in arrival order | The link thread never waits on the UI |
 
 - **Credit** for a data frame is granted once the UI thread has taken it, applied or dropped by
   the fence, so a UI that stops taking frames stops the brain within its window. Grants add up
   in the connection's own counter, without a lock, and the data writer sends them after each
-  wake-up, so a grant waits at most for the write in progress.
+  wake-up, so a grant waits at most for one data write.
 - **Data before its run is named.** A frame for a run no `RunState` has named yet is held, and its
   credit withheld, until the state arrives: dropped if Esc cancelled that run's turn, applied
   otherwise. Since withheld credit stops the brain, its credit window bounds what's held.
+- **Pages.** Each list has one request in flight. A superseded query or closed thread drops its
+  reply when applied, but still earns credit. Page frames are never held for a RunState.
 - **Turns.** The shell keeps at most 63 turns unanswered; a 64th is refused until a new run's
   first `RunState` answers one. The brain's queue holds 64, so the shell never sends the turn
   that would end the connection. It refuses blank turns, which the brain ignores, and turns too

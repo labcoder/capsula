@@ -64,7 +64,8 @@ sequenceDiagram
 ## The typing panel
 
 A double tap opens a small panel where the status panel would be, with one gpui-kit `Input`.
-It's the only window Capsula activates, as described in [Taking the front](#taking-the-front). The
+Like the [threads panel](panels.md), it activates only on a user command, as described in
+[Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Capsula still has the front and that window still exists.
 Switching to another window also hides it and keeps the draft, without restoring the old
@@ -122,8 +123,8 @@ Rejected alternatives:
 ## Esc
 
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second,
-otherwise dismiss the topmost local panel, the typing panel. The local effect always happens
-first, and nothing waits on the brain:
+otherwise dismiss the topmost local panel: the typing panel or the focused threads panel. The
+local effect always happens first, and nothing waits on the brain:
 
 - **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames

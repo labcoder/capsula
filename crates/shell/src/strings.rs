@@ -31,11 +31,28 @@ pub(crate) enum Text {
     TurnBusy,
     TurnOffline,
     TurnTooLong,
+    Threads,
+    OpenThreads,
+    NewThread,
+    SearchThreads,
+    EmptyThreads,
+    EmptyThreadSearch,
+    ThreadGone,
+    SelectThread,
+    ThreadCut,
+    OlderMessages,
+    CloseThreads,
+    ThreadUser,
+    ThreadAssistant,
+    ThreadStep,
+    ThreadRevealed,
+    ThreadsOffline,
+    ThreadSearchTooLong,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 39] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -58,6 +75,23 @@ impl Text {
         Self::TurnBusy,
         Self::TurnOffline,
         Self::TurnTooLong,
+        Self::Threads,
+        Self::OpenThreads,
+        Self::NewThread,
+        Self::SearchThreads,
+        Self::EmptyThreads,
+        Self::EmptyThreadSearch,
+        Self::ThreadGone,
+        Self::SelectThread,
+        Self::ThreadCut,
+        Self::OlderMessages,
+        Self::CloseThreads,
+        Self::ThreadUser,
+        Self::ThreadAssistant,
+        Self::ThreadStep,
+        Self::ThreadRevealed,
+        Self::ThreadsOffline,
+        Self::ThreadSearchTooLong,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -96,6 +130,23 @@ impl Text {
             Self::TurnBusy => "turn-busy",
             Self::TurnOffline => "turn-offline",
             Self::TurnTooLong => "turn-too-long",
+            Self::Threads => "threads-title",
+            Self::OpenThreads => "action-threads",
+            Self::NewThread => "action-new-thread",
+            Self::SearchThreads => "threads-search",
+            Self::EmptyThreads => "threads-empty",
+            Self::EmptyThreadSearch => "threads-search-empty",
+            Self::ThreadGone => "thread-gone",
+            Self::SelectThread => "thread-select",
+            Self::ThreadCut => "thread-cut",
+            Self::OlderMessages => "thread-older",
+            Self::CloseThreads => "threads-close",
+            Self::ThreadUser => "thread-user",
+            Self::ThreadAssistant => "thread-assistant",
+            Self::ThreadStep => "thread-step",
+            Self::ThreadRevealed => "thread-revealed",
+            Self::ThreadsOffline => "threads-offline",
+            Self::ThreadSearchTooLong => "threads-search-too-long",
         }
     }
 }

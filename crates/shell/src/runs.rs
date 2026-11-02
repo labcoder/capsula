@@ -78,10 +78,18 @@ pub(crate) struct Runs {
     held: Vec<(DataToShell, u32)>,
     /// The thread the next turn continues.
     thread: Option<ThreadId>,
+    /// Turns sent before the latest explicit selection must not replace that choice.
+    selection_pending: usize,
     shown: Option<Shown>,
 }
 
 impl Runs {
+    /// Selects the thread the next typed turn continues; no message or store write is needed.
+    pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) {
+        self.thread = thread;
+        self.selection_pending = self.pending;
+    }
+
     /// A run is moving that Esc hasn't stopped, or a turn is waiting for its run.
     pub(crate) fn working(&self) -> bool {
         self.stoppable().is_some() || self.pending > self.cancelled
@@ -177,18 +185,23 @@ impl Runs {
         self.fence = self.fence.max(self.answered);
         self.live = None;
         self.pending = 0;
+        self.selection_pending = 0;
         self.cancelled = 0;
         self.held.clear();
     }
 
     /// A `RunState`. A run newer than any before answers the oldest pending turn exactly once,
     /// fenced or not, and is fenced before any of its output is applied if Esc cancelled that
-    /// turn. Only such a run sets the thread the next turn continues.
+    /// turn. Only such a run sets the next thread, and never over a later explicit selection.
     pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) -> Applied {
         let mut applied = Applied::default();
         if run > self.answered {
             self.answered = run;
-            self.thread = Some(thread);
+            if self.selection_pending == 0 {
+                self.thread = Some(thread);
+            } else {
+                self.selection_pending -= 1;
+            }
             if self.pending > 0 {
                 self.pending -= 1;
                 if self.cancelled > 0 {
@@ -218,7 +231,7 @@ impl Runs {
     /// A data frame of `bytes` on the pipe. Returns the credit to grant for it now: none while
     /// it's held for its run's first `RunState`.
     pub(crate) fn apply_data(&mut self, message: DataToShell, bytes: u32) -> u32 {
-        if run_of(&message) > self.answered {
+        if run_of(&message).is_some_and(|run| run > self.answered) {
             self.held.push((message, bytes));
             return 0;
         }
@@ -231,7 +244,7 @@ impl Runs {
         let answered = self.answered;
         let (ready, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
             .into_iter()
-            .partition(|(message, _)| run_of(message) <= answered);
+            .partition(|(message, _)| run_of(message).is_none_or(|run| run <= answered));
         self.held = held;
         ready.into_iter().fold(0, |credit, (message, bytes)| {
             self.show(message);
@@ -260,6 +273,7 @@ impl Runs {
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
+            DataToShell::ThreadList { .. } | DataToShell::Page { .. } => {}
         }
     }
 
@@ -289,11 +303,12 @@ impl Runs {
     }
 }
 
-fn run_of(message: &DataToShell) -> RunId {
+fn run_of(message: &DataToShell) -> Option<RunId> {
     match message {
         DataToShell::AssistantText { run, .. }
         | DataToShell::StepCommit { run, .. }
-        | DataToShell::RunEnd { run } => *run,
+        | DataToShell::RunEnd { run } => Some(*run),
+        DataToShell::ThreadList { .. } | DataToShell::Page { .. } => None,
     }
 }
 
@@ -317,9 +332,91 @@ mod tests {
     };
 
     use super::{Applied, Refused, Runs, TEXT_KEPT};
+    use crate::escape::{Activity, Escape, Panel, decide};
 
     /// Every data frame in these tests is this size on the pipe.
     const BYTES: u32 = 10;
+
+    #[test]
+    fn selecting_and_starting_a_new_thread_only_change_the_next_turn() {
+        let mut runs = answering(5);
+        runs.select_thread(Some(ThreadId(9)));
+        runs.apply_state(RunId(5), ThreadId(1), Phase::Answering);
+        let mut sent = Vec::new();
+        runs.submit("continue", |turn| {
+            sent.push(turn);
+            true
+        })
+        .expect("sent");
+        runs.select_thread(None);
+        runs.submit("new", |turn| {
+            sent.push(turn);
+            true
+        })
+        .expect("sent");
+        assert_eq!(
+            sent,
+            [
+                DataToBrain::TextSubmit {
+                    thread: Some(ThreadId(9)),
+                    text: "continue".to_owned()
+                },
+                DataToBrain::TextSubmit {
+                    thread: None,
+                    text: "new".to_owned()
+                },
+            ]
+        );
+        assert!(runs.working(), "selection didn't stop work");
+    }
+
+    #[test]
+    fn pages_are_never_held_for_a_run_state() {
+        let mut runs = Runs::default();
+        let page = DataToShell::Page {
+            request: 1,
+            thread: ThreadId(999),
+            events: Vec::new(),
+            before: None,
+        };
+        assert_eq!(runs.apply_data(page, BYTES), BYTES);
+        assert!(runs.held.is_empty());
+        assert!(runs.shown().is_none());
+    }
+
+    #[test]
+    fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
+        let mut runs = Runs::default();
+        runs.connected();
+        submit(&mut runs, "old pending turn");
+        runs.select_thread(None);
+        runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
+        let mut sent = Vec::new();
+        runs.submit("new thread turn", |turn| {
+            sent.push(turn);
+            true
+        })
+        .expect("sent");
+        runs.apply_state(RunId(2), ThreadId(22), Phase::Thinking);
+        runs.submit("continue new thread", |turn| {
+            sent.push(turn);
+            true
+        })
+        .expect("sent");
+        assert_eq!(
+            sent,
+            [
+                DataToBrain::TextSubmit {
+                    thread: None,
+                    text: "new thread turn".to_owned()
+                },
+                DataToBrain::TextSubmit {
+                    thread: Some(ThreadId(22)),
+                    text: "continue new thread".to_owned()
+                },
+            ]
+        );
+    }
 
     fn text(run: u64, delta: &str) -> DataToShell {
         DataToShell::AssistantText {
@@ -564,6 +661,83 @@ mod tests {
         state(&mut runs, 5, Phase::Done);
         assert!(!runs.working());
         assert_eq!(runs.stop(), None);
+    }
+
+    #[test]
+    fn a_terminal_state_first_waits_for_run_end_to_settle() {
+        let mut runs = answering(5);
+        state(&mut runs, 5, Phase::Done);
+        assert!(runs.working(), "its data hasn't ended");
+        data(&mut runs, end(5));
+        assert!(!runs.working());
+        assert_eq!(runs.stop(), None);
+    }
+
+    #[test]
+    fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
+        let mut runs = Runs::default();
+        runs.connected();
+        submit(&mut runs, "a");
+        assert_eq!(runs.stop(), None, "a isn't named yet");
+        assert_eq!(data(&mut runs, text(1, "a's text")), 0, "held");
+        runs.disconnected();
+        runs.connected();
+        submit(&mut runs, "b");
+        assert_eq!(
+            state(&mut runs, 2, Phase::Answering),
+            Applied {
+                stop: None,
+                credit: 0
+            },
+            "b isn't cancelled, and a's held frame is gone"
+        );
+        assert_eq!(data(&mut runs, text(2, "b's answer")), BYTES);
+        assert_eq!(shown_text(&runs), Some((RunId(2), "b's answer")));
+        assert!(runs.working());
+    }
+
+    /// One Esc press, decided the way the presence decides it with the typing panel open.
+    fn press(runs: &mut Runs) -> (Escape, Option<ControlToBrain>) {
+        let activity = Activity {
+            working: runs.working(),
+            speaking: false,
+            drawing: runs.drawing(),
+        };
+        let action = decide(activity, Panel::Open);
+        let message = match action {
+            Escape::Stop => runs.stop(),
+            Escape::Clear => runs.clear(),
+            Escape::Dismiss | Escape::Ignore => None,
+        };
+        (action, message)
+    }
+
+    #[test]
+    fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
+        let mut runs = answering(4);
+        data(&mut runs, step(4, 0));
+        state(&mut runs, 4, Phase::Done);
+        data(&mut runs, end(4));
+        submit(&mut runs, "a");
+        assert_eq!(press(&mut runs), (Escape::Stop, None), "a is cancelled");
+        assert_eq!(
+            press(&mut runs),
+            (
+                Escape::Clear,
+                Some(ControlToBrain::ClearDrawing { run: RunId(4) })
+            ),
+            "a cancelled turn isn't work, so the drawing clears"
+        );
+        assert_eq!(press(&mut runs), (Escape::Dismiss, None));
+        assert_eq!(
+            state(&mut runs, 5, Phase::Thinking),
+            Applied {
+                stop: Some(stop(5)),
+                credit: 0
+            },
+            "a's run is stopped once it's named"
+        );
+        assert_eq!(press(&mut runs), (Escape::Dismiss, None));
     }
 
     #[test]

@@ -35,6 +35,11 @@ transaction each, and a brain refuses a file whose version is newer than it know
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
 and never returns a thread being deleted.
 
+The [threads panel](panels.md) reads bounded thread, ranked search, and newest-first event pages
+on the serving connection. Each read is one autocommit statement, finished before returning,
+with no retained snapshot. Reads neither stop the purge's copy nor postpone its quiet deadline;
+the store thread still services due or completed purge work while pages arrive.
+
 ## Deleting a thread
 
 ```mermaid
@@ -122,10 +127,10 @@ The purge is cleanup that can be retried:
 
 - **One job at a time.** A copy and a removal never run together, so a removal can't delete a
   later copy's file, and a copy starts only once every purge file is gone.
-- **A copy runs only while nothing else does.** No live thread may have an `active` run; a
+- **A copy runs only while no run is active.** No live thread may have an `active` run; a
   thread whose deletion keeps failing doesn't count, since its runs never write again. An owed
-  purge found at start is tried at once, and after any op the thread waits until none has come
-  for 200 ms [guess]. An op sets the copy's stop flag before it runs, and the swap throws away a
+  purge found at start is tried at once, and after a write the thread waits until none has come
+  for 200 ms [guess]. A write sets the copy's stop flag before it runs, and the swap throws away a
   copy made before a write, so no write is lost. A removal runs during runs too, and ops don't
   stop it.
 - **It needs room.** A copy starts only if the volume has twice the store's size free (its pages

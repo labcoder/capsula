@@ -141,9 +141,21 @@ mod tests {
         };
         let output = format!(
             "{page:?} {row:?} {event:?} {:?} {:?} {:?}",
-            DataToBrain::PageRequest { request: 1, page },
-            DataToShell::ThreadList { request: 2, threads: vec![row], next: None },
-            DataToShell::Page { request: 3, thread: ThreadId(1), events: vec![event], before: None }
+            DataToBrain::PageRequest {
+                request: 1,
+                page: page.clone()
+            },
+            DataToShell::ThreadList {
+                request: 2,
+                threads: vec![row.clone()],
+                next: None
+            },
+            DataToShell::Page {
+                request: 3,
+                thread: ThreadId(1),
+                events: vec![event.clone()],
+                before: None
+            }
         );
         for content in [words, title, text] {
             assert!(!output.contains(content));
