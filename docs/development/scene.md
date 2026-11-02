@@ -228,6 +228,34 @@ Prepared residency remains the preparation layer's separate limit.
 4,000,000 classifications, depth 64 and twice the input triangle count in
 fragments. No 3D vocabulary or geometry is implemented here.
 
+## Preparation foundation
+
+`geom` provides logical-pixel points and rectangles, including finite, capped-corner
+checks. The structs themselves are plain geometry, not a validated input boundary.
+`theme` resolves typed palette tokens and RGB colors using the owned rendering spike's
+palette. Host foreground/accent overrides do not change fixed named colors.
+
+`display` defines immutable prepared primitives and handle-tagged items. Polygon and
+polyline vertices use shared slices; sampled frame items share the prepared primitives
+instead of cloning text or path storage. `TextMeasure` supplies the same shaping sizes
+used by the host painter. No painter or motion sampler is implemented yet.
+
+`layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
+cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
+It returns rectangles in input order and has no scene, clock, activation or rendering
+dependency. This is the initial-batch algorithm; incremental placement, preparation and
+cut recovery are not implemented yet.
+
+Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
+`geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
+tests retain their names (`chain_ranks_left_to_right_and_survives_cycles` and
+`siblings_stack_across_the_flow`). Invalid edge indices and self-loops are still ignored
+by this pure algorithm; admission rejects invalid references before preparation.
+Deliberate differences are typed colors instead of string parsing and a fallible layout
+result for excess node/edge counts, unsafe measured dimensions or generated coordinates
+outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
+and those failure boundaries have additional tests.
+
 ## Incremental drawing input
 
 `Tokenizer::next(&mut rest)` consumes a delta through at most one closed record

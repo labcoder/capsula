@@ -2,14 +2,18 @@
 //! JSON tool arguments and binary messages validate through the same types.
 
 pub mod budget;
+pub mod display;
 pub mod error;
+pub mod geom;
 pub mod id;
+pub mod layout;
 pub mod limits;
 pub mod parse;
 mod path;
 pub mod record;
 pub mod state;
 pub mod text;
+pub mod theme;
 pub mod tokenize;
 
 pub use budget::GlobalBudget;
