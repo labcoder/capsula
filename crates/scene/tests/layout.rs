@@ -132,6 +132,7 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
     let first = picture(&scene, first, &before, &mut measure).expect("first picture");
     assert_eq!(first.after.items().len(), 2);
     assert!(first.after.handle(&id("b")).is_none());
+    let unchanged = first.after.items();
     let bounds = first.after.bounds(&id("a")).expect("safe").expect("a");
     let second = picture(&scene, second, &first.after, &mut measure).expect("second picture");
     assert_eq!(second.after.bounds(&id("a")).expect("safe"), Some(bounds));
@@ -143,6 +144,8 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
     );
     assert_eq!(third.after.handle(&id("b")), None);
     assert_eq!(third.removed, expected_removed);
+    assert_eq!(first.after.items(), unchanged);
+    assert!(first.after.handle(&id("b")).is_none());
 }
 
 #[test]
@@ -467,7 +470,7 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
     );
     let input = PrepareInput::new(
         first.preparation,
-        before.clone(),
+        before,
         SurfaceGeometry::default(),
         Arc::new(Theme::default()),
     )
@@ -477,8 +480,6 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
         prepare(input, &mut Cancelling(&cancel), &cancel),
         Err(PrepareError::Cancelled)
     ));
-    assert_eq!(before.revision(), 0);
-    assert!(before.items().is_empty());
 }
 
 #[test]
@@ -1117,6 +1118,7 @@ fn measure_prepare_six_hundred_text_updates() {
             samples.push(elapsed);
         }
     }
+    println!("prepare_600_text_updates_raw_us={samples:?}");
     let mean = samples.iter().sum::<f64>() / 64.0;
     let maximum = samples.into_iter().fold(0.0_f64, f64::max);
     println!(
@@ -1171,5 +1173,375 @@ fn generated_group_glides_cannot_push_old_nodes_beyond_the_coordinate_cap() {
             .expect("old node")
             .origin,
         kumochi_scene::geom::Vec2::new(-19970.0, 16.0)
+    );
+}
+
+#[test]
+fn alignment_defaults_and_explicit_override() {
+    use kumochi_scene::record::Align;
+    let run = |align: Value| {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"first","put":[
+                {"table":{"id":"t","box":[0,0,180,300],"cols":["Name","Value","Override"],"align":align}},
+                {"row":{"id":"r","in":"t","cells":["Long text that should wrap",12,3]}}
+            ]}),
+        );
+        picture(&scene, first, &before, &mut Measure::default())
+            .expect("fitted table")
+            .after
+    };
+    let explicit = run(json!(["center"]));
+    let row = explicit
+        .items()
+        .into_iter()
+        .find(|item| Some(item.handle) == explicit.handle(&id("r")))
+        .expect("row");
+    let aligns: Vec<_> = row
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text { align, .. } => Some(*align),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(aligns, [Align::Center, Align::Right, Align::Right]);
+    assert_eq!(row.bounds.size, kumochi_scene::geom::Vec2::new(180.0, 84.0));
+    let inferred = run(json!([]));
+    let row = inferred
+        .items()
+        .into_iter()
+        .find(|item| Some(item.handle) == inferred.handle(&id("r")))
+        .expect("row");
+    let aligns: Vec<_> = row
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text { align, .. } => Some(*align),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(aligns, [Align::Left, Align::Right, Align::Right]);
+}
+
+#[test]
+fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let table = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"table","put":[{"table":{"id":"t","cols":["Name","Value"]}}]}),
+    );
+    let table = picture(&scene, table, &before, &mut measure).expect("empty table");
+    assert_eq!(table.after.items().len(), 1);
+    let rows = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"rows","put":[
+            {"row":{"id":"a","in":"t","cells":["A",1000]}},{"row":{"id":"b","in":"t","cells":["B",true],"emphasis":true}}
+        ]}),
+    );
+    let removal = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"remove","remove":["b"]}),
+    );
+    let rows =
+        picture(&scene, rows, &table.after, &mut measure).expect("rows before future removal");
+    let old_items = rows.after.items();
+    assert!(rows.after.handle(&id("b")).is_some());
+    let removed = picture(&scene, removal, &rows.after, &mut measure).expect("activation removal");
+    assert_eq!(
+        removed.removed,
+        [rows.after.handle(&id("b")).expect("old row")]
+    );
+    assert!(removed.after.handle(&id("b")).is_none());
+    assert_eq!(
+        removed
+            .after
+            .bounds(&id("t"))
+            .expect("table bounds")
+            .expect("table")
+            .size,
+        kumochi_scene::geom::Vec2::new(112.0, 65.05),
+        "a removal-only step rebuilds the surviving table height"
+    );
+    assert_eq!(rows.after.items(), old_items);
+    let values: Vec<_> = rows
+        .after
+        .items()
+        .into_iter()
+        .flat_map(|item| item.primitives.to_vec())
+        .filter_map(|primitive| match primitive {
+            Prim::Text { text, .. } => Some(String::from(text)),
+            _ => None,
+        })
+        .collect();
+    assert!(values.iter().any(|value| value == "1,000"));
+    assert!(values.iter().any(|value| value == "true"));
+}
+
+#[test]
+fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"table":{"id":"t","box":[100,100,240,200],"cols":["Value","Padded"]}},
+            {"row":{"id":"r","in":"t","cells":[1]}},
+            {"anim":{"target":"t","track":"pos","keys":[[0,[20,30]]]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("table");
+    let expected = first.after.bounds(&id("r")).expect("bounds").expect("row");
+    cut(&mut scene, &mut budget, 1, &["r"], &first.after);
+    let tip = first.after.cut(&scene).expect("detached row");
+    assert_eq!(tip.bounds(&id("r")).expect("bounds"), Some(expected));
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"cells","set":[{"target":"r","cells":[2],"color":"red"}]}),
+    );
+    let next = picture(&scene, next, &tip, &mut measure).expect("detached cells");
+    let texts: Vec<_> = next.after.items()[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(texts, ["2", ""]);
+    let (_, replayed) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("detached replay");
+    assert_eq!(replayed.items(), next.after.items());
+}
+
+#[test]
+fn table_alignment_and_row_cell_caps_are_admission_errors_not_layout_truncation() {
+    let scene = SceneState::begin(header()).expect("scene");
+    let budget = GlobalBudget::default();
+    let align = step(
+        json!({"id":"align","put":[{"table":{"id":"t","cols":["One"],"align":["left","right"]}}]}),
+    );
+    assert!(
+        matches!(scene.admit(&align,&budget),Err(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
+    );
+    let cells = step(
+        json!({"id":"cells","put":[{"table":{"id":"t","cols":["One"]}},{"row":{"id":"r","in":"t","cells":[1,2]}}]}),
+    );
+    assert!(
+        matches!(scene.admit(&cells,&budget),Err(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
+    );
+}
+
+fn row_style_updates(cut_revision: Option<u32>) {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"table":{"id":"t","cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[1],"emphasis":true,"color":"blue"}}
+        ]}),
+    );
+    let mut layout = picture(&scene, first, &before, &mut Measure::default())
+        .expect("table")
+        .after;
+    if let Some(revision) = cut_revision {
+        cut(&mut scene, &mut budget, revision, &["r"], &layout);
+        layout = layout.cut(&scene).expect("detached row");
+    }
+    let red = kumochi_scene::display::Paint::from(
+        kumochi_scene::record::Rgb::try_from(0x00ff_6b7d).expect("RGB"),
+    );
+    for (index, emphasis) in [true, false, true].into_iter().enumerate() {
+        let next = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":format!("style{index}"),"set":[{"target":"r","emphasis":emphasis,"color":"red"}]}),
+        );
+        layout = picture(&scene, next, &layout, &mut Measure::default())
+            .expect("style update")
+            .after;
+        let row = layout
+            .items()
+            .into_iter()
+            .find(|item| Some(item.handle) == layout.handle(&id("r")))
+            .expect("row");
+        let bands: Vec<_> = row
+            .primitives
+            .iter()
+            .filter_map(|primitive| {
+                if let Prim::Rect { fill, .. } = primitive {
+                    Some(*fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            bands,
+            if emphasis {
+                vec![Some(red.faded(0.1))]
+            } else {
+                vec![]
+            },
+            "background follows the updated row emphasis and color"
+        );
+        let styles: Vec<_> = row
+            .primitives
+            .iter()
+            .filter_map(|primitive| {
+                if let Prim::Text { style, color, .. } = primitive {
+                    Some((style.bold, *color))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            [(emphasis, red)],
+            "text follows the updated row style"
+        );
+    }
+}
+
+#[test]
+fn attached_row_style_updates_apply_emphasis_and_color() {
+    row_style_updates(None);
+}
+
+#[test]
+fn detached_row_style_updates_apply_emphasis_and_color() {
+    row_style_updates(Some(1));
+}
+
+#[test]
+fn table_lists_accept_eight_cells_and_alignments_and_reject_nine() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let cols = vec!["Column"; 8];
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"table":{"id":"t","cols":cols,"align":vec!["center";8]}},
+            {"row":{"id":"r","in":"t","cells":vec![1;8]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("eight columns");
+    let row = first
+        .after
+        .items()
+        .into_iter()
+        .find(|item| Some(item.handle) == first.after.handle(&id("r")))
+        .expect("row");
+    assert_eq!(
+        row.primitives
+            .iter()
+            .filter(|primitive| matches!(
+                primitive,
+                Prim::Text {
+                    align: kumochi_scene::record::Align::Center,
+                    ..
+                }
+            ))
+            .count(),
+        8
+    );
+    for record in [
+        json!({"step":{"id":"align","put":[{"table":{"id":"bad","cols":vec!["Column";8],"align":vec!["center";9]}}]}}),
+        json!({"step":{"id":"cells","put":[{"row":{"id":"bad","in":"t","cells":vec![1;9]}}]}}),
+    ] {
+        assert!(
+            matches!(parse_record(&serde_json::to_vec(&record).expect("fixture")),Err(error) if error.code==kumochi_scene::ErrorCode::TooLong)
+        );
+    }
+}
+
+#[test]
+#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+fn measure_prepare_table_at_column_and_row_caps() {
+    let mut samples = Vec::new();
+    for iteration in 0..69 {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let mut layout = LayoutState::new(&scene);
+        let mut measure = Measure::default();
+        let table = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"table","put":[{"table":{"id":"t","box":[0,0,1600,1000],"cols":["A","B","C","D","E","F","G","H"]}}]}),
+        );
+        layout = picture(&scene, table, &layout, &mut measure)
+            .expect("table")
+            .after;
+        for row in 0..40 {
+            let cells: Vec<_> = (0..8).map(|_| Value::String("x".repeat(400))).collect();
+            let commit = committed(
+                &mut scene,
+                &mut budget,
+                json!({"id":format!("step{row}"),"put":[{"row":{"id":format!("r{row}"),"in":"t","cells":cells}}]}),
+            );
+            layout = picture(&scene, commit, &layout, &mut measure)
+                .expect("row at cap")
+                .after;
+        }
+        assert_eq!(scene.usage().cells, 320);
+        let commit = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"update","set":[{"target":"r0","color":"red"}]}),
+        );
+        let input = PrepareInput::new(
+            commit.preparation,
+            layout.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        measure.calls.clear();
+        let start = std::time::Instant::now();
+        let result = std::hint::black_box(prepare(
+            std::hint::black_box(input),
+            &mut measure,
+            &AtomicBool::new(false),
+        ))
+        .expect("table at caps");
+        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+        result.validate(&scene, &layout).expect("current result");
+        assert_eq!(result.display.items.len(), 41);
+        if iteration >= 5 {
+            samples.push(elapsed);
+        }
+    }
+    let mean = samples.iter().sum::<f64>() / 64.0;
+    let maximum = samples.into_iter().fold(0.0_f64, f64::max);
+    println!(
+        "prepare_table_8x40_400chars samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
     );
 }

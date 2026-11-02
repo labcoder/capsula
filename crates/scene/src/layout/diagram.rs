@@ -10,7 +10,7 @@ use crate::{
     record::Direction,
 };
 
-/// Smallest gap between ranks; callers widen it to fit edge labels.
+/// Smallest gap between ranks.
 // shortcut: edge labels do not widen ranks; revisit in A8's visual gate.
 pub(super) const RANK_GAP: f32 = 72.0;
 const NODE_GAP: f32 = 30.0;

@@ -50,9 +50,11 @@ pub fn prepare(
     let mut after = before.clone();
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
+    let mut tables = false;
     for (slot, op) in ticket.step.put.iter().enumerate() {
         if let Some(visual) = object::visual(op) {
             let handle = Handle::new(ticket.revision, slot)?;
+            tables |= matches!(op, Op::Table(_) | Op::Row(_));
             sources.insert(visual.id.clone(), (handle, Arc::new(op.clone())));
             order.push(visual.id.clone());
         }
@@ -67,6 +69,7 @@ pub fn prepare(
                 .ok_or(PrepareError::Stale)?;
             (previous.item.handle, Arc::clone(&previous.source))
         };
+        tables |= matches!(&*source, Op::Table(_) | Op::Row(_));
         if !sources.contains_key(&change.target) {
             order.push(change.target.clone());
         }
@@ -84,17 +87,16 @@ pub fn prepare(
             order.push(id.clone());
         }
     }
-    if sources.values().any(|(_, op)| {
-        matches!(
-            &**op,
-            Op::Table(_) | Op::Row(_) | Op::Chart(_) | Op::Series(_)
-        )
-    }) {
+    if sources
+        .values()
+        .any(|(_, op)| matches!(&**op, Op::Chart(_) | Op::Series(_)))
+    {
         return Err(layout_error(ErrorCode::Unsupported));
     }
     let mut removed = Vec::new();
     for id in &*ticket.step.remove {
         if let Some(old) = after.objects.remove(id) {
+            tables |= matches!(&*old.source, Op::Row(_));
             after.handles.remove(&old.item.handle);
             removed.push(old.item.handle);
         } else if let Some((handle, _)) = sources.get(id) {
@@ -136,7 +138,7 @@ pub fn prepare(
     }
     let mut containers: Vec<_> = order
         .iter()
-        .filter(|id| matches!(&*sources[*id].1, Op::Diagram(_)))
+        .filter(|id| matches!(&*sources[*id].1, Op::Diagram(_) | Op::Table(_)))
         .cloned()
         .collect();
     while !containers.is_empty() {
@@ -148,8 +150,10 @@ pub fn prepare(
         };
         let id = containers.remove(index);
         let (handle, source) = &sources[&id];
-        let Op::Diagram(diagram) = &**source else {
-            unreachable!("container list contains diagrams");
+        let (bounds, opacity) = match &**source {
+            Op::Diagram(value) => (value.bounds, value.opacity),
+            Op::Table(value) => (value.bounds, value.opacity),
+            _ => unreachable!("container list contains diagrams and tables"),
         };
         let previous = after.objects.get(&id).cloned();
         let parent = parent(source, &after, previous.as_ref())?;
@@ -158,9 +162,9 @@ pub fn prepare(
                 handle: *handle,
                 parent,
                 primitives: Arc::from([]),
-                bounds: diagram.bounds.map_or_else(Rect::default, rect),
+                bounds: bounds.map_or_else(Rect::default, rect),
                 transform: Affine::default(),
-                opacity: diagram.opacity.map_or(1.0, crate::Finite::get),
+                opacity: opacity.map_or(1.0, crate::Finite::get),
             },
             Arc::clone(source),
             previous.as_ref(),
@@ -171,6 +175,9 @@ pub fn prepare(
 
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
+    }
+    if tables {
+        super::table::place(&sources, &before, &mut after, &removed, &mut build)?;
     }
     let mut glides = nodes::place(&sources, &order, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
@@ -201,7 +208,12 @@ pub fn prepare(
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
-        .filter(|id| !matches!(&*sources[*id].1, Op::Diagram(_) | Op::Node(_)))
+        .filter(|id| {
+            !matches!(
+                &*sources[*id].1,
+                Op::Diagram(_) | Op::Node(_) | Op::Table(_) | Op::Row(_)
+            )
+        })
         .cloned()
         .collect();
     while !pending.is_empty() {
@@ -411,6 +423,14 @@ fn patch(source: &Op, change: &Change) -> Op {
                 edge.label = Some(value.clone());
             }
         }
+        Op::Row(row) => {
+            if let Some(value) = &change.cells {
+                row.cells = value.clone();
+            }
+            if let Some(value) = change.emphasis {
+                row.emphasis = value;
+            }
+        }
         _ => {}
     }
     if let Some(color) = &change.color {
@@ -429,6 +449,8 @@ fn patch(source: &Op, change: &Change) -> Op {
             Op::Diagram(value) => color!(value),
             Op::Node(value) => color!(value),
             Op::Edge(value) => color!(value),
+            Op::Table(value) => color!(value),
+            Op::Row(value) => color!(value),
             _ => {}
         }
     }

@@ -6,6 +6,7 @@ mod path;
 mod prepare;
 mod primitives;
 mod state;
+mod table;
 
 use crate::{
     Preparation, SceneState, StepError,

@@ -197,6 +197,7 @@ Quadratic and cubic second differences determine power-of-two subdivision counts
 the same walker and subdivision function when producing vertices. Procedural curves,
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
 segment reservations in `path.rs`; generated output must stay within them.
+
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
 Composed scales must be normal positive floats and at most 64, even when layout has
@@ -295,7 +296,7 @@ flowchart LR
 host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
 nodes and edges, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
-Tables and charts fail preparation with `Unsupported` until A6. `PreparedStep` contains owned display changes,
+Charts remain unsupported until the chart layer of A6. `PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
 mutates an earlier picture. The host calls `PreparedStep::validate` against the current
 scene and predecessor immediately before accepting the result.
@@ -339,6 +340,35 @@ test below normal priority, then run its executable at normal priority under the
 exclusive Rez lock after 30 seconds without cargo/rustc. Main had no preparation
 pipeline, so there is no before speedup baseline. Results are not painter, frame,
 real-font or end-to-end timings.
+
+### Tables
+
+`layout::table` ports S1's fitted column widths and number formatting into preparation.
+Only rows present in this prepared prefix participate. Natural widths shrink text
+columns first, then numeric columns; wrapped measurement determines header and row
+heights. Explicit alignments win, otherwise a column containing only numeric cells
+aligns right. Text, booleans and padded blank cells align left. Missing cells are
+rendered blank; excess cells and alignments are rejected by admission, never truncated.
+Numbers have grouped thousands and at most two decimal places; an extreme finite
+number uses scientific notation if grouped output would exceed the display-text cap.
+
+A table's explicit box supplies its origin and available width; content determines
+its height, as in S1. Without a box it uses the host viewport's origin and width.
+Empty tables still prepare their header and background. Adding, updating or removing
+a row rebuilds that table's current geometry at the new step's activation, without
+changing an earlier prepared picture. A detached row keeps its placed columns and
+absorbed ancestor transform, including when later cell/color/emphasis updates arrive.
+Emphasis changes rebuild both the text weight and the colored background band.
+The existing shared detachment path does not yet preserve inherited opacity across
+later updates; A7 must retain that factor independently of the object's own opacity.
+
+The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
+`alignment_defaults_and_explicit_override` retain their names. Preparation replaces
+S1's draw-time measurement and entrance progress; A7 owns sampling. No source data is
+silently clipped to a table cap. The ignored
+`measure_prepare_table_at_column_and_row_caps` fixture rebuilds one table with eight
+columns, forty rows and 400 characters per cell using deterministic measurement.
+It follows the exclusive-lock release timing method above, not a real-font/frame test.
 
 ## Incremental drawing input
 
