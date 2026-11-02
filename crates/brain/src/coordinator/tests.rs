@@ -154,20 +154,34 @@ fn text_waits_behind_a_pending_step() {
     let mut core = started();
     core.handle(engine(R, EngineEvent::Text("before".to_owned())))
         .expect("current");
-    for event in [
-        EngineEvent::Step(step("a")),
-        EngineEvent::Text("after a".to_owned()),
-        EngineEvent::Step(step("b")),
-        EngineEvent::Text("after b".to_owned()),
-    ] {
-        let effects = core.handle(engine(R, event)).expect("current");
-        assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::Data(_))),
-            "{effects:?}"
-        );
-    }
+    let commit = |text: &str, index: u32, label: &str| {
+        vec![Effect::Store(StoreOp::CommitStep {
+            thread: T,
+            run: R,
+            text: Some(text.to_owned()),
+            index,
+            step: step(label),
+        })]
+    };
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Step(step("a"))))
+            .expect("current"),
+        commit("before", 0, "a")
+    );
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Text("after a".to_owned()))),
+        Ok(Vec::new()),
+        "held behind a"
+    );
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Step(step("b"))))
+            .expect("current"),
+        commit("after a", 1, "b")
+    );
+    assert_eq!(
+        core.handle(engine(R, EngineEvent::Text("after b".to_owned()))),
+        Ok(Vec::new())
+    );
     assert_eq!(
         core.handle(ack(0, "a")).expect("current"),
         vec![committed(0, "a"), text("after a")],
@@ -201,24 +215,27 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
     for event in [
         EngineEvent::Step(step("a")),
         EngineEvent::Step(step("b")),
+        EngineEvent::Step(step("c")),
         EngineEvent::Text("tail".to_owned()),
     ] {
         core.handle(engine(R, event)).expect("current");
     }
+    core.handle(ack(0, "a")).expect("current");
+    core.handle(ack(1, "b")).expect("current");
     assert_eq!(
         core.handle(Input::Stop {
             run: R,
-            revealed: vec![1, 0, 1, 7],
+            revealed: vec![1, 0, 2, 1, 7],
         })
         .expect("current"),
         vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Interrupted)
         ],
-        "the outcome waits for the steps still in the store"
+        "the outcome waits for the step still in the store"
     );
     let late = [
-        engine(R, EngineEvent::Step(step("c"))),
+        engine(R, EngineEvent::Step(step("d"))),
         engine(R, EngineEvent::Text("more".to_owned())),
         engine(R, EngineEvent::Done),
         Input::Stop {
@@ -233,18 +250,13 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
         assert_eq!(core.handle(input.clone()), Err(Stale), "{input:?}");
     }
     assert_eq!(
-        core.handle(ack(0, "a")),
-        Ok(Vec::new()),
-        "nothing more is sent"
-    );
-    assert_eq!(
-        core.handle(ack(1, "b")).expect("ending"),
+        core.handle(ack(2, "c")).expect("ending"),
         vec![end_run(
             Some("tail"),
             Some(vec![0, 1]),
             RunEnd::Interrupted(Interruption::Stop)
         )],
-        "revealed keeps only produced steps, once each, in order"
+        "nothing more is sent, and revealed keeps only steps the shell got, once each, in order"
     );
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
     assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
@@ -424,7 +436,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
         core.handle(ack(0, "a")).expect("ending"),
         vec![end_run(
             None,
-            Some(vec![0]),
+            Some(Vec::new()),
             RunEnd::Interrupted(Interruption::Stop)
         )]
     );
@@ -509,10 +521,13 @@ fn budgets_are_absolute_for_the_run() {
     ));
 
     let mut core = started();
-    assert!(
-        core.handle(Input::Deadline { run: R })
-            .expect("current")
-            .contains(&state(R, T, Phase::Failed))
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }).expect("current"),
+        vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Failed),
+            end_run(None, None, RunEnd::Failed(Failure::Budget)),
+        ]
     );
 }
 
@@ -536,14 +551,13 @@ fn a_lost_shell_ends_the_run_without_telling_it() {
 #[test]
 fn a_stalled_view_or_a_refused_turn_ends_the_run() {
     let mut core = started();
-    assert!(
-        core.handle(Input::Stalled { run: R })
-            .expect("current")
-            .contains(&end_run(
-                None,
-                None,
-                RunEnd::Interrupted(Interruption::ViewStalled)
-            ))
+    assert_eq!(
+        core.handle(Input::Stalled { run: R }).expect("current"),
+        vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Interrupted),
+            end_run(None, None, RunEnd::Interrupted(Interruption::ViewStalled)),
+        ]
     );
 
     let mut core = Coordinator::new(ThreadId(3), RunId(9));
@@ -560,13 +574,12 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
     assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
 }
 
-fn ends_failed(effects: &[Effect], failure: Failure) -> bool {
-    !effects.iter().any(|effect| {
-        matches!(
-            effect,
-            Effect::Data(_) | Effect::Store(StoreOp::CommitStep { .. })
-        )
-    }) && effects.contains(&end_run(None, None, RunEnd::Failed(failure)))
+fn ends_failed(failure: Failure) -> Vec<Effect> {
+    vec![
+        Effect::CancelEngine { run: R },
+        state(R, T, Phase::Failed),
+        end_run(None, None, RunEnd::Failed(failure)),
+    ]
 }
 
 #[test]
@@ -581,14 +594,14 @@ fn over_budget_steps_and_oversized_labels_commit_and_send_nothing() {
     let over = core
         .handle(engine(R, EngineEvent::Step(step("one too many"))))
         .expect("current");
-    assert!(ends_failed(&over, Failure::Budget), "{over:?}");
+    assert_eq!(over, ends_failed(Failure::Budget));
 
     let mut core = started();
     let label = "x".repeat(MAX_STEP_LABEL + 1);
     let over = core
         .handle(engine(R, EngineEvent::Step(step(&label))))
         .expect("current");
-    assert!(ends_failed(&over, Failure::Engine), "{over:?}");
+    assert_eq!(over, ends_failed(Failure::Engine));
 }
 
 #[test]
@@ -615,4 +628,53 @@ fn a_long_delta_goes_out_in_frames_that_fit_the_data_pipe() {
     assert_eq!(pieces.len(), 3);
     assert!(pieces.iter().all(|piece| piece.len() <= MAX_DELTA));
     assert_eq!(pieces.concat(), delta);
+}
+
+#[test]
+fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
+    let mut core = started();
+    core.handle(engine(R, EngineEvent::Step(step("a"))))
+        .expect("current");
+    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    assert_eq!(
+        core.handle(Input::Stop {
+            run: R,
+            revealed: vec![0],
+        })
+        .expect("still current"),
+        vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Interrupted)
+        ]
+    );
+    assert_eq!(
+        core.handle(ack(0, "a")).expect("ending"),
+        vec![end_run(
+            None,
+            Some(Vec::new()),
+            RunEnd::Interrupted(Interruption::Stop)
+        )],
+        "the shell never got the step"
+    );
+}
+
+#[test]
+fn a_lost_shell_isnt_told_about_runs_still_ending() {
+    let mut core = started();
+    core.handle(engine(R, EngineEvent::Text("x".to_owned())))
+        .expect("current");
+    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()));
+    assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
+}
+
+#[test]
+fn the_engine_is_heard_only_once_its_turn_is_stored() {
+    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    core.handle(Input::Turn {
+        thread: None,
+        text: "hi".to_owned(),
+    })
+    .expect("turn");
+    assert_eq!(core.handle(engine(R, EngineEvent::Done)), Err(Stale));
 }

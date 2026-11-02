@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{EventKind, Store};
+use crate::store::{EventKind, NewEvent, Store};
 
 #[derive(Debug)]
 pub(crate) struct StoreThread {
@@ -70,13 +70,17 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
             let mut events = Vec::with_capacity(2);
             if let Some(text) = &text {
-                events.push((EventKind::AssistantText, Some(text.as_str()), None));
+                events.push(NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some(text.as_str()),
+                    body: None,
+                });
             }
-            events.push((
-                EventKind::SceneStep,
-                Some(step.label.as_str()),
-                Some(body.as_str()),
-            ));
+            events.push(NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some(step.label.as_str()),
+                body: Some(body.as_str()),
+            });
             (
                 store.append(thread, run, &events),
                 Input::StepStored { run, index, step },
@@ -93,10 +97,18 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
             let mut events = Vec::with_capacity(2);
             if let Some(text) = &text {
-                events.push((EventKind::AssistantText, Some(text.as_str()), None));
+                events.push(NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some(text.as_str()),
+                    body: None,
+                });
             }
             if let Some(revealed) = &revealed {
-                events.push((EventKind::Revealed, None, Some(revealed.as_str())));
+                events.push(NewEvent {
+                    kind: EventKind::Revealed,
+                    text: None,
+                    body: Some(revealed.as_str()),
+                });
             }
             (
                 store.end_run(thread, run, &events, end),

@@ -200,15 +200,6 @@ enum Notify {
     Nobody,
 }
 
-/// Data for the shell, held in the order the engine produced it.
-#[derive(Debug)]
-enum Held {
-    /// A step the store hasn't acknowledged; it's sent from the acknowledgement.
-    Step,
-    /// A frame produced after a pending step.
-    Data(DataToShell),
-}
-
 /// The run in flight, or one that ended and is waiting on the store.
 #[derive(Debug)]
 struct Run {
@@ -223,8 +214,9 @@ struct Run {
     /// Steps sent to the store, and how many of them it acknowledged, in order.
     steps: u32,
     acked: u32,
-    /// Data waiting behind the oldest pending step.
-    held: VecDeque<Held>,
+    /// One entry per pending step: the frames the engine produced after it, sent once it's
+    /// acknowledged, so the shell sees the engine's order.
+    held: VecDeque<Vec<DataToShell>>,
     /// The engine said `Done` while steps were pending; the run ends with the last one.
     finishing: bool,
     ending: Option<Ending>,
@@ -279,6 +271,9 @@ impl Coordinator {
     /// # Errors
     /// [`Stale`] when the input names a run that isn't current or answers nothing that is
     /// pending; nothing changed.
+    ///
+    /// # Panics
+    /// Only if a run in the ending list has no ending record, which `end` never allows.
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
@@ -291,7 +286,7 @@ impl Coordinator {
                 let current = self.take(run)?;
                 let mut revealed: Vec<u32> = revealed
                     .into_iter()
-                    .filter(|&index| index < current.steps)
+                    .filter(|&index| index < current.acked)
                     .collect();
                 revealed.sort_unstable();
                 revealed.dedup();
@@ -319,7 +314,10 @@ impl Coordinator {
             }
             Input::RunStored { run } => {
                 let at = self.ending_at(run)?;
-                let ending = self.ending[at].ending.as_ref().ok_or(Stale)?;
+                let ending = self.ending[at]
+                    .ending
+                    .as_ref()
+                    .expect("an ending run has an Ending");
                 if !ending.written {
                     return Err(Stale);
                 }
@@ -410,8 +408,8 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let current = self.current(run)?;
-        // An engine that said Done has nothing more to say.
-        if current.finishing {
+        // The engine hasn't started before its turn is stored, and has nothing more after Done.
+        if current.turn.is_some() || current.finishing {
             return Err(Stale);
         }
         match event {
@@ -441,11 +439,10 @@ impl Coordinator {
                         run,
                         delta: piece.to_owned(),
                     };
-                    // Text after a pending step waits for it, so the shell sees the engine's order.
-                    if current.held.is_empty() {
-                        effects.push(Effect::Data(frame));
+                    if let Some(behind) = current.held.back_mut() {
+                        behind.push(frame);
                     } else {
-                        current.held.push_back(Held::Data(frame));
+                        effects.push(Effect::Data(frame));
                     }
                     rest = tail;
                 }
@@ -478,7 +475,7 @@ impl Coordinator {
                     step,
                 }));
                 current.steps += 1;
-                current.held.push_back(Held::Step);
+                current.held.push_back(Vec::new());
             }
             EngineEvent::Done if current.acked < current.steps => current.finishing = true,
             EngineEvent::Done => {
@@ -516,13 +513,15 @@ impl Coordinator {
             self.settle(run, effects);
             return Ok(());
         }
-        found.held.pop_front();
         effects.push(Effect::Data(DataToShell::StepCommit { run, index, step }));
-        while let Some(Held::Data(_)) = found.held.front() {
-            if let Some(Held::Data(frame)) = found.held.pop_front() {
-                effects.push(Effect::Data(frame));
-            }
-        }
+        effects.extend(
+            found
+                .held
+                .pop_front()
+                .into_iter()
+                .flatten()
+                .map(Effect::Data),
+        );
         if found.finishing && found.acked == found.steps {
             let done = self.take(run)?;
             self.end(done, RunEnd::Done, None, Notify::Shell, effects);
@@ -539,22 +538,23 @@ impl Coordinator {
             let current = self.take(run)?;
             let failed = RunEnd::Failed(Failure::Store);
             self.end(current, failed, None, Notify::Shell, effects);
-        } else {
-            let ended = &self.ending[self.ending_at(run)?];
-            let ending = ended.ending.as_ref().ok_or(Stale)?;
-            // A failed outcome was already told; any other ending now turns out failed.
-            if ending.notify == Notify::Shell
-                && !ending.failed
-                && !matches!(ending.outcome, RunEnd::Failed(_))
-            {
-                effects.push(run_state(ended, Phase::Failed));
-            }
         }
         let at = self.ending_at(run)?;
         let ended = &mut self.ending[at];
-        let ending = ended.ending.as_mut().ok_or(Stale)?;
-        let fallback_failed = ending.written && ending.failed;
-        if !ending.written && ended.turn.is_some() || fallback_failed {
+        let (id, thread) = (ended.id, ended.thread);
+        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
+        // A failed outcome was already told; any other ending now turns out failed.
+        if ending.notify == Notify::Shell
+            && !ending.failed
+            && !matches!(ending.outcome, RunEnd::Failed(_))
+        {
+            effects.push(Effect::Control(ControlToShell::RunState {
+                run: id,
+                thread,
+                phase: Phase::Failed,
+            }));
+        }
+        if ended.turn.is_some() || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
             // a run left active is marked failed(crash) at the next start.
             self.ending.swap_remove(at);

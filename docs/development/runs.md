@@ -62,8 +62,9 @@ index out of range, a step before its turn is stored) is `Stale` and changes not
 
 ## Ending a run
 
-Every ending runs in the same order: cancel the engine so it produces nothing more, drop the data
-it still held for the shell, tell the shell (every ending but `done`), then store the outcome
+Every ending runs in the same order: cancel the engine so it produces nothing more (unless it
+finished, or never started because the turn wasn't stored yet), drop the data it still held for
+the shell, tell the shell (every ending but `done`), then store the outcome
 with the unstored text and, when the user stopped it, the `revealed` set. The outcome is
 written once the run's earlier operations are answered, so a run stopped before its turn was
 stored gets its outcome after the turn, and its engine never starts.
@@ -72,8 +73,8 @@ An ended run stays with the coordinator until the store answers for its outcome,
 never lost:
 
 - if the turn failed, there's no run row, and nothing more is written;
-- if a step or the outcome failed, the outcome is written again as `failed(store)`, alone; if
-  that fails too, the run stays `active` and the next start's recovery marks it
+- if a step or the outcome failed, the outcome is written as `failed(store)`, alone; if that
+  fails too, the run stays `active` and the next start's recovery marks it
   `failed(crash)`.
 
 | Cause | Outcome | Shell told |
@@ -87,7 +88,7 @@ never lost:
 | The engine failed or sent an oversized step | `failed(engine)` | at once |
 | A store write failed | `failed(store)` | at once |
 
-`revealed` keeps only indices of steps the run produced, each once, in order.
+`revealed` keeps only indices of steps already sent to the shell, each once, in order.
 
 ### What the shell can rely on
 
@@ -97,7 +98,9 @@ never lost:
   the outcome is stored.
 - A terminal `RunState` can be followed by `RunState Failed` for the same run, when its
   writes later fail. The shell shows the failure; nothing else follows it.
-- A `Stop` that arrives after the engine finished is stale: the run still ends `done`.
+- A `Stop` that arrives after the run's outcome went to the store is stale: the run still ends
+  `done`. One that arrives while the engine has finished but its last step is still being stored
+  interrupts the run, since the shell never showed that step.
 
 ## Budgets
 

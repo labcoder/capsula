@@ -76,8 +76,24 @@ impl EventKind {
     }
 }
 
-/// An event to append: what it records, its searchable text, and its typed record as JSON.
-pub type NewEvent<'a> = (EventKind, Option<&'a str>, Option<&'a str>);
+/// An event to append. Its `Debug` shows only the kind, so a log line can't carry content.
+#[derive(Clone, Copy)]
+pub struct NewEvent<'a> {
+    /// What it records.
+    pub kind: EventKind,
+    /// What search finds.
+    pub text: Option<&'a str>,
+    /// The typed record as JSON.
+    pub body: Option<&'a str>,
+}
+
+impl std::fmt::Debug for NewEvent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewEvent")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
 
 /// How a run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -546,8 +562,16 @@ fn insert_events(
     if active.is_none() {
         return Err(StoreError::NoRun);
     }
-    for &(kind, text, body) in events {
-        insert_event(conn, thread, Some(run), kind, text, body, now)?;
+    for event in events {
+        insert_event(
+            conn,
+            thread,
+            Some(run),
+            event.kind,
+            event.text,
+            event.body,
+            now,
+        )?;
     }
     Ok(())
 }
