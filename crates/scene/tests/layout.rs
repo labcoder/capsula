@@ -1118,6 +1118,7 @@ fn measure_prepare_six_hundred_text_updates() {
             samples.push(elapsed);
         }
     }
+    println!("prepare_600_text_updates_raw_us={samples:?}");
     let mean = samples.iter().sum::<f64>() / 64.0;
     let maximum = samples.into_iter().fold(0.0_f64, f64::max);
     println!(
@@ -1341,6 +1342,91 @@ fn table_alignment_and_row_cell_caps_are_admission_errors_not_layout_truncation(
     assert!(
         matches!(scene.admit(&cells,&budget),Err(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
     );
+}
+
+fn row_style_updates(cut_revision: Option<u32>) {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"table":{"id":"t","cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[1],"emphasis":true,"color":"blue"}}
+        ]}),
+    );
+    let mut layout = picture(&scene, first, &before, &mut Measure::default())
+        .expect("table")
+        .after;
+    if let Some(revision) = cut_revision {
+        cut(&mut scene, &mut budget, revision, &["r"], &layout);
+        layout = layout.cut(&scene).expect("detached row");
+    }
+    let red = kumochi_scene::display::Paint::from(
+        kumochi_scene::record::Rgb::try_from(0x00ff_6b7d).expect("RGB"),
+    );
+    for (index, emphasis) in [true, false, true].into_iter().enumerate() {
+        let next = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":format!("style{index}"),"set":[{"target":"r","emphasis":emphasis,"color":"red"}]}),
+        );
+        layout = picture(&scene, next, &layout, &mut Measure::default())
+            .expect("style update")
+            .after;
+        let row = layout
+            .items()
+            .into_iter()
+            .find(|item| Some(item.handle) == layout.handle(&id("r")))
+            .expect("row");
+        let bands: Vec<_> = row
+            .primitives
+            .iter()
+            .filter_map(|primitive| {
+                if let Prim::Rect { fill, .. } = primitive {
+                    Some(*fill)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            bands,
+            if emphasis {
+                vec![Some(red.faded(0.1))]
+            } else {
+                vec![]
+            },
+            "background follows the updated row emphasis and color"
+        );
+        let styles: Vec<_> = row
+            .primitives
+            .iter()
+            .filter_map(|primitive| {
+                if let Prim::Text { style, color, .. } = primitive {
+                    Some((style.bold, *color))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            [(emphasis, red)],
+            "text follows the updated row style"
+        );
+    }
+}
+
+#[test]
+fn attached_row_style_updates_apply_emphasis_and_color() {
+    row_style_updates(None);
+}
+
+#[test]
+fn detached_row_style_updates_apply_emphasis_and_color() {
+    row_style_updates(Some(1));
 }
 
 #[test]

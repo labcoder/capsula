@@ -357,7 +357,10 @@ its height, as in S1. Without a box it uses the host viewport's origin and width
 Empty tables still prepare their header and background. Adding, updating or removing
 a row rebuilds that table's current geometry at the new step's activation, without
 changing an earlier prepared picture. A detached row keeps its placed columns and
-absorbed ancestor transform, including when later cell/color updates arrive.
+absorbed ancestor transform, including when later cell/color/emphasis updates arrive.
+Emphasis changes rebuild both the text weight and the colored background band.
+The existing shared detachment path does not yet preserve inherited opacity across
+later updates; A7 must retain that factor independently of the object's own opacity.
 
 The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
 `alignment_defaults_and_explicit_override` retain their names. Preparation replaces

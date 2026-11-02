@@ -384,6 +384,7 @@ pub(super) fn place(
                     .filter(|old| old.item.parent.is_none())
                 {
                     let mut output = old.item.primitives.to_vec();
+                    output.retain(|primitive| !matches!(primitive, Prim::Rect { .. }));
                     let mut column = 0;
                     let mut bounds = old.item.bounds;
                     for primitive in &mut output {
@@ -397,6 +398,7 @@ pub(super) fn place(
                         } = primitive
                         {
                             *text = cell(row.cells.get(column))?;
+                            style.bold = row.emphasis;
                             let size = build.measure(text, *style, *max_width)?;
                             bounds = bounds.union(Rect {
                                 origin: *origin,
@@ -409,6 +411,17 @@ pub(super) fn place(
                                 .into();
                             column += 1;
                         }
+                    }
+                    if row.emphasis {
+                        output.insert(
+                            0,
+                            Prim::Rect {
+                                rect: bounds,
+                                radius: 5.0,
+                                fill: Some(build.color(row.color.as_ref()).faded(0.1)),
+                                border: None,
+                            },
+                        );
                     }
                     install(
                         state,

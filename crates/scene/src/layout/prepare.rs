@@ -421,6 +421,9 @@ fn patch(source: &Op, change: &Change) -> Op {
             if let Some(value) = &change.cells {
                 row.cells = value.clone();
             }
+            if let Some(value) = change.emphasis {
+                row.emphasis = value;
+            }
         }
         _ => {}
     }
