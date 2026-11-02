@@ -18,18 +18,19 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use capsula_protocol::constants;
-use gpui_kit::component::input::{Escape as EscapeKey, Input, InputState};
+use capsula_protocol::message::ControlToBrain;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
-    point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, point, px,
+    size,
 };
 
 use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
-use crate::link::{LinkEvent, LinkHandle, LinkState};
+use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::{
     self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
     PresenceNative, PresenceSurface,
@@ -63,6 +64,8 @@ struct Presence {
     text: Option<TextPanel>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
+    /// The connection the UI last applied `Connected` for, until its next state.
+    session: Option<Session>,
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
@@ -310,13 +313,8 @@ impl Presence {
         self.refresh_conversation(cx);
         // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
-        if let Some(message) = tell
-            && !self.link.send_control(message)
-        {
-            tracing::warn!(
-                ?action,
-                "the brain isn't connected or isn't reading; nothing to tell"
-            );
+        if let Some(message) = tell {
+            self.tell(message);
         }
         self.escape_fixture = false;
         self.sync_escape(cx)
@@ -345,28 +343,6 @@ impl Presence {
         self.sync_escape(cx)
     }
 
-    /// Shows the newest run's steps and the end of its answer in the typing panel.
-    fn refresh_conversation(&self, cx: &mut Context<'_, Self>) {
-        let Some(text) = &self.text else {
-            return;
-        };
-        let (steps, answer) = self.runs.shown().map_or_else(Default::default, |shown| {
-            let steps: Vec<SharedString> = shown
-                .steps
-                .iter()
-                .map(|(_, step)| step.label.clone().into())
-                .collect();
-            (steps, answer_tail(&shown.text).into())
-        });
-        text.view.update(cx, |view, cx| {
-            if view.steps != steps || view.answer != answer {
-                view.steps = steps;
-                view.answer = answer;
-                cx.notify();
-            }
-        });
-    }
-
     /// Enter in the typing panel: sends the draft as a turn and empties the box, or keeps the
     /// draft and says why it wasn't sent.
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -374,8 +350,12 @@ impl Presence {
             return Ok(());
         };
         let draft = text.input.read(cx).value();
-        let link = self.link.clone();
-        let result = self.runs.submit(&draft, |turn| link.send_data(turn));
+        let (link, session) = (&self.link, &self.session);
+        let result = self.runs.submit(&draft, |turn| {
+            session
+                .as_ref()
+                .is_some_and(|session| link.send_data(session, turn))
+        });
         diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
         let notice = match result {
             Ok(()) => {
@@ -409,19 +389,57 @@ impl Presence {
     ) -> Result<(), OpenError> {
         for event in events {
             match event {
-                LinkEvent::State(state) => self.link_state(state, cx),
-                LinkEvent::RunState { run, thread, phase } => {
-                    self.runs.apply_state(run, thread, phase);
-                    diagnostics::record(cx, format_args!("run phase={phase:?}"));
+                LinkEvent::State(state) => {
+                    self.session = None;
+                    self.link_state(state, cx);
                 }
-                LinkEvent::Data { message, bytes } => {
-                    // Applied, or dropped by the fence; taken either way.
-                    self.runs.apply_data(message);
-                    self.link.grant(bytes);
+                LinkEvent::Connected(session) => {
+                    self.session = Some(session);
+                    self.link_state(LinkState::Connected, cx);
+                }
+                LinkEvent::RunState { run, thread, phase } => {
+                    let applied = self.runs.apply_state(run, thread, phase);
+                    diagnostics::record(cx, format_args!("run phase={phase:?}"));
+                    if let Some(stop) = applied.stop {
+                        self.tell(stop);
+                    }
+                    self.grant(applied.credit);
+                }
+                LinkEvent::Data {
+                    generation,
+                    message,
+                    bytes,
+                } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        let credit = self.runs.apply_data(message, bytes);
+                        self.grant(credit);
+                    }
                 }
             }
         }
         self.runs_changed(cx)
+    }
+
+    /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
+    fn tell(&self, message: ControlToBrain) {
+        let sent = self
+            .session
+            .as_ref()
+            .is_some_and(|session| self.link.send_control(session, message));
+        if !sent {
+            tracing::warn!("the brain isn't connected or isn't reading; nothing to tell");
+        }
+    }
+
+    /// Grants the connection credit for data frames the UI has taken.
+    fn grant(&self, credit: u32) {
+        if let Some(session) = self.session.as_ref().filter(|_| credit > 0) {
+            session.grant(credit);
+        }
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
@@ -673,86 +691,6 @@ impl Render for Panel {
     }
 }
 
-/// The anchored typing surface: the newest run's placeholder steps and the end of its answer,
-/// one focused input, and why a turn wasn't sent. shortcut: stands in for the threads panel.
-struct TextView {
-    input: Entity<InputState>,
-    /// The Stop fallback, here too because this panel covers the status panel's.
-    stop: bool,
-    steps: Vec<SharedString>,
-    answer: SharedString,
-    notice: Option<SharedString>,
-    events: Sender<PresenceEvent>,
-}
-
-impl Render for TextView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let events = self.events.clone();
-        let stop = self.stop.then(|| {
-            let events = self.events.clone();
-            Button::new("stop")
-                .label(cx.global::<Strings>().get(Text::Stop))
-                .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
-        });
-        let steps = (!self.steps.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(self.steps.iter().map(|label| {
-                    div()
-                        .px_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(label.clone())
-                }))
-        });
-        div()
-            .size_full()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .gap_1()
-                    .text_xs()
-                    .children(steps)
-                    .child(self.answer.clone()),
-            )
-            .children(
-                self.notice
-                    .clone()
-                    .map(|notice| div().text_xs().child(notice)),
-            )
-            .child(Input::new(&self.input))
-            .children(stop)
-    }
-}
-
-/// The end of an answer the typing panel has room for [guess], cut at a character boundary.
-fn answer_tail(text: &str) -> &str {
-    const SHOWN: usize = 280;
-    let mut start = text.len().saturating_sub(SHOWN);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
-}
-
 fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
     if events.try_send(event).is_err() {
         tracing::error!("presence event receiver closed");
@@ -912,6 +850,7 @@ pub(crate) fn open(
             text: None,
             events,
             link,
+            session: None,
             state: LinkState::Connecting,
             gesture: owner_gesture,
             activity: Activity::default(),

@@ -367,6 +367,14 @@ fn done_is_told_only_once_it_is_stored_and_needs_no_cancel() {
         core.handle(Input::RunStored { run: R }).expect("ending"),
         vec![state(R, T, Phase::Done), run_end(R)]
     );
+    assert_eq!(
+        core.handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        }),
+        Err(Stale),
+        "a Stop for a run that already ended changes nothing"
+    );
     assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()), "no run left");
 }
 

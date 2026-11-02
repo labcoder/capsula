@@ -9,12 +9,12 @@
 
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use async_channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender, WeakSender};
 use capsula_protocol::BUILD_ID;
 use capsula_protocol::constants::BRAIN_EXE;
 use capsula_protocol::frame::{self, FrameError, Pipe};
@@ -57,10 +57,13 @@ pub(crate) enum LinkState {
 }
 
 /// What the link tells the UI thread, in the order it happened. Nothing from the brain comes
-/// before `State(Connected)`, and none of a connection's messages after its next state.
+/// before `Connected`, and none of a connection's messages after its next state.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
+    /// Any state but `Connected`, which comes as [`LinkEvent::Connected`].
     State(LinkState),
+    /// A new connection, and the session the UI sends and grants credit through.
+    Connected(Session),
     /// A run's phase changed, from the control pipe.
     RunState {
         run: RunId,
@@ -68,11 +71,49 @@ pub(crate) enum LinkEvent {
         phase: Phase,
     },
     /// A data frame, with its size on the pipe, header included, for the credit it earns once
-    /// the UI has taken it.
+    /// the UI has taken it, and the generation of the connection it came on.
     Data {
+        generation: u64,
         message: DataToShell,
         bytes: u32,
     },
+}
+
+/// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
+/// session of a connection that has ended do nothing, so nothing meant for one connection
+/// reaches the next.
+#[derive(Clone, Debug)]
+pub(crate) struct Session {
+    /// Counts connections in this shell; the brain's incarnation can't, since the same brain may
+    /// be reconnected to.
+    generation: u64,
+    credit: Arc<Credit>,
+}
+
+impl Session {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
+    /// that size. Grants add up until the data writer sends them. Never blocks or locks.
+    pub(crate) fn grant(&self, bytes: u32) {
+        // The writer sends whatever has added up after each message, so only the first grant
+        // since the last send needs to wake it; a full queue wakes it anyway.
+        if self.credit.bytes.fetch_add(bytes, Ordering::SeqCst) == 0
+            && let Some(wake) = self.credit.wake.upgrade()
+        {
+            let _woken = wake.try_send(DataOut::Credit);
+        }
+    }
+}
+
+/// A connection's credit granted and not yet sent.
+#[derive(Debug)]
+struct Credit {
+    bytes: AtomicU32,
+    /// The data writer's queue, weak so a session the UI still holds keeps no writer alive.
+    wake: WeakSender<DataOut>,
 }
 
 /// Why a connection attempt failed.
@@ -109,19 +150,19 @@ struct Connection {
 }
 
 /// What the data writer sends.
+#[derive(Debug)]
 enum DataOut {
     Submit(DataToBrain),
-    /// Credit is waiting in [`Outbox::credit`].
+    /// Credit is waiting in the connection's [`Credit`].
     Credit,
 }
 
 /// Where the UI's messages go while connected.
 #[derive(Debug)]
 struct Outbox {
+    generation: u64,
     control: Sender<ControlToBrain>,
     data: Sender<DataOut>,
-    /// Credit granted and not yet sent; the data writer sends it after each message it writes.
-    credit: Arc<AtomicU32>,
 }
 
 /// What the UI thread and the link thread share.
@@ -132,14 +173,18 @@ struct Shared {
     /// The control pipe while connected, so Quit can bound its writes.
     control: Mutex<Option<Arc<PipeClient>>>,
     outbox: Mutex<Option<Outbox>>,
+    /// The last connection's generation.
+    generations: AtomicU64,
 }
 
 impl Shared {
-    fn outbox<T>(&self, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
+    /// Uses the outbox if it's still `session`'s connection's.
+    fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
         self.outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
+            .filter(|outbox| outbox.generation == session.generation)
             .map(use_it)
     }
 }
@@ -177,7 +222,14 @@ impl LinkHandle {
         if let Some(control) = control {
             // A stalled brain can't hold the shell open.
             control.set_timeout(Some(QUIT_TIMEOUT));
-            if !self.send_control(ControlToBrain::Quitting) {
+            let queued = self
+                .shared
+                .outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|outbox| outbox.control.try_send(ControlToBrain::Quitting).is_ok());
+            if !queued {
                 tracing::warn!("couldn't tell the brain about Quit");
             }
         }
@@ -200,31 +252,21 @@ impl LinkHandle {
         }
     }
 
-    /// Queues a control message for the brain. False while no brain is connected, or when it has
-    /// stopped reading. Never blocks.
-    pub(crate) fn send_control(&self, message: ControlToBrain) -> bool {
+    /// Queues a control message for `session`'s brain. False once that connection has ended, or
+    /// when the brain has stopped reading. Never blocks.
+    pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         self.shared
-            .outbox(|outbox| outbox.control.try_send(message).is_ok())
+            .outbox(session, |outbox| outbox.control.try_send(message).is_ok())
             .unwrap_or(false)
     }
 
-    /// Queues a typed turn for the brain, like [`LinkHandle::send_control`].
-    pub(crate) fn send_data(&self, message: DataToBrain) -> bool {
+    /// Queues a typed turn for `session`'s brain, like [`LinkHandle::send_control`].
+    pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         self.shared
-            .outbox(|outbox| outbox.data.try_send(DataOut::Submit(message)).is_ok())
+            .outbox(session, |outbox| {
+                outbox.data.try_send(DataOut::Submit(message)).is_ok()
+            })
             .unwrap_or(false)
-    }
-
-    /// Grants the brain `bytes` more of data frames, once the UI has taken a frame that size.
-    /// Grants add up until the data writer sends them. Never blocks.
-    pub(crate) fn grant(&self, bytes: u32) {
-        self.shared.outbox(|outbox| {
-            // The writer sends whatever has added up after each message, so only the first grant
-            // since the last send needs to wake it; a full queue wakes it anyway.
-            if outbox.credit.fetch_add(bytes, Ordering::SeqCst) == 0 {
-                let _woken = outbox.data.try_send(DataOut::Credit);
-            }
-        });
     }
 }
 
@@ -348,7 +390,11 @@ impl Link {
         let Connection { control, data, .. } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
-        let credit = Arc::new(AtomicU32::new(0));
+        let generation = self.shared.generations.fetch_add(1, Ordering::SeqCst) + 1;
+        let credit = Arc::new(Credit {
+            bytes: AtomicU32::new(0),
+            wake: data_out.downgrade(),
+        });
         let mut helpers = Vec::new();
         let spawned = spawn_helper("link-control-writer", &mut helpers, {
             let control = Arc::clone(&control);
@@ -370,9 +416,9 @@ impl Link {
             .outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Outbox {
+            generation,
             control: control_out.clone(),
             data: data_out,
-            credit,
         });
         // Quit may have come while connecting, when there was no pipe to send it on.
         if self.quitting() {
@@ -380,14 +426,14 @@ impl Link {
             let _queued = control_out.try_send(ControlToBrain::Quitting);
         }
         let open = events
-            .send_blocking(LinkEvent::State(LinkState::Connected))
+            .send_blocking(LinkEvent::Connected(Session { generation, credit }))
             .is_ok();
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
                 let (data, control, events) =
                     (Arc::clone(&data), Arc::clone(&control), events.clone());
-                move || read_data(&data, &control, &events)
+                move || read_data(&data, &control, &events, generation)
             })
         });
         match read {
@@ -569,7 +615,7 @@ impl<R: Read> Read for Counted<R> {
 /// Reads data frames and passes them on until the pipe ends. A malformed frame, or the data pipe
 /// ending, ends the whole connection, so the link reconnects instead of leaving the shell
 /// connected with nothing arriving.
-fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>) {
+fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>, generation: u64) {
     let mut reader = Counted {
         inner: BufReader::with_capacity(READ_BUFFER, data),
         bytes: 0,
@@ -581,7 +627,11 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);
                 if events
-                    .send_blocking(LinkEvent::Data { message, bytes })
+                    .send_blocking(LinkEvent::Data {
+                        generation,
+                        message,
+                        bytes,
+                    })
                     .is_err()
                 {
                     break;
@@ -613,13 +663,13 @@ fn write_control(control: &PipeClient, queue: &Receiver<ControlToBrain>) {
 
 /// Writes queued turns in order, and after each wake-up any credit that has added up, until the
 /// queue closes or the pipe fails.
-fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &AtomicU32) {
+fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
     while let Ok(out) = queue.recv_blocking() {
         let submitted = match out {
             DataOut::Submit(message) => frame::write(&mut &*data, &message, Pipe::Data),
             DataOut::Credit => Ok(()),
         };
-        let bytes = credit.swap(0, Ordering::SeqCst);
+        let bytes = credit.bytes.swap(0, Ordering::SeqCst);
         let credited = if bytes > 0 {
             frame::write(&mut &*data, &DataToBrain::Credit { bytes }, Pipe::Data)
         } else {
@@ -651,8 +701,9 @@ mod tests {
         ThreadId,
     };
 
-    use super::{Connection, Link, LinkEvent, LinkHandle, LinkState, Shared, start};
+    use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
     use crate::platform::{PipeClient, test_pair};
+    use crate::runs::{Refused, Runs};
 
     /// Bytes of text each data sample streams.
     const TOTAL: usize = 960_000;
@@ -718,6 +769,13 @@ mod tests {
         events.recv_timeout(PATIENCE).expect("an event in time")
     }
 
+    fn connected(event: LinkEvent) -> Session {
+        let LinkEvent::Connected(session) = event else {
+            panic!("Connected first, got {event:?}");
+        };
+        session
+    }
+
     fn text(run: u64, delta: &str) -> DataToShell {
         DataToShell::AssistantText {
             run: RunId(run),
@@ -731,11 +789,8 @@ mod tests {
         let sent = text(1, "early");
         frame::write(&mut &*link.data, &sent, Pipe::Data).expect("written");
         let events = patient(link.events);
-        assert!(matches!(
-            next(&events),
-            LinkEvent::State(LinkState::Connected)
-        ));
-        let LinkEvent::Data { message, bytes } = next(&events) else {
+        let _session = connected(next(&events));
+        let LinkEvent::Data { message, bytes, .. } = next(&events) else {
             panic!("data next");
         };
         assert_eq!(message, sent);
@@ -749,10 +804,7 @@ mod tests {
     fn pings_are_answered_and_run_states_passed_on() {
         let link = attended("ping");
         let events = patient(link.events);
-        assert!(matches!(
-            next(&events),
-            LinkEvent::State(LinkState::Connected)
-        ));
+        let _session = connected(next(&events));
         frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
         let pong = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control);
         assert_eq!(pong.expect("read"), Some(ControlToBrain::Pong));
@@ -778,24 +830,21 @@ mod tests {
     fn the_ui_s_messages_go_out_on_their_pipes_and_credit_adds_up() {
         let link = attended("outbox");
         let events = patient(link.events);
-        assert!(matches!(
-            next(&events),
-            LinkEvent::State(LinkState::Connected)
-        ));
+        let session = connected(next(&events));
         let stop = ControlToBrain::Stop {
             run: RunId(3),
             revealed: vec![0],
         };
-        assert!(link.handle.send_control(stop.clone()));
+        assert!(link.handle.send_control(&session, stop.clone()));
         let read = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control);
         assert_eq!(read.expect("read"), Some(stop));
         let submit = DataToBrain::TextSubmit {
             thread: None,
             text: "typed".to_owned(),
         };
-        assert!(link.handle.send_data(submit.clone()));
-        link.handle.grant(100);
-        link.handle.grant(28);
+        assert!(link.handle.send_data(&session, submit.clone()));
+        session.grant(100);
+        session.grant(28);
         let read = frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data);
         assert_eq!(read.expect("read"), Some(submit));
         let mut credit = 0;
@@ -810,7 +859,7 @@ mod tests {
         drop(link.control);
         assert!(link.link.join().expect("joined"));
         assert!(
-            !link.handle.send_control(ControlToBrain::Pong),
+            !link.handle.send_control(&session, ControlToBrain::Pong),
             "not connected"
         );
     }
@@ -819,10 +868,7 @@ mod tests {
     fn a_malformed_data_frame_ends_the_connection() {
         let link = attended("malformed");
         let events = patient(link.events);
-        assert!(matches!(
-            next(&events),
-            LinkEvent::State(LinkState::Connected)
-        ));
+        let session = connected(next(&events));
         // A three-byte payload naming no `DataToShell` variant.
         std::io::Write::write_all(&mut &*link.data, &[3, 0, 0, 0, 0xff, 0xff, 0xff])
             .expect("written");
@@ -833,7 +879,7 @@ mod tests {
         ));
         assert!(link.link.join().expect("joined"));
         assert!(
-            !link.handle.send_control(ControlToBrain::Pong),
+            !link.handle.send_control(&session, ControlToBrain::Pong),
             "not connected"
         );
     }
@@ -842,10 +888,7 @@ mod tests {
     fn a_repeated_handshake_ends_the_connection() {
         let link = attended("rehandshake");
         let events = patient(link.events);
-        assert!(matches!(
-            next(&events),
-            LinkEvent::State(LinkState::Connected)
-        ));
+        let _session = connected(next(&events));
         let welcome = ControlToShell::Welcome {
             incarnation: Incarnation(2),
         };
@@ -855,6 +898,84 @@ mod tests {
             Ok(None)
         ));
         assert!(link.link.join().expect("joined"));
+    }
+
+    #[test]
+    fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
+        let (a_control, a_shell_control) = pair("generation-a-control");
+        let (a_data, a_shell_data) = pair("generation-a-data");
+        let (b_control, b_shell_control) = pair("generation-b-control");
+        let (b_data, b_shell_data) = pair("generation-b-data");
+        for pipe in [&a_control, &a_data, &b_control, &b_data] {
+            pipe.set_timeout(Some(PATIENCE));
+        }
+        let (sender, events) = async_channel::unbounded();
+        let link = Link {
+            brain: PathBuf::new(),
+            session: 0,
+            shared: Arc::new(Shared::default()),
+        };
+        let (handle, start) = start(link, sender);
+        let link = thread::spawn(move || {
+            [
+                (a_shell_control, a_shell_data),
+                (b_shell_control, b_shell_data),
+            ]
+            .into_iter()
+            .all(|(control, data)| {
+                let connection = Connection {
+                    control: Arc::new(control),
+                    data: Arc::new(data),
+                    incarnation: Incarnation(1),
+                };
+                start.link.attend(connection, &start.events)
+            })
+        });
+        let events = patient(events);
+        let a = connected(next(&events));
+        frame::write(&mut &a_data, &text(1, "from a"), Pipe::Data).expect("written");
+        let LinkEvent::Data {
+            generation, bytes, ..
+        } = next(&events)
+        else {
+            panic!("a's data");
+        };
+        assert_eq!(generation, a.generation());
+        // Ends A; the link then serves B on the same brain.
+        drop(a_control);
+        let b = connected(next(&events));
+        assert_ne!(b.generation(), a.generation());
+        // A UI that took A's frame only now, with B already installed.
+        a.grant(bytes);
+        let mut runs = Runs::default();
+        runs.connected();
+        assert_eq!(
+            runs.submit("typed", |turn| handle.send_data(&a, turn)),
+            Err(Refused::Offline),
+            "a turn through A's session never goes to B, so its draft stays"
+        );
+        assert!(!handle.send_control(&a, ControlToBrain::Pong));
+        runs.disconnected();
+        runs.connected();
+        assert_eq!(
+            runs.submit("typed", |turn| handle.send_data(&b, turn)),
+            Ok(())
+        );
+        b.grant(7);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
+            Some(DataToBrain::TextSubmit {
+                thread: None,
+                text: "typed".to_owned(),
+            })
+        );
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
+            Some(DataToBrain::Credit { bytes: 7 }),
+            "B gets its own credit and none of A's"
+        );
+        drop(b_control);
+        assert!(link.join().expect("joined"));
     }
 
     /// Plays the brain's control side: answers each Stop with `Interrupted`.
@@ -894,7 +1015,7 @@ mod tests {
             }
         }
         // The shell closes its end once the connection ends, which ends the drain.
-        let _ = drainer.join();
+        drainer.join().expect("the drain ended cleanly");
     }
 
     #[expect(clippy::print_stderr, reason = "a measurement's output")]
@@ -923,18 +1044,18 @@ mod tests {
             let control = Arc::clone(&control);
             move || answer_stops(&control)
         });
-        assert!(matches!(
-            link.events.recv_blocking(),
-            Ok(LinkEvent::State(LinkState::Connected))
-        ));
+        let session = connected(link.events.recv_blocking().expect("an event"));
         let mut stops = Vec::new();
         for round in 0..200 {
             let run = RunId(round);
             let sent = Instant::now();
-            assert!(link.handle.send_control(ControlToBrain::Stop {
-                run,
-                revealed: Vec::new(),
-            }));
+            assert!(link.handle.send_control(
+                &session,
+                ControlToBrain::Stop {
+                    run,
+                    revealed: Vec::new(),
+                }
+            ));
             while !matches!(
                 link.events.recv_blocking(),
                 Ok(LinkEvent::RunState { run: got, .. }) if got == run
@@ -942,7 +1063,7 @@ mod tests {
             stops.push(sent.elapsed());
         }
         control.abort();
-        let _ = brain.join();
+        brain.join().expect("the brain's side ended cleanly");
         // Closing the brain's end ends the connection.
         drop(control);
         assert!(link.link.join().expect("joined"));
@@ -957,28 +1078,26 @@ mod tests {
                     let data = Arc::clone(&link.data);
                     move || stream_text(&data, chunk)
                 });
-                assert!(matches!(
-                    link.events.recv_blocking(),
-                    Ok(LinkEvent::State(LinkState::Connected))
-                ));
+                let session = connected(link.events.recv_blocking().expect("an event"));
                 let mut started = None;
                 let mut bytes = 0;
                 while bytes < TOTAL {
                     let Ok(LinkEvent::Data {
                         message: DataToShell::AssistantText { delta, .. },
                         bytes: size,
+                        ..
                     }) = link.events.recv_blocking()
                     else {
                         panic!("text only");
                     };
                     started.get_or_insert_with(Instant::now);
                     bytes += delta.len();
-                    link.handle.grant(size);
+                    session.grant(size);
                 }
                 streams.push(started.expect("text arrived").elapsed());
                 drop(link.control);
                 assert!(link.link.join().expect("joined"));
-                let _ = brain.join();
+                brain.join().expect("the brain's side ended cleanly");
             }
             report(
                 &format!("960 kB in {chunk}-byte frames, first frame to last"),
