@@ -6,6 +6,7 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
+mod pages;
 mod purge;
 mod schema;
 #[cfg(test)]
@@ -56,6 +57,9 @@ pub enum StoreError {
     /// `capsula.db.purge-old` once the shell can show brain errors.
     #[error("the store's file is missing, but a purge's old copy of it remains")]
     Retired,
+    /// A page couldn't be read or encoded; SQLite details may contain user content.
+    #[error("can't read the store page")]
+    Read,
     /// A purge's copy of the store couldn't be written, moved or removed.
     #[error("a purge file couldn't be written, moved or removed")]
     Purge(#[source] io::Error),
