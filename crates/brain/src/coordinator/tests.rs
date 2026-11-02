@@ -173,10 +173,12 @@ fn text_waits_behind_a_pending_step() {
         commit("before", 0, "a")
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("after a".to_owned()))),
+        core.handle(engine(R, EngineEvent::Text("after ".to_owned()))),
         Ok(Vec::new()),
         "held behind a"
     );
+    core.handle(engine(R, EngineEvent::Text("a".to_owned())))
+        .expect("current");
     assert_eq!(
         core.handle(engine(R, EngineEvent::Step(step("b"))))
             .expect("current"),
@@ -189,7 +191,7 @@ fn text_waits_behind_a_pending_step() {
     assert_eq!(
         core.handle(ack(0, "a")).expect("current"),
         vec![committed(0, "a"), text("after a")],
-        "released up to the next pending step"
+        "released up to the next pending step, as one frame"
     );
     assert_eq!(
         core.handle(Input::Stop {

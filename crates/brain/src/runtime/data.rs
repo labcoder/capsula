@@ -9,10 +9,14 @@ use capsula_protocol::message::RunId;
 /// How long the shell may leave the queue blocked on credit before the run ends as
 /// `view_stalled` (architecture v1 §3.2) [guess].
 pub(crate) const STALL: Duration = Duration::from_secs(2);
+/// What a queued frame costs beyond its bytes.
+const ENTRY: usize = std::mem::size_of::<(RunId, Vec<u8>)>();
 
 #[derive(Debug)]
 pub(crate) struct DataQueue {
     frames: VecDeque<(RunId, Vec<u8>)>,
+    /// The memory the queued frames hold.
+    bytes: usize,
     credit: usize,
     window: usize,
     /// Since when bytes have waited, on credit or on a write the shell isn't draining.
@@ -24,6 +28,7 @@ impl DataQueue {
     pub(crate) fn new(window: usize) -> Self {
         Self {
             frames: VecDeque::new(),
+            bytes: 0,
             credit: window,
             window,
             waiting_since: None,
@@ -31,12 +36,23 @@ impl DataQueue {
     }
 
     pub(crate) fn push(&mut self, run: RunId, frame: Vec<u8>) {
+        self.bytes += frame.len() + ENTRY;
         self.frames.push_back((run, frame));
+    }
+
+    /// The memory the queued frames hold, for pausing what feeds the queue.
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Drops a stopped run's frames that haven't started writing; the shell would drop them.
     pub(crate) fn revoke(&mut self, run: RunId) {
         self.frames.retain(|(owner, _)| *owner != run);
+        self.bytes = self
+            .frames
+            .iter()
+            .map(|(_, frame)| frame.len() + ENTRY)
+            .sum();
     }
 
     /// Adds credit, never past the window, so a confused shell can't unbound the queue.
@@ -53,6 +69,7 @@ impl DataQueue {
             return None;
         }
         self.credit -= len;
+        self.bytes -= len + ENTRY;
         self.frames.pop_front().map(|(_, frame)| frame)
     }
 
@@ -74,7 +91,7 @@ mod tests {
 
     use capsula_protocol::message::RunId;
 
-    use super::{DataQueue, STALL};
+    use super::{DataQueue, ENTRY, STALL};
 
     const A: RunId = RunId(1);
     const B: RunId = RunId(2);
@@ -110,8 +127,10 @@ mod tests {
         queue.push(B, vec![2]);
         queue.push(A, vec![3]);
         queue.revoke(A);
+        assert_eq!(queue.bytes(), 1 + ENTRY);
         assert_eq!(queue.pop(start), Some(vec![2]));
         assert_eq!(queue.pop(start), None);
+        assert_eq!(queue.bytes(), 0);
     }
 
     #[test]

@@ -83,12 +83,12 @@ impl Fixture {
     }
 }
 
-/// Plays `fixture` for `run`, reporting to `inputs`. Sending on (or dropping) the returned
-/// sender cancels it.
+/// Plays `fixture` for `run`, reporting to `inputs`, and waits while `inputs` is full. Sending
+/// on (or dropping) the returned sender cancels it.
 pub(crate) fn start(
     fixture: Arc<Fixture>,
     run: RunId,
-    inputs: mpsc::UnboundedSender<Input>,
+    inputs: mpsc::Sender<Input>,
 ) -> oneshot::Sender<()> {
     let (cancel, cancelled) = oneshot::channel();
     tokio::spawn(play(fixture, run, inputs, cancelled));
@@ -98,36 +98,71 @@ pub(crate) fn start(
 async fn play(
     fixture: Arc<Fixture>,
     run: RunId,
-    inputs: mpsc::UnboundedSender<Input>,
+    inputs: mpsc::Sender<Input>,
     mut cancelled: oneshot::Receiver<()>,
 ) {
-    let send = |event| inputs.send(Input::Engine { run, event }).is_ok();
     for line in &fixture.lines {
-        let after = match line {
-            Line::Text(after, _) | Line::Step(after, _) | Line::Fail(after) => *after,
-        };
-        tokio::select! {
-            () = tokio::time::sleep(after) => {}
-            _ = &mut cancelled => {
-                if let Some(label) = &fixture.late {
-                    send(EngineEvent::Step(Step { label: label.clone() }));
-                }
-                return;
-            }
-        }
-        let event = match line {
-            Line::Text(_, text) => EngineEvent::Text(text.clone()),
-            Line::Step(_, label) => EngineEvent::Step(Step {
-                label: label.clone(),
-            }),
-            Line::Fail(_) => EngineEvent::Failed,
+        let (after, event) = match line {
+            Line::Text(after, text) => (*after, EngineEvent::Text(text.clone())),
+            Line::Step(after, label) => (
+                *after,
+                EngineEvent::Step(Step {
+                    label: label.clone(),
+                }),
+            ),
+            Line::Fail(after) => (*after, EngineEvent::Failed),
         };
         let failed = event == EngineEvent::Failed;
-        if !send(event) || failed {
+        if !emit(
+            &inputs,
+            run,
+            after,
+            event,
+            &mut cancelled,
+            fixture.late.as_deref(),
+        )
+        .await
+            || failed
+        {
             return;
         }
     }
-    send(EngineEvent::Done);
+    let done = EngineEvent::Done;
+    emit(
+        &inputs,
+        run,
+        Duration::ZERO,
+        done,
+        &mut cancelled,
+        fixture.late.as_deref(),
+    )
+    .await;
+}
+
+/// Waits `after`, then sends `event`. False when the run was cancelled first, after sending its
+/// late step, or when nobody listens.
+async fn emit(
+    inputs: &mpsc::Sender<Input>,
+    run: RunId,
+    after: Duration,
+    event: EngineEvent,
+    cancelled: &mut oneshot::Receiver<()>,
+    late: Option<&str>,
+) -> bool {
+    let sent = async {
+        tokio::time::sleep(after).await;
+        inputs.send(Input::Engine { run, event }).await.is_ok()
+    };
+    tokio::select! {
+        sent = sent => sent,
+        _ = cancelled => {
+            if let Some(label) = late {
+                let step = EngineEvent::Step(Step { label: label.to_owned() });
+                let _unheard = inputs.send(Input::Engine { run, event: step }).await;
+            }
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,7 +207,7 @@ mod tests {
     async fn a_cancelled_run_still_finishes_its_late_step_and_nothing_else() {
         let fixture =
             Arc::new(Fixture::parse("10 text a\n1000 step never\nlate closed").expect("parses"));
-        let (inputs, mut events) = mpsc::unbounded_channel();
+        let (inputs, mut events) = mpsc::channel(4);
         let cancel = start(fixture, RunId(3), inputs);
         let first = events.recv().await;
         assert_eq!(
@@ -198,7 +233,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_script_ends_with_done() {
         let fixture = Arc::new(Fixture::parse("1 step s").expect("parses"));
-        let (inputs, mut events) = mpsc::unbounded_channel();
+        let (inputs, mut events) = mpsc::channel(4);
         let _cancel = start(fixture, RunId(1), inputs);
         events.recv().await.expect("step");
         assert_eq!(

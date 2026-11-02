@@ -268,6 +268,11 @@ impl Coordinator {
         self.current.as_ref().map(|run| run.id)
     }
 
+    /// How many ended runs still wait on the store.
+    pub fn ending_runs(&self) -> usize {
+        self.ending.len()
+    }
+
     /// Acts on one input.
     ///
     /// # Errors
@@ -466,14 +471,21 @@ impl Coordinator {
                         cut -= 1;
                     }
                     let (piece, tail) = rest.split_at(cut);
-                    let frame = DataToShell::AssistantText {
+                    let frame = || DataToShell::AssistantText {
                         run,
                         delta: piece.to_owned(),
                     };
-                    if let Some(behind) = current.held.back_mut() {
-                        behind.push(frame);
-                    } else {
-                        effects.push(Effect::Data(frame));
+                    // Held text joins the frame before it, so small deltas don't each cost an entry.
+                    match current.held.back_mut() {
+                        Some(behind) => match behind.last_mut() {
+                            Some(DataToShell::AssistantText { delta, .. })
+                                if delta.len() + piece.len() <= MAX_DELTA =>
+                            {
+                                delta.push_str(piece);
+                            }
+                            _ => behind.push(frame()),
+                        },
+                        None => effects.push(Effect::Data(frame())),
                     }
                     rest = tail;
                 }

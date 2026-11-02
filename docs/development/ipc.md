@@ -61,7 +61,7 @@ flowchart LR
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
 | Control | `RunState`, `Ping` | 256 queued frames [guess] | The shell counts as hung and the connection ends |
-| Data | `AssistantText`, `StepCommit`, `RunEnd` | Unbounded queue; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Data | `AssistantText`, `StepCommit`, `RunEnd` | 1 MiB queued pauses the engine [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
@@ -74,8 +74,12 @@ flowchart LR
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it.
-- shortcut: the data queue has no 4 MiB cap and the brain doesn't pause the engine when it
-  grows; the run budgets bound it, and real engines get backpressure in slice 3.
+- **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
+  control frames and store replies, so `Stop` is never queued behind data. While the data queue
+  holds 1 MiB, frames and their bookkeeping counted, engine events wait in a 16-event channel
+  and the engine waits on it. While 16 ended runs wait on the store, the data pipe isn't read,
+  so new turns (and credit with them) wait until the store catches up [guess]. Memory stays
+  bounded however slow the store or the shell is.
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`; the brain sends only `RunState` and `Ping`, so it can't fill short of a hung shell.
 

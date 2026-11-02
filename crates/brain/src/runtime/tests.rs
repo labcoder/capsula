@@ -8,7 +8,8 @@ use tokio::io::{AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
 use tokio::time::timeout;
 
-use super::Ended;
+use super::fixture::Fixture;
+use super::{Brain, Ended, MAX_ENDING};
 use crate::ipc;
 use crate::platform::{self, Instance};
 use crate::store::Store;
@@ -234,6 +235,76 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
                 DataToShell::RunEnd { run },
             ]
         );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close();
+}
+
+#[tokio::test]
+async fn new_turns_wait_while_too_many_runs_wait_on_the_store() {
+    let scratch = Scratch::new("backlog");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recover");
+    let high_water = store.high_water().expect("high water");
+    // Another connection holds the write lock, so every store write waits on it.
+    store
+        .conn_for_tests()
+        .busy_timeout(Duration::from_secs(10))
+        .expect("busy timeout");
+    let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
+    lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
+    let fixture = Fixture::parse("0 text a").expect("script");
+    let mut brain = Brain::new(store, high_water, fixture).expect("brain");
+    let ((control, data), mut shell) = connect("backlog").await;
+    let mut tap = Tap::from_env();
+    let turns = MAX_ENDING + 4;
+    let client = async {
+        for _ in 0..turns {
+            shell.submit("go").await;
+        }
+        let mut thinking = 0;
+        while let Ok((_, phase)) = timeout(Duration::from_millis(300), shell.state()).await {
+            thinking += usize::from(phase == Phase::Thinking);
+        }
+        assert_eq!(
+            thinking,
+            MAX_ENDING + 1,
+            "the current run and the ending ones"
+        );
+        lock.execute_batch("ROLLBACK").expect("unlocked");
+        while thinking < turns {
+            let (_, phase) = timeout(Duration::from_secs(5), shell.state())
+                .await
+                .expect("the rest are taken once the store answers");
+            thinking += usize::from(phase == Phase::Thinking);
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close();
+}
+
+#[tokio::test]
+async fn the_engine_waits_while_the_shell_is_behind_on_data() {
+    let scratch = Scratch::new("behind");
+    let fill = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000";
+    let mut brain = test_support::brain(&scratch, fill);
+    let ((control, data), mut shell) = connect("behind").await;
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("one").await;
+        let (first, _) = shell.state().await;
+        assert_eq!(shell.state().await, (first, Phase::Answering));
+        assert_eq!(shell.state().await, (first, Phase::Done));
+        // The first run's text is still queued, so the second run's engine waits and the
+        // unread data stalls it instead of finishing it.
+        shell.submit("two").await;
+        let (second, _) = shell.state().await;
+        assert_eq!(shell.state().await, (second, Phase::Answering));
+        assert_eq!(shell.state().await, (second, Phase::Interrupted));
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);

@@ -117,9 +117,10 @@ never lost:
 
 Budgets are absolute for the run and never reset (OSC-105 boundary 5): 120 s of wall clock, 1 MiB
 of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, and the text or
-step that went over is never sent. The wall clock covers the engine only: once it says it's done,
-the deadline no longer applies, even while its last step is still being stored. Model rounds, tool calls and speech budgets arrive with the
-engines that use them.
+step that went over is never sent. The wall clock starts when the turn is accepted, so time a held
+turn spends waiting counts against it, and it stops applying once the engine says it's done, even
+while the run's last writes are still pending. Model rounds, tool calls and speech budgets arrive
+with the engines that use them.
 
 ## The fixture engine
 

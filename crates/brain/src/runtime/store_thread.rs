@@ -125,3 +125,62 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use capsula_protocol::message::{RunId, Step, ThreadId};
+    use tokio::sync::mpsc;
+
+    use super::StoreThread;
+    use crate::coordinator::{Input, StoreOp};
+    use crate::store::{RunEnd, Store};
+    use crate::test_support::Scratch;
+
+    #[test]
+    fn every_operation_gets_one_reply_in_order() {
+        let scratch = Scratch::new("replies");
+        let store = Store::open(&scratch.db()).expect("store");
+        let (thread, run) = (ThreadId(1), RunId(1));
+        let (acks, mut replies) = mpsc::unbounded_channel();
+        let store = StoreThread::spawn(store, acks).expect("thread");
+        for op in [
+            StoreOp::BeginTurn {
+                thread,
+                title: Some("t".to_owned()),
+                run,
+                text: "hi".to_owned(),
+            },
+            StoreOp::CommitStep {
+                thread: ThreadId(2),
+                run,
+                text: None,
+                index: 0,
+                step: Step {
+                    label: "s".to_owned(),
+                },
+            },
+            StoreOp::EndRun {
+                thread,
+                run,
+                text: None,
+                revealed: None,
+                end: RunEnd::Done,
+            },
+        ] {
+            assert!(store.send(op));
+        }
+        store.close();
+        let mut got = Vec::new();
+        while let Ok(reply) = replies.try_recv() {
+            got.push(reply);
+        }
+        assert_eq!(
+            got,
+            [
+                Input::TurnStored { run },
+                Input::StoreFailed { run },
+                Input::RunStored { run },
+            ]
+        );
+    }
+}

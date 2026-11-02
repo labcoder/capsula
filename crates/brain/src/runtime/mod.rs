@@ -41,6 +41,12 @@ const CONTROL_QUEUE: usize = 256;
 const PING_EVERY: Duration = Duration::from_millis(500);
 /// How long a ping may go unanswered [guess].
 const PONG_WITHIN: Duration = Duration::from_secs(2);
+/// Ended runs waiting on the store before new turns wait too [guess].
+const MAX_ENDING: usize = 16;
+/// Data queued for the shell before the engine waits, twice the credit window [guess].
+const DATA_CAP: usize = 1024 * 1024;
+/// Engine events queued before the engine waits [guess].
+const ENGINE_QUEUE: usize = 16;
 
 /// How a shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,20 +59,18 @@ pub(crate) enum Ended {
     Broken(&'static str),
 }
 
-/// What a reader hands the core loop.
-enum Frame {
-    Control(ControlToBrain),
-    Data(DataToBrain),
-}
-
 /// The coordinator and the systems that outlive one shell connection.
 #[derive(Debug)]
 pub(crate) struct Brain {
     coordinator: Coordinator,
     store: Option<StoreThread>,
     fixture: Arc<Fixture>,
+    /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
+    /// Engine events, taken only while the data queue has room.
+    engine_tx: mpsc::Sender<Input>,
+    engine_events: mpsc::Receiver<Input>,
     engine: Option<(RunId, oneshot::Sender<()>)>,
     deadline: Option<(RunId, Instant)>,
 }
@@ -82,12 +86,15 @@ impl Brain {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         let store = StoreThread::spawn(store, inputs_tx.clone())?;
+        let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
             coordinator: Coordinator::new(last_thread, last_run),
             store: Some(store),
             fixture: Arc::new(fixture),
             inputs_tx,
             inputs,
+            engine_tx,
+            engine_events,
             engine: None,
             deadline: None,
         })
@@ -109,13 +116,14 @@ impl Brain {
     {
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
-        let (frames_tx, mut frames) = mpsc::channel::<Frame>(64);
+        let (controls_tx, mut controls) = mpsc::channel(64);
+        let (datas_tx, mut datas) = mpsc::channel(64);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
 
-        let control_reader = read_control(&mut control_in, &frames_tx);
-        let data_reader = read_data(&mut data_in, &frames_tx);
+        let control_reader = read_control(&mut control_in, &controls_tx);
+        let data_reader = read_data(&mut data_in, &datas_tx);
         let control_writer = write_control(&mut control_out, &mut out);
         let data_writer = write_data(&mut data_out, &queue, &ready);
         let link = Link {
@@ -124,7 +132,7 @@ impl Brain {
             ready: &ready,
             tap: &mut *tap,
         };
-        let core = self.core(&mut frames, link);
+        let core = self.core(&mut controls, &mut datas, link);
         let ended = tokio::select! {
             ended = control_reader => ended,
             ended = data_reader => ended,
@@ -142,46 +150,58 @@ impl Brain {
     }
 
     /// The core loop: frames from the shell, completions from the systems, the deadline and
-    /// the watchdog, each turned into coordinator inputs and their effects applied.
-    async fn core(&mut self, frames: &mut mpsc::Receiver<Frame>, mut link: Link<'_, '_>) -> Ended {
+    /// the watchdog, each turned into coordinator inputs and their effects applied. Nothing in
+    /// it awaits a pipe, the store or an engine. Control and store replies are always taken;
+    /// new turns wait while too many runs are ending, and engine events while the data queue
+    /// is full, so memory stays bounded however slow the store or the shell is.
+    async fn core(
+        &mut self,
+        controls: &mut mpsc::Receiver<ControlToBrain>,
+        datas: &mut mpsc::Receiver<DataToBrain>,
+        mut link: Link<'_, '_>,
+    ) -> Ended {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
         loop {
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
+            // Credit shares the data pipe, so it waits too, but the store drains on its own.
+            let take_turns = self.coordinator.ending_runs() < MAX_ENDING;
+            let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let input = tokio::select! {
                 biased;
-                Some(frame) = frames.recv() => match frame {
-                    Frame::Control(message) => {
-                        link.tap.record(Pipe::Control, Direction::ToBrain, &message);
-                        match message {
-                            ControlToBrain::Stop { run, revealed } => {
-                                link.queue.borrow_mut().revoke(run);
-                                Input::Stop { run, revealed }
-                            }
-                            ControlToBrain::Pong => {
-                                ping_sent = None;
-                                continue;
-                            }
-                            // The readers end the connection on these.
-                            ControlToBrain::Hello(_) | ControlToBrain::Quitting => continue,
+                Some(message) = controls.recv() => {
+                    link.tap.record(Pipe::Control, Direction::ToBrain, &message);
+                    match message {
+                        ControlToBrain::Stop { run, revealed } => {
+                            link.queue.borrow_mut().revoke(run);
+                            Input::Stop { run, revealed }
                         }
+                        ControlToBrain::Pong => {
+                            ping_sent = None;
+                            continue;
+                        }
+                        // The readers end the connection on these.
+                        ControlToBrain::Hello(_) | ControlToBrain::Quitting => continue,
                     }
-                    Frame::Data(DataToBrain::TextSubmit { thread, text }) => {
+                }
+                Some(input) = self.inputs.recv() => input,
+                Some(message) = datas.recv(), if take_turns => match message {
+                    DataToBrain::TextSubmit { thread, text } => {
                         if let Some(replaced) = running {
                             link.queue.borrow_mut().revoke(replaced);
                         }
                         Input::Turn { thread, text }
                     }
-                    Frame::Data(DataToBrain::Credit { bytes }) => {
+                    DataToBrain::Credit { bytes } => {
                         link.queue.borrow_mut().grant(bytes);
                         link.ready.notify_one();
                         continue;
                     }
-                    Frame::Data(DataToBrain::Hello(_)) => continue,
+                    DataToBrain::Hello(_) => continue,
                 },
-                Some(input) = self.inputs.recv() => input,
+                Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = sleep_until(deadline) => {
                     self.deadline = None;
                     match deadline {
@@ -250,7 +270,7 @@ impl Brain {
                 }
                 Effect::StartEngine { run, text: _ } => {
                     let cancel =
-                        fixture::start(Arc::clone(&self.fixture), run, self.inputs_tx.clone());
+                        fixture::start(Arc::clone(&self.fixture), run, self.engine_tx.clone());
                     self.engine = Some((run, cancel));
                 }
                 Effect::CancelEngine { run } => {
@@ -272,13 +292,16 @@ impl Brain {
     }
 }
 
-async fn read_control(pipe: &mut (impl AsyncRead + Unpin), frames: &mpsc::Sender<Frame>) -> Ended {
+async fn read_control(
+    pipe: &mut (impl AsyncRead + Unpin),
+    frames: &mpsc::Sender<ControlToBrain>,
+) -> Ended {
     loop {
         match ipc::read::<ControlToBrain>(pipe, Pipe::Control).await {
             Ok(Some(ControlToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
             Ok(Some(ControlToBrain::Quitting)) => return Ended::Quit,
             Ok(Some(message)) => {
-                if frames.send(Frame::Control(message)).await.is_err() {
+                if frames.send(message).await.is_err() {
                     return Ended::Lost;
                 }
             }
@@ -291,12 +314,15 @@ async fn read_control(pipe: &mut (impl AsyncRead + Unpin), frames: &mpsc::Sender
     }
 }
 
-async fn read_data(pipe: &mut (impl AsyncRead + Unpin), frames: &mpsc::Sender<Frame>) -> Ended {
+async fn read_data(
+    pipe: &mut (impl AsyncRead + Unpin),
+    frames: &mpsc::Sender<DataToBrain>,
+) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
             Ok(Some(message)) => {
-                if frames.send(Frame::Data(message)).await.is_err() {
+                if frames.send(message).await.is_err() {
                     return Ended::Lost;
                 }
             }
