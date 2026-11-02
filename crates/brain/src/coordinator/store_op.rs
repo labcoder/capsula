@@ -1,6 +1,6 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
-use capsula_protocol::message::{DataToShell, PageOf, RunId, SceneId, Step, ThreadId};
+use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, Step, ThreadId};
 
 use super::Input;
 use crate::store::{RunEnd, SceneTarget};
@@ -70,13 +70,21 @@ pub enum StoreOp {
         /// Indices of the steps that stayed.
         revealed: Vec<u32>,
     },
+    /// Delete a thread whatever its state, in up to two transactions.
+    Delete {
+        /// The thread.
+        thread: ThreadId,
+    },
 }
 
 impl StoreOp {
     /// The run a write belongs to; page reads and clears have none.
     pub fn run(&self) -> Option<RunId> {
         match self {
-            Self::ReadPage { .. } | Self::ClearScenes { .. } | Self::KeepScene { .. } => None,
+            Self::ReadPage { .. }
+            | Self::ClearScenes { .. }
+            | Self::KeepScene { .. }
+            | Self::Delete { .. } => None,
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
@@ -101,6 +109,11 @@ impl StoreOp {
             Self::KeepScene { scene, .. } => Input::SceneKept {
                 scene: *scene,
                 ok: false,
+            },
+            Self::Delete { thread } => Input::Deleted {
+                thread: *thread,
+                outcome: Deleted::NotHidden,
+                last_run: None,
             },
         }
     }

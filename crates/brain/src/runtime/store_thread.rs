@@ -6,17 +6,18 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{DataToShell, PageOf, RunId, SceneId};
+use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap, cleared_body};
+use crate::store::{
+    Cancel, Copied, Deletion, EventKind, NewEvent, Store, StoreError, Swap, cleared_body,
+};
 
 /// How often the thread looks at a running helper.
 const POLL: Duration = Duration::from_millis(50);
@@ -42,6 +43,27 @@ pub(crate) struct Schedule {
     /// Hears every op as it starts.
     #[cfg(test)]
     pub(crate) observed: Option<UnboundedSender<super::Seen>>,
+    /// Gates that each hold one op before it runs.
+    #[cfg(test)]
+    pub(crate) gates: Option<mpsc::Receiver<Gate>>,
+    /// Where the first copy pauses.
+    #[cfg(test)]
+    pub(crate) pauses: Option<crate::store::Pauses>,
+}
+
+/// Holds the next op `matches` accepts, after it's reported started and before it runs, until
+/// the test sends on `release`, so a test can take a lock or reorder pipes first.
+#[cfg(test)]
+pub(crate) struct Gate {
+    pub(crate) matches: fn(&StoreOp) -> bool,
+    pub(crate) release: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gate").finish_non_exhaustive()
+    }
 }
 
 impl Default for Schedule {
@@ -55,6 +77,10 @@ impl Default for Schedule {
             attempts: None,
             #[cfg(test)]
             observed: None,
+            #[cfg(test)]
+            gates: None,
+            #[cfg(test)]
+            pauses: None,
         }
     }
 }
@@ -79,9 +105,9 @@ pub(crate) enum Attempt {
 /// The one purge job running on a helper thread. Only one runs at a time, so a removal never
 /// takes a later copy's file.
 enum Job {
-    /// A copy; any op stops it.
+    /// A copy; any write stops it, and waits until it has let go of the live store.
     Copy {
-        stop: Arc<AtomicBool>,
+        cancel: Arc<Cancel>,
         helper: JoinHandle<Result<Option<Copied>, StoreError>>,
     },
     /// Removing the purge's files: the old store after a swap, an unused copy, or what a crash
@@ -140,10 +166,12 @@ impl Purger {
             .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
-    /// An op is about to run, so a running copy is stale: it stops before the op takes the disk.
+    /// A write is about to run, so a running copy is stale. It stops, and the write waits until
+    /// the copy holds no snapshot of the live store, which would keep the write's pages in the
+    /// WAL for a later commit to checkpoint. The rest of the copy's work goes on off this thread.
     fn op_arriving(&self) {
-        if let Some(Job::Copy { stop, .. }) = &self.job {
-            stop.store(true, Ordering::Relaxed);
+        if let Some(Job::Copy { cancel, .. }) = &self.job {
+            cancel.stop_and_release();
         }
     }
 
@@ -223,13 +251,17 @@ impl Purger {
             Ok(_) => return self.settle(Attempt::NoRoom, store),
             Err(error) => return self.settle(failed(&StoreError::Purge(error)), store),
         }
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
+        #[cfg(test)]
+        let cancel = (self.schedule.pauses.take()).map_or_else(Cancel::default, Cancel::pausing);
+        #[cfg(not(test))]
+        let cancel = Cancel::default();
+        let cancel = Arc::new(cancel);
+        let cancelling = Arc::clone(&cancel);
         match thread::Builder::new()
             .name("purge".to_owned())
-            .spawn(move || owed.copy(&stopping))
+            .spawn(move || owed.copy(&cancelling))
         {
-            Ok(helper) => self.job = Some(Job::Copy { stop, helper }),
+            Ok(helper) => self.job = Some(Job::Copy { cancel, helper }),
             Err(error) => {
                 tracing::error!(%error, "the purge's helper didn't start");
                 self.settle(Attempt::Failed, store);
@@ -307,6 +339,8 @@ impl StoreThread {
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
                 let mut purger = Purger::new(schedule, &store);
+                #[cfg(test)]
+                let mut gates: Vec<Gate> = Vec::new();
                 loop {
                     let op = match purger.timeout() {
                         None => ops.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -315,8 +349,17 @@ impl StoreThread {
                     match op {
                         Ok(op) => {
                             #[cfg(test)]
-                            if let Some(observed) = &purger.schedule.observed {
-                                observed.send(super::Seen::StoreOpStarted(op.clone())).ok();
+                            {
+                                if let Some(observed) = &purger.schedule.observed {
+                                    observed.send(super::Seen::StoreOpStarted(op.clone())).ok();
+                                }
+                                if let Some(added) = &purger.schedule.gates {
+                                    gates.extend(added.try_iter());
+                                }
+                                if let Some(at) = gates.iter().position(|gate| (gate.matches)(&op))
+                                {
+                                    gates.remove(at).release.recv().ok();
+                                }
                             }
                             serve_op(&mut store, &mut purger, &acks, op);
                         }
@@ -380,6 +423,11 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 }
             };
             answer(acks, Input::SceneKept { scene, ok });
+            purger.op_arrived(store);
+        }
+        StoreOp::Delete { thread } => {
+            purger.op_arriving();
+            answer(acks, delete(store, thread));
             purger.op_arrived(store);
         }
         StoreOp::BeginTurn {
@@ -460,6 +508,26 @@ fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
         epoch,
         request,
         reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+    }
+}
+
+/// Deletes a thread; an unavailable store hides nothing. A failure is logged by kind only.
+fn delete(store: &mut Store, thread: ThreadId) -> Input {
+    let deletion = match store.reconnect() {
+        Ok(()) => store.delete(thread),
+        Err(error) => Deletion {
+            outcome: Deleted::NotHidden,
+            last_run: None,
+            error: Some(error),
+        },
+    };
+    if let Some(error) = &deletion.error {
+        tracing::warn!(%error, outcome = ?deletion.outcome, "a delete didn't finish");
+    }
+    Input::Deleted {
+        thread,
+        outcome: deletion.outcome,
+        last_run: deletion.last_run,
     }
 }
 

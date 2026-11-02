@@ -1,8 +1,7 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use super::*;
-use crate::store::{EventKind, NewEvent, RunEnd, Swap, purge};
+use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Swap, purge};
 use crate::test_support::Scratch;
 
 fn add(store: &mut Store, title: &str, text: &str) -> ThreadId {
@@ -484,7 +483,7 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
     let live = add(&mut store, "live", "kept");
     store.begin_delete(doomed).expect("hide");
     store.finish_delete(doomed).expect("delete");
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Cancel::default());
     let copied = {
         let mut query = store
             .conn

@@ -14,4 +14,8 @@ conversation. Closing the threads panel doesn't erase anything or change that ne
 Esc stops moving work before clearing a drawing or dismissing the focused panel. Switching
 away hides the panel. The panel reloads after reconnecting to the background process.
 
-Thread deletion isn't available yet.
+To delete the open thread, choose **Delete** and confirm. It stays in the list, marked
+Deleting…, until it's removed, and your next message starts a new thread. The copy on disk is
+scrubbed shortly after. Capsula can't remove issues you already filed on GitHub, or what your
+model provider keeps under its own terms. If deleting fails, the thread stays and you can try
+again.

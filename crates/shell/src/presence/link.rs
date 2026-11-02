@@ -33,6 +33,7 @@ impl Presence {
                         state.run_state(thread);
                         cx.notify();
                     });
+                    self.sync_deletes(cx);
                     self.request_pages(cx);
                 }
                 LinkEvent::Data {
@@ -77,15 +78,30 @@ impl Presence {
                                     }
                                 }
                             }
+                            DataToShell::ScenesRemoved { scenes } => {
+                                bytes.saturating_add(self.runs.remove_scenes(&scenes))
+                            }
                             message => self.runs.apply_data(message, bytes),
                         };
                         self.grant(credit);
                     }
                 }
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
-                    Ok(effect) => self.effect(effect),
+                    Ok(effect) => {
+                        self.effect(effect);
+                        self.send_deletes(cx);
+                    }
                     Err(error) => self.end(&error),
                 },
+                LinkEvent::ThreadDeleted {
+                    thread,
+                    outcome,
+                    last_run,
+                } => self.thread_deleted(thread, outcome, last_run, cx),
+                LinkEvent::TurnRefused => {
+                    self.runs.refused();
+                    self.sync_deletes(cx);
+                }
             }
         }
         self.runs_changed(cx)
@@ -145,6 +161,7 @@ impl Presence {
             self.request_pages(cx);
         } else {
             self.runs.disconnected();
+            self.sync_deletes(cx);
             self.threads.update(cx, |state, cx| {
                 state.disconnected();
                 cx.notify();
