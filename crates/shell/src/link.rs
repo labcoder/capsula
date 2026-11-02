@@ -381,3 +381,128 @@ fn watch(connection: &Connection) {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use capsula_protocol::frame::{self, Pipe};
+    use capsula_protocol::message::{
+        ControlToBrain, ControlToShell, DataToShell, Phase, RunId, ThreadId,
+    };
+
+    use crate::platform::{PipeClient, test_pair};
+
+    /// Bytes of text each data sample streams.
+    const TOTAL: usize = 960_000;
+
+    fn pair(label: &str) -> (PipeClient, PipeClient) {
+        let name = format!(r"\\.\pipe\capsula-test-{}-{label}", std::process::id());
+        test_pair(&name).expect("a test pipe")
+    }
+
+    /// Plays the brain's control side: answers each Stop with `Interrupted`.
+    fn answer_stops(server: &PipeClient) {
+        while let Ok(Some(message)) = frame::read::<ControlToBrain>(&mut &*server, Pipe::Control) {
+            if let ControlToBrain::Stop { run, .. } = message {
+                let state = ControlToShell::RunState {
+                    run,
+                    thread: ThreadId(1),
+                    phase: Phase::Interrupted,
+                };
+                if frame::write(&mut &*server, &state, Pipe::Control).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Plays the brain's data side: streams [`TOTAL`] bytes in `chunk`-byte text frames, one
+    /// allocation per frame as the brain does, while another thread drains what the shell sends.
+    fn stream_text(server: PipeClient, chunk: usize) {
+        let server = std::sync::Arc::new(server);
+        let drain = std::sync::Arc::clone(&server);
+        let drainer = thread::spawn(move || {
+            let mut sink = [0; 4096];
+            while std::io::Read::read(&mut &*drain, &mut sink).is_ok_and(|n| n > 0) {}
+        });
+        let mut sent = 0;
+        while sent < TOTAL {
+            let delta = "x".repeat(chunk.min(TOTAL - sent));
+            sent += delta.len();
+            let text = DataToShell::AssistantText { run: RunId(1), delta };
+            if frame::write(&mut &*server, &text, Pipe::Data).is_err() {
+                break;
+            }
+        }
+        // The shell closes its end once it has read everything, which ends the drain.
+        let _ = drainer.join();
+    }
+
+    fn report(name: &str, samples: &mut [Duration]) {
+        samples.sort_unstable();
+        eprintln!(
+            "{name}: p50 {:?} p95 {:?} max {:?} (n={})",
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+            samples[samples.len() - 1],
+            samples.len()
+        );
+    }
+
+    /// Rez measurement for the pull request, not a check: run it with
+    /// `cargo test --release -p capsula-shell -- --ignored --nocapture measure_`. The shell side
+    /// here is the plain pipe client, read and written on one thread.
+    #[test]
+    #[ignore = "a measurement, run by hand on Rez"]
+    fn measure_control_round_trip_and_data_throughput() {
+        let (server, client) = pair("control");
+        let brain = thread::spawn(move || answer_stops(&server));
+        let mut stops = Vec::new();
+        for round in 0..200 {
+            let run = RunId(round);
+            let sent = Instant::now();
+            let stop = ControlToBrain::Stop { run, revealed: Vec::new() };
+            frame::write(&mut &client, &stop, Pipe::Control).expect("Stop sent");
+            loop {
+                let state = frame::read::<ControlToShell>(&mut &client, Pipe::Control);
+                if let Ok(Some(ControlToShell::RunState { run: got, .. })) = state
+                    && got == run
+                {
+                    break;
+                }
+            }
+            stops.push(sent.elapsed());
+        }
+        drop(client);
+        let _ = brain.join();
+        report("Stop -> Interrupted round trip", &mut stops);
+
+        for chunk in [240_000, 40] {
+            let mut streams = Vec::new();
+            for round in 0..20 {
+                let (server, client) = pair(&format!("data-{chunk}-{round}"));
+                let brain = thread::spawn(move || stream_text(server, chunk));
+                let mut started = None;
+                let mut bytes = 0;
+                while bytes < TOTAL {
+                    let Ok(Some(DataToShell::AssistantText { delta, .. })) =
+                        frame::read::<DataToShell>(&mut &client, Pipe::Data)
+                    else {
+                        panic!("text only");
+                    };
+                    started.get_or_insert_with(Instant::now);
+                    bytes += delta.len();
+                }
+                streams.push(started.expect("text arrived").elapsed());
+                drop(client);
+                let _ = brain.join();
+            }
+            report(
+                &format!("960 kB in {chunk}-byte frames, first frame to last"),
+                &mut streams,
+            );
+        }
+    }
+}

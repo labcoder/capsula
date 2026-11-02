@@ -13,6 +13,8 @@ pub(crate) use observer::{
     ProxyHandle, ProxyNote, client_origin, performance_frequency, window_handle,
 };
 pub(crate) use pipe::{PipeClient, session_id};
+#[cfg(test)]
+pub(crate) use pipe::test_pair;
 pub(crate) use presence::{
     Capture, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,
     PresenceSurface, activate_presence_window, configure_presence_window, cursor_position,

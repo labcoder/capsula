@@ -186,6 +186,44 @@ fn process_image(pid: u32) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_wide(&buffer)))
 }
 
+/// The server and client ends of a new pipe, for tests that play the brain. The server end uses
+/// the brain's 64 KiB buffers.
+///
+/// # Errors
+/// Fails when the pipe can't be created or opened.
+#[cfg(test)]
+pub(crate) fn test_pair(name: &str) -> io::Result<(PipeClient, PipeClient)> {
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+    let wide = HSTRING::from(name);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; no security attributes.
+    let server = unsafe {
+        CreateNamedPipeW(
+            &wide,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            None,
+        )
+    };
+    if server.is_invalid() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateNamedPipeW returned a valid handle that nothing else owns.
+    let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+    let client = PipeClient::open(name)?;
+    let server = PipeClient {
+        handle: server,
+        timeout_ms: AtomicU32::new(INFINITE),
+    };
+    Ok((server, client))
+}
+
 /// The Windows session this process runs in.
 ///
 /// # Errors
