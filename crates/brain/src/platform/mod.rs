@@ -31,8 +31,12 @@ fn data_dir_under(base: Option<OsString>) -> Option<PathBuf> {
     base.is_absolute().then(|| base.join(constants::DATA_DIR))
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
+    use std::path::PathBuf;
+
+    use capsula_protocol::constants::DATA_DIR;
+
     use super::data_dir_under;
 
     #[test]
@@ -41,8 +45,9 @@ mod tests {
             assert_eq!(data_dir_under(Some(bad.into())), None, "{bad:?}");
         }
         assert_eq!(data_dir_under(None), None);
-        let good = data_dir_under(Some(r"C:\Users\me\AppData\Local".into())).expect("absolute");
-        assert!(good.is_absolute());
-        assert!(good.ends_with(capsula_protocol::constants::DATA_DIR));
+        assert_eq!(
+            data_dir_under(Some(r"C:\Users\me\AppData\Local".into())),
+            Some(PathBuf::from(r"C:\Users\me\AppData\Local").join(DATA_DIR))
+        );
     }
 }
