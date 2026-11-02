@@ -98,10 +98,15 @@ How long the store thread spends on one delete, the thread's stand-in captures i
 
 | Store | p50 / p95 / worst | After a reader held the WAL | WAL held |
 |---|---|---|---|
-| 46 MiB | 7.4 / 9.8 / 10.2 ms | 21.9 / 22.2 / 24.3 ms | 13.4 MiB |
-| 232 MiB | 18.0 / 23.3 / 26.2 ms | 75.0 / 83.8 / 88.8 ms | 41.7 MiB |
-| 515 MiB | 25.9 / 35.2 / 36.1 ms | 86.4 / 88.0 / 97.0 ms | 36.0 MiB |
-| 984 MiB | 41.6 / 52.6 / 54.3 ms | 153.4 / 155.0 / 156.0 ms | 58.9 MiB |
+| 46 MiB | 7.4 / 7.7 / 9.7 ms | 8.6 / 11.4 / 12.3 ms | 52.5 MiB |
+| 232 MiB | 18.3 / 18.7 / 19.7 ms | 39.2 / 45.9 / 51.9 ms | 215.1 MiB |
+| 515 MiB | 26.3 / 29.1 / 29.4 ms | 28.0 / 28.1 / 29.5 ms | 187.2 MiB |
+| 984 MiB | 45.1 / 47.5 / 54.6 ms | 44.8 / 44.9 / 49.6 ms | 316.4 MiB |
+
+Commits don't checkpoint, so a commit after a reader let go no longer copies the WAL that reader
+held: before that change the right-hand column was 24, 89, 97 and 156 ms. The measurement opens
+the store alone, with no checkpoint helper, so nothing copies the WAL between samples and it grows
+larger than it would in the brain.
 
 The purge's copy is the one reader of the live store besides the store thread, so a write never
 commits under its snapshot: before any write the store thread stops the copy and waits until it
@@ -110,10 +115,18 @@ copy. At 984 MiB (`measure_delete_during_a_purge`, 5 samples with the copy in ea
 delete from enqueue to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during
 the snapshot, against 9.9 ms with nothing running, and the write right behind it 1.1 ms.
 
-shortcut: a reader outside the store thread that held a snapshot through a big write makes the
-next commit checkpoint that WAL, past the ~100 ms foreground bound (the right-hand column above,
-156 ms at 984 MiB). Only the purge reads that way today, and it lets go first; OSC-152 brings
-long-lived readers and the checkpoint lifecycle that bounds them.
+A write queued behind a page read no longer waits for it (`measure_page_reads`, release build on
+Rez, 30 rounds; medians, worst in brackets):
+
+| Store | Common-word search | BeginTurn behind it, store thread reading | On the page reader |
+|---|---|---|---|
+| 46 MiB | 62.2 (65.4) ms | 63.9 (69.7) ms | 0.9 (1.2) ms |
+| 232 MiB | 315.4 (355.0) ms | 332.4 (362.8) ms | 1.1 (16.5) ms |
+| 515 MiB | 62.3 (69.9) ms | 66.8 (82.9) ms | 0.9 (1.3) ms |
+| 984 MiB | 57.9 (60.5) ms | 65.4 (79.7) ms | 0.9 (1.2) ms |
+
+A write behind an events page went from 93–101 ms to 0.8 ms (worst 7.4 ms), against 0.8 ms with no
+read ahead of it.
 
 ```mermaid
 sequenceDiagram
@@ -192,8 +205,7 @@ by the drain on the helper, not by the swap on the store thread: with a tenth of
 deleted behind a reader, 19–123 MiB of WAL, the swap took 8–19 ms against 7–11 ms normally,
 because its TRUNCATE still frees a large WAL file. Without the drain it took 217–223 ms at
 984 MiB. Ops during the drain took at most 48 ms (`measure_swap_after_a_held_reader`). Without
-any purge, the first write after such a reader lets go copies that WAL itself through SQLite's
-automatic checkpoint (243 ms there). These are measurements on Rez's NVMe drive, not a bound for
+any purge, the checkpoint helper copies that WAL once the reader lets go; commits never do. These are measurements on Rez's NVMe drive, not a bound for
 slower disks. On a volume without hard links (FAT, some network shares) the move falls back to
 freeing the old file itself, so the swap grows with the store again.
 
