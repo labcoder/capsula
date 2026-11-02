@@ -1,7 +1,7 @@
 //! Killing the brain mid-run and starting it again, and reconnecting to a multi-chunk drawing
 //! while `Stop` and `ClearDrawing` arrive between its chunks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -149,8 +149,10 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     second.failures.extend(third.failures);
     let detail = format!(
         "{DRAWINGS} drawings of {MAX_STEPS} steps × {MAX_STEP_LABEL} B, {} chunks; Stop for run {} \
-         and ClearDrawing of the second scene after the first chunk. By the shell's rules \
-         (install at the last chunk only, never a cleared scene), the other 3 installed whole \
+         and ClearDrawing of the second scene after the first chunk. Scenes named 4 distinct \
+         whole drawings (committed = revision = {MAX_STEPS}). By the shell's rules (install at \
+         the last chunk only, with exactly the committed steps; a wrong revision spoils the scene, \
+         an overrun fails; never a cleared scene), the other 3 installed whole \
          with the fixture's steps and the cleared one never did, checked after every chunk; the \
          next connection named the same 3, unchanged, and installed them whole. One scene can't \
          reach 3 chunks today (32 KiB target, at most {MAX_STEPS} × {MAX_STEP_LABEL} B), so the \
@@ -164,13 +166,14 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     ))
 }
 
-/// The client's applied-message record, kept by the shell's rules: chunks stage per scene, a
-/// scene installs only at its last chunk, and a scene cleared locally or not named by `Scenes`
-/// never installs.
+/// The client's applied-message record, kept by the shell's rules (`drawing.rs`): a scene named by
+/// `Scenes` stages its chunks and installs only at its last one, with exactly its committed steps; a
+/// chunk at another revision spoils the scene for this connection, more steps than committed is an
+/// overrun, and a scene cleared locally or not named never installs.
 #[derive(Debug, Default)]
 struct Applied {
     named: Vec<SceneDescriptor>,
-    staged: BTreeMap<SceneId, Vec<Step>>,
+    pending: BTreeMap<SceneId, Vec<Step>>,
     installed: BTreeMap<SceneId, Vec<Step>>,
     cleared: Option<SceneId>,
     chunks: usize,
@@ -178,16 +181,35 @@ struct Applied {
 }
 
 impl Applied {
-    fn new(named: Vec<SceneDescriptor>) -> Self {
+    /// Starts a connection's record, checking `named` is `scenes` of the fixture's drawings.
+    fn new(named: Vec<SceneDescriptor>, scenes: usize) -> Self {
+        let mut failures = Vec::new();
+        let unique: BTreeSet<SceneId> = named.iter().map(|descriptor| descriptor.scene).collect();
+        if unique.len() != scenes || named.len() != scenes {
+            failures.push(format!("{named:?} isn't {scenes} distinct scenes"));
+        }
+        let whole = u32::try_from(MAX_STEPS).unwrap_or(u32::MAX);
+        for descriptor in &named {
+            if descriptor.committed != whole || descriptor.revision != whole {
+                failures.push(format!(
+                    "{descriptor:?} isn't a whole drawing of {MAX_STEPS} steps"
+                ));
+            }
+        }
         Self {
+            pending: unique
+                .into_iter()
+                .map(|scene| (scene, Vec::new()))
+                .collect(),
             named,
+            failures,
             ..Self::default()
         }
     }
 
     fn clear(&mut self, scene: SceneId) {
         self.cleared = Some(scene);
-        self.staged.remove(&scene);
+        self.pending.remove(&scene);
         self.installed.remove(&scene);
     }
 
@@ -206,21 +228,43 @@ impl Applied {
             return false;
         };
         self.chunks += 1;
-        let named = self
+        let descriptor = self
             .named
             .iter()
-            .any(|descriptor| descriptor.scene == *scene && descriptor.revision == *revision);
-        if named && self.cleared != Some(*scene) {
-            if self.installed.contains_key(scene) {
-                self.failures
-                    .push(format!("{scene:?} sent a chunk after its last"));
+            .find(|descriptor| descriptor.scene == *scene)
+            .copied();
+        match (self.pending.get_mut(scene), descriptor) {
+            (Some(staged), Some(descriptor)) => {
+                let committed = usize::try_from(descriptor.committed).unwrap_or(usize::MAX);
+                if *revision != descriptor.revision {
+                    self.pending.remove(scene);
+                    self.failures.push(format!(
+                        "{scene:?} sent revision {revision}, not {}: its snapshot is spoiled",
+                        descriptor.revision
+                    ));
+                } else if staged.len() + chunk.len() > committed {
+                    self.pending.remove(scene);
+                    self.failures
+                        .push(format!("{scene:?} overran its {committed} committed steps"));
+                } else {
+                    staged.extend(chunk.iter().cloned());
+                    if *last {
+                        let steps = self.pending.remove(scene).unwrap_or_default();
+                        if steps.len() == committed {
+                            self.installed.insert(*scene, steps);
+                        } else {
+                            self.failures.push(format!(
+                                "{scene:?} ended at {} of {committed} steps",
+                                steps.len()
+                            ));
+                        }
+                    }
+                }
             }
-            let staged = self.staged.entry(*scene).or_default();
-            staged.extend(chunk.iter().cloned());
-            if *last {
-                let steps = self.staged.remove(scene).unwrap_or_default();
-                self.installed.insert(*scene, steps);
-            }
+            _ if self.installed.contains_key(scene) => self
+                .failures
+                .push(format!("{scene:?} sent a chunk after its last")),
+            _ => {}
         }
         if let Some(cleared) = self.cleared
             && self.installed.contains_key(&cleared)
@@ -240,17 +284,22 @@ impl Applied {
                 .push(format!("{when}: {installed:?} installed, not {scenes:?}"));
         }
         for (scene, steps) in &self.installed {
-            if steps.len() != MAX_STEPS || steps.iter().any(|step| step.label != label) {
+            if steps.len() != MAX_STEPS {
                 self.failures.push(format!(
                     "{when}: {scene:?} installed {} steps, not the fixture's {MAX_STEPS}",
                     steps.len()
                 ));
             }
+            if steps.iter().any(|step| step.label != label) {
+                self.failures.push(format!(
+                    "{when}: {scene:?} installed steps whose label isn't the fixture's"
+                ));
+            }
         }
-        if !self.staged.is_empty() {
+        if !self.pending.is_empty() {
             self.failures.push(format!(
                 "{when}: {:?} stopped short of their last chunk",
-                self.staged.keys().collect::<Vec<_>>()
+                self.pending.keys().collect::<Vec<_>>()
             ));
         }
     }
@@ -266,7 +315,7 @@ impl Applied {
 /// Takes `Scenes` and one chunk, sends `Stop` for `last` and clears the second scene, then
 /// takes the rest.
 fn recover(client: &mut Client, last: RunId, label: &str) -> Result<Applied> {
-    let mut applied = Applied::new(scenes(client)?);
+    let mut applied = Applied::new(scenes(client)?, DRAWINGS);
     if applied.named.len() != DRAWINGS {
         bail!(
             "{} scenes named, not the {DRAWINGS} drawn",
@@ -307,7 +356,7 @@ fn recover(client: &mut Client, last: RunId, label: &str) -> Result<Applied> {
 
 /// Takes `Scenes` and every chunk it names, expecting `kept` unchanged.
 fn settle(client: &mut Client, kept: &[SceneDescriptor], label: &str) -> Result<Applied> {
-    let mut applied = Applied::new(scenes(client)?);
+    let mut applied = Applied::new(scenes(client)?, kept.len());
     if applied.named != kept {
         applied.failures.push(format!(
             "the next connection named {:?}, not {kept:?}",
@@ -340,11 +389,14 @@ mod tests {
     use super::Applied;
     use crate::slice2::client::Frame;
 
+    /// The fixture's whole drawing: every one of its steps committed.
+    const WHOLE: u32 = 64;
+
     fn chunk(scene: u64, steps: usize, label: &str) -> Frame {
         Frame::Data(
             DataToShell::SceneSnapshot {
                 scene: SceneId(scene),
-                revision: 1,
+                revision: WHOLE,
                 chunk: vec![
                     Step {
                         label: label.to_owned(),
@@ -364,22 +416,30 @@ mod tests {
         frame
     }
 
-    fn named(scenes: &[u64]) -> Applied {
+    fn at(mut frame: Frame, at: u32) -> Frame {
+        if let Frame::Data(DataToShell::SceneSnapshot { revision, .. }, _) = &mut frame {
+            *revision = at;
+        }
+        frame
+    }
+
+    fn described(scenes: &[u64], committed: u32) -> Applied {
         Applied::new(
             scenes
                 .iter()
                 .map(|scene| SceneDescriptor {
                     scene: SceneId(*scene),
-                    revision: 1,
-                    committed: 64,
+                    revision: WHOLE,
+                    committed,
                 })
                 .collect(),
+            scenes.len(),
         )
     }
 
     #[test]
     fn a_scene_installs_only_whole_at_its_last_chunk() {
-        let mut applied = named(&[1, 2]);
+        let mut applied = described(&[1, 2], WHOLE);
         assert!(applied.apply(&chunk(1, MAX_STEPS - 1, "s")));
         assert!(applied.apply(&last(chunk(1, 1, "s"))));
         assert!(applied.apply(&chunk(2, 3, "s")));
@@ -391,8 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cleared_scene_never_installs_and_wrong_steps_fail() {
-        let mut applied = named(&[1, 2]);
+    fn a_cleared_scene_never_installs_and_wrong_labels_fail() {
+        let mut applied = described(&[1, 2], WHOLE);
         applied.clear(SceneId(2));
         applied.apply(&last(chunk(2, MAX_STEPS, "s")));
         applied.apply(&last(chunk(1, MAX_STEPS, "other")));
@@ -400,9 +460,45 @@ mod tests {
         applied.expect(&[SceneId(1)], "s", "now");
         assert_eq!(
             applied.failures,
-            ["now: SceneId(1) installed 64 steps, not the fixture's 64"]
+            ["now: SceneId(1) installed steps whose label isn't the fixture's"]
         );
         assert!(!applied.installed.contains_key(&SceneId(2)), "cleared");
         assert!(!applied.installed.contains_key(&SceneId(3)), "never named");
+    }
+
+    #[test]
+    fn a_whole_payload_over_a_short_commit_overruns_and_never_installs() {
+        let mut applied = described(&[1], 1);
+        applied.apply(&last(chunk(1, MAX_STEPS, "s")));
+        applied.expect(&[SceneId(1)], "s", "now");
+        assert!(applied.installed.is_empty(), "the shell restores nothing");
+        assert_eq!(
+            applied.failures,
+            [
+                "SceneDescriptor { scene: SceneId(1), revision: 64, committed: 1 } isn't a whole \
+                 drawing of 64 steps",
+                "SceneId(1) overran its 1 committed steps",
+                "now: [] installed, not [SceneId(1)]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wrong_revision_spoils_the_scene_for_the_connection() {
+        let mut applied = described(&[1], WHOLE);
+        applied.apply(&at(chunk(1, 1, "s"), WHOLE - 1));
+        applied.apply(&last(chunk(1, MAX_STEPS, "s")));
+        applied.expect(&[SceneId(1)], "s", "now");
+        assert!(
+            applied.installed.is_empty(),
+            "the later chunk can't install"
+        );
+        assert_eq!(
+            applied.failures,
+            [
+                "SceneId(1) sent revision 63, not 64: its snapshot is spoiled",
+                "now: [] installed, not [SceneId(1)]",
+            ]
+        );
     }
 }
