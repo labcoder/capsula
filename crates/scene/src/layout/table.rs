@@ -64,7 +64,11 @@ fn count(value: usize) -> f32 {
 fn fit(widths: &mut [f32], textual: &[bool], available: f32, font: f32) {
     let mut excess = (widths.iter().sum::<f32>() - available).max(0.0);
     let minimum = (available / count(widths.len().max(1))).min(PAD_X * 2.0 + font * 2.0);
+    let tolerance = 0.01;
     for text_only in [true, false] {
+        if excess <= tolerance {
+            break;
+        }
         for _ in 0..widths.len() {
             let Some(widest) = widths
                 .iter()
@@ -90,16 +94,21 @@ fn fit(widths: &mut [f32], textual: &[bool], available: f32, font: f32) {
             let reduction = (excess / count(tied)).min(widest - next);
             for (i, width) in widths.iter_mut().enumerate() {
                 if *width == widest && (!text_only || textual[i]) {
-                    *width -= reduction;
+                    *width = if reduction == widest - next {
+                        next
+                    } else {
+                        *width - reduction
+                    };
                 }
             }
             excess = (excess - reduction * count(tied)).max(0.0);
-            if excess <= f32::EPSILON {
+            if excess <= tolerance {
                 break;
             }
         }
     }
-    if excess > 0.0 {
+    if excess > tolerance {
+        // Keep rounding residuals inside the available width after the bounded passes.
         let total = widths.iter().sum::<f32>();
         for width in widths {
             *width *= available / total;
@@ -546,6 +555,16 @@ fn place_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_width_fitting_preserves_numeric_width_while_text_can_shrink() {
+        let mut widths = [1164.6945, 321.97293, 118.40325, 100.91873];
+        fit(&mut widths, &[true, true, true, false], 388.67493, 14.0);
+        assert_eq!(
+            widths[3].to_bits(),
+            100.91873_f32.to_bits(),
+            "text columns must absorb the excess before the numeric column shrinks"
+        );
+    }
     #[test]
     fn numbers_are_grouped_rounded_and_trimmed() {
         for (value, expected) in [
