@@ -1,7 +1,9 @@
 //! Helpers shared by the brain's tests.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use capsula_protocol::constants;
 
@@ -35,8 +37,19 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.0) {
-            eprintln!("scratch folder left behind: {error}");
+        // A dropped brain's store thread closes SQLite on its own, so the files can stay open
+        // for a moment after the test ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(error) if error.kind() == ErrorKind::NotFound => return,
+                Err(error) if Instant::now() >= deadline => {
+                    eprintln!("scratch folder left behind: {error}");
+                    return;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
         }
     }
 }

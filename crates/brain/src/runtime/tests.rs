@@ -210,6 +210,8 @@ async fn stop_is_answered_while_a_data_write_is_blocked() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
+    // The stall timer would also end the run, as view_stalled, if the Stop were ignored.
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "stop")]);
 }
 
 /// Proves Stop works over real pipes while the shell reads no data; the blocked write itself is
