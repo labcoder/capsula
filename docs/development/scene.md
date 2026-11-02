@@ -2,7 +2,7 @@
 
 `kumochi-scene` is the shared, synchronous drawing format. It depends on neither
 GPUI nor tokio. The brain parses model JSON; the shell decodes the same validated
-types from postcard. There is no renderer or scene-state caller yet.
+types from postcard. There is no renderer or scene-state caller yet; preparation is synchronous and host-independent.
 
 ## Records
 
@@ -94,7 +94,8 @@ declared in the same step, independent of put order. `start.after` must name an
 earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
 or wrongly typed parents/endpoints, properties the target does not own, invalid
 track values/times, and removals that orphan a surviving dependant. Only `draw`
-has kind-specific track ownership checks so far; the motion layer defines the
+has kind-specific track ownership checks so far; a `set` or `anim` targeting an object
+removed by that same step fails as `UnknownRef`. The motion layer defines the
 remaining property rules. Mermaid expansion must run before admission; it remains
 unsupported until A8.
 
@@ -129,7 +130,8 @@ not this page. This is an admission measurement, not a frame or end-to-end laten
 ## Stop and recovery
 
 `StopCut.activated` is the revision activated **through**, not a count of kept
-steps. Zero returns `Cleared` without resetting revision. Stop first undoes all
+steps. Zero returns `Cleared` without resetting revision only before anything was
+shown; afterward it is rejected, and a user clear uses `clear`. Stop first undoes all
 unactivated steps' removals, then drops their objects and retains exactly the
 revealed handles in the activated prefix. A retained object whose dependency was
 discarded becomes detached. This can leave a node, row or series without its parent,
@@ -191,17 +193,19 @@ and the remaining property-ownership rules.
 The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
 repetitions. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
-0.25 logical-pixel tolerance after conservative composed scale bounds. A5 must use
+0.25 logical-pixel tolerance after conservative composed scale bounds. Preparation uses
 the same walker and subdivision function when producing vertices. Procedural curves,
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
-segment reservations in `path.rs`; A5/A6 must keep generated output within them.
+segment reservations in `path.rs`; generated output must stay within them.
 
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
+Composed scales must be normal positive floats and at most 64, even when layout has
+not measured the object's dimensions yet. Preparation must still check measured bounds.
 These envelopes can reject near-cap combinations whose extrema never coincide.
 Detaching an object preserves its inherited bounds so later admissions cannot forget
-its path cost or transform basis. This is budget metadata, not placed geometry: A5
-still prepares stepwise through the ordered log and validates measured layout output.
+its path cost or transform basis. This is budget metadata, not placed geometry: layout
+still prepares stepwise through the ordered log and validates measured output.
 Prepared residency remains the preparation layer's separate limit.
 
 | Resource | Per object/scene | Global across visible scenes |
@@ -227,6 +231,98 @@ Prepared residency remains the preparation layer's separate limit.
 24,000 triangles per scene/globally, 48 curved segments, and BSP limits of
 4,000,000 classifications, depth 64 and twice the input triangle count in
 fragments. No 3D vocabulary or geometry is implemented here.
+
+## Preparation
+
+`geom` provides logical-pixel points and rectangles, including finite, capped-corner
+checks. The structs themselves are plain geometry, not a validated input boundary.
+`theme` resolves typed palette tokens and RGB colors using the owned rendering spike's
+palette. Host foreground/accent overrides do not change fixed named colors.
+
+`display` defines immutable prepared primitives and handle-tagged items. Polygon and
+polyline vertices use shared slices; sampled frame items share the prepared primitives
+instead of cloning text or path storage. `TextMeasure` supplies the same shaping sizes
+used by the host painter. It is fallible and must return deterministic finite,
+nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
+in deterministic order and rejects failed or invalid measurements atomically. No
+painter or motion sampler is implemented yet.
+
+`layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
+cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
+It returns rectangles in input order and has no scene, clock, activation or rendering
+dependency. The initial batch is every node in the first step adding nodes to a
+diagram. Later additions use free slots without moving existing node-local rectangles.
+Inline defaults to downwards flow at the host's narrow width (360 logical pixels by
+default); overlay defaults to rightwards flow. Explicit diagram direction and bounds
+win. Inline `begin.size` overrides host dimensions when present.
+
+Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
+`geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
+tests retain their names (`chain_ranks_left_to_right_and_survives_cycles` and
+`siblings_stack_across_the_flow`). Invalid edge indices and self-loops are still ignored
+by this pure algorithm; admission rejects invalid references before preparation.
+Deliberate differences are typed colors instead of string parsing and a fallible layout
+result for excess node/edge counts, unsafe measured dimensions or generated coordinates
+outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
+and those failure boundaries have additional tests.
+Outside that pure port, node sizing is smaller, the rank gap is fixed, edges use
+quadratic routing, and wide initial batches are not scaled to fit; A8's visual gate
+will decide these differences from S1.
+
+### Inputs, publication and cuts
+
+Each `Committed` carries an opaque `Preparation` ticket. Its sizing facts contain
+only the composed scales of new paths and paths whose segment count changed;
+there is no cloned scene, budget snapshot or pending-charge input. Commit captures
+these facts before preparation can lag behind a later ancestor track. That later
+step retessellates affected paths without changing an older prepared result.
+
+`PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
+host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
+nodes and edges, then validates measured/generated bounds and conservative motion
+envelopes against ±20,000 before publishing. It checks cancellation before publication.
+Tables/charts remain unsupported until A6. `PreparedStep` contains owned display changes,
+activation-time removals, generated glides and an immutable `after` layout. Nothing
+mutates an earlier picture. The host calls `PreparedStep::validate` against the current
+scene and predecessor immediately before accepting the result.
+
+A diagram gets at most one generated position glide per step, targeting its last
+resting position plus the shift. A7 supplies the sampled start at activation and
+compiles at most two keys. An explicit same-step position track wins; nodes without
+a diagram parent never receive a group glide. All shifted output remains coordinate-
+checked, including motion extrema rather than only the final resting rectangle.
+
+The live host retains the last activated `after` layout. On Stop it discards queued
+preparations and calls `LayoutState::cut` on that retained state, using SceneState's
+authoritative survivor handles, parents and references. A detached survivor absorbs
+its ancestor's static and final activated transforms, including generated glides and
+opacity. No per-revision layout undo deltas or persisted geometry are needed.
+A cut fences both old results and old predecessor states, even when a result's
+objects survive the cut.
+
+`layout::recover` shares semantic replay's ordered traversal. Every original step
+and effective cut is semantically validated, but layout skips any step dropped by
+its first following cut. Thus a deterministically failing dropped preparation cannot
+block recovery. A failing kept preparation returns its revision in `RecoveryError`;
+the host applies the ordinary failure cut before that revision. B4 owns the total
+recovery time budget.
+
+`resident_bytes` estimates new primitive/vertex payload plus the full layout index
+for every result, including entries for unchanged objects. Older shared geometry is
+excluded from that result's new-payload charge. The index estimate does not include
+all referenced heap storage, and summing result estimates is not an exact retained
+or recovered-scene total. Preparation rejects a single estimate over 64 MiB; B4
+must complete retained/queued accounting and enforce the global residency cap,
+independently of logical admission.
+
+The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
+to 600 existing text objects, using fixed deterministic measurement rather than GPUI.
+Five warm-ups precede 64 timed preparations; fixture construction, admission, input
+assembly and result destruction are outside the timer. Build the release `layout`
+test below normal priority, then run its executable at normal priority under the
+exclusive Rez lock after 30 seconds without cargo/rustc. Main had no preparation
+pipeline, so there is no before speedup baseline. Results are not painter, frame,
+real-font or end-to-end timings.
 
 ## Incremental drawing input
 

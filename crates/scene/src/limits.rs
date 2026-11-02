@@ -22,6 +22,8 @@ pub const MAX_GLOBAL_LIVE_OBJECTS: usize = 1_500;
 pub const MAX_VISIBLE_SCENES: usize = 4;
 /// Maximum absolute composed canvas coordinate.
 pub const MAX_COORD: f32 = 20_000.0;
+/// Maximum composed scale, including objects whose dimensions are measured later.
+pub const MAX_COMPOSED_SCALE: f32 = 64.0;
 /// Maximum nodes in one diagram.
 pub const MAX_DIAGRAM_NODES: usize = 48;
 /// Maximum edges in one diagram.

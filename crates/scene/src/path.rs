@@ -19,6 +19,7 @@ pub(crate) struct PathWork {
     pub lines: usize,
     pub curvature: Arc<[f32]>,
     pub extent: f32,
+    pub composed_scale: f32,
 }
 impl PathWork {
     pub(crate) fn segments(&self, scale: f32) -> Result<usize, ErrorCode> {
@@ -37,7 +38,7 @@ pub(crate) fn subdivisions(curvature: f32, scale: f32) -> Result<u16, ErrorCode>
     let deviation = f64::from(curvature) * f64::from(scale);
     let mut pieces = 1_u16;
     while deviation > TOLERANCE * f64::from(pieces).powi(2) {
-        if usize::from(pieces) == MAX_PATH_SEGMENTS {
+        if usize::from(pieces) >= MAX_PATH_SEGMENTS {
             return Err(ErrorCode::OverBudget(Budget::PathSegments));
         }
         pieces *= 2;
@@ -137,10 +138,11 @@ pub(crate) fn walk(
         lines,
         curvature: curvature.into(),
         extent,
+        composed_scale: 1.0,
     })
 }
 
-fn second_difference(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+pub(crate) fn second_difference(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
     (a[0] - 2.0 * b[0] + c[0]).hypot(a[1] - 2.0 * b[1] + c[1])
 }
 
@@ -187,17 +189,19 @@ impl Tokens<'_> {
     fn number(&mut self) -> Result<f32, ErrorCode> {
         self.peek();
         let start = self.position;
+        let mut decimal = false;
+        let mut exponent = false;
         while let Some(&byte) = self.source.get(self.position) {
             let sign =
                 self.position == start || matches!(self.source[self.position - 1], b'e' | b'E');
-            if byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'e' | b'E')
-                || (sign && matches!(byte, b'+' | b'-'))
-            {
-                self.position += 1;
-            } else {
-                break;
+            match byte {
+                b'.' if !decimal && !exponent => decimal = true,
+                b'e' | b'E' if !exponent => exponent = true,
+                b'+' | b'-' if sign => {}
+                b'0'..=b'9' => {}
+                _ => break,
             }
+            self.position += 1;
         }
         let value = std::str::from_utf8(&self.source[start..self.position])
             .ok()
@@ -228,6 +232,16 @@ mod tests {
             Some(&Segment::Quad([[30.0, 10.0], [35.0, 5.0]]))
         );
         assert_eq!(work.segments(1.0).expect("bounded"), 9);
+        let mut compact = Vec::new();
+        walk("M.5.5 L1.5-2.5", |_, segment| {
+            compact.push(segment);
+            Ok(())
+        })
+        .expect("compact SVG numbers");
+        assert_eq!(
+            compact,
+            vec![Segment::Move([0.5, 0.5]), Segment::Line([1.5, -2.5])]
+        );
     }
 
     #[test]

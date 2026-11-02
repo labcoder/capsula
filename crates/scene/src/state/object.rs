@@ -5,7 +5,7 @@ use crate::{
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Line,
     Path,
     Shape,
@@ -27,7 +27,7 @@ impl Kind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Object {
+pub(crate) struct Object {
     pub work: super::work::Work,
     pub handle: Handle,
     pub kind: Kind,
@@ -35,17 +35,17 @@ pub(super) struct Object {
     pub references: Vec<WireId>,
 }
 
-pub(super) struct Visual<'a> {
+pub(crate) struct Visual<'a> {
     pub id: &'a WireId,
     pub kind: Kind,
     pub name: &'static str,
-    parent: Option<&'a WireId>,
-    opacity: Option<Finite>,
-    delay: Option<Ms>,
-    dur: Option<Ms>,
+    pub parent: Option<&'a WireId>,
+    pub opacity: Option<Finite>,
+    pub delay: Option<Ms>,
+    pub dur: Option<Ms>,
 }
 
-pub(super) fn visual(op: &Op) -> Option<Visual<'_>> {
+pub(crate) fn visual(op: &Op) -> Option<Visual<'_>> {
     macro_rules! visual {
         ($r:expr, $kind:ident, $name:literal) => {
             Some(Visual {
@@ -141,6 +141,13 @@ fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
     refs
 }
 
+pub(crate) fn reference_ids(op: &Op) -> Vec<WireId> {
+    references(op)
+        .into_iter()
+        .map(|reference| reference.id.clone())
+        .collect()
+}
+
 pub(super) fn object(
     v: &Visual<'_>,
     op: &Op,
@@ -153,7 +160,7 @@ pub(super) fn object(
         handle,
         kind: v.kind,
         parent: v.parent.cloned(),
-        references: references(op).into_iter().map(|r| r.id.clone()).collect(),
+        references: reference_ids(op),
     })
 }
 
@@ -166,9 +173,10 @@ pub(super) fn validate_op(
     index: usize,
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     if let Op::Anim(anim) = op {
-        return validate_anim(anim, index, step, objects);
+        return validate_anim(anim, index, step, objects, removed);
     }
     let Some(v) = visual(op) else {
         return Err(StepError::in_step(
@@ -286,6 +294,7 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
 pub(super) fn validate_changes(
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
@@ -297,6 +306,13 @@ pub(super) fn validate_changes(
             ));
         };
         validate_change(change, target.kind, &prefix, step)?;
+        if removed.contains(&change.target) {
+            return Err(StepError::in_step(
+                &step.id,
+                prefix.field("target"),
+                ErrorCode::UnknownRef,
+            ));
+        }
     }
     Ok(())
 }
@@ -337,10 +353,11 @@ fn validate_anim(
     index: usize,
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     let prefix = path(index, "anim");
     let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
-    if step.remove.contains(&anim.target) {
+    if removed.contains(&anim.target) {
         return Err(fail("target", ErrorCode::UnknownRef));
     }
     let Some(target) = objects.get(&anim.target) else {
@@ -442,13 +459,13 @@ pub(super) fn acyclic(step: &Step, objects: &BTreeMap<WireId, Object>) -> Result
 pub(super) fn removals(
     step: &Step,
     objects: &mut BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<Vec<(WireId, Object)>, StepError> {
-    let mut removed = HashSet::with_capacity(step.remove.len());
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
     for (index, id) in step.remove.iter().enumerate() {
         let field = FieldPath::default().field("remove").index(index);
-        if !removed.insert(id) {
-            return Err(StepError::in_step(&step.id, field, ErrorCode::DuplicateKey));
-        }
         if !objects.contains_key(id) {
             return Err(StepError::in_step(&step.id, field, ErrorCode::UnknownRef));
         }

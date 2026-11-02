@@ -59,7 +59,7 @@ fn texts(from: usize, count: usize) -> Vec<Value> {
         .map(|n| json!({"text":{"id":format!("t{n}"),"at":[0,0],"text":""}}))
         .collect()
 }
-fn rejected(state: &SceneState, global: &GlobalBudget, value: Value, code: ErrorCode) {
+fn rejected(state: &SceneState, global: &GlobalBudget, value: Value, code: ErrorCode) -> StepError {
     let before = (
         state.revision(),
         state.usage(),
@@ -78,6 +78,7 @@ fn rejected(state: &SceneState, global: &GlobalBudget, value: Value, code: Error
         before,
         "failed admission consumes nothing"
     );
+    error
 }
 fn cut(revision: u32, handles: Vec<Handle>) -> StopCut {
     StopCut {
@@ -755,4 +756,198 @@ fn detaching_a_scaled_path_preserves_its_future_charge_and_coordinate_basis() {
     let replay =
         SceneState::replay(header("detached"), state.recovery_log()).expect("frozen basis replays");
     assert_eq!(replay.usage(), state.usage());
+}
+
+#[test]
+fn composed_scale_is_bounded_before_layout_and_rejects_subnormal_products() {
+    let mut state = scene("scale_cap");
+    let mut budget = GlobalBudget::default();
+    put(&mut state, &mut budget, texts(0, 1));
+    put(
+        &mut state,
+        &mut budget,
+        vec![json!({"anim":{"target":"t0","track":"scale","keys":[[0,64]]}})],
+    );
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"too_large","put":[{"anim":{"target":"t0","track":"scale","keys":[[0,65]]}}]}),
+        ErrorCode::TransformOverflow,
+    );
+    assert_eq!(error.path.as_str(), "put");
+    let empty = scene("subnormal");
+    let error = rejected(
+        &empty,
+        &GlobalBudget::default(),
+        json!({"id":"tiny","put":[
+            {"diagram":{"id":"a"}},{"diagram":{"id":"b","in":"a"}},
+            {"anim":{"target":"a","track":"scale","keys":[[0,1e-20]]}},
+            {"anim":{"target":"b","track":"scale","keys":[[0,1e-20]]}}
+        ]}),
+        ErrorCode::TransformOverflow,
+    );
+    assert_eq!(error.path.as_str(), "put");
+}
+
+#[test]
+fn line_waypoints_and_composed_coordinates_accept_their_exact_boundaries() {
+    for (kind, segments) in [("line", 511), ("arrow", 514)] {
+        let mut state = scene(kind);
+        let mut budget = GlobalBudget::default();
+        put(
+            &mut state,
+            &mut budget,
+            vec![json!({kind:{"id":"l","from":[0,0],"to":[1,1],"via":vec![[0,0];510]}})],
+        );
+        assert_eq!(state.usage().segments, segments);
+        let error = rejected(
+            &state,
+            &budget,
+            json!({"id":"excess","put":[{kind:{"id":"extra","from":[0,0],"to":[1,1],"via":vec![[0,0];511]}}]}),
+            ErrorCode::OverBudget(Budget::PathPoints),
+        );
+        assert_eq!(error.path.as_str(), format!("put[0].{kind}.via"));
+    }
+    let mut state = scene("coordinate");
+    let mut budget = GlobalBudget::default();
+    put(
+        &mut state,
+        &mut budget,
+        vec![json!({"text":{"id":"edge","at":[20000,-20000],"text":""}})],
+    );
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"outside","put":[{"anim":{"target":"edge","track":"x","keys":[[0,1]]}}]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put");
+}
+
+#[test]
+fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked() {
+    let mut state = scene("reservations");
+    let mut budget = GlobalBudget::default();
+    put(
+        &mut state,
+        &mut budget,
+        vec![
+            json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}}),
+            json!({"diagram":{"id":"d"}}),
+            json!({"node":{"id":"a","in":"d","label":""}}),
+            json!({"node":{"id":"b","in":"d","label":""}}),
+            json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}}),
+        ],
+    );
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (3, 6));
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"long","put":[{"anim":{"target":"t","track":"opacity","delay":1,"repeat":1,"keys":[[0,0],[30000,1]]}}]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put[0].anim.repeat");
+    let foreign = GlobalBudget::default();
+    let error = rejected(
+        &state,
+        &foreign,
+        json!({"id":"foreign","put":texts(1,1)}),
+        ErrorCode::BudgetContext,
+    );
+    assert_eq!(error.path.as_str(), "");
+    let mut cleared = scene("cleared");
+    let mut isolated = GlobalBudget::default();
+    put(&mut cleared, &mut isolated, texts(0, 1));
+    cleared
+        .stop(&cut(0, vec![]), &mut isolated)
+        .expect("never shown");
+    let sources = vec![(cleared.header(), cleared.recovery_log()); 5];
+    let error =
+        SceneState::replay_all(&sources).expect_err("batch length checked even for cleared scenes");
+    assert_eq!(error.code, ErrorCode::OverBudget(Budget::VisibleScenes));
+    assert_eq!(error.path.as_str(), "");
+}
+
+#[test]
+fn four_scenes_jointly_fill_every_global_work_cap() {
+    let mut budget = GlobalBudget::default();
+    let mut scenes: Vec<_> = (0..4).map(|n| scene(&format!("global{n}"))).collect();
+    for state in &mut scenes {
+        for n in 0..3 {
+            put(state, &mut budget, table_ops(&format!("a{n}"), 40));
+        }
+        put(state, &mut budget, table_ops("last", 5));
+        put(state, &mut budget, chart_ops("c0", 8, 500));
+        put(state, &mut budget, chart_ops("c1", 2, 500));
+        put(
+            state,
+            &mut budget,
+            vec![json!({"path":{"id":"p","d":long_path(6,494)}})],
+        );
+        put(state, &mut budget, texts(0, 233));
+        assert_eq!(
+            (
+                state.usage().objects,
+                state.usage().cells,
+                state.usage().marks,
+                state.usage().segments
+            ),
+            (375, 1000, 5000, 5000)
+        );
+    }
+    let usage = budget.usage();
+    assert_eq!(
+        (
+            usage.scenes,
+            usage.objects,
+            usage.cells,
+            usage.marks,
+            usage.segments
+        ),
+        (4, 1500, 4000, 20000, 20000)
+    );
+    rejected(
+        &scenes[0],
+        &budget,
+        json!({"id":"one_more_object","put":texts(233,1)}),
+        ErrorCode::OverBudget(Budget::LiveObjects),
+    );
+    apply(
+        &mut scenes[0],
+        &mut budget,
+        json!({"id":"free_slot","remove":["t0"]}),
+    );
+    let index = scenes[0].revision() - 1;
+    scenes[0]
+        .retire(index, &mut budget)
+        .expect("one slot released");
+    for (op, code) in [
+        (
+            json!({"row":{"id":"extra","in":"lasttable","cells":[]}}),
+            Budget::TableCells,
+        ),
+        (
+            json!({"series":{"id":"extra","in":"c1chart","data":[1]}}),
+            Budget::ChartMarks,
+        ),
+        (
+            json!({"path":{"id":"extra","d":"M0 0 L1 0"}}),
+            Budget::PathSegments,
+        ),
+    ] {
+        rejected(
+            &scenes[0],
+            &budget,
+            json!({"id":"probe","put":[op]}),
+            ErrorCode::OverBudget(code),
+        );
+    }
+    let sources: Vec<_> = scenes
+        .iter()
+        .map(|state| (state.header(), state.recovery_log()))
+        .collect();
+    let (restored, installed) =
+        SceneState::replay_all(&sources).expect("four cap-filled scenes recover");
+    assert_eq!(installed.usage(), budget.usage());
+    assert_eq!(restored.len(), 4);
 }
