@@ -1594,6 +1594,86 @@ fn measure_swap_after_a_held_reader() {
     }
 }
 
+/// Rez measurement for the pull request, not a check: how long the store thread spends on one
+/// `Store::delete` of a thread, its captures included, by store size. Normally, and right after
+/// a reader that held a snapshot while a twentieth of the store's threads were deleted lets go,
+/// so the delete may have to checkpoint that WAL itself. Reports p50, p95 and the worst sample
+/// against the ~100 ms foreground bound. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_big_delete`; set
+/// `MEASURE_ONLY` to one store's name to run just that one.
+#[test]
+#[ignore = "a measurement, run by hand on Rez"]
+fn measure_big_delete() {
+    use std::time::{Duration, Instant};
+    const SAMPLES: usize = 20;
+    const HELD: usize = 5;
+    let only = std::env::var("MEASURE_ONLY").ok();
+    let timed = |store: &mut Store, thread: usize| {
+        let started = Instant::now();
+        store
+            .conn
+            .execute(
+                "DELETE FROM media WHERE thread = ?1",
+                [i64::try_from(thread).expect("small")],
+            )
+            .expect("media gone");
+        let deletion = store.delete(ThreadId(u64::try_from(thread).expect("small")));
+        let took = started.elapsed();
+        assert_eq!(deletion.outcome, Deleted::Removed);
+        took
+    };
+    let report = |name: &str, size: u64, how: &str, mut samples: Vec<Duration>| {
+        samples.sort();
+        let at = |percent: usize| samples[(samples.len() - 1) * percent / 100];
+        eprintln!(
+            "{name} ({} MiB) {how}: {} deletes, p50 {:.1?}, p95 {:.1?}, worst {:.1?}",
+            size >> 20,
+            samples.len(),
+            at(50),
+            at(95),
+            samples[samples.len() - 1],
+        );
+    };
+    for (name, shape) in MEASURED_STORES {
+        if only.as_deref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let scratch = Scratch::new("measure-delete");
+        let mut store = measured_store(&scratch, shape);
+        let size = std::fs::metadata(scratch.db()).expect("size").len();
+        let threads = shape.0;
+        let normal = (1..=SAMPLES)
+            .map(|thread| timed(&mut store, thread))
+            .collect();
+        report(name, size, "normally", normal);
+        let fill = threads / 20;
+        let mut next = SAMPLES + 1;
+        let mut held = Vec::new();
+        let mut wal_mib = 0.0_f64;
+        for _ in 0..HELD {
+            let reader = Connection::open(scratch.db()).expect("reader");
+            reader
+                .execute_batch("BEGIN; SELECT count(*) FROM events;")
+                .expect("snapshot");
+            for thread in next..next + fill {
+                delete_measured(&mut store, thread);
+            }
+            next += fill;
+            let wal = std::fs::metadata(beside(&scratch.db(), "-wal")).map_or(0, |wal| wal.len());
+            wal_mib = wal_mib.max(f64::from(u32::try_from(wal >> 10).expect("small")) / 1024.0);
+            drop(reader);
+            held.push(timed(&mut store, next));
+            next += 1;
+        }
+        report(
+            name,
+            size,
+            &format!("after a reader held a WAL of up to {wal_mib:.1} MiB"),
+            held,
+        );
+    }
+}
+
 /// Rez measurement for the pull request, not a check: the purge's phases by store size, with and
 /// without media blobs the size of slice 6's captures (architecture v1 §6.1: two capture images
 /// total about 121 KB), and how long store ops take while each phase runs. Five purges a store;
