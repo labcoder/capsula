@@ -44,6 +44,7 @@ fn spawn_with_room(
         free_space,
         attempts: Some(heard),
         observed: None,
+        gates: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
     (thread, attempts)

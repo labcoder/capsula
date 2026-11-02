@@ -42,6 +42,24 @@ pub(crate) struct Schedule {
     /// Hears every op as it starts.
     #[cfg(test)]
     pub(crate) observed: Option<UnboundedSender<super::Seen>>,
+    /// Gates that each hold one op before it runs.
+    #[cfg(test)]
+    pub(crate) gates: Option<mpsc::Receiver<Gate>>,
+}
+
+/// Holds the next op `matches` accepts, after it's reported started and before it runs, until
+/// the test sends on `release`, so a test can take a lock or reorder pipes first.
+#[cfg(test)]
+pub(crate) struct Gate {
+    pub(crate) matches: fn(&StoreOp) -> bool,
+    pub(crate) release: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gate").finish_non_exhaustive()
+    }
 }
 
 impl Default for Schedule {
@@ -55,6 +73,8 @@ impl Default for Schedule {
             attempts: None,
             #[cfg(test)]
             observed: None,
+            #[cfg(test)]
+            gates: None,
         }
     }
 }
@@ -307,6 +327,8 @@ impl StoreThread {
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
                 let mut purger = Purger::new(schedule, &store);
+                #[cfg(test)]
+                let mut gates: Vec<Gate> = Vec::new();
                 loop {
                     let op = match purger.timeout() {
                         None => ops.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -315,8 +337,17 @@ impl StoreThread {
                     match op {
                         Ok(op) => {
                             #[cfg(test)]
-                            if let Some(observed) = &purger.schedule.observed {
-                                observed.send(super::Seen::StoreOpStarted(op.clone())).ok();
+                            {
+                                if let Some(observed) = &purger.schedule.observed {
+                                    observed.send(super::Seen::StoreOpStarted(op.clone())).ok();
+                                }
+                                if let Some(added) = &purger.schedule.gates {
+                                    gates.extend(added.try_iter());
+                                }
+                                if let Some(at) = gates.iter().position(|gate| (gate.matches)(&op))
+                                {
+                                    gates.remove(at).release.recv().ok();
+                                }
                             }
                             serve_op(&mut store, &mut purger, &acks, op);
                         }

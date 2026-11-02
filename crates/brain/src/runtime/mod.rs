@@ -116,6 +116,8 @@ pub(crate) struct Brain {
     observer: mpsc::UnboundedSender<Seen>,
     #[cfg(test)]
     seen: Option<mpsc::UnboundedReceiver<Seen>>,
+    #[cfg(test)]
+    gates: std::sync::mpsc::Sender<store_thread::Gate>,
 }
 
 /// What a test can wait for instead of sleeping.
@@ -130,6 +132,8 @@ pub(crate) enum Seen {
     ControlApplied,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
+    /// Another pipe ended first, and the control reader's grace began.
+    Grace,
 }
 
 impl Brain {
@@ -148,9 +152,13 @@ impl Brain {
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         #[cfg(test)]
         let (observer, seen) = mpsc::unbounded_channel();
+        #[cfg(test)]
+        let (gates, gates_heard) = std::sync::mpsc::channel();
         let schedule = store_thread::Schedule {
             #[cfg(test)]
             observed: Some(observer.clone()),
+            #[cfg(test)]
+            gates: Some(gates_heard),
             ..store_thread::Schedule::default()
         };
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
@@ -172,7 +180,25 @@ impl Brain {
             observer,
             #[cfg(test)]
             seen: Some(seen),
+            #[cfg(test)]
+            gates,
         })
+    }
+
+    /// Holds the next store op `matches` accepts before it runs, until the returned sender
+    /// sends or drops.
+    #[cfg(test)]
+    pub(crate) fn hold_store(
+        &self,
+        matches: fn(&crate::coordinator::StoreOp) -> bool,
+    ) -> std::sync::mpsc::Sender<()> {
+        let (release, held) = std::sync::mpsc::channel();
+        let gate = store_thread::Gate {
+            matches,
+            release: held,
+        };
+        self.gates.send(gate).expect("the store thread runs");
+        release
     }
 
     /// What the brain reports to a test, from here on.
@@ -359,6 +385,8 @@ impl Brain {
             }
         };
         if reading && quit.get().is_none() {
+            #[cfg(test)]
+            self.observer.send(Seen::Grace).ok();
             let grace = tokio::time::sleep(QUIT_GRACE);
             tokio::pin!(grace);
             loop {
