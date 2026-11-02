@@ -41,6 +41,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         next: Some(ThreadCursor {
             id: ThreadId(3),
             updated_ms: 9,
+            rank_bits: 0,
         }),
     };
     let page = DataToShell::Page {

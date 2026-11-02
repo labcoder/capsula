@@ -17,12 +17,15 @@ impl Store {
     /// # Errors
     /// Fails with a content-free error when reading or encoding fails.
     pub fn read_page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+        let mut cursors = Vec::new();
         let mut reply = match page {
             PageOf::Threads { search, after } => {
-                let (threads, next) = match search {
-                    Some(words) => self.search_page_after(&words, after, MAX_PAGE_ROWS)?,
-                    None => self.thread_page(after, MAX_PAGE_ROWS)?,
+                let rows = match search {
+                    Some(words) => self.search_rows(&words, after, MAX_PAGE_ROWS)?,
+                    None => self.thread_rows(after, MAX_PAGE_ROWS)?,
                 };
+                let (threads, next);
+                (threads, cursors, next) = paged(rows, MAX_PAGE_ROWS);
                 DataToShell::ThreadList {
                     request,
                     threads,
@@ -43,7 +46,8 @@ impl Store {
             match &mut reply {
                 DataToShell::ThreadList { threads, next, .. } if threads.len() > 1 => {
                     threads.pop();
-                    *next = threads.last().map(cursor);
+                    cursors.pop();
+                    *next = cursors.last().copied();
                 }
                 DataToShell::Page { events, before, .. } if events.len() > 1 => {
                     events.pop();
@@ -69,6 +73,16 @@ impl Store {
         limit: usize,
     ) -> Result<(Vec<ThreadRow>, Option<ThreadCursor>), StoreError> {
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
+        let (rows, _, next) = paged(self.thread_rows(after, limit)?, limit);
+        Ok((rows, next))
+    }
+
+    /// Up to `limit + 1` live threads after `after`, each with its own continuation key.
+    fn thread_rows(
+        &self,
+        after: Option<ThreadCursor>,
+        limit: usize,
+    ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
         let mut query = self
             .conn
             .prepare(
@@ -84,13 +98,18 @@ impl Store {
                     after.map(|key| bounded_id(key.id.0)),
                     i64::try_from(limit + 1).map_err(|_| StoreError::Read)?
                 ],
-                thread_row,
+                |row| {
+                    let thread = thread_row(row)?;
+                    let cursor = ThreadCursor {
+                        updated_ms: thread.updated_ms,
+                        id: thread.id,
+                        rank_bits: 0,
+                    };
+                    Ok((thread, cursor))
+                },
             )
             .map_err(|_| StoreError::Read)?;
-        let rows = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StoreError::Read)?;
-        Ok(thread_result(rows, limit))
+        rows.collect::<Result<_, _>>().map_err(|_| StoreError::Read)
     }
 
     /// Phrase matches with titles, best rank first and descending id for equal ranks.
@@ -112,15 +131,32 @@ impl Store {
         after: Option<ThreadCursor>,
         limit: usize,
     ) -> Result<(Vec<ThreadRow>, Option<ThreadCursor>), StoreError> {
+        let limit = limit.clamp(1, MAX_PAGE_ROWS);
+        let (rows, _, next) = paged(self.search_rows(words, after, limit)?, limit);
+        Ok((rows, next))
+    }
+
+    /// Up to `limit + 1` matches after `after`, each with its own continuation key. The key
+    /// carries its thread's rank, so a continuation still works once that thread stops matching.
+    /// A rank that isn't finite, read or sent, fails the page.
+    fn search_rows(
+        &self,
+        words: &str,
+        after: Option<ThreadCursor>,
+        limit: usize,
+    ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
         // shortcut: search ranks are live; snapshot them when writes must preserve result order.
         if words.contains('\0') {
-            return Ok((Vec::new(), None));
+            return Ok(Vec::new());
+        }
+        let rank = after.map(|key| f64::from_bits(key.rank_bits));
+        if rank.is_some_and(|rank| !rank.is_finite()) {
+            return Err(StoreError::Read);
         }
         // shortcut: every page scores every matching event before taking its rows, ahead of the
         // next write: about 65 ms at 20k matching events and 335 ms at 100k on Rez; OSC-152 moves
         // page reads to their own read-only connection.
         let phrase = format!("\"{}\"", words.replace('"', "\"\""));
-        let limit = limit.clamp(1, MAX_PAGE_ROWS);
         let mut query = self
             .conn
             .prepare(
@@ -130,10 +166,9 @@ impl Store {
                  JOIN threads t ON t.id = e.thread AND t.state = 'live'
                  WHERE events_fts MATCH ?1 GROUP BY t.id
              )
-             SELECT id, title, updated_ms FROM matches
-             WHERE ?2 IS NULL OR score > (SELECT score FROM matches WHERE id = ?2)
-                OR (score = (SELECT score FROM matches WHERE id = ?2) AND id < ?2)
-             ORDER BY score, id DESC LIMIT ?3",
+             SELECT id, title, updated_ms, score FROM matches
+             WHERE ?2 IS NULL OR score > ?3 OR (score = ?3 AND id < ?2)
+             ORDER BY score, id DESC LIMIT ?4",
             )
             .map_err(|_| StoreError::Read)?;
         let rows = query
@@ -141,15 +176,25 @@ impl Store {
                 params![
                     phrase,
                     after.map(|key| bounded_id(key.id.0)),
+                    rank,
                     i64::try_from(limit + 1).map_err(|_| StoreError::Read)?
                 ],
-                thread_row,
+                |row| {
+                    let thread = thread_row(row)?;
+                    let rank: f64 = row.get(3)?;
+                    if !rank.is_finite() {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    let cursor = ThreadCursor {
+                        updated_ms: thread.updated_ms,
+                        id: thread.id,
+                        rank_bits: rank.to_bits(),
+                    };
+                    Ok((thread, cursor))
+                },
             )
             .map_err(|_| StoreError::Read)?;
-        let rows = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StoreError::Read)?;
-        Ok(thread_result(rows, limit))
+        rows.collect::<Result<_, _>>().map_err(|_| StoreError::Read)
     }
 
     /// A live thread's events, newest first, continuing before the oldest returned id.
@@ -173,7 +218,7 @@ impl Store {
                 "SELECT e.id, e.run, e.kind, coalesce(e.text, '') FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
-             AND e.kind NOT IN ('scene_begin', 'scene_cleared')
+             AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'revealed')
              ORDER BY e.id DESC LIMIT ?3",
             )
             .map_err(|_| StoreError::Read)?;
@@ -190,7 +235,6 @@ impl Store {
                         "user" => PageEventKind::User,
                         "assistant_text" => PageEventKind::AssistantText,
                         "scene_step" => PageEventKind::SceneStep,
-                        "revealed" => PageEventKind::Revealed,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
                     Ok(PageEvent {
@@ -229,18 +273,25 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     })
 }
 
-fn cursor(row: &ThreadRow) -> ThreadCursor {
-    ThreadCursor {
-        updated_ms: row.updated_ms,
-        id: row.id,
-    }
-}
-
-fn thread_result(mut rows: Vec<ThreadRow>, limit: usize) -> (Vec<ThreadRow>, Option<ThreadCursor>) {
+/// The first `limit` rows, their keys, and the continuation when more were read.
+fn paged(
+    mut rows: Vec<(ThreadRow, ThreadCursor)>,
+    limit: usize,
+) -> (Vec<ThreadRow>, Vec<ThreadCursor>, Option<ThreadCursor>) {
     let more = rows.len() > limit;
     rows.truncate(limit);
-    let next = more.then(|| cursor(rows.last().expect("a full page has a last row")));
-    (rows, next)
+    let (rows, cursors): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+    let next = if more { cursors.last().copied() } else { None };
+    (rows, cursors, next)
+}
+
+#[cfg(test)]
+impl Store {
+    /// The ids of the first page of live threads matching `words`.
+    pub(crate) fn search_ids(&self, words: &str) -> Result<Vec<ThreadId>, StoreError> {
+        let (rows, _) = self.search_page(words, MAX_PAGE_ROWS)?;
+        Ok(rows.iter().map(|row| row.id).collect())
+    }
 }
 
 fn fits(reply: &DataToShell) -> Result<bool, StoreError> {

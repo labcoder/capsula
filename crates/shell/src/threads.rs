@@ -135,6 +135,7 @@ impl Threads {
                 after: Some(ThreadCursor {
                     updated_ms: i64::MAX,
                     id: ThreadId(u64::MAX),
+                    rank_bits: u64::MAX,
                 }),
             },
         };

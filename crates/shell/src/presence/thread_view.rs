@@ -319,7 +319,6 @@ impl ThreadsView {
                 PageEventKind::User => Text::ThreadUser,
                 PageEventKind::AssistantText => Text::ThreadAssistant,
                 PageEventKind::SceneStep => Text::ThreadStep,
-                PageEventKind::Revealed => Text::ThreadRevealed,
             };
             div()
                 .id(("event", event.id.0))

@@ -53,6 +53,7 @@ fn reply(request: u32, ids: &[u64], next: Option<u64>) -> DataToShell {
         next: next.map(|id| ThreadCursor {
             updated_ms: i64::try_from(id).expect("small"),
             id: ThreadId(id),
+            rank_bits: 0,
         }),
     }
 }
