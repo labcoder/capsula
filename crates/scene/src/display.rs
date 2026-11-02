@@ -1,7 +1,7 @@
 //! Immutable prepared primitives; painters never read records or perform layout.
 use crate::{
     Handle, Text,
-    geom::{Rect, Vec2},
+    geom::{Affine, Rect, Vec2},
     record::{Align, Rgb},
 };
 use std::sync::Arc;
@@ -17,7 +17,41 @@ pub struct TextStyle {
 /// Host text shaping, supplied during preparation rather than painting.
 pub trait TextMeasure {
     /// Returns width and height, wrapping at `max_width` when present.
-    fn measure(&mut self, text: &str, style: TextStyle, max_width: Option<f32>) -> [f32; 2];
+    /// # Errors
+    /// Returns `MeasureError` when the host cannot shape this text.
+    fn measure(
+        &mut self,
+        text: &str,
+        style: TextStyle,
+        max_width: Option<f32>,
+    ) -> Result<[f32; 2], MeasureError>;
+}
+/// Content-free text-shaping failure; host diagnostics must not contain drawing text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("scene.TextMeasure")]
+pub struct MeasureError;
+/// A resolved RGB color and its independent primitive opacity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Paint {
+    /// RGB channels.
+    pub rgb: Rgb,
+    /// Opacity before object and sampled opacity are applied.
+    pub opacity: f32,
+}
+impl From<Rgb> for Paint {
+    fn from(rgb: Rgb) -> Self {
+        Self { rgb, opacity: 1.0 }
+    }
+}
+impl Paint {
+    /// Multiplies this paint's opacity without changing its RGB channels.
+    #[must_use]
+    pub fn faded(self, opacity: f32) -> Self {
+        Self {
+            opacity: self.opacity * opacity,
+            ..self
+        }
+    }
 }
 /// A resolved renderer-independent primitive.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,16 +63,16 @@ pub enum Prim {
         /// Corner radius.
         radius: f32,
         /// Optional fill.
-        fill: Option<Rgb>,
+        fill: Option<Paint>,
         /// Optional border color and width.
-        border: Option<(Rgb, f32)>,
+        border: Option<(Paint, f32)>,
     },
     /// Filled polygon with immutable vertex storage.
     Fill {
         /// Polygon vertices.
         points: Arc<[Vec2]>,
         /// Fill color.
-        color: Rgb,
+        color: Paint,
     },
     /// Stroked polyline with immutable vertex storage.
     Line {
@@ -47,7 +81,7 @@ pub enum Prim {
         /// Whether the last vertex connects to the first.
         closed: bool,
         /// Stroke color.
-        color: Rgb,
+        color: Paint,
         /// Stroke width.
         width: f32,
         /// Whether to paint a dashed stroke.
@@ -62,7 +96,7 @@ pub enum Prim {
         /// Shaping parameters.
         style: TextStyle,
         /// Foreground color.
-        color: Rgb,
+        color: Paint,
         /// Optional wrapping width.
         max_width: Option<f32>,
         /// Alignment within the wrapping width.
@@ -80,6 +114,8 @@ pub struct Item {
     pub primitives: Arc<[Prim]>,
     /// Prepared bounds before sampled motion.
     pub bounds: Rect,
+    /// Static transform inherited from detached ancestors.
+    pub transform: Affine,
     /// Base opacity.
     pub opacity: f32,
 }

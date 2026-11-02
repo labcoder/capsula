@@ -19,6 +19,7 @@ pub(crate) struct PathWork {
     pub lines: usize,
     pub curvature: Arc<[f32]>,
     pub extent: f32,
+    pub composed_scale: f32,
 }
 impl PathWork {
     pub(crate) fn segments(&self, scale: f32) -> Result<usize, ErrorCode> {
@@ -137,6 +138,7 @@ pub(crate) fn walk(
         lines,
         curvature: curvature.into(),
         extent,
+        composed_scale: 1.0,
     })
 }
 

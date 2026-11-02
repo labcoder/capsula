@@ -18,10 +18,7 @@ pub(super) fn validate(
     objects: &mut BTreeMap<WireId, Object>,
 ) -> Result<(), StepError> {
     let fail = |code| StepError::in_step(&step.id, FieldPath::default().field("put"), code);
-    let mut memo = BTreeMap::new();
-    for id in objects.keys() {
-        graph(id, objects, &mut memo, 0).map_err(&fail)?;
-    }
+    let memo = graph_metrics(objects).map_err(&fail)?;
     let columns: BTreeMap<_, _> = objects
         .iter()
         .filter(|(_, o)| o.kind == Kind::Table)
@@ -55,12 +52,13 @@ pub(super) fn validate(
             object.work.usage.cells = cols;
             object.work.usage.segments = cols + 2;
         }
-        if let Some(path) = &object.work.path {
+        if let Some(path) = &mut object.work.path {
             let scale = memo
                 .get(&object.handle)
                 .expect("every object has graph metrics")
                 .scale;
             object.work.usage.segments = path.segments(scale).map_err(&fail)?;
+            path.composed_scale = scale;
         }
         if object.kind == Kind::Series
             && let Some(chart) = object.work.chart
@@ -90,6 +88,18 @@ struct Graph {
     min_scale: f32,
     translation: f32,
     rotated: bool,
+}
+fn graph_metrics(
+    objects: &BTreeMap<WireId, Object>,
+) -> Result<BTreeMap<crate::Handle, Graph>, ErrorCode> {
+    let mut memo = BTreeMap::new();
+    for id in objects.keys() {
+        graph(id, objects, &mut memo, 0)?;
+    }
+    Ok(memo)
+}
+pub(crate) fn validate_transforms(objects: &BTreeMap<WireId, Object>) -> Result<(), ErrorCode> {
+    graph_metrics(objects).map(|_| ())
 }
 fn graph(
     id: &WireId,

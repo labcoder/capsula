@@ -5,7 +5,7 @@ use crate::{
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Line,
     Path,
     Shape,
@@ -27,7 +27,7 @@ impl Kind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Object {
+pub(crate) struct Object {
     pub work: super::work::Work,
     pub handle: Handle,
     pub kind: Kind,
@@ -35,17 +35,17 @@ pub(super) struct Object {
     pub references: Vec<WireId>,
 }
 
-pub(super) struct Visual<'a> {
+pub(crate) struct Visual<'a> {
     pub id: &'a WireId,
     pub kind: Kind,
     pub name: &'static str,
-    parent: Option<&'a WireId>,
-    opacity: Option<Finite>,
-    delay: Option<Ms>,
-    dur: Option<Ms>,
+    pub parent: Option<&'a WireId>,
+    pub opacity: Option<Finite>,
+    pub delay: Option<Ms>,
+    pub dur: Option<Ms>,
 }
 
-pub(super) fn visual(op: &Op) -> Option<Visual<'_>> {
+pub(crate) fn visual(op: &Op) -> Option<Visual<'_>> {
     macro_rules! visual {
         ($r:expr, $kind:ident, $name:literal) => {
             Some(Visual {
@@ -141,6 +141,13 @@ fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
     refs
 }
 
+pub(crate) fn reference_ids(op: &Op) -> Vec<WireId> {
+    references(op)
+        .into_iter()
+        .map(|reference| reference.id.clone())
+        .collect()
+}
+
 pub(super) fn object(
     v: &Visual<'_>,
     op: &Op,
@@ -153,7 +160,7 @@ pub(super) fn object(
         handle,
         kind: v.kind,
         parent: v.parent.cloned(),
-        references: references(op).into_iter().map(|r| r.id.clone()).collect(),
+        references: reference_ids(op),
     })
 }
 
