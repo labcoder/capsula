@@ -910,14 +910,16 @@ fn a_write_waits_for_a_copy_reading_the_live_store_but_not_for_its_cleanup() {
 #[test]
 fn a_write_never_waits_for_the_helper_behind_a_drain() {
     let scratch = Scratch::new("drain-beside-helper");
-    let paused = armed_and_paused(&scratch, &[Point::Helper]);
+    let paused = armed_and_paused(&scratch, &[Point::Source, Point::Helper]);
     reached(&paused, 0);
     let helper = paused.side.hold_helper();
     release(&paused, 0);
+    reached(&paused, 1);
     assert!(paused.thread.send(StoreOp::Delete {
         thread: ThreadId(2)
     }));
     assert_removed(&paused, 2);
+    release(&paused, 1);
     drop(helper);
     then_purged(paused);
 }

@@ -443,6 +443,10 @@ impl StoreThread {
                             serve_op(&mut store, &mut purger, &acks, op);
                             exit.barrier.complete();
                             exit.checkpoints.raise();
+                            #[cfg(test)]
+                            if let Some(observed) = &purger.schedule.observed {
+                                observed.send(super::Seen::CheckpointOwed).ok();
+                            }
                         }
                         Err(RecvTimeoutError::Timeout) => purger.tick(&mut store),
                         Err(RecvTimeoutError::Disconnected) => break,

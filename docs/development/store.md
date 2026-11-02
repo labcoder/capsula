@@ -109,8 +109,9 @@ held: before that change the right-hand column was 24, 89, 97 and 156 ms. The me
 the store alone, with no checkpoint helper, so nothing copies the WAL between samples and it grows
 larger than it would in the brain.
 
-The purge's copy is the one reader of the live store besides the store thread, so a write never
-commits under its snapshot: before any write the store thread stops the copy and waits until it
+Besides the store thread, the live store has two readers: the page reader, whose one-statement
+reads a write never waits for, and the purge's copy. A write never commits under the copy's
+snapshot: before any write the store thread stops the copy and waits until it
 has let go of the live store, and nothing more of the copy. Letting go means two things: its drain
 has finished its checkpoint on the helper's connection, which stays open for the helper, and its
 snapshot's own read-only connection has closed. The copy takes the helper's connection before it

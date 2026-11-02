@@ -96,7 +96,18 @@ impl Side {
 
     /// Takes the helper's connection, waiting while a checkpoint runs on it.
     pub(crate) fn hold_helper(&self) -> MutexGuard<'_, Option<Connection>> {
-        lock(&self.helper)
+        self.hold_helper_after(|| ())
+    }
+
+    /// [`Side::hold_helper`], calling `waiting` first when it has to wait.
+    pub(crate) fn hold_helper_after(
+        &self,
+        waiting: impl FnOnce(),
+    ) -> MutexGuard<'_, Option<Connection>> {
+        try_lock(&self.helper).unwrap_or_else(|| {
+            waiting();
+            lock(&self.helper)
+        })
     }
 
     /// Closes both connections for good, as the store's thread ends; a read waiting on a swap

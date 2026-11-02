@@ -101,7 +101,7 @@ impl Cancel {
 pub(crate) enum Point {
     /// Before it takes the live store.
     Source,
-    /// Before it takes the helper's connection for its drain.
+    /// Waiting for the helper's connection, which a checkpoint holds, for its drain.
     Helper,
     /// In the drain, before its checkpoint.
     Drain,
@@ -322,10 +322,11 @@ impl Owed {
                 let db = &leftovers.db;
                 #[cfg(test)]
                 cancel.pauses.reach(Point::Source);
-                #[cfg(test)]
-                cancel.pauses.reach(Point::Helper);
                 // Before the source, so a write waiting on the source never waits for the helper.
-                let helper = self.side.hold_helper();
+                let helper = self.side.hold_helper_after(|| {
+                    #[cfg(test)]
+                    cancel.pauses.reach(Point::Helper);
+                });
                 let source = cancel.source.lock().unwrap_or_else(PoisonError::into_inner);
                 let read = drain(&self.side, helper, cancel)? && snapshot(db, cancel)?;
                 drop(source);

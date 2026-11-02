@@ -579,3 +579,38 @@ fn page_failures_never_expose_sqlite_content() {
         assert!(std::error::Error::source(&error).is_none());
     }
 }
+
+#[test]
+fn text_past_the_budget_is_capped_in_bytes_and_keeps_its_nuls() {
+    let scratch = Scratch::new("pages-nul");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let thread = add(&mut store, "title", "x\0y");
+    let text = format!("a\0b{}", "é".repeat(20_000));
+    store
+        .begin_turn(thread, None, RunId(2), &text)
+        .expect("huge event");
+    let reply = events(&store, thread, None);
+    assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
+    let DataToShell::Page {
+        events: rows,
+        before,
+        ..
+    } = reply
+    else {
+        panic!("events")
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].cut);
+    assert!(
+        rows[0].text.starts_with("a\0bé"),
+        "the NUL didn't end the text"
+    );
+    assert!(text.starts_with(&rows[0].text));
+    assert_eq!(before, Some(EventId(2)));
+    let DataToShell::Page { events: rows, .. } = events(&store, thread, before) else {
+        panic!("events")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "x\0y");
+    assert!(!rows[0].cut);
+}

@@ -134,6 +134,8 @@ pub(crate) enum Seen {
     SwapWaiting,
     /// The page reader waits for an op queued before its read.
     ReadWaiting,
+    /// The store thread asked the checkpoint helper for a checkpoint after an op.
+    CheckpointOwed,
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     /// A page reply landed while the data queue was full and waits for room.
