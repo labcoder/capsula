@@ -152,7 +152,8 @@ stateDiagram-v2
 - **`Scenes` is authoritative.** A shown scene it doesn't name goes at once. A named one stays
   until its snapshot installs and then is replaced, even at the same revision.
 - **Install.** A scene's `last` chunk installs it only on the connection that described it, with
-  no clear since, the descriptor's revision, and exactly `committed` steps. Installed steps show
+  no clear since, the descriptor's revision on every chunk, and exactly `committed` steps. A
+  chunk at any other revision spoils its scene's snapshot, so none of it installs. Installed steps show
   as already activated, and installing sends nothing.
 - **Esc during recovery.** While awaiting, Esc drops the held chunks, granting their credit, and
   keeps a clear intent through disconnects and Retry: the next complete `Scenes` clears every id

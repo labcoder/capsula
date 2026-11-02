@@ -140,16 +140,29 @@ impl Drawing {
     /// Makes room for `scene` among the newest four, evicting the oldest. False when it's older
     /// than all four.
     fn admit(&mut self, scene: SceneId) -> bool {
-        let mut members: Vec<SceneId> = self.shown.keys().copied().collect();
-        if let Recovery::Receiving { pending } = &self.recovery {
-            members.extend(pending.keys());
-        }
-        members.sort_unstable();
-        members.dedup();
-        if members.contains(&scene) || members.len() < MAX_VISIBLE_SCENES {
+        let pending = match &self.recovery {
+            Recovery::Receiving { pending } => Some(pending),
+            Recovery::Offline | Recovery::Awaiting { .. } => None,
+        };
+        if self.shown.contains_key(&scene) || pending.is_some_and(|p| p.contains_key(&scene)) {
             return true;
         }
-        let oldest = members[0];
+        let recovering = pending.map_or(0, |pending| {
+            let only = pending.keys().filter(|id| !self.shown.contains_key(id));
+            only.count()
+        });
+        if self.shown.len() + recovering < MAX_VISIBLE_SCENES {
+            return true;
+        }
+        let first_pending = pending.and_then(|pending| pending.keys().next());
+        let oldest = *self
+            .shown
+            .keys()
+            .next()
+            .into_iter()
+            .chain(first_pending)
+            .min()
+            .expect("four scenes are known");
         if scene < oldest {
             return false;
         }
@@ -277,6 +290,11 @@ impl Drawing {
         let Some(scene) = pending.get_mut(&chunk.scene) else {
             return Ok(chunk.bytes);
         };
+        if chunk.revision != scene.revision {
+            // Not the snapshot its descriptor named, so none of it installs.
+            pending.remove(&chunk.scene);
+            return Ok(chunk.bytes);
+        }
         let committed = usize::try_from(scene.committed).unwrap_or(usize::MAX);
         if scene.steps.len() + chunk.steps.len() > committed {
             return Err(Broken::Overrun(scene.committed));
@@ -286,7 +304,6 @@ impl Drawing {
             return Ok(chunk.bytes);
         }
         if let Some(done) = pending.remove(&chunk.scene)
-            && done.revision == chunk.revision
             && done.steps.len() == committed
         {
             let steps = (0..).zip(done.steps).collect();
