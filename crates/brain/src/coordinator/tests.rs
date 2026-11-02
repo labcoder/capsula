@@ -727,7 +727,7 @@ fn a_deadline_after_done_leaves_the_finished_run_alone() {
     );
     assert_eq!(
         core.handle(Input::RunStored { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Done)]
+        vec![state(R, T, Phase::Done), run_end(R)]
     );
 }
 
@@ -756,6 +756,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Interrupted),
+            run_end(R),
             state(b, T, Phase::Thinking),
             Effect::ArmDeadline {
                 run: b,
@@ -770,7 +771,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             revealed: Vec::new(),
         })
         .expect("current"),
-        vec![state(b, T, Phase::Interrupted)]
+        vec![state(b, T, Phase::Interrupted), run_end(b)]
     );
     assert_eq!(core.handle(Input::TurnStored { run: b }), Err(Stale));
     assert_eq!(
