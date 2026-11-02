@@ -15,7 +15,8 @@ path = "src/main.rs"
 capsula-protocol.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+# hooks: the progress handler that lets a purge give way to queued work.
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks"] }
 serde.workspace = true
 serde_json = "1"
 subtle = "2"
@@ -38,6 +39,4 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [dev-dependencies]
-# hooks: a progress handler lets a test queue work from inside a running purge step.
-rusqlite = { version = "0.41", default-features = false, features = ["hooks"] }
 tokio = { version = "1", features = ["test-util"] }

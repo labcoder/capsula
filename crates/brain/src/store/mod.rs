@@ -201,7 +201,9 @@ pub enum Purge {
 }
 
 /// Counts work queued for the store, so a purge gives way to it: a step checks the count before
-/// it starts, and queuing work interrupts a step already running. Clones share the count.
+/// it starts, a progress handler stops a running statement while the count is above zero, and
+/// queuing work interrupts a step too, which also reaches a checkpoint the handler can't.
+/// Clones share the count.
 #[derive(Clone)]
 pub struct Queue(Arc<QueueShared>);
 
@@ -242,6 +244,12 @@ impl Queue {
         state.queued = state.queued.saturating_sub(1);
     }
 
+    /// Whether a running purge step should stop: work is waiting for it.
+    fn waiting_on_purge(&self) -> bool {
+        let state = self.lock();
+        state.purging && state.queued > 0
+    }
+
     fn lock(&self) -> MutexGuard<'_, QueueState> {
         // The state is two plain fields, valid whatever a panicking holder left.
         self.0.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -259,7 +267,7 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
-    /// The purge is still owed after recovery tried it, because a reader blocked its checkpoint.
+    /// A deletion's purge is owed; the store's thread runs it once its queue is quiet.
     pub purge_pending: bool,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
@@ -317,6 +325,9 @@ impl Store {
             state: Mutex::default(),
             interrupt: conn.get_interrupt_handle(),
         }));
+        let waiting = queue.clone();
+        // Every 1,000 VM steps [guess]: often enough to stop a VACUUM within a millisecond or so.
+        conn.progress_handler(1000, Some(move || waiting.waiting_on_purge()))?;
         Ok(Self {
             conn,
             queue,
@@ -335,8 +346,9 @@ impl Store {
         self.purge_pending
     }
 
-    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`,
-    /// deletions left pending finish, and an owed purge runs. Run it once at start, before any new run.
+    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
+    /// deletions left pending finish. An owed purge is only reported: the store's thread runs
+    /// it, where it gives way to turns, so a slow or failing purge can't hold up the start. Run it once at start, before any new run.
     ///
     /// shortcut: two sessions of the same user run two brains on one store, and the second's
     /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
@@ -368,8 +380,7 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
-        // Nothing is queued yet, so the purge can only finish or meet a reader.
-        recovered.purge_pending = self.purge()? != Purge::Done;
+        recovered.purge_pending = self.purge_pending;
         Ok(recovered)
     }
 
@@ -575,7 +586,8 @@ impl Store {
 
     /// Deletion's second transaction: removes every row of a thread [`Store::begin_delete`]
     /// fenced and records the purge as owed, then runs the purge. Returns
-    /// [`Deletion::Pending`] when the purge gave way to queued work or met a reader.
+    /// [`Deletion::Pending`] when the purge gave way to queued work, met a reader or failed;
+    /// the rows are gone either way.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't being deleted.
@@ -593,9 +605,13 @@ impl Store {
             return Err(StoreError::NoThread);
         }
         self.remove(thread)?;
-        Ok(match self.purge()? {
-            Purge::Done => Deletion::Finished,
-            Purge::Yielded | Purge::Blocked => Deletion::Pending,
+        Ok(match self.purge() {
+            Ok(Purge::Done) => Deletion::Finished,
+            Ok(Purge::Yielded | Purge::Blocked) => Deletion::Pending,
+            Err(error) => {
+                tracing::error!(%error, "the purge failed; it stays owed");
+                Deletion::Pending
+            }
         })
     }
 
@@ -633,13 +649,19 @@ impl Store {
         self.conn.execute("DELETE FROM purge_pending", [])?;
         self.purge_pending = false;
         // The WAL now holds only the cleared row, so a reader blocking this leaves nothing behind.
-        if !checkpoint_now(&self.conn)? {
-            tracing::debug!("a reader blocked the checkpoint after the purge");
+        match checkpoint_now(&self.conn) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!("a reader blocked the checkpoint after the purge"),
+            Err(error) => tracing::debug!(%error, "the checkpoint after the purge failed"),
         }
         Ok(Purge::Done)
     }
 
     /// Runs one purge step unless work is queued; `None` when it gave way, before or during it.
+    /// shortcut: a checkpoint runs as one VM step, so work queued just before it starts waits for
+    /// it (tens of milliseconds at 500 MiB on Rez); fine while only deletion purges.
+    /// shortcut: `VACUUM` copies its result back without checking for an interrupt, so work
+    /// queued during that copy waits for it; the PR that added the purge measured it.
     fn step<T>(
         &self,
         run: impl FnOnce(&Connection) -> rusqlite::Result<T>,

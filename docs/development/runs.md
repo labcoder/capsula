@@ -139,8 +139,8 @@ described in `ipc.md`. A shell that disconnects ends the current run as
 `interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close. A deletion's purge (`store.md`) runs on the store thread only while no op is
-queued, and an op queued during it, or closing, aborts it, so turns and runs never wait behind
-a `VACUUM`.
+queued, and an op queued during it, or closing, stops it, so turns and runs wait at most for
+`VACUUM`'s final copy back or a checkpoint already under way (measured in the purge's PR).
 
 shortcut: a store that never answers leaves a finished run unconfirmed. At the next start, runs
 still active in the store become `failed(crash)`; outcomes already committed stay, and work not

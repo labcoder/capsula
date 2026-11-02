@@ -67,16 +67,20 @@ TRUNCATE checkpoint copies the result into the main file and empties the WAL. On
 The purge is cleanup that can be retried, and it never holds up a run:
 
 - **It gives way to store work.** Every op queued for the store thread is counted under a lock.
-  A purge step doesn't start while the count is above zero, and an op queued during a step
-  aborts it through SQLite's interrupt. The step rolls back, the purge stays owed, and the op
-  runs at once. Stop's answer never waits on the store at all (`runs.md`).
+  A purge step doesn't start while the count is above zero, and while it runs a progress handler
+  stops it as soon as the count rises, backed by SQLite's interrupt for the checkpoint. The step
+  rolls back, the purge stays owed, and the op runs. Two parts can't be stopped: `VACUUM`'s final
+  copy back into the file, and a checkpoint that had already started, so an op arriving then
+  waits for them. Stop's answer never waits on the store at all (`runs.md`).
 - **It's retried in-session.** The store thread retries an owed purge once its queue has been
   empty for 200 ms [guess], so a purge doesn't start mid-run. After a reader blocked the
-  checkpoint, or SQLite failed, it waits 1 s [guess] first. Within a session a retry only redoes
+  checkpoint it waits 1 s [guess] first. A purge that fails, a full disk for example, waits for
+  the next start rather than rewriting the file every second. Within a session a retry only redoes
   the steps that didn't succeed; once the rebuild and `VACUUM` are done, only the checkpoint is
   owed, because later writes never bring deleted text back.
-- **It's retried at start.** The row survives a crash, so the next start's recovery runs the
-  whole purge again.
+- **It's retried at start.** The row survives a crash. Recovery only reports it, so a slow or
+  failing purge can't hold up the start, and the store thread runs the whole purge once its
+  queue is quiet.
 - **The checkpoint never waits on a reader.** It runs with no busy timeout, so a reader holding an
   older snapshot makes it return at once, and `finish_delete` reports `Deletion::Pending`.
 
@@ -84,10 +88,11 @@ The cost grows with the file: `VACUUM` rewrites every page, media included once 
 captures, and needs room for a second copy, in memory for the temporary database and in the
 WAL. The pull request that added the purge measured it at several sizes on Rez.
 
-A test ports CAPS-22's remnants scan: it writes about 100 threads one event per transaction,
-deletes 30 of them, then scans the raw `.db`, `-wal` and `-shm` bytes for their markers and
-tokens and checks every `events_fts_idx` key. On the bundled SQLite it fails if the purge skips
-the rebuild, or if it skips `VACUUM`.
+A test ports CAPS-22's remnants scan: it writes 100 threads one event per transaction and
+deletes 30 of them, first checking that their FTS keys survive until a rebuild and that, on a
+copy of the file, a deleted cell survives the rebuild in a page gap. Then it purges and scans the
+raw `.db`, `-wal` and `-shm` bytes, with the store open and after closing it, and checks every
+`events_fts_idx` key. It fails if the purge skips the rebuild, `VACUUM` or the checkpoints.
 
 Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a truncated WAL
 frees, Volume Shadow Copy restore points, backups and the pagefile.
@@ -100,8 +105,7 @@ The brain opens the store and runs the recovery scan before it serves any shell:
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;
 - runs still `active` in live threads become `failed` with reason `crash`, keeping what they
   committed;
-- an owed purge runs. If a reader blocks its checkpoint again, `purge_pending` says so and the
-  store thread keeps retrying it.
+- an owed purge is reported, and the store thread runs it once its queue is quiet.
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
 deletions, and whether the purge is still owed.

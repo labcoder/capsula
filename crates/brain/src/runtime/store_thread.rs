@@ -13,7 +13,7 @@ use crate::store::{EventKind, NewEvent, Purge, Queue, Store};
 
 /// How long the queue stays empty before an owed purge starts [guess].
 const QUIET: Duration = Duration::from_millis(200);
-/// How long a purge waits after a reader blocked it or SQLite failed [guess].
+/// How long a purge waits after a reader blocked its checkpoint [guess].
 const RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -38,6 +38,7 @@ impl StoreThread {
                 // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
+                // An owed purge, from a deletion or found at start, runs once the queue is quiet.
                 let mut next_purge = store.purge_pending().then(Instant::now);
                 loop {
                     let op = match next_purge {
@@ -60,9 +61,6 @@ impl StoreThread {
                     taken.pop();
                     if acks.send(apply(&mut store, op)).is_err() {
                         tracing::debug!("an acknowledgement had no listener");
-                    }
-                    if store.purge_pending() && next_purge.is_none() {
-                        next_purge = Some(Instant::now());
                     }
                 }
                 drop(store);
@@ -93,7 +91,8 @@ impl StoreThread {
     }
 }
 
-/// Tries an owed purge; when to try again, or `None` once nothing is owed.
+/// Tries an owed purge; when to try again, or `None` once nothing is owed or it failed. A failed
+/// purge waits for the next start, so a full disk isn't rewritten every second.
 fn purge(store: &mut Store) -> Option<Instant> {
     match store.purge() {
         Ok(Purge::Done) => None,
@@ -101,8 +100,8 @@ fn purge(store: &mut Store) -> Option<Instant> {
         Ok(Purge::Yielded) => Some(Instant::now()),
         Ok(Purge::Blocked) => Some(Instant::now() + RETRY),
         Err(error) => {
-            tracing::error!(%error, "the purge failed; it's retried");
-            Some(Instant::now() + RETRY)
+            tracing::error!(%error, "the purge failed; the next start retries it");
+            None
         }
     }
 }

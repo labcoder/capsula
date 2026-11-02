@@ -474,10 +474,13 @@ fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
         store.recover().expect("recover"),
         Recovered {
             finished_deletions: 1,
+            purge_pending: true,
             ..Recovered::default()
         },
         "the deleted thread's run isn't counted as crashed"
     );
+    // What the store's thread does next.
+    assert_eq!(store.purge().expect("purge"), Purge::Done);
     assert!(!contains_marker(&scratch.db()));
     assert!(matches!(
         store.finish_delete(thread),
@@ -490,11 +493,6 @@ fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
 fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
     let scratch = Scratch::new("blocked");
     let mut store = Store::open(&scratch.db()).expect("store");
-    // The checkpoint would otherwise wait out the 5 s busy timeout before giving up.
-    store
-        .conn
-        .busy_timeout(std::time::Duration::ZERO)
-        .expect("timeout");
     let (first, _) = plant(&mut store);
     // Without the marker, so the raw scan below can only find the first thread's residue.
     let (second, _) = turn(&mut store, Err("plain"), "plain");
@@ -505,10 +503,20 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
         .execute_batch("BEGIN; SELECT count(*) FROM events;")
         .expect("snapshot");
 
+    let started = std::time::Instant::now();
     assert_eq!(
         store.finish_delete(first).expect("finish"),
         Deletion::Pending
     );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the checkpoint didn't wait out the busy timeout"
+    );
+    let wait: i64 = store
+        .conn
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .expect("timeout");
+    assert_eq!(wait, 5000, "other work keeps its busy timeout");
     assert!(
         contains_marker(&scratch.db()),
         "the old pages are still in the files"
@@ -523,8 +531,9 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
     );
 
     reader.execute_batch("COMMIT").expect("end snapshot");
-    assert_eq!(store.recover().expect("retry"), Recovered::default());
+    assert_eq!(store.purge().expect("retry"), Purge::Done);
     assert!(!contains_marker(&scratch.db()));
+    assert!(!store.recover().expect("recover").purge_pending);
 }
 
 #[test]
@@ -657,7 +666,6 @@ fn a_purge_gives_way_to_queued_work_and_stays_owed_until_it_finishes() {
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert!(store.purge_pending(), "owed across a restart");
     assert_eq!(store.purge().expect("purge"), Purge::Done);
-    assert_ne!(segments(&store), before, "the index was rebuilt");
     assert_eq!(rows(&store.conn, "purge_pending"), 0);
     drop(store);
     assert!(!Store::open(&scratch.db()).expect("reopen").purge_pending());
@@ -670,7 +678,8 @@ fn work_queued_during_a_purge_step_interrupts_it() {
     owed_purge(&mut store);
     store.queue().pop();
     let before = segments(&store);
-    // Work arrives while the first step is running.
+    // Work arrives while the first step is running. This handler replaces the store's own, so
+    // only the interrupt can stop the step.
     let queue = store.queue();
     let mut queued = false;
     store
@@ -694,8 +703,30 @@ fn work_queued_during_a_purge_step_interrupts_it() {
         .progress_handler(0, None::<fn() -> bool>)
         .expect("no handler");
     store.queue().pop();
+    // Without its handler the store still finishes, so the retry shows the purge was only paused.
     assert_eq!(store.purge().expect("retry"), Purge::Done);
-    assert_ne!(segments(&store), before);
+    assert!(!store.purge_pending());
+}
+
+#[test]
+fn work_queued_as_a_step_starts_still_stops_its_statement() {
+    let scratch = Scratch::new("late-push");
+    let store = Store::open(&scratch.db()).expect("store");
+    let queue = store.queue();
+    // Queued after the step checked the count but before its statement ran: SQLite clears an
+    // interrupt that arrives between statements, so only the progress handler can stop it.
+    let stepped = store
+        .step(|conn| {
+            queue.push(|| ());
+            conn.query_row(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 1000000)
+                 SELECT count(*) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("step");
+    assert_eq!(stepped, None);
 }
 
 /// A tiny xorshift generator, so the remnants test builds the same store every run.
@@ -735,9 +766,10 @@ impl Rng {
     }
 }
 
-/// Where each deleted thread's marker or tokens still appear in the raw files.
+/// Where each deleted thread's marker or tokens still appear in the raw files, in one pass over
+/// each file.
 fn raw_remnants(db: &Path, deleted: &[usize]) -> Vec<String> {
-    let mut found = Vec::new();
+    let mut found = std::collections::BTreeMap::<String, usize>::new();
     for suffix in ["", "-wal", "-shm"] {
         let mut path = db.as_os_str().to_owned();
         path.push(suffix);
@@ -745,19 +777,35 @@ fn raw_remnants(db: &Path, deleted: &[usize]) -> Vec<String> {
             continue;
         };
         bytes.make_ascii_lowercase();
-        for thread in deleted {
-            for pattern in [format!("mark{thread:04}q"), format!("tk{thread:04}x")] {
-                let hits = bytes
-                    .windows(pattern.len())
-                    .filter(|window| *window == pattern.as_bytes())
-                    .count();
-                if hits > 0 {
-                    found.push(format!("{pattern} x{hits} in store.db{suffix}"));
-                }
+        for at in 0..bytes.len() {
+            let rest = &bytes[at..];
+            let (prefix, end) = if rest.starts_with(b"mark") {
+                ("mark", b'q')
+            } else if rest.starts_with(b"tk") {
+                ("tk", b'x')
+            } else {
+                continue;
+            };
+            let Some(digits) = rest.get(prefix.len()..prefix.len() + 4) else {
+                continue;
+            };
+            if rest.get(prefix.len() + 4) != Some(&end) || !digits.iter().all(u8::is_ascii_digit) {
+                continue;
+            }
+            let thread: usize = std::str::from_utf8(digits)
+                .expect("digits")
+                .parse()
+                .expect("a number");
+            if deleted.contains(&thread) {
+                let pattern = format!("{prefix}{thread:04}{} in store.db{suffix}", char::from(end));
+                *found.entry(pattern).or_default() += 1;
             }
         }
     }
     found
+        .into_iter()
+        .map(|(pattern, hits)| format!("{pattern} x{hits}"))
+        .collect()
 }
 
 /// `events_fts_idx` keys that still name a deleted thread's tokens.
@@ -787,6 +835,7 @@ fn index_remnants(conn: &Connection, deleted: &[usize]) -> Vec<String> {
 /// segments, written one event per transaction as the runtime writes it, with threads deleted
 /// through the store, then the raw files and the index keys searched for anything of theirs.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
 fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
     const THREADS: usize = 100;
     const ROUNDS: usize = 10;
@@ -798,9 +847,8 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
         .conn
         .execute_batch("PRAGMA synchronous = OFF")
         .expect("no fsync");
-    // On the bundled SQLite this seed leaves thread 57's cells in a page gap when VACUUM is
-    // skipped, and FTS keys of several threads when the rebuild is; most seeds reach only the
-    // keys. runs/CAPS-20/logs/6b-mutation-*.txt records both.
+    // Most seeds leave only FTS keys behind; on the bundled SQLite this one also leaves a deleted
+    // cell in a page gap, which the test checks before purging.
     let mut rng = Rng(0x3C6E_F372_FE94_F82B);
     let syllables = [
         "ka", "lo", "mi", "ne", "ru", "sa", "ti", "vo", "be", "da", "fe", "go", "hu", "ji", "pe",
@@ -866,25 +914,51 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
                 let t = live.remove(rng.below(live.len()));
                 let thread = ids[t].expect("every thread had a turn");
                 store.begin_delete(thread).expect("begin");
+                // Deletion as it was before the purge: the rows' transaction alone.
+                store.queue().push(|| ());
                 assert_eq!(
                     store.finish_delete(thread).expect("finish"),
-                    Deletion::Finished
+                    Deletion::Pending
                 );
+                store.queue().pop();
                 deleted.push(t);
             }
         }
     }
     let kept = live[0];
     let kept_id = ids[kept].expect("a turn");
-    drop(store);
 
+    // Each half of the purge is needed: the keys survive until a rebuild, and on a copy of the
+    // file a cell in a page gap survives the rebuild.
+    assert!(!index_remnants(&store.conn, &deleted).is_empty());
+    assert!(
+        checkpoint_now(&store.conn).expect("checkpoint"),
+        "the copy needs the whole file"
+    );
+    let unvacuumed = Scratch::new("remnants-copy");
+    std::fs::create_dir_all(unvacuumed.db().parent().expect("a folder")).expect("folder");
+    std::fs::copy(scratch.db(), unvacuumed.db()).expect("copy");
+    let copy = Connection::open(unvacuumed.db()).expect("copy opens");
+    copy.execute_batch("INSERT INTO events_fts (events_fts) VALUES ('rebuild')")
+        .expect("rebuild");
+    assert_eq!(index_remnants(&copy, &deleted), Vec::<String>::new());
+    drop(copy);
+    assert!(
+        !raw_remnants(&unvacuumed.db(), &deleted).is_empty(),
+        "no page gap kept a deleted cell, so this seed no longer tests the VACUUM"
+    );
+
+    assert_eq!(store.purge().expect("purge"), Purge::Done);
+    // Read while the store is open, before closing checkpoints and removes the WAL.
     assert_eq!(raw_remnants(&scratch.db(), &deleted), Vec::<String>::new());
-    let store = Store::open(&scratch.db()).expect("reopen");
     store
         .conn
         .execute_batch("INSERT INTO events_fts (events_fts) VALUES ('integrity-check')")
         .expect("the index matches the events");
     assert_eq!(index_remnants(&store.conn, &deleted), Vec::<String>::new());
+    drop(store);
+    assert_eq!(raw_remnants(&scratch.db(), &deleted), Vec::<String>::new());
+    let store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
         store
             .search(&format!("mark{kept:04}q"), 10)
@@ -901,6 +975,7 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
 /// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
+#[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
 fn measure_purge() {
     use std::time::{Duration, Instant};
     // (name, threads, events per thread, bytes per event, captures per thread)
@@ -981,24 +1056,32 @@ fn measure_purge() {
         let started = Instant::now();
         assert!(checkpoint_now(&store.conn).expect("checkpoint"));
         let checkpoint = started.elapsed();
-        // How long queued work waits when it arrives 50 ms into a purge.
-        let other = ThreadId(2);
-        store.begin_delete(other).expect("begin");
-        store.queue().push(|| ());
-        assert_eq!(
-            store.finish_delete(other).expect("finish"),
-            Deletion::Pending
-        );
-        store.queue().pop();
-        let queue = store.queue();
-        let arrival = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            queue.push(Instant::now)
-        });
-        assert_eq!(store.purge().expect("purge"), Purge::Yielded);
-        let gave_way = arrival.join().expect("arrived").elapsed();
+        // How long queued work waits when it arrives 50 ms in, halfway through the VACUUM, and
+        // nine tenths of the way through it, where its copy back may be running.
+        let mut waits = Vec::new();
+        for (other, after) in [
+            (2, Duration::from_millis(50)),
+            (3, rebuild + vacuum / 2),
+            (4, rebuild + vacuum * 9 / 10),
+        ] {
+            let other = ThreadId(other);
+            store.begin_delete(other).expect("begin");
+            store.queue().push(|| ());
+            assert_eq!(
+                store.finish_delete(other).expect("finish"),
+                Deletion::Pending
+            );
+            store.queue().pop();
+            let queue = store.queue();
+            let arrival = std::thread::spawn(move || {
+                std::thread::sleep(after);
+                queue.push(Instant::now)
+            });
+            let outcome = store.purge().expect("purge");
+            waits.push((after, arrival.join().expect("arrived").elapsed(), outcome));
+        }
         eprintln!(
-            "{name}: {} MiB; finish_delete {total:.1?} (rebuild {rebuild:.1?}, VACUUM {vacuum:.1?}, checkpoint {checkpoint:.1?}); work queued mid-purge waited {gave_way:.2?}",
+            "{name}: {} MiB; finish_delete {total:.1?} (rebuild {rebuild:.1?}, VACUUM {vacuum:.1?}, checkpoint {checkpoint:.1?}); work queued at (arrival, wait, outcome) {waits:.1?}",
             size >> 20
         );
     }
