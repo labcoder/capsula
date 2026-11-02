@@ -190,6 +190,135 @@ fn a_full_rank_emits_one_group_glide_and_preserves_node_local_rectangles() {
 }
 
 #[test]
+fn review_empty_boxless_diagram_can_be_cut_after_a_resting_offset() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d"}},{"anim":{"target":"d","track":"y","keys":[[0,40]]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("empty diagram");
+    cut(&mut scene, &mut budget, 1, &["d"], &first.after);
+    let kept = first
+        .after
+        .cut(&scene)
+        .expect("published geometry must remain safe during cut");
+    assert_eq!(kept.items().len(), 1);
+    assert_eq!(
+        kept.bounds(&id("d")).expect("bounds"),
+        Some(capsula_scene::geom::Rect {
+            origin: capsula_scene::geom::Vec2::new(0.0, 40.0),
+            size: capsula_scene::geom::Vec2::default()
+        })
+    );
+}
+
+#[test]
+fn review_same_step_callout_resolves_the_nodes_post_glide_position() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d","box":[0,0,360,300],"dir":"down"}},
+            {"node":{"id":"a","in":"d","label":"A"}},{"node":{"id":"b","in":"d","label":"B"}},{"node":{"id":"c","in":"d","label":"C"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("first nodes");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"next","put":[
+            {"node":{"id":"overflow","in":"d","label":"D"}},
+            {"callout":{"id":"callout","target":{"ref":"overflow"},"at":[320,200],"text":"X"}}
+        ]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("node and callout");
+    assert_eq!(next.glides.len(), 1);
+    assert_eq!(
+        next.after
+            .bounds(&id("overflow"))
+            .expect("bounds")
+            .expect("node")
+            .center(),
+        capsula_scene::geom::Vec2::new(320.0, 36.0)
+    );
+    let callout = next
+        .display
+        .items
+        .iter()
+        .find(|item| Some(item.handle) == next.after.handle(&id("callout")))
+        .expect("callout");
+    let Prim::Line { points, .. } = &callout.primitives[0] else {
+        panic!("leader");
+    };
+    assert_eq!(points[1], capsula_scene::geom::Vec2::new(320.0, 56.0));
+}
+
+#[test]
+fn review_same_step_highlight_uses_the_diagrams_measured_children() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d"}},{"node":{"id":"a","in":"d","label":"A"}},
+            {"highlight":{"id":"h","target":{"ref":"d"}}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default())
+        .expect("same-step diagram highlight");
+    assert_eq!(
+        first
+            .after
+            .bounds(&id("h"))
+            .expect("bounds")
+            .expect("highlight")
+            .size,
+        capsula_scene::geom::Vec2::new(92.0, 52.0)
+    );
+}
+
+#[test]
+fn review_reverse_put_order_places_new_predecessors_before_successors() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d","box":[0,0,360,300],"dir":"down"}},{"node":{"id":"a","in":"d","label":"A"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("first node");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"next","put":[
+            {"node":{"id":"c","in":"d","label":"C"}},{"node":{"id":"b","in":"d","label":"B"}},
+            {"edge":{"id":"ab","in":"d","from":"a","to":"b"}},{"edge":{"id":"bc","in":"d","from":"b","to":"c"}}
+        ]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("reverse order nodes");
+    let b = next.after.bounds(&id("b")).expect("bounds").expect("b");
+    let c = next.after.bounds(&id("c")).expect("bounds").expect("c");
+    assert!(!b.intersects(c));
+    assert_eq!(b.origin, capsula_scene::geom::Vec2::new(16.0, 128.0));
+    assert_eq!(c.origin, capsula_scene::geom::Vec2::new(16.0, 240.0));
+}
+
+#[test]
 fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();

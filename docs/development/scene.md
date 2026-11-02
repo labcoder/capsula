@@ -265,6 +265,9 @@ Deliberate differences are typed colors instead of string parsing and a fallible
 result for excess node/edge counts, unsafe measured dimensions or generated coordinates
 outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
 and those failure boundaries have additional tests.
+Outside that pure port, node sizing is smaller, the rank gap is fixed, edges use
+quadratic routing, and wide initial batches are not scaled to fit; A8's visual gate
+will decide these differences from S1.
 
 ### Inputs, publication and cuts
 
@@ -304,12 +307,13 @@ block recovery. A failing kept preparation returns its revision in `RecoveryErro
 the host applies the ordinary failure cut before that revision. B4 owns the total
 recovery time budget.
 
-Shared primitive arrays and stroked/filled vertex arrays are charged once when new
-geometry is prepared, not again for each retained layout. `resident_bytes` also
-accounts for the new layout index; unchanged older geometry is excluded. Preparation
-rejects a single result over 64 MiB. B4 sums the charges of retained and queued
-results across scenes to enforce the global prepared-residency cap, independently
-of logical admission.
+`resident_bytes` estimates new primitive/vertex payload plus the full layout index
+for every result, including entries for unchanged objects. Older shared geometry is
+excluded from that result's new-payload charge. The index estimate does not include
+all referenced heap storage, and summing result estimates is not an exact retained
+or recovered-scene total. Preparation rejects a single estimate over 64 MiB; B4
+must complete retained/queued accounting and enforce the global residency cap,
+independently of logical admission.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
 to 600 existing text objects, using fixed deterministic measurement rather than GPUI.

@@ -162,7 +162,7 @@ pub fn prepare(
                 handle: *handle,
                 parent,
                 primitives: Arc::from([]),
-                bounds: diagram.bounds.map_or(viewport, rect),
+                bounds: diagram.bounds.map_or_else(Rect::default, rect),
                 transform: previous
                     .as_ref()
                     .map_or_else(Affine::default, |old| old.item.transform),
@@ -186,6 +186,26 @@ pub fn prepare(
             .get(&glide.target)
             .is_some_and(|id| !explicit_pos.contains(id))
     });
+    for (id, object) in &mut after.objects {
+        if let Some(rest) = rests.get(id) {
+            object.rest = *rest;
+        }
+    }
+    for Glide { target, to } in &glides {
+        let id = after.handles.get(target).ok_or(PrepareError::Stale)?;
+        let group = after.objects.get_mut(id).ok_or(PrepareError::Stale)?;
+        let old = group.rest.pos;
+        group.rest.pos = *to;
+        group.motion.insert(
+            "pos",
+            work::Motion {
+                keys: 2,
+                min: [old.x.min(to.x), old.y.min(to.y)],
+                max: [old.x.max(to.x), old.y.max(to.y)],
+            },
+        );
+    }
+    update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
         .filter(|id| !matches!(&*sources[*id].1, Op::Diagram(_) | Op::Node(_)))
@@ -219,11 +239,7 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
-    for (id, object) in &mut after.objects {
-        if let Some(rest) = rests.get(id) {
-            object.rest = *rest;
-        }
-    }
+    update_group_bounds(&mut after);
     for ((id, property), motion) in motions {
         after
             .objects
@@ -232,21 +248,6 @@ pub fn prepare(
             .motion
             .insert(property, motion);
     }
-    for Glide { target, to } in &glides {
-        let id = after.handles.get(target).ok_or(PrepareError::Stale)?;
-        let group = after.objects.get_mut(id).ok_or(PrepareError::Stale)?;
-        let old = group.rest.pos;
-        group.rest.pos = *to;
-        group.motion.insert(
-            "pos",
-            work::Motion {
-                keys: 2,
-                min: [old.x.min(to.x), old.y.min(to.y)],
-                max: [old.x.max(to.x), old.y.max(to.y)],
-            },
-        );
-    }
-    update_group_bounds(&mut after);
     validate_bounds(&after)?;
     let mut items: Vec<_> = after
         .objects

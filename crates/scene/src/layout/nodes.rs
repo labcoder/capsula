@@ -85,7 +85,7 @@ pub(super) fn place(
         groups.entry(parent).or_default().push(id.clone());
     }
     let mut glides = Vec::new();
-    for (parent, new_ids) in groups {
+    for (parent, mut new_ids) in groups {
         let group_id = parent.and_then(|handle| state.handles.get(&handle).cloned());
         let group = group_id.as_ref().and_then(|id| state.objects.get(id));
         let viewport = group
@@ -171,6 +171,7 @@ pub(super) fn place(
             viewport.origin.y + 16.0 - placement.bounds.origin.y,
         );
         let mut focus = None;
+        new_ids.sort_by_key(|id| ranks[index[id]]);
         for id in new_ids {
             let (handle, source) = &sources[&id];
             let Op::Node(node) = &**source else {

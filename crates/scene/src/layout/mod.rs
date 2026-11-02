@@ -112,7 +112,7 @@ pub struct PreparedStep {
     pub glides: Vec<Glide>,
     /// Immutable state to retain if this step activates.
     pub after: LayoutState,
-    /// New geometry and index payload bytes; shared older geometry is not charged again.
+    /// New geometry plus a full per-result layout-index estimate; older geometry is shared.
     pub resident_bytes: usize,
     ticket: Preparation,
     base: Arc<()>,
