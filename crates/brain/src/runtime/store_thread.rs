@@ -157,14 +157,11 @@ impl Purger {
         }
     }
 
-    /// Stops a running copy and waits for its helper to clean up.
-    fn stop(self) {
-        if let Some(copying) = self.copying {
-            copying.stop.store(true, Ordering::Relaxed);
-            if copying.helper.join().is_err() {
-                tracing::error!("the purge's helper panicked");
-            }
-        }
+    /// Tells a running copy to stop, and hands back its helper to wait for.
+    fn stop(self) -> Option<JoinHandle<Result<Option<Copied>, StoreError>>> {
+        let copying = self.copying?;
+        copying.stop.store(true, Ordering::Relaxed);
+        Some(copying.helper)
     }
 }
 
@@ -217,10 +214,15 @@ impl StoreThread {
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                purger.stop();
+                let helper = purger.stop();
                 drop(store);
                 if finished.send(()).is_err() {
                     tracing::debug!("nobody waited for the store to close");
+                }
+                // After the store closed: a copy's sync can't be stopped, and close needn't wait
+                // for it. A copy the exit cuts short is removed at the next start.
+                if helper.is_some_and(|helper| helper.join().is_err()) {
+                    tracing::error!("the purge's helper panicked");
                 }
             })?;
         Ok(Self { ops: ops_tx, done })
@@ -366,11 +368,10 @@ mod tests {
             .expect("the store's thread tried the purge")
     }
 
-    /// Waits out repeats of `attempt`, which a retry already under way can add, then expects
-    /// the purge to finish.
-    fn done_after(attempts: &std_mpsc::Receiver<Attempt>, attempt: Attempt) {
+    /// Waits out repeats a retry already under way can add, then expects the purge to finish.
+    fn done_after(attempts: &std_mpsc::Receiver<Attempt>, repeats: &[Attempt]) {
         let mut next_one = next(attempts);
-        while next_one == attempt {
+        while repeats.contains(&next_one) {
             next_one = next(attempts);
         }
         assert_eq!(next_one, Attempt::Done);
@@ -423,7 +424,8 @@ mod tests {
         let (thread, attempts) = spawn(store);
         assert_eq!(next(&attempts), Attempt::Blocked);
         drop(reader);
-        done_after(&attempts, Attempt::Blocked);
+        // A retry racing the reader's close can find its file still held.
+        done_after(&attempts, &[Attempt::Blocked, Attempt::Failed]);
         thread.close().blocking_recv().expect("closed");
         assert_eq!(owed(&scratch), 0);
     }
@@ -447,7 +449,7 @@ mod tests {
             .expect("fixer")
             .execute_batch("DROP TRIGGER keep_owed")
             .expect("drop");
-        done_after(&attempts, Attempt::Failed);
+        done_after(&attempts, &[Attempt::Failed]);
         thread.close().blocking_recv().expect("closed");
         assert_eq!(owed(&scratch), 0);
     }

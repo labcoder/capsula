@@ -33,7 +33,6 @@ pub struct Owed {
 /// A clean copy of the store, ready to swap in.
 #[derive(Debug)]
 pub struct Copied {
-    db: PathBuf,
     writes: u64,
 }
 
@@ -50,8 +49,9 @@ pub enum Swap {
 }
 
 impl Store {
-    /// The owed purge, unless nothing is owed or a run is active: a run's next write would make
-    /// the copy stale.
+    /// The owed purge, unless nothing is owed or a live thread has an active run: a run's next
+    /// write would make the copy stale. A thread whose deletion keeps failing keeps its runs,
+    /// but they'll never write again.
     ///
     /// # Errors
     /// Fails when SQLite fails.
@@ -62,7 +62,8 @@ impl Store {
         let active = self
             .conn
             .query_row(
-                "SELECT 1 FROM runs WHERE state = 'active' LIMIT 1",
+                "SELECT 1 FROM runs WHERE state = 'active'
+                 AND thread IN (SELECT id FROM threads WHERE state = 'live') LIMIT 1",
                 [],
                 |_| Ok(()),
             )
@@ -76,16 +77,19 @@ impl Store {
 
     /// Replaces the store's file with the clean copy: empties the WAL, closes the file, moves the
     /// copy over it and reopens. A write since the snapshot keeps the old file, and so does a
-    /// failed move, for example while a scanner holds the file.
+    /// failed move, for example while another SQLite connection holds the file.
     ///
     /// # Errors
     /// Fails when SQLite fails or the copy can't be moved; the old file stays and the purge stays
-    /// owed. Should reopening fail after the move, every later operation fails rather than
-    /// write anywhere else.
+    /// owed. Should the reopen fail, whichever file it was, every later operation fails until
+    /// the next start rather than write anywhere else.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the copy is used up: its file is gone either way"
+    )]
     pub fn swap(&mut self, copied: Copied) -> Result<Swap, StoreError> {
-        let Copied { db, writes } = copied;
-        let swapped = self.swap_in(writes);
-        let discarded = discard(&db).map_err(StoreError::Purge);
+        let swapped = self.swap_in(copied.writes);
+        let discarded = discard(&self.path).map_err(StoreError::Purge);
         let swapped = swapped?;
         discarded?;
         Ok(swapped)
@@ -104,7 +108,8 @@ impl Store {
             self.conn = serving;
             return Err(error.into());
         }
-        // A WAL left beside the new file would be replayed onto it.
+        // A WAL left beside the new file would be replayed onto it; one survives the close only
+        // while another connection holds the store.
         let moved =
             no_wal(&self.path).and_then(|()| fs::rename(sidecar(&self.path, CLEAN), &self.path));
         self.conn = connect(&self.path)?;
@@ -130,7 +135,6 @@ impl Owed {
             tracing::warn!(%error, "a purge's copy couldn't be removed; the next start removes it");
         }
         Ok(made?.then_some(Copied {
-            db: self.db,
             writes: self.writes,
         }))
     }
@@ -138,7 +142,8 @@ impl Owed {
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.
 pub(super) fn snapshot(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
-    if stopped(stop) {
+    // Checked before each step too: a short statement may never call the progress handler.
+    if stop.load(Ordering::Relaxed) {
         return Ok(false);
     }
     let mut reader = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -149,7 +154,8 @@ pub(super) fn snapshot(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreE
 /// Clears the owed row in the snapshot and rebuilds its FTS index from the live events, which
 /// drops the deleted rows' index keys.
 pub(super) fn clean(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
-    if stopped(stop) {
+    // Checked before each step too: a short statement may never call the progress handler.
+    if stop.load(Ordering::Relaxed) {
         return Ok(false);
     }
     let mut conn = Connection::open(sidecar(db, SNAPSHOT))?;
@@ -167,7 +173,8 @@ pub(super) fn clean(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreErro
 /// Writes the snapshot into fresh pages, so no gap the rebuild left survives, syncs the result
 /// and removes the snapshot.
 pub(super) fn compact(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
-    if stopped(stop) {
+    // Checked before each step too: a short statement may never call the progress handler.
+    if stop.load(Ordering::Relaxed) {
         return Ok(false);
     }
     let mut conn = Connection::open(sidecar(db, SNAPSHOT))?;
@@ -201,19 +208,13 @@ pub(super) fn discard(db: &Path) -> io::Result<()> {
 }
 
 /// Lets `stop` end a statement on `conn`; every 1,000 VM steps [guess].
-fn stoppable(conn: &mut Connection, stop: &Arc<AtomicBool>) -> rusqlite::Result<()> {
+pub(super) fn stoppable(conn: &mut Connection, stop: &Arc<AtomicBool>) -> rusqlite::Result<()> {
     let stop = Arc::clone(stop);
     conn.progress_handler(1000, Some(move || stop.load(Ordering::Relaxed)))
 }
 
-/// Whether `stop` was set, checked before each step too, since a short statement may never
-/// call the progress handler.
-fn stopped(stop: &AtomicBool) -> bool {
-    stop.load(Ordering::Relaxed)
-}
-
 /// False when `stop` ended the statement.
-fn finished<T>(result: rusqlite::Result<T>) -> Result<bool, StoreError> {
+pub(super) fn finished<T>(result: rusqlite::Result<T>) -> Result<bool, StoreError> {
     match result {
         Ok(_) => Ok(true),
         Err(rusqlite::Error::SqliteFailure(error, _))
@@ -225,12 +226,12 @@ fn finished<T>(result: rusqlite::Result<T>) -> Result<bool, StoreError> {
     }
 }
 
-/// Fails unless the store's WAL is gone or empty.
+/// Fails unless the store's WAL is gone.
 fn no_wal(db: &Path) -> io::Result<()> {
     match fs::metadata(sidecar(db, "-wal")) {
-        Ok(wal) if wal.len() > 0 => Err(io::Error::other("the WAL outlived the close")),
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+        Ok(_) => Err(io::Error::other("the WAL outlived the close")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

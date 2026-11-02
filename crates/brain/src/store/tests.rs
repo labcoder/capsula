@@ -543,8 +543,6 @@ fn a_checkpoint_a_reader_blocks_keeps_the_old_file_and_the_purge_owed() {
     assert!(!store.recover().expect("recover").purge_pending);
 }
 
-/// Windows can't move a file over one another process holds open; elsewhere the move succeeds.
-#[cfg(windows)]
 #[test]
 fn a_copy_that_cant_replace_the_file_keeps_the_old_store_serving() {
     let scratch = Scratch::new("held");
@@ -823,14 +821,77 @@ fn a_copy_left_by_a_crash_is_removed_at_start() {
         .copy(&Arc::new(AtomicBool::new(false)))
         .expect("copy")
         .expect("not stopped");
-    // The brain dies before the swap.
-    assert!(!purge_files(&scratch.db()).is_empty());
+    // The brain dies before the swap, with only the clean copy left.
+    let mut clean = scratch.db().into_os_string();
+    clean.push(".purge-clean");
+    assert_eq!(purge_files(&scratch.db()), vec![PathBuf::from(clean)]);
     drop((copied, store));
 
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
     assert!(store.purge_pending());
     assert_eq!(purge(&mut store), Swap::Done);
+}
+
+#[test]
+fn a_leftover_that_cant_be_removed_doesnt_stop_the_start() {
+    let scratch = Scratch::new("stuck-copy");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    drop(store);
+    // A folder in the copy's place can't be removed as a file.
+    let mut clean = scratch.db().into_os_string();
+    clean.push(".purge-clean");
+    std::fs::create_dir(&clean).expect("in the way");
+
+    let store = Store::open(&scratch.db()).expect("the store still opens");
+    assert!(store.purge_pending());
+    assert!(matches!(
+        store
+            .owed()
+            .expect("owed")
+            .expect("idle")
+            .copy(&Arc::new(AtomicBool::new(false))),
+        Err(StoreError::Purge(_))
+    ));
+    std::fs::remove_dir(&clean).expect("out of the way");
+}
+
+#[test]
+fn a_thread_whose_deletion_keeps_failing_doesnt_hold_the_purge() {
+    let scratch = Scratch::new("stuck-delete");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    // Its run stays active: recovery fails only live threads' runs.
+    let (stuck, _) = turn(&mut store, Err("stuck"), "stuck");
+    store.begin_delete(stuck).expect("begin");
+    assert!(store.owed().expect("owed").is_some());
+}
+
+#[test]
+fn a_stop_ends_a_running_statement() {
+    let scratch = Scratch::new("stop-mid");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = turn(&mut store, Err("big"), "big");
+    let events: Vec<NewEvent<'_>> = (0..2000)
+        .map(|_| NewEvent {
+            kind: EventKind::AssistantText,
+            text: Some("some words to copy"),
+            body: None,
+        })
+        .collect();
+    store.append(thread, run, &events).expect("events");
+    let mut reader = Connection::open(scratch.db()).expect("reader");
+    steps::stoppable(&mut reader, &Arc::new(AtomicBool::new(true))).expect("handler");
+    let mut copy = scratch.db().into_os_string();
+    copy.push(".purge-snapshot");
+    let copy = copy.into_string().expect("a UTF-8 path");
+    assert!(
+        !steps::finished(reader.execute("VACUUM INTO ?1", [&copy])).expect("stopped, not failed")
+    );
+    drop(reader);
+    steps::discard(&scratch.db()).expect("discard");
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
 }
 
 /// A tiny xorshift generator, so the remnants test builds the same store every run.

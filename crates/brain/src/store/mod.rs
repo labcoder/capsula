@@ -228,8 +228,11 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
-        // A copy a purge left behind when the brain died; the purge is still owed.
-        purge::discard(path).map_err(StoreError::Purge)?;
+        // A copy a purge left behind when the brain died; the purge is still owed. One that can't
+        // go yet mustn't stop the start: every copy clears leftovers first.
+        if let Err(error) = purge::discard(path) {
+            tracing::warn!(%error, "a purge's leftover copy couldn't be removed");
+        }
         let mut conn = connect(path)?;
         schema::migrate(&mut conn)?;
         let purge_pending = owes(&conn)?;

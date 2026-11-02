@@ -46,7 +46,7 @@ sequenceDiagram
   Note over S: hidden from lists and search, takes no new runs or events
   S->>S: stop the thread's producers (later slices)
   S->>DB: tx 2: delete events (and FTS rows), runs, thread; purge_pending=1
-  Note over S: no run active, no op for 200 ms
+  Note over S: no live thread's run active, no op for 200 ms
   S->>H: copy
   H->>DB: read-only: VACUUM INTO capsula.db.purge-snapshot
   H->>H: on the snapshot: purge_pending=0, FTS rebuild, optimize
@@ -82,22 +82,25 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    started, it TRUNCATE-checkpoints the WAL so no committed data lives only there, closes the
    file, checks that no WAL is left that SQLite could replay onto the new file, renames the copy
    over `capsula.db` and reopens. This is the only step store work waits for, tens of
-   milliseconds at the sizes the purge's pull request measured. Should the reopen fail after the
-   rename, every later operation fails rather than write anywhere else.
+   milliseconds at the sizes the purge's pull request measured. Should the reopen fail, whichever
+   file it was, every later operation fails until the next start rather than write anywhere else.
 
 The purge is cleanup that can be retried:
 
-- **It runs only while nothing else does.** It starts once no run is `active` and no op has
-  come for 200 ms [guess]. An op that arrives during the copy stops it, and the swap throws away
-  a copy made before a write, so no write is lost; the purge waits for the next quiet moment.
-- **It's retried in session.** A swap a reader blocked, a rename that failed (a scanner holding
-  the file, say) and any SQLite or file error leave the old file serving and the purge owed. The
-  next try waits 1 minute [guess], doubling up to 30 minutes [guess], so a full disk isn't
-  rewritten constantly. Every try runs all four steps. Once nothing is owed the thread sleeps
-  until an op arrives.
+- **It runs only while nothing else does.** No live thread may have an `active` run; a thread
+  whose deletion keeps failing doesn't count, since its runs never write again. An owed purge
+  found at start is tried at once, and after any op the thread waits until none has come for
+  200 ms [guess]. An op that arrives during the copy stops it, and the swap throws away a copy
+  made before a write, so no write is lost; the purge waits for the next quiet moment.
+- **It's retried in session.** A swap a reader blocked, a rename that failed (another SQLite
+  connection holding the file, say) and any SQLite or file error leave the old file serving and
+  the purge owed. The next try waits 1 minute [guess], doubling up to 30 minutes [guess], so a
+  full disk isn't rewritten constantly. Every try runs all four steps. Once nothing is owed the
+  thread sleeps until an op arrives.
 - **It's retried at start.** The row survives a crash. A crash before the rename leaves the old
-  file and a copy, which opening the store deletes; after it, the new file has no owed row.
-  Recovery only reports an owed purge.
+  file and a copy, which opening the store deletes (or leaves for the next copy to clear, if it
+  can't yet, without stopping the start); after it, the new file has no owed row. Recovery only
+  reports an owed purge. Closing the store stops a running copy without waiting for it.
 - **It costs disk, not memory.** While it runs it needs room for two more copies of the store,
   and `VACUUM INTO` writes straight to its file, with no in-memory temporary database.
 
