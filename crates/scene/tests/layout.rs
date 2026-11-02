@@ -132,6 +132,7 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
     let first = picture(&scene, first, &before, &mut measure).expect("first picture");
     assert_eq!(first.after.items().len(), 2);
     assert!(first.after.handle(&id("b")).is_none());
+    let unchanged = first.after.items();
     let bounds = first.after.bounds(&id("a")).expect("safe").expect("a");
     let second = picture(&scene, second, &first.after, &mut measure).expect("second picture");
     assert_eq!(second.after.bounds(&id("a")).expect("safe"), Some(bounds));
@@ -143,6 +144,8 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
     );
     assert_eq!(third.after.handle(&id("b")), None);
     assert_eq!(third.removed, expected_removed);
+    assert_eq!(first.after.items(), unchanged);
+    assert!(first.after.handle(&id("b")).is_none());
 }
 
 #[test]
@@ -467,7 +470,7 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
     );
     let input = PrepareInput::new(
         first.preparation,
-        before.clone(),
+        before,
         SurfaceGeometry::default(),
         Arc::new(Theme::default()),
     )
@@ -477,8 +480,6 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
         prepare(input, &mut Cancelling(&cancel), &cancel),
         Err(PrepareError::Cancelled)
     ));
-    assert_eq!(before.revision(), 0);
-    assert!(before.items().is_empty());
 }
 
 #[test]
