@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Swap, purge};
+use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Store, Swap, purge};
 use crate::test_support::Scratch;
 
 fn add(store: &mut Store, title: &str, text: &str) -> ThreadId {
@@ -36,7 +36,8 @@ fn ids(rows: &[ThreadRow]) -> Vec<u64> {
 
 fn list(store: &Store, search: Option<&str>, after: Option<ThreadCursor>) -> DataToShell {
     store
-        .pages().read_page(
+        .pages()
+        .read_page(
             u32::MAX,
             PageOf::Threads {
                 search: search.map(str::to_owned),
@@ -48,7 +49,8 @@ fn list(store: &Store, search: Option<&str>, after: Option<ThreadCursor>) -> Dat
 
 fn events(store: &Store, thread: ThreadId, before: Option<EventId>) -> DataToShell {
     store
-        .pages().read_page(u32::MAX, PageOf::Events { thread, before })
+        .pages()
+        .read_page(u32::MAX, PageOf::Events { thread, before })
         .expect("page")
 }
 
@@ -125,7 +127,10 @@ fn deleting_threads_are_hidden_from_list_search_and_events() {
     );
     for thread in [ThreadId(999), ThreadId(u64::MAX)] {
         assert_eq!(
-            store.pages().events_page(thread, None, 50).expect("missing"),
+            store
+                .pages()
+                .events_page(thread, None, 50)
+                .expect("missing"),
             (vec![], None)
         );
     }
@@ -148,17 +153,22 @@ fn phrase_search_pages_follow_rank_and_deduplicate_threads() {
     let (rows, next) = store.pages().search_page("RED fox", 1).expect("best");
     assert_eq!(ids(&rows), vec![1]);
     let (rows, next) = store
-        .pages().search_page_after("RED fox", next, 1)
+        .pages()
+        .search_page_after("RED fox", next, 1)
         .expect("tie first");
     assert_eq!(ids(&rows), vec![3]);
     let (rows, next) = store
-        .pages().search_page_after("RED fox", next, 1)
+        .pages()
+        .search_page_after("RED fox", next, 1)
         .expect("tie second");
     assert_eq!(ids(&rows), vec![2]);
     assert_eq!(next, None);
     for words in ["fox red", "", "\0", "red\0fox", r#"" OR * NEAR("#] {
         assert_eq!(
-            store.pages().search_page(words, 50).expect("literal phrase"),
+            store
+                .pages()
+                .search_page(words, 50)
+                .expect("literal phrase"),
             (vec![], None)
         );
     }
@@ -178,7 +188,8 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
         .begin_delete(ThreadId(3))
         .expect("hide the cursor's thread");
     let (rows, next) = store
-        .pages().search_page_after("red fox", next, 2)
+        .pages()
+        .search_page_after("red fox", next, 2)
         .expect("continued");
     assert_eq!(ids(&rows), vec![2]);
     assert_eq!(next, None);
@@ -196,7 +207,10 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
                 rank_bits: rank.to_bits(),
             }),
         };
-        assert!(matches!(store.pages().read_page(1, page), Err(StoreError::Read)));
+        assert!(matches!(
+            store.pages().read_page(1, page),
+            Err(StoreError::Read)
+        ));
     }
 }
 
@@ -221,7 +235,8 @@ fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
     };
     store.append(thread, run, &[answer]).expect("an answer");
     let (rows, next) = store
-        .pages().search_page_after("needle", next, 50)
+        .pages()
+        .search_page_after("needle", next, 50)
         .expect("continued");
     assert_eq!(ids(&rows), vec![5, 4, 3, 2, 1]);
     assert_eq!(next, None);
@@ -491,7 +506,7 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
             .expect("statement");
         let mut rows = query.query([]).expect("query");
         assert!(rows.next().expect("step").is_some());
-        assert!(purge::drain(&scratch.db(), &stop).expect("drain"));
+        assert!(purge::drain(&store.side(), &stop).expect("drain"));
         let helper = rusqlite::Connection::open(scratch.db()).expect("helper");
         let (frames, copied): (i64, i64) = helper
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
@@ -513,7 +528,11 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
     assert!(!store.purge_pending());
     assert!(!store.leftovers().exist());
     assert_eq!(
-        ids(&store.pages().thread_page(None, 50).expect("live survives").0),
+        ids(&store
+            .pages()
+            .thread_page(None, 50)
+            .expect("live survives")
+            .0),
         vec![live.0]
     );
 }
@@ -532,7 +551,8 @@ fn page_failures_never_expose_sqlite_content() {
         .execute("UPDATE events SET kind = 'private content'", [])
         .expect("bad kind");
     let error = store
-        .pages().read_page(
+        .pages()
+        .read_page(
             1,
             PageOf::Events {
                 thread,
@@ -549,7 +569,8 @@ fn page_failures_never_expose_sqlite_content() {
     for error in [
         store.pages().thread_page(None, 50).expect_err("list fails"),
         store
-            .pages().search_page("private search", 50)
+            .pages()
+            .search_page("private search", 50)
             .expect_err("search fails"),
     ] {
         assert_eq!(format!("{error:?}"), "Read");

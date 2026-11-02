@@ -10,22 +10,26 @@ mod pages;
 mod purge;
 mod scenes;
 mod schema;
+mod side;
 #[cfg(test)]
 pub(crate) mod tests;
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kumochi_protocol::constants;
 use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
+pub(crate) use pages::Pages;
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
 #[cfg(test)]
 pub(crate) use purge::{Pause, Pauses, Point};
 pub(crate) use scenes::cleared_body;
 pub use scenes::{SceneState, SceneTarget};
+pub use side::Side;
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +69,10 @@ pub enum StoreError {
     /// A page couldn't be read or encoded; SQLite details may contain user content.
     #[error("can't read the store page")]
     Read,
+
+    /// A swap's reopen failed, or the store's thread ended, so the file is closed to reads.
+    #[error("the store's file isn't open")]
+    Closed,
     /// A purge's copy of the store couldn't be written, moved or removed.
     #[error("a purge file couldn't be written, moved or removed")]
     Purge(#[source] io::Error),
@@ -235,6 +243,8 @@ pub struct Store {
     purge_pending: bool,
     /// False after a swap's reopen failed, until [`Store::reconnect`] opens the file again.
     serving: bool,
+    /// The page reader's and the checkpoint helper's connections.
+    side: Arc<Side>,
 }
 
 /// The store's file, in the data folder.
@@ -271,6 +281,7 @@ impl Store {
             path: path.to_owned(),
             purge_pending,
             serving: true,
+            side: Arc::new(Side::new(path.to_owned())),
         })
     }
 
@@ -283,11 +294,25 @@ impl Store {
         if self.serving {
             return Ok(());
         }
+        let side = Arc::clone(&self.side);
+        let held = side.hold();
+        self.reopen()?;
+        held.available();
+        Ok(())
+    }
+
+    /// Opens the file again, reading its owed purge, while the side connections are held.
+    fn reopen(&mut self) -> Result<(), StoreError> {
         let conn = connect(&self.path, OpenFlags::empty())?;
         self.purge_pending = owes(&conn)?;
         self.conn = conn;
         self.serving = true;
         Ok(())
+    }
+
+    /// The side connections, for the page reader and the checkpoint helper.
+    pub fn side(&self) -> Arc<Side> {
+        Arc::clone(&self.side)
     }
 
     /// Whether a deletion's purge is still owed.
@@ -574,7 +599,8 @@ impl Store {
 }
 
 /// Opens the store's file in WAL mode with its settings; `create` is
-/// `OpenFlags::SQLITE_OPEN_CREATE` where a missing file may be created.
+/// `OpenFlags::SQLITE_OPEN_CREATE` where a missing file may be created. Commits never checkpoint:
+/// the store's thread hands that to its helper.
 fn connect(path: &Path, create: OpenFlags) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -590,6 +616,7 @@ fn connect(path: &Path, create: OpenFlags) -> Result<Connection, StoreError> {
     }
     conn.execute_batch(
         "PRAGMA synchronous = FULL;
+         PRAGMA wal_autocheckpoint = 0;
          PRAGMA foreign_keys = ON;
          PRAGMA secure_delete = ON;
          PRAGMA temp_store = MEMORY;",

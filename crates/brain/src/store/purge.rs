@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _};
 
-use super::{Store, StoreError, checkpoint_now};
+use super::{Side, Store, StoreError, checkpoint_now};
 use crate::platform;
 
 /// The snapshot, with the deleted rows' leftovers still in it.
@@ -36,6 +36,8 @@ pub struct Owed {
     writes: u64,
     /// The store's size with the pages still in its WAL; each copy needs about as much.
     bytes: u64,
+    /// Whose checkpoint connection the drain uses.
+    side: Arc<Side>,
 }
 
 /// A clean copy of the store, ready to swap in.
@@ -52,7 +54,8 @@ pub enum Swap {
     Done,
     /// The store was written after the snapshot, so the copy would lose that write; still owed.
     Stale,
-    /// A reader kept the WAL from emptying, so the old file can't be closed cleanly; still owed.
+    /// A side connection was in use, or a reader kept the WAL from emptying, so the old file
+    /// can't be closed cleanly; still owed.
     Blocked,
 }
 
@@ -98,7 +101,7 @@ impl Cancel {
 pub(crate) enum Point {
     /// Before it takes the live store.
     Source,
-    /// In the drain, its connection open.
+    /// In the drain, before its checkpoint.
     Drain,
     /// In the snapshot, its read-only connection open.
     Snapshot,
@@ -185,6 +188,7 @@ impl Store {
             db: self.path.clone(),
             writes: self.conn.total_changes(),
             bytes: u64::try_from(bytes).unwrap_or(u64::MAX),
+            side: Arc::clone(&self.side),
         }))
     }
 
@@ -217,6 +221,11 @@ impl Store {
         if self.conn.total_changes() != copied.writes {
             return Ok(Swap::Stale);
         }
+        // Held until the outcome is final, so no side connection opens the old file.
+        let side = Arc::clone(&self.side);
+        let Some(held) = side.try_hold() else {
+            return Ok(Swap::Blocked);
+        };
         if !checkpoint_now(&self.conn)? {
             return Ok(Swap::Blocked);
         }
@@ -227,10 +236,14 @@ impl Store {
             return Err(error.into());
         }
         self.serving = false;
+        held.unavailable();
         // A WAL left beside the new file would be replayed onto it; one survives the close only
         // while another connection holds the store.
         let moved = no_wal(&self.path).and_then(|()| self.replace(link));
-        let reopened = self.reconnect();
+        let reopened = self.reopen();
+        if reopened.is_ok() {
+            held.available();
+        }
         if let (Err(error), Err(_)) = (&moved, &reopened) {
             tracing::warn!(%error, "the move failed before the reopen did");
         }
@@ -308,7 +321,7 @@ impl Owed {
                 #[cfg(test)]
                 cancel.pauses.reach(Point::Source);
                 let source = cancel.source.lock().unwrap_or_else(PoisonError::into_inner);
-                let read = drain(db, cancel)? && snapshot(db, cancel)?;
+                let read = drain(&self.side, cancel)? && snapshot(db, cancel)?;
                 drop(source);
                 Ok(read && clean(db, cancel)? && compact(db, cancel)?)
             });
@@ -393,25 +406,20 @@ pub(super) fn old(db: &Path) -> PathBuf {
     sidecar(db, OLD)
 }
 
-/// Copies what the WAL holds into the store's file on its own connection, so the swap's
-/// checkpoint on the store's thread finds little left to copy: a large deletion a reader kept in
-/// the WAL took the swap past 200 ms at 1 GiB on Rez. Passive, so it never waits on the store's
-/// writer or holds it up; it can't be stopped once started, and an op meanwhile shares the disk.
-/// False unless it copied the whole WAL: a reader still holding part of it, or another
-/// connection checkpointing, would leave that copy to the swap, so the purge waits instead.
-pub(super) fn drain(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+/// Copies what the WAL holds into the store's file, so the swap's checkpoint on the store's
+/// thread finds little left to copy: a large deletion a reader kept in the WAL took the swap past
+/// 200 ms at 1 GiB on Rez. It runs on the checkpoint helper's connection, so never beside the
+/// helper's own checkpoint. Passive, so it never waits on the store's writer or holds it up; it
+/// can't be stopped once started, and an op meanwhile shares the disk. False unless it copied the
+/// whole WAL: a reader still holding part of it would leave that copy to the swap, so the purge
+/// waits instead.
+pub(super) fn drain(side: &Side, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     if cancel.stopped() {
         return Ok(false);
     }
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     #[cfg(test)]
     cancel.pauses.reach(Point::Drain);
-    let (busy, frames, copied): (i64, i64, i64) =
-        conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
-    // Busy leaves both counts at -1, which match.
-    Ok(busy == 0 && copied == frames)
+    side.checkpoint()
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.
@@ -501,7 +509,7 @@ fn no_wal(db: &Path) -> io::Result<()> {
 }
 
 /// `db` with `suffix` appended to its file name.
-fn sidecar(db: &Path, suffix: &str) -> PathBuf {
+pub(super) fn sidecar(db: &Path, suffix: &str) -> PathBuf {
     let mut path = OsString::from(db);
     path.push(suffix);
     path.into()

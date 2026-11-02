@@ -5,7 +5,7 @@ use kumochi_protocol::message::{
 };
 use rusqlite::{Connection, Row, params};
 
-use super::{Store, StoreError, row_id};
+use super::{StoreError, row_id};
 
 #[cfg(test)]
 mod tests;
@@ -13,7 +13,8 @@ mod tests;
 /// The page queries, on the store's own connection or on the page reader's.
 pub(crate) struct Pages<'a>(pub(crate) &'a Connection);
 
-impl Store {
+#[cfg(test)]
+impl super::Store {
     /// The page queries on the store's connection.
     pub(crate) fn pages(&self) -> Pages<'_> {
         Pages(&self.conn)
@@ -94,7 +95,8 @@ impl Pages<'_> {
         after: Option<ThreadCursor>,
         limit: usize,
     ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
-        let mut query = self.0
+        let mut query = self
+            .0
             .prepare(
                 "SELECT id, title, updated_ms FROM threads
              WHERE state = 'live' AND (?1 IS NULL OR (updated_ms, id) < (?1, ?2))
@@ -172,7 +174,8 @@ impl Pages<'_> {
         // next write: about 65 ms at 20k matching events and 335 ms at 100k on Rez; OSC-152 moves
         // page reads to their own read-only connection.
         let phrase = format!("\"{}\"", words.replace('"', "\"\""));
-        let mut query = self.0
+        let mut query = self
+            .0
             .prepare(
                 "WITH matches AS MATERIALIZED (
                  SELECT t.id, t.title, t.updated_ms, t.state = 'live' AS live,
@@ -230,7 +233,8 @@ impl Pages<'_> {
             return Ok((Vec::new(), None));
         };
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
-        let mut query = self.0
+        let mut query = self
+            .0
             .prepare(
                 "SELECT e.id, e.run, e.kind, coalesce(e.text, '') FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'

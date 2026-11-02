@@ -10,13 +10,13 @@ use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, Step, Threa
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
-use super::{Attempt, Job, Purger, Schedule, StoreThread, serve_op};
+use super::{Attempt, Purger, Schedule, StoreThread};
 use crate::coordinator::{Input, StoreOp};
 use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, SceneTarget, Store, Swap};
 use crate::test_support::Scratch;
 
 /// A store owing the purge of its deleted thread 1.
-fn owing(scratch: &Scratch) -> Store {
+pub(super) fn owing(scratch: &Scratch) -> Store {
     let mut store = Store::open(&scratch.db()).expect("store");
     store
         .begin_turn(ThreadId(1), Some("t"), RunId(1), "doomed")
@@ -45,13 +45,14 @@ fn spawn_with_room(
         attempts: Some(heard),
         observed: None,
         gates: None,
+        read_gates: None,
         pauses: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
     (thread, attempts)
 }
 
-fn next(attempts: &std_mpsc::Receiver<Attempt>) -> Attempt {
+pub(super) fn next(attempts: &std_mpsc::Receiver<Attempt>) -> Attempt {
     attempts
         .recv_timeout(Duration::from_secs(10))
         .expect("the store's thread tried the purge")
@@ -66,7 +67,7 @@ fn done_after(attempts: &std_mpsc::Receiver<Attempt>, repeats: &[Attempt]) {
     assert_eq!(next_one, Attempt::Done);
 }
 
-fn owed(scratch: &Scratch) -> i64 {
+pub(super) fn owed(scratch: &Scratch) -> i64 {
     Connection::open(scratch.db())
         .expect("watcher")
         .query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))
@@ -146,14 +147,14 @@ fn a_failed_purge_is_retried_in_session() {
 }
 
 /// `db` with `suffix` appended.
-fn beside(db: &Path, suffix: &str) -> PathBuf {
+pub(super) fn beside(db: &Path, suffix: &str) -> PathBuf {
     let mut path = db.as_os_str().to_owned();
     path.push(suffix);
     PathBuf::from(path)
 }
 
 /// The purge's files left in the store's folder.
-fn purge_files(scratch: &Scratch) -> Vec<PathBuf> {
+pub(super) fn purge_files(scratch: &Scratch) -> Vec<PathBuf> {
     std::fs::read_dir(scratch.db().parent().expect("a folder"))
         .expect("folder")
         .map(|entry| entry.expect("entry").path())
@@ -334,7 +335,10 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         vec![kept],
         "the same file, not an empty one"
     );
-    assert_eq!(store.pages().search_ids("refused").expect("search"), Vec::new());
+    assert_eq!(
+        store.pages().search_ids("refused").expect("search"),
+        Vec::new()
+    );
 }
 
 #[test]
@@ -497,122 +501,39 @@ fn every_operation_gets_one_reply_in_order() {
 }
 
 #[test]
-fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
+fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
     let scratch = Scratch::new("read-during-copy");
-    let mut store = owing(&scratch);
-    let (acks, mut replies) = mpsc::unbounded_channel();
-    let (heard, attempts) = std_mpsc::channel();
-    let mut purger = Purger::new(
-        Schedule {
-            quiet: Duration::from_secs(600),
-            attempts: Some(heard),
-            observed: None,
-            ..Schedule::default()
-        },
-        &store,
-    );
-    purger.next = Some(Instant::now() + Duration::from_secs(60));
-    let next = purger.next;
-    let read = || StoreOp::ReadPage {
+    let paused = armed_and_paused(&scratch, &[Point::Snapshot]);
+    reached(&paused, 0);
+    assert!(paused.thread.send(StoreOp::ReadPage {
         epoch: 1,
         request: 3,
         page: PageOf::Threads {
             search: None,
             after: None,
         },
-    };
-    let expected = Input::PageRead {
-        epoch: 1,
+    }));
+    let reply = paused
+        .acks
+        .recv_timeout(PATIENCE)
+        .expect("the read didn't wait");
+    let Input::PageRead {
         request: 3,
-        reply: DataToShell::ThreadList {
-            request: 3,
-            threads: Vec::new(),
-            next: None,
-        },
+        reply: DataToShell::ThreadList { threads, .. },
+        ..
+    } = reply
+    else {
+        panic!("not the thread list: {reply:?}");
     };
-    serve_op(&mut store, &mut purger, &acks, read());
-    assert_eq!(replies.try_recv().expect("reply"), expected);
+    let ids: Vec<ThreadId> = threads.into_iter().map(|row| row.id).collect();
+    assert_eq!(ids, [ThreadId(3), ThreadId(2)]);
+    release(&paused, 0);
     assert_eq!(
-        purger.next, next,
-        "a read doesn't postpone the next attempt"
+        next(&paused.attempts),
+        Attempt::Done,
+        "the read didn't stop it"
     );
-
-    let copying = store.owed().expect("owed").expect("idle");
-    let stop = Arc::new(Cancel::default());
-    let stopping = Arc::clone(&stop);
-    let (started, running) = std_mpsc::channel();
-    let (resume, paused) = std_mpsc::channel();
-    let helper = std::thread::spawn(move || {
-        started.send(()).expect("running");
-        paused.recv().expect("resume the real copy");
-        copying.copy(&stopping)
-    });
-    purger.job = Some(Job::Copy {
-        cancel: Arc::clone(&stop),
-        helper,
-    });
-    running
-        .recv_timeout(Duration::from_secs(10))
-        .expect("helper running");
-    serve_op(&mut store, &mut purger, &acks, read());
-    assert_eq!(replies.try_recv().expect("reply"), expected);
-    assert!(!stop.stopped(), "the read didn't cancel the copy");
-    assert_eq!(purger.next, next);
-    resume.send(()).expect("resume");
-    let copy = purger.job.take().expect("copy running");
-    purger.finish(&mut store, copy);
-    let remove = purger.job.take().expect("removing the old store");
-    purger.finish(&mut store, remove);
-    done_after(&attempts, &[]);
-    assert_eq!(owed(&scratch), 0);
-}
-
-#[test]
-fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
-    let scratch = Scratch::new("read-due-purge");
-    let mut store = owing(&scratch);
-    let (acks, mut replies) = mpsc::unbounded_channel();
-    let (heard, attempts) = std_mpsc::channel();
-    let mut purger = Purger::new(
-        Schedule {
-            quiet: Duration::from_secs(600),
-            free_space: |_| Ok(u64::MAX),
-            attempts: Some(heard),
-            observed: None,
-            ..Schedule::default()
-        },
-        &store,
-    );
-    serve_op(
-        &mut store,
-        &mut purger,
-        &acks,
-        StoreOp::ReadPage {
-            epoch: 1,
-            request: 1,
-            page: PageOf::Threads {
-                search: None,
-                after: None,
-            },
-        },
-    );
-    assert!(matches!(
-        replies.try_recv(),
-        Ok(Input::PageRead {
-            reply: DataToShell::ThreadList { .. },
-            ..
-        })
-    ));
-    let copy = purger
-        .job
-        .take()
-        .expect("the due purge started despite the read");
-    assert!(matches!(copy, Job::Copy { .. }));
-    purger.finish(&mut store, copy);
-    let remove = purger.job.take().expect("removing the old store");
-    purger.finish(&mut store, remove);
-    done_after(&attempts, &[]);
-    assert_eq!(owed(&scratch), 0);
+    paused.thread.close().blocking_recv().expect("closed");
 }
 
 /// Rez measurement for the pull request, not a check: how long a page read takes, and a write
@@ -827,7 +748,8 @@ fn a_delete_in_session_purges_its_thread() {
     let store = Store::open(&scratch.db()).expect("reopen");
     assert!(!store.leftovers().exist(), "no copy is left");
     let threads: Vec<ThreadId> = store
-        .pages().thread_page(None, 50)
+        .pages()
+        .thread_page(None, 50)
         .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
         .expect("threads");
     assert_eq!(threads, [ThreadId(2)]);
@@ -905,7 +827,7 @@ fn armed_and_paused(scratch: &Scratch, points: &[Point]) -> Paused {
     paused
 }
 
-const PATIENCE: Duration = Duration::from_secs(10);
+pub(super) const PATIENCE: Duration = Duration::from_secs(10);
 
 fn assert_removed(paused: &Paused, thread: u64) {
     let ack = paused.acks.recv_timeout(PATIENCE).expect("acknowledged");
