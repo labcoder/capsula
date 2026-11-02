@@ -447,16 +447,6 @@ pub(super) fn changes(
             object.work.data = Some(Data::Set(index));
             object.work.usage.marks = data.len();
         }
-        if step.remove.contains(&change.target) {
-            return Err(StepError::in_step(
-                &step.id,
-                FieldPath::default()
-                    .field("set")
-                    .index(index)
-                    .field("target"),
-                ErrorCode::UnknownRef,
-            ));
-        }
     }
     Ok(original)
 }

@@ -94,7 +94,8 @@ declared in the same step, independent of put order. `start.after` must name an
 earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
 or wrongly typed parents/endpoints, properties the target does not own, invalid
 track values/times, and removals that orphan a surviving dependant. Only `draw`
-has kind-specific track ownership checks so far; the motion layer defines the
+has kind-specific track ownership checks so far; a `set` or `anim` targeting an object
+removed by that same step fails as `UnknownRef`. The motion layer defines the
 remaining property rules. Mermaid expansion must run before admission; it remains
 unsupported until A8.
 
@@ -129,7 +130,8 @@ not this page. This is an admission measurement, not a frame or end-to-end laten
 ## Stop and recovery
 
 `StopCut.activated` is the revision activated **through**, not a count of kept
-steps. Zero returns `Cleared` without resetting revision. Stop first undoes all
+steps. Zero returns `Cleared` without resetting revision only before anything was
+shown; afterward it is rejected, and a user clear uses `clear`. Stop first undoes all
 unactivated steps' removals, then drops their objects and retains exactly the
 revealed handles in the activated prefix. A retained object whose dependency was
 discarded becomes detached. This can leave a node, row or series without its parent,
@@ -198,6 +200,8 @@ segment reservations in `path.rs`; A5/A6 must keep generated output within them.
 
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
+Composed scales must be normal positive floats and at most 64, even when layout has
+not measured the object's dimensions yet. Preparation must still check measured bounds.
 These envelopes can reject near-cap combinations whose extrema never coincide.
 Detaching an object preserves its inherited bounds so later admissions cannot forget
 its path cost or transform basis. This is budget metadata, not placed geometry: A5

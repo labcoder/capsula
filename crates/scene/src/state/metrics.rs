@@ -6,8 +6,8 @@ use crate::{
     Budget, ErrorCode, FieldPath, Step, StepError, WireId,
     budget::Usage,
     limits::{
-        MAX_CHART_SERIES, MAX_COORD, MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES, MAX_KEYS,
-        MAX_LIVE_OBJECTS, MAX_OBJECT_DEPTH, MAX_TABLE_ROWS, MAX_TRACKS,
+        MAX_CHART_SERIES, MAX_COMPOSED_SCALE, MAX_COORD, MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES,
+        MAX_KEYS, MAX_LIVE_OBJECTS, MAX_OBJECT_DEPTH, MAX_TABLE_ROWS, MAX_TRACKS,
     },
     record::{ChartKind, Point},
 };
@@ -174,8 +174,9 @@ fn graph(
         }
         + translation;
     if !scale.is_finite()
+        || scale > MAX_COMPOSED_SCALE
         || min_scale <= 0.0
-        || !min_scale.is_finite()
+        || !min_scale.is_normal()
         || !translation.is_finite()
         || !extent.is_finite()
     {

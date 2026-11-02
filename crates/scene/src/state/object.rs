@@ -166,9 +166,10 @@ pub(super) fn validate_op(
     index: usize,
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     if let Op::Anim(anim) = op {
-        return validate_anim(anim, index, step, objects);
+        return validate_anim(anim, index, step, objects, removed);
     }
     let Some(v) = visual(op) else {
         return Err(StepError::in_step(
@@ -286,6 +287,7 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
 pub(super) fn validate_changes(
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
@@ -297,6 +299,13 @@ pub(super) fn validate_changes(
             ));
         };
         validate_change(change, target.kind, &prefix, step)?;
+        if removed.contains(&change.target) {
+            return Err(StepError::in_step(
+                &step.id,
+                prefix.field("target"),
+                ErrorCode::UnknownRef,
+            ));
+        }
     }
     Ok(())
 }
@@ -337,10 +346,11 @@ fn validate_anim(
     index: usize,
     step: &Step,
     objects: &BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<(), StepError> {
     let prefix = path(index, "anim");
     let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
-    if step.remove.contains(&anim.target) {
+    if removed.contains(&anim.target) {
         return Err(fail("target", ErrorCode::UnknownRef));
     }
     let Some(target) = objects.get(&anim.target) else {
@@ -442,13 +452,13 @@ pub(super) fn acyclic(step: &Step, objects: &BTreeMap<WireId, Object>) -> Result
 pub(super) fn removals(
     step: &Step,
     objects: &mut BTreeMap<WireId, Object>,
+    removed: &HashSet<&WireId>,
 ) -> Result<Vec<(WireId, Object)>, StepError> {
-    let mut removed = HashSet::with_capacity(step.remove.len());
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
     for (index, id) in step.remove.iter().enumerate() {
         let field = FieldPath::default().field("remove").index(index);
-        if !removed.insert(id) {
-            return Err(StepError::in_step(&step.id, field, ErrorCode::DuplicateKey));
-        }
         if !objects.contains_key(id) {
             return Err(StepError::in_step(&step.id, field, ErrorCode::UnknownRef));
         }

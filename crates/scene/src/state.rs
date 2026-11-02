@@ -13,7 +13,7 @@ use crate::{
 use object::Object;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     sync::Arc,
 };
@@ -321,6 +321,15 @@ impl SceneState {
         global
             .check(self.bound_usage(), minimum)
             .map_err(|code| fail(FieldPath::default(), code))?;
+        let mut removal_ids = HashSet::with_capacity(step.remove.len());
+        for (index, id) in step.remove.iter().enumerate() {
+            if !removal_ids.insert(id) {
+                return Err(fail(
+                    FieldPath::default().field("remove").index(index),
+                    ErrorCode::DuplicateKey,
+                ));
+            }
+        }
         let mut after = self.objects.clone();
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
@@ -339,10 +348,10 @@ impl SceneState {
             }
         }
         for (index, op) in step.put.iter().enumerate() {
-            object::validate_op(op, index, step, &after)?;
+            object::validate_op(op, index, step, &after, &removal_ids)?;
         }
         object::acyclic(step, &after)?;
-        object::validate_changes(step, &after)?;
+        object::validate_changes(step, &after, &removal_ids)?;
         let mut changed = work::changes(step, &mut after, revision)?;
         metrics::validate(step, &mut after)?;
         for (id, object) in &after {
@@ -364,7 +373,7 @@ impl SceneState {
         global
             .check(self.bound_usage(), usage)
             .map_err(|code| fail(FieldPath::default(), code))?;
-        let mut removed = object::removals(step, &mut after)?;
+        let mut removed = object::removals(step, &mut after, &removal_ids)?;
         for object in after
             .values_mut()
             .chain(removed.iter_mut().map(|(_, object)| object))
