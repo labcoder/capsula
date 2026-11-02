@@ -615,12 +615,14 @@ fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
     assert_eq!(owed(&scratch), 0);
 }
 
-/// Rez measurement for the pull request, not a check: how long the store's thread takes to answer
-/// a page read, and a write queued right behind it, on the large measured stores with a purge
-/// owed. Pages are a thread's 50 newest events at near the frame budget each, and a search for a
-/// phrase every event holds. The write alone, with no read ahead of it, is the before. Run it
-/// with `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_page_reads`;
-/// set `MEASURE_ONLY` to one store's name to run just that one.
+/// Rez measurement for the pull request, not a check: how long a page read takes, and a write
+/// sent right behind it, on the large measured stores with a purge owed. Pages are a thread's 50
+/// newest events at near a turn's cap each, and a search for a phrase every event holds. The
+/// writes go to a thread the pages don't read, and each one's run is ended (untimed), so no run
+/// stays active to hold off the owed purge. Each reply is timed as it arrives, in either order.
+/// The write alone, with no read ahead of it, is the before. Run it with
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_page_reads`; set
+/// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
 #[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
@@ -666,27 +668,49 @@ fn measure_page_reads() {
                 .end_run(history, run, &[], RunEnd::Done)
                 .expect("ended");
         }
+        let writes = ThreadId(2_000_000);
+        store
+            .begin_turn(writes, Some("w"), RunId(2_000_000), "the writes' thread")
+            .expect("turn");
+        store
+            .end_run(writes, RunId(2_000_000), &[], RunEnd::Done)
+            .expect("ended");
         store.begin_delete(ThreadId(2)).expect("begin");
         store.finish_delete(ThreadId(2)).expect("finish");
         let (acks, mut replies) = mpsc::unbounded_channel();
         let thread = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
-        let write = |thread: &StoreThread, at: u64| {
+        let begin = |thread: &StoreThread, at: u64| {
             assert!(thread.send(StoreOp::BeginTurn {
-                thread: history,
+                thread: writes,
                 title: None,
-                run: RunId(2_000_000 + at),
+                run: RunId(2_000_001 + at),
                 text: "a measured turn".to_owned(),
             }));
+        };
+        let settle = |thread: &StoreThread, replies: &mut mpsc::UnboundedReceiver<Input>, at| {
+            let run = RunId(2_000_001 + at);
+            assert!(thread.send(StoreOp::EndRun {
+                thread: writes,
+                run,
+                text: None,
+                revealed: None,
+                clear: None,
+                end: RunEnd::Done,
+            }));
+            assert_eq!(replies.blocking_recv(), Some(Input::RunStored { run }));
         };
         let mut alone = Vec::new();
         for at in 0..ROUNDS {
             let started = Instant::now();
-            write(&thread, at);
-            assert!(matches!(
+            begin(&thread, at);
+            assert_eq!(
                 replies.blocking_recv(),
-                Some(Input::TurnStored { .. })
-            ));
+                Some(Input::TurnStored {
+                    run: RunId(2_000_001 + at)
+                })
+            );
             alone.push(started.elapsed());
+            settle(&thread, &mut replies, at);
         }
         let common = |after| PageOf::Threads {
             search: Some("lorem".to_owned()),
@@ -726,29 +750,51 @@ fn measure_page_reads() {
         for (round, (what, page)) in (1..).zip(pages) {
             let (mut reads, mut behind) = (Vec::new(), Vec::new());
             for at in 0..ROUNDS {
+                let at = round * ROUNDS + at;
+                let request = u32::try_from(at).expect("small");
                 let started = Instant::now();
                 assert!(thread.send(StoreOp::ReadPage {
                     epoch: 1,
-                    request: 0,
+                    request,
                     page: page.clone(),
                 }));
-                write(&thread, round * ROUNDS + at);
-                assert!(matches!(
-                    replies.blocking_recv(),
-                    Some(Input::PageRead {
-                        reply: DataToShell::ThreadList { .. } | DataToShell::Page { .. },
-                        ..
-                    })
-                ));
-                reads.push(started.elapsed());
-                assert!(matches!(
-                    replies.blocking_recv(),
-                    Some(Input::TurnStored { .. })
-                ));
-                behind.push(started.elapsed());
+                begin(&thread, at);
+                let (mut read, mut stored) = (None, None);
+                while read.is_none() || stored.is_none() {
+                    match replies.blocking_recv().expect("the store answers") {
+                        Input::PageRead {
+                            request: answered,
+                            reply,
+                            ..
+                        } if answered == request => {
+                            read = Some(started.elapsed());
+                            match reply {
+                                DataToShell::ThreadList { threads, .. } => {
+                                    assert_eq!(threads.len(), 50);
+                                }
+                                DataToShell::Page { events, .. } => {
+                                    let shape: Vec<(usize, bool)> = events
+                                        .iter()
+                                        .map(|event| (event.text.len(), event.cut))
+                                        .collect();
+                                    // The newest answer; the near-cap turn behind it doesn't fit.
+                                    assert_eq!(shape, [("a short answer".len(), false)]);
+                                }
+                                other => panic!("unexpected {other:?}"),
+                            }
+                        }
+                        Input::TurnStored { run } if run == RunId(2_000_001 + at) => {
+                            stored = Some(started.elapsed());
+                        }
+                        other => panic!("unexpected {other:?}"),
+                    }
+                }
+                reads.extend(read);
+                behind.extend(stored);
+                settle(&thread, &mut replies, at);
             }
             lines.push(format!(
-                "{what}: read {}; the BeginTurn behind it {}",
+                "{what}: read {}; the BeginTurn sent behind it {}",
                 summary(reads),
                 summary(behind)
             ));
