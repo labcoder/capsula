@@ -8,7 +8,7 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Motion {
     pub keys: usize,
     pub min: [f32; 2],

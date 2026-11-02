@@ -7,7 +7,7 @@ use crate::{
 };
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Rest {
     pub pos: Vec2,
     pub x: f32,
@@ -58,7 +58,23 @@ pub(super) struct Placed {
     pub rank: Option<usize>,
     pub initialized: bool,
     pub motion: BTreeMap<&'static str, crate::state::work::Motion>,
-    pub references: Vec<WireId>,
+}
+
+impl Placed {
+    pub(super) fn new(mut item: Item, source: Arc<Op>, cached: Option<&Self>) -> Self {
+        if let Some(old) = cached {
+            item.transform = old.item.transform;
+        }
+        Self {
+            item,
+            source,
+            anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
+            rest: cached.map_or_else(Rest::default, |old| old.rest),
+            rank: cached.and_then(|old| old.rank),
+            initialized: cached.is_some_and(|old| old.initialized),
+            motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
+        }
+    }
 }
 
 /// Placed objects from the prepared prefix, sharing immutable geometry.
@@ -160,7 +176,7 @@ impl LayoutState {
         }
         let mut after = self.clone();
         let mut retained = BTreeMap::new();
-        for (id, handle, parent, references) in scene.preparation_objects() {
+        for (id, handle, parent) in scene.preparation_objects() {
             let mut object = self
                 .objects
                 .get(id)
@@ -185,7 +201,6 @@ impl LayoutState {
                 }
             }
             object.item.parent = parent;
-            object.references = references.to_vec();
             retained.insert(id.clone(), object);
         }
         after.objects = retained;
@@ -201,5 +216,118 @@ impl LayoutState {
             after.world_bounds(object)?;
         }
         Ok(after)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::{MeasureError, TextMeasure, TextStyle};
+    use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover};
+    use crate::{
+        Admission, GlobalBudget, Record, StopCut, parse_record, text::Bounded, theme::Theme,
+    };
+    use std::sync::atomic::AtomicBool;
+    struct Measure;
+    impl TextMeasure for Measure {
+        fn measure(
+            &mut self,
+            _text: &str,
+            _style: TextStyle,
+            _width: Option<f32>,
+        ) -> Result<[f32; 2], MeasureError> {
+            Ok([8.0, 10.0])
+        }
+    }
+    fn picture(
+        scene: &mut SceneState,
+        budget: &mut GlobalBudget,
+        before: &LayoutState,
+        source: &str,
+    ) -> PreparedStep {
+        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
+            panic!("step");
+        };
+        let Admission::New(candidate) = scene.admit(&step, budget).expect("admit") else {
+            panic!("new");
+        };
+        let ticket = scene.commit(candidate, budget).expect("commit").preparation;
+        let input = PrepareInput::new(
+            ticket,
+            before.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
+    }
+    #[test]
+    fn recovery_preserves_the_hidden_state_used_by_the_next_glide() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"hidden","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header.clone()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            r#"{"step":{"id":"first","put":[{"diagram":{"id":"d","box":[0,0,360,300],"dir":"down"}},{"node":{"id":"a","in":"d","label":"A"}},{"node":{"id":"b","in":"d","label":"B"}},{"node":{"id":"c","in":"d","label":"C"}}]}}"#,
+        );
+        let second = picture(
+            &mut scene,
+            &mut budget,
+            &first.after,
+            r#"{"step":{"id":"overflow","put":[{"node":{"id":"overflow","in":"d","label":"D"}}]}}"#,
+        );
+        assert_eq!(second.glides.len(), 1);
+        let kept = Bounded::new(
+            ["d", "overflow"]
+                .map(|id| {
+                    second
+                        .after
+                        .handle(&id.to_owned().try_into().expect("id"))
+                        .expect("handle")
+                })
+                .to_vec(),
+        )
+        .expect("cut");
+        scene
+            .stop(
+                &StopCut {
+                    activated: 2,
+                    revealed: kept,
+                },
+                &mut budget,
+            )
+            .expect("stop");
+        let live = second.after.cut(&scene).expect("cut");
+        let (mut restored, replayed) = recover(
+            header,
+            scene.recovery_log(),
+            SurfaceGeometry::default(),
+            &Arc::new(Theme::default()),
+            &mut Measure,
+            &AtomicBool::new(false),
+        )
+        .expect("recover");
+        assert_eq!(live.objects.len(), 2);
+        for (id, object) in &live.objects {
+            let replayed = &replayed.objects[id];
+            assert_eq!(object.rest, replayed.rest);
+            assert_eq!(object.rank, replayed.rank);
+            assert_eq!(object.initialized, replayed.initialized);
+            assert_eq!(object.motion, replayed.motion);
+        }
+        let next = r#"{"step":{"id":"next","put":[{"node":{"id":"next","in":"d","label":"N"}}]}}"#;
+        let live = picture(&mut scene, &mut budget, &live, next);
+        let replayed = picture(&mut restored, &mut GlobalBudget::default(), &replayed, next);
+        assert_eq!(live.after.items(), replayed.after.items());
+        assert_eq!(live.glides, replayed.glides);
+        assert_eq!(live.glides.len(), 1);
     }
 }
