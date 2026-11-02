@@ -95,7 +95,9 @@ shortcut: a cut event cannot be read in full until the chat panel can page withi
 
 Each page has at most 50 rows [guess] and 32 KiB of encoded frame, header included [guess].
 The continuation names the last row actually sent, including a page shortened by the byte
-budget. Defensive truncation also makes a single impossible, oversized stored title fit;
+budget. The events query itself reads no more than the budget of each event's text, counted in
+bytes since SQLite's character functions stop at a NUL, and the rows past the budget are dropped
+in one pass by their own encoded sizes. Defensive truncation also makes a single impossible, oversized stored title fit;
 normal titles are already limited by the coordinator.
 
 Two shell page requests occupy at most 64 KiB of frame bytes, plus bounded queue metadata,
