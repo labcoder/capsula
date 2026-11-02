@@ -79,6 +79,10 @@ impl Coordinator {
     /// and wait in `clearing` until their write commits. An id that isn't visible, because it's
     /// unknown, already durable or already clearing, changes nothing.
     pub(super) fn clear(&mut self, scenes: &[SceneId], effects: &mut Vec<Effect>) {
+        if !scenes.is_empty() {
+            let scenes = scenes.to_vec();
+            effects.push(Effect::RevokeScenes { scenes });
+        }
         let mut cleared = Vec::new();
         for scene in scenes {
             if let Some(at) = self.scenes.iter().position(|state| state.scene == *scene) {

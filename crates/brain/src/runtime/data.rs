@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{MAX_PENDING_PAGES, RunId};
+use capsula_protocol::message::{MAX_PENDING_PAGES, RunId, SceneId};
 
 /// How long the shell may leave the queue blocked on credit before the run ends as
 /// `view_stalled` (architecture v1 §3.2) [guess].
@@ -19,8 +19,9 @@ pub(crate) enum Owner {
     Run(RunId),
     /// A page reply, which counts against the unanswered page requests until it's written.
     Page,
-    /// A recovery snapshot chunk: no run's, and never dropped by a Stop.
-    Scene,
+    /// A recovery snapshot chunk of a scene: no run's, so a Stop never drops it, but a clear of
+    /// its scene does.
+    Scene(SceneId),
 }
 
 #[derive(Debug)]
@@ -75,7 +76,16 @@ impl DataQueue {
 
     /// Drops a stopped run's frames that haven't started writing; the shell would drop them.
     pub(crate) fn revoke(&mut self, run: RunId) {
-        self.frames.retain(|(owner, _)| *owner != Owner::Run(run));
+        self.retain(|owner| *owner != Owner::Run(run));
+    }
+
+    /// Drops the snapshot chunks of cleared scenes that haven't started writing.
+    pub(crate) fn revoke_scenes(&mut self, scenes: &[SceneId]) {
+        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if scenes.contains(scene)));
+    }
+
+    fn retain(&mut self, keep: impl Fn(&Owner) -> bool) {
+        self.frames.retain(|(owner, _)| keep(owner));
         self.bytes = self
             .frames
             .iter()
@@ -125,7 +135,7 @@ impl DataQueue {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use capsula_protocol::message::RunId;
+    use capsula_protocol::message::{RunId, SceneId};
 
     use super::{DataQueue, ENTRY, Owner, STALL};
 
@@ -218,10 +228,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cleared_scene_s_chunks_leave_and_everything_else_stays_in_order() {
+        let mut queue = DataQueue::new(100);
+        queue.push(Owner::Scene(SceneId(1)), vec![1; 3]);
+        queue.push(Owner::Scene(SceneId(2)), vec![2]);
+        queue.push(A, vec![3]);
+        queue.push(Owner::Page, vec![4]);
+        queue.push(Owner::Scene(SceneId(1)), vec![5]);
+        queue.revoke_scenes(&[SceneId(1), SceneId(9)]);
+        assert_eq!(queue.bytes(), 3 * (1 + ENTRY));
+        let sent: Vec<_> = std::iter::from_fn(|| queue.pop(Instant::now())).collect();
+        assert_eq!(sent, [vec![2], vec![3], vec![4]]);
+    }
+
+    #[test]
     fn a_snapshot_chunk_is_never_revoked_and_never_answers_a_page() {
         let mut queue = DataQueue::new(100);
         assert!(queue.admit_page());
-        queue.push(Owner::Scene, vec![1]);
+        queue.push(Owner::Scene(SceneId(1)), vec![1]);
         queue.push(A, vec![2]);
         queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));

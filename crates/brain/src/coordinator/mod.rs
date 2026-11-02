@@ -173,6 +173,11 @@ pub enum Effect {
         /// The run.
         run: RunId,
     },
+    /// Drop the snapshots of `scenes` not yet sent to the shell, which cleared them.
+    RevokeScenes {
+        /// The scenes.
+        scenes: Vec<SceneId>,
+    },
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.

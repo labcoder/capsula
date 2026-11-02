@@ -88,14 +88,21 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
     let clear = |scenes: &[u64]| Input::Clear {
         scenes: scenes.iter().copied().map(SceneId).collect(),
     };
+    let revoke = |scenes: &[u64]| Effect::RevokeScenes {
+        scenes: scenes.iter().copied().map(SceneId).collect(),
+    };
     assert_eq!(
         core.handle(clear(&[1, 7])),
-        Ok(vec![clear_scenes(&[1])]),
-        "an unknown id is a no-op"
+        Ok(vec![revoke(&[1, 7]), clear_scenes(&[1])]),
+        "an unknown id writes nothing"
     );
     assert_eq!(ids(&core), [2]);
     assert!(!core.settled(), "the clear isn't durable yet");
-    assert_eq!(core.handle(clear(&[1])), Ok(Vec::new()), "already clearing");
+    assert_eq!(
+        core.handle(clear(&[1])),
+        Ok(vec![revoke(&[1])]),
+        "already clearing"
+    );
     let failed = Input::ScenesCleared {
         scenes: vec![SceneId(1)],
         ok: false,

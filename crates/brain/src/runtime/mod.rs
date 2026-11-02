@@ -318,12 +318,7 @@ impl Brain {
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
-            let link = Link {
-                out: &out_tx,
-                queue: &queue,
-                ready: &ready,
-                tap: &mut *tap,
-            };
+            let link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -396,8 +391,6 @@ impl Brain {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
-        let mut held_pages = VecDeque::new();
-        let mut recovery: Option<Recovery> = None;
         let barrier = Instant::now() + SCENES_WAIT;
         // A clear whose write failed while no shell was connected is retried now at the latest.
         let retried = self.coordinator.retry_clears();
@@ -405,19 +398,19 @@ impl Brain {
             return Ended::Lost;
         }
         loop {
-            if recovery.is_none() && self.coordinator.settled() {
+            if link.recovery.is_none() && self.coordinator.settled() {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
                 };
-                recovery = Some(described);
+                link.recovery = Some(described);
             }
-            let described = recovery.is_some();
+            let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let take_turns =
                 described && take_engine && self.coordinator.ending_runs() < MAX_ENDING;
-            let feed = take_engine && recovery.as_ref().is_some_and(Recovery::pending);
+            let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
                 Some(message) = controls.recv() => {
@@ -431,11 +424,11 @@ impl Brain {
                         Err(ended) => return ended,
                     }
                 }
-                () = std::future::ready(()), if take_engine && !held_pages.is_empty() => {
-                    held_pages.pop_front().expect("a held page is ready")
+                () = std::future::ready(()), if take_engine && !link.held_pages.is_empty() => {
+                    link.held_pages.pop_front().expect("a held page is ready")
                 }
                 () = std::future::ready(()), if feed => {
-                    let chunk = recovery.as_mut().and_then(Recovery::next_chunk);
+                    let chunk = link.recovery.as_mut().and_then(Recovery::next_chunk);
                     if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
                         return Ended::Lost;
                     }
@@ -465,15 +458,12 @@ impl Brain {
                     }
                 }
             };
-            if let (Input::Clear { scenes }, Some(recovery)) = (&input, &mut recovery) {
-                recovery.drop_scenes(scenes);
-            }
             if let Input::PageRead { epoch, .. } = &input {
                 if *epoch != self.epoch {
                     continue;
                 }
                 if !take_engine {
-                    held_pages.push_back(input);
+                    link.held_pages.push_back(input);
                     continue;
                 }
             }
@@ -546,6 +536,14 @@ impl Brain {
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
                         link.queue.borrow_mut().revoke(run);
+                    }
+                }
+                Effect::RevokeScenes { scenes } => {
+                    if let Some(link) = link.as_deref_mut() {
+                        if let Some(recovery) = &mut link.recovery {
+                            recovery.drop_scenes(&scenes);
+                        }
+                        link.queue.borrow_mut().revoke_scenes(&scenes);
                     }
                 }
                 Effect::CancelEngine { run } => {
@@ -740,9 +738,29 @@ struct Link<'a, 't> {
     queue: &'a RefCell<DataQueue>,
     ready: &'a Notify,
     tap: &'t mut Tap,
+    /// The snapshots still to send, once `Scenes` has gone.
+    recovery: Option<Recovery>,
+    /// Page replies waiting for room in the data queue.
+    held_pages: VecDeque<Input>,
 }
 
-impl Link<'_, '_> {
+impl<'a, 't> Link<'a, 't> {
+    fn new(
+        out: &'a mpsc::Sender<Vec<u8>>,
+        queue: &'a RefCell<DataQueue>,
+        ready: &'a Notify,
+        tap: &'t mut Tap,
+    ) -> Self {
+        Self {
+            out,
+            queue,
+            ready,
+            tap,
+            recovery: None,
+            held_pages: VecDeque::new(),
+        }
+    }
+
     fn control(&mut self, message: &ControlToShell) -> Result<(), Full> {
         self.tap.record(Pipe::Control, Direction::ToShell, message);
         match frame::encode(message, Pipe::Control) {
@@ -763,7 +781,7 @@ impl Link<'_, '_> {
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::SceneSnapshot { .. } => Owner::Scene,
+            DataToShell::SceneSnapshot { scene, .. } => Owner::Scene(*scene),
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");
