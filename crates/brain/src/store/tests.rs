@@ -4,7 +4,9 @@ use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
 
-use super::{Deletion, EventKind, Failure, Interruption, Recovered, RunEnd, Store, StoreError};
+use super::{
+    Deletion, EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, Store, StoreError,
+};
 
 /// A store file in its own temp folder, removed afterwards.
 struct Scratch(PathBuf);
@@ -84,7 +86,11 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
         .append(
             thread,
             run,
-            &[(EventKind::AssistantText, Some(&answer), None)],
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some(&answer),
+                body: None,
+            }],
         )
         .expect("text");
     let body = format!(r#"{{"label":"{MARKER}"}}"#);
@@ -92,7 +98,11 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
         .append(
             thread,
             run,
-            &[(EventKind::SceneStep, Some("label"), Some(&body))],
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("label"),
+                body: Some(&body),
+            }],
         )
         .expect("step");
     (thread, run)
@@ -226,7 +236,11 @@ fn a_thread_being_deleted_takes_no_new_work() {
         store.append(
             thread,
             run,
-            &[(EventKind::AssistantText, Some("late"), None)]
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("late"),
+                body: None
+            }]
         ),
         Err(StoreError::NoThread)
     ));
@@ -243,14 +257,26 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
     let (a, _) = turn(&mut store, Err("a"), "x");
     let (b, run_b) = turn(&mut store, Err("b"), "y");
     assert!(matches!(
-        store.append(a, run_b, &[(EventKind::AssistantText, Some("x"), None)]),
+        store.append(
+            a,
+            run_b,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("x"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoRun)
     ));
     assert!(matches!(
         store.append(
             b,
             RunId(u64::MAX),
-            &[(EventKind::AssistantText, Some("x"), None)]
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("x"),
+                body: None
+            }]
         ),
         Err(StoreError::NoRun)
     ));
@@ -258,7 +284,15 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
         .end_run(b, run_b, &[], RunEnd::Interrupted(Interruption::Stop))
         .expect("end");
     assert!(matches!(
-        store.append(b, run_b, &[(EventKind::SceneStep, Some("late"), None)]),
+        store.append(
+            b,
+            run_b,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("late"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoRun)
     ));
     assert!(matches!(
@@ -297,7 +331,11 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
         .append(
             thread,
             active,
-            &[(EventKind::AssistantText, Some("partial"), None)],
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("partial"),
+                body: None,
+            }],
         )
         .expect("committed text");
     // The brain dies: its connection never closes, so nothing is checkpointed.
@@ -521,11 +559,34 @@ fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = turn(&mut store, Err("t"), "hi");
     let (other, _) = turn(&mut store, Err("u"), "hey");
-    let tail = [(EventKind::AssistantText, Some("tail"), None)];
+    let tail = [NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some("tail"),
+        body: None,
+    }];
+    let other_updated = |store: &Store| -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT updated_ms FROM threads WHERE id = ?1",
+                [super::sql_id(other.0, StoreError::NoThread).expect("id")],
+                |row| row.get(0),
+            )
+            .expect("updated_ms")
+    };
+    store
+        .conn
+        .execute("UPDATE threads SET updated_ms = 0", [])
+        .expect("reset");
     assert!(matches!(
         store.end_run(other, run, &tail, RunEnd::Done),
         Err(StoreError::NoRun)
     ));
+    assert_eq!(
+        other_updated(&store),
+        0,
+        "the touch rolled back with the rest"
+    );
     store.begin_delete(thread).expect("begin");
     assert!(matches!(
         store.end_run(thread, run, &tail, RunEnd::Done),
