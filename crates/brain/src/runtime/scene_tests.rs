@@ -13,8 +13,14 @@ use tokio::time::timeout;
 #[cfg(windows)]
 use super::pipes;
 use super::{PATIENCE, Shell, duplex, hold, locked_brain, outcome, outcomes, patient_brain};
-use crate::coordinator::Input;
-use crate::runtime::{Brain, CLOSE_WAIT, Ended, Quit, SCENES_WAIT};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use tokio::io::ReadBuf;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::coordinator::{Input, StoreOp};
+use crate::runtime::{Brain, CLOSE_WAIT, Ended, Quit, SCENES_WAIT, Seen};
 use crate::store::{RunEnd, SceneTarget, Store};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, SENTINEL, Scratch};
@@ -22,8 +28,6 @@ use crate::test_support::{self, Captured, SENTINEL, Scratch};
 /// The first step's write starts this long after the run's text, so a test can hold the store
 /// before it.
 const SCRIPT: &str = "0 text a\n300 step one\n5000 text never";
-/// Long enough for that write to have reached the store and be waiting on the lock.
-const STEP_WRITTEN: Duration = Duration::from_millis(800);
 
 /// Scenes drawn before the brain starts, each by its own thread's run from `labels`. A fifth
 /// evicts the oldest, as the brain does.
@@ -84,6 +88,7 @@ fn clear(scenes: &[SceneId]) -> ControlToBrain {
 async fn hold_first_step<S: AsyncRead + AsyncWrite>(
     shell: &mut Shell<S>,
     scratch: &Scratch,
+    observed: &mut UnboundedReceiver<Seen>,
 ) -> (RunId, rusqlite::Connection) {
     shell.submit("go").await;
     let (run, _) = shell.state().await;
@@ -95,8 +100,22 @@ async fn hold_first_step<S: AsyncRead + AsyncWrite>(
         }
     }
     let lock = hold(scratch);
-    tokio::time::sleep(STEP_WRITTEN).await;
+    step_started(observed, 0).await;
     (run, lock)
+}
+
+/// Waits for the brain to report what `wanted` matches, skipping everything before it.
+async fn seen(observed: &mut UnboundedReceiver<Seen>, wanted: impl Fn(&Seen) -> bool) {
+    let found = async { while !wanted(&observed.recv().await.expect("the brain reports")) {} };
+    timeout(PATIENCE, found).await.expect("seen in time");
+}
+
+/// Waits until the store thread has begun writing the step at `index`.
+async fn step_started(observed: &mut UnboundedReceiver<Seen>, index: u32) {
+    seen(observed, |seen| {
+        matches!(seen, Seen::StoreOpStarted(StoreOp::CommitStep { index: at, .. }) if *at == index)
+    })
+    .await;
 }
 
 /// Sends a turn and waits for its run state. The core takes controls before turns, so every
@@ -154,11 +173,12 @@ fn release_after(lock: rusqlite::Connection, after: Duration) -> std::thread::Jo
 async fn a_held_first_step_holds_back_scenes_and_turns_and_the_connection_ends_unavailable() {
     let scratch = Scratch::new("barrier-held");
     let mut brain = patient_brain(&scratch, SCRIPT);
+    let mut observed = brain.observe();
     let mut tap = Tap::from_env();
     let ((control, data), mut shell) = duplex();
     let client = async {
         assert_eq!(shell.scenes().await, []);
-        let (_, lock) = hold_first_step(&mut shell, &scratch).await;
+        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
         drop(shell);
         lock
     };
@@ -205,26 +225,34 @@ async fn a_held_first_step_holds_back_scenes_and_turns_and_the_connection_ends_u
 
 /// Four scenes, then a fifth whose first step, which evicts the oldest, waits on the lock as
 /// its shell leaves.
-async fn held_fifth_scene(scratch: &Scratch) -> (Brain, Vec<SceneId>, rusqlite::Connection) {
+async fn held_fifth_scene(
+    scratch: &Scratch,
+) -> (
+    Brain,
+    UnboundedReceiver<Seen>,
+    Vec<SceneId>,
+    rusqlite::Connection,
+) {
     let four = drawn(scratch, &[&["a"], &["b"], &["c"], &["d"]]);
     let mut brain = patient_brain(scratch, SCRIPT);
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), four);
-        let (_, lock) = hold_first_step(&mut shell, scratch).await;
+        let (_, lock) = hold_first_step(&mut shell, scratch, &mut observed).await;
         drop(shell);
         lock
     };
     let (ended, lock) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    (brain, four, lock)
+    (brain, observed, four, lock)
 }
 
 #[tokio::test]
 async fn scenes_after_a_held_fifth_scene_name_the_four_its_transaction_committed() {
     let scratch = Scratch::new("barrier-fifth");
-    let (mut brain, four, lock) = held_fifth_scene(&scratch).await;
+    let (mut brain, _, four, lock) = held_fifth_scene(&scratch).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -246,14 +274,16 @@ async fn scenes_after_a_held_fifth_scene_name_the_four_its_transaction_committed
 #[tokio::test]
 async fn stop_and_clear_are_served_while_the_barrier_waits() {
     let scratch = Scratch::new("barrier-served");
-    let (mut brain, four, lock) = held_fifth_scene(&scratch).await;
+    let (mut brain, mut observed, four, lock) = held_fifth_scene(&scratch).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.stop(RunId(5)).await;
         shell.send(&clear(&[four[1]])).await;
-        // Nothing answers either, so give the core a moment to take them before the store frees.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Nothing answers either, so wait until the core has taken both before the store frees.
+        for _ in 0..2 {
+            seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
+        }
         lock.execute_batch("ROLLBACK").expect("unlocked");
         let scenes = shell.scenes().await;
         drop(shell);
@@ -279,11 +309,12 @@ async fn a_stop_that_kept_nothing_brings_no_scene_back_once_its_late_ack_lands()
     let scratch = Scratch::new("kept-nothing");
     let three = drawn(&scratch, &[&["a"], &["b"], &["c"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), three);
-        let (run, lock) = hold_first_step(&mut shell, &scratch).await;
+        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
         shell.stop(run).await;
         while shell.state().await != (run, Phase::Interrupted) {}
         lock.execute_batch("ROLLBACK").expect("unlocked");
@@ -378,11 +409,12 @@ async fn a_quit_applies_a_queued_stop_and_clear_and_waits_for_a_late_first_ack()
     let scratch = Scratch::new("quit-queued");
     let drawn = drawn(&scratch, &[&["a"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), drawn);
-        let (run, lock) = hold_first_step(&mut shell, &scratch).await;
+        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
         shell
             .send(&ControlToBrain::Stop {
                 run,
@@ -416,11 +448,12 @@ async fn a_quit_ends_a_current_run_whose_first_ack_is_pending() {
     let scratch = Scratch::new("quit-current");
     let drawn = drawn(&scratch, &[&["a"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), drawn);
-        let (_, lock) = hold_first_step(&mut shell, &scratch).await;
+        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
         shell.send(&clear(&drawn)).await;
         shell.send(&ControlToBrain::Quitting).await;
         drop(shell);
@@ -471,11 +504,66 @@ async fn a_quitting_written_before_both_pipes_close_is_accepted() {
     assert_eq!(brain.quit(deadline(ended)).await, Quit::Complete);
 }
 
+/// A pipe end that reports how many bytes have been read from it in all.
+struct Counted<S> {
+    inner: S,
+    read: usize,
+    heard: UnboundedSender<usize>,
+}
+
+impl<S> Counted<S> {
+    fn new(inner: S) -> (Self, UnboundedReceiver<usize>) {
+        let (heard, read) = tokio::sync::mpsc::unbounded_channel();
+        let counted = Self {
+            inner,
+            read: 0,
+            heard,
+        };
+        (counted, read)
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
+        let taken = buf.filled().len() - before;
+        if taken > 0 {
+            self.read += taken;
+            self.heard.send(self.read).ok();
+        }
+        polled
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 #[tokio::test]
 async fn a_quitting_split_around_the_data_pipe_s_end_is_finished_and_accepted() {
     let scratch = Scratch::new("quit-split");
     let mut brain = test_support::brain(&scratch, "");
     let ((control, data), shell) = duplex();
+    let (control, mut read) = Counted::new(control);
     let mut tap = Tap::from_env();
     let Shell {
         control_in,
@@ -489,7 +577,10 @@ async fn a_quitting_split_around_the_data_pipe_s_end_is_finished_and_accepted() 
     let client = async {
         control_out.write_all(&quitting[..cut]).await.expect("sent");
         drop((data_in, data_out));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let taken = async { while read.recv().await.expect("reading") < cut {} };
+        timeout(PATIENCE, taken)
+            .await
+            .expect("the first part was read");
         control_out.write_all(&quitting[cut..]).await.expect("sent");
         drop((control_in, control_out));
     };
@@ -933,6 +1024,7 @@ async fn stopped_while_ending(
     revealed: Vec<u32>,
 ) -> (Option<u32>, Option<(u32, Vec<String>)>) {
     let mut brain = patient_brain(scratch, script);
+    let mut observed = brain.observe();
     let replace = script == STEPS_HELD_THEN_REPLACED;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -946,7 +1038,14 @@ async fn stopped_while_ending(
             DataToShell::AssistantText { .. }
         ));
         let lock = hold(scratch);
-        tokio::time::sleep(STEP_WRITTEN).await;
+        // Steps b and c are both queued behind the lock.
+        seen(&mut observed, |seen| {
+            matches!(
+                seen,
+                Seen::StoreOpQueued(StoreOp::CommitStep { index: 2, .. })
+            )
+        })
+        .await;
         if replace {
             shell.submit("next").await;
             while shell.state().await != (run, Phase::Interrupted) {}

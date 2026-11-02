@@ -39,6 +39,9 @@ pub(crate) struct Schedule {
     /// Hears every attempt's outcome.
     #[cfg(test)]
     pub(crate) attempts: Option<mpsc::Sender<Attempt>>,
+    /// Hears every op as it starts.
+    #[cfg(test)]
+    pub(crate) observed: Option<UnboundedSender<super::Seen>>,
 }
 
 impl Default for Schedule {
@@ -50,6 +53,8 @@ impl Default for Schedule {
             free_space: crate::platform::free_space,
             #[cfg(test)]
             attempts: None,
+            #[cfg(test)]
+            observed: None,
         }
     }
 }
@@ -292,7 +297,7 @@ impl StoreThread {
         acks: UnboundedSender<Input>,
         schedule: Schedule,
     ) -> std::io::Result<Self> {
-        let (ops_tx, ops) = mpsc::channel();
+        let (ops_tx, ops) = mpsc::channel::<StoreOp>();
         let (finished, done) = oneshot::channel();
         thread::Builder::new()
             .name("store".to_owned())
@@ -309,6 +314,10 @@ impl StoreThread {
                     };
                     match op {
                         Ok(op) => {
+                            #[cfg(test)]
+                            if let Some(observed) = &purger.schedule.observed {
+                                observed.send(super::Seen::StoreOpStarted(op.clone())).ok();
+                            }
                             serve_op(&mut store, &mut purger, &acks, op);
                         }
                         Err(RecvTimeoutError::Timeout) => purger.tick(&mut store),

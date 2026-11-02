@@ -105,6 +105,23 @@ pub(crate) struct Brain {
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
     chunk_target: usize,
+    /// Hears what tests wait on instead of sleeping.
+    #[cfg(test)]
+    observer: mpsc::UnboundedSender<Seen>,
+    #[cfg(test)]
+    seen: Option<mpsc::UnboundedReceiver<Seen>>,
+}
+
+/// What a test can wait for instead of sleeping.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Seen {
+    /// The core queued this op for the store thread.
+    StoreOpQueued(crate::coordinator::StoreOp),
+    /// The store thread began this op; a write may then wait on a lock.
+    StoreOpStarted(crate::coordinator::StoreOp),
+    /// The brain handled a control input and applied its effects.
+    ControlApplied,
 }
 
 impl Brain {
@@ -121,8 +138,14 @@ impl Brain {
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
-        let store =
-            StoreThread::spawn(store, inputs_tx.clone(), store_thread::Schedule::default())?;
+        #[cfg(test)]
+        let (observer, seen) = mpsc::unbounded_channel();
+        let schedule = store_thread::Schedule {
+            #[cfg(test)]
+            observed: Some(observer.clone()),
+            ..store_thread::Schedule::default()
+        };
+        let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
             coordinator: Coordinator::new(last_thread, last_run, scenes),
@@ -136,7 +159,27 @@ impl Brain {
             deadline: None,
             epoch: 0,
             chunk_target: recovery::CHUNK_TARGET,
+            #[cfg(test)]
+            observer,
+            #[cfg(test)]
+            seen: Some(seen),
         })
+    }
+
+    /// What the brain reports to a test, from here on.
+    #[cfg(test)]
+    pub(crate) fn observe(&mut self) -> mpsc::UnboundedReceiver<Seen> {
+        self.seen.take().expect("observed once")
+    }
+
+    /// Reports a control input as it's taken. Tests run on one thread, so they hear it only
+    /// once its effects are applied and the brain waits again.
+    #[cfg(test)]
+    fn control_taken(&self, input: &Input) {
+        if matches!(input, Input::Stop { .. } | Input::Clear { .. }) {
+            // A test that stopped listening doesn't matter.
+            self.observer.send(Seen::ControlApplied).ok();
+        }
     }
 
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
@@ -322,6 +365,8 @@ impl Brain {
     fn control_offline(&mut self, message: ControlToBrain, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message);
         if let Ok(Some(input)) = control_input(message) {
+            #[cfg(test)]
+            self.control_taken(&input);
             self.offline(input);
         }
     }
@@ -431,6 +476,8 @@ impl Brain {
                     continue;
                 }
             }
+            #[cfg(test)]
+            self.control_taken(&input);
             let Ok(effects) = self.coordinator.handle(input) else {
                 continue;
             };
@@ -465,6 +512,8 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
+                    #[cfg(test)]
+                    self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
