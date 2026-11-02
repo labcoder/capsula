@@ -228,7 +228,10 @@ fn hold(
 }
 
 /// Checkpoints when raised, and again after a delay while frames are left, until stopped.
-pub(super) fn spawn_helper(exit: &Exit) -> io::Result<JoinHandle<()>> {
+pub(super) fn spawn_helper(
+    exit: &Exit,
+    #[cfg(test)] observed: Option<UnboundedSender<super::super::Seen>>,
+) -> io::Result<JoinHandle<()>> {
     let (side, checkpoints) = (Arc::clone(&exit.side), Arc::clone(&exit.checkpoints));
     thread::Builder::new()
         .name("checkpoint".to_owned())
@@ -242,6 +245,10 @@ pub(super) fn spawn_helper(exit: &Exit) -> io::Result<JoinHandle<()>> {
                         true
                     }
                 };
+                #[cfg(test)]
+                if let Some(observed) = &observed {
+                    observed.send(super::super::Seen::Checkpointed).ok();
+                }
                 retry = left.then(|| {
                     retry.map_or(FIRST_RETRY, |retry: Duration| (retry * 2).min(LAST_RETRY))
                 });

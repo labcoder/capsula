@@ -144,6 +144,14 @@ fn a_read_sees_the_ops_queued_before_it() {
     running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_turn(op)));
     assert!(running.thread.send(threads(7)));
     running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_read(op)));
+    // The one bounded wait for an absence: without the barrier the read answers at once.
+    assert!(
+        running
+            .acks
+            .recv_timeout(Duration::from_millis(100))
+            .is_err(),
+        "the read waits for the turn"
+    );
     release.send(()).expect("held");
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
     assert_eq!(listed(running.ack()), [ThreadId(1)]);
@@ -274,23 +282,29 @@ fn reads_fail_while_the_store_cant_reopen_and_work_once_it_does() {
 }
 
 #[test]
-fn close_returns_at_once_and_finishes_the_queued_write_and_its_read() {
+fn close_returns_at_once_and_finishes_the_queued_write_and_its_reads() {
     let scratch = Scratch::new("close-with-read");
     let running = run(Store::open(&scratch.db()).expect("store"), None);
     let release = gate(&running.gates, is_turn);
     assert!(running.thread.send(turn(1)));
     running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_turn(op)));
+    let reading = gate(&running.read_gates, is_read);
     assert!(running.thread.send(threads(4)));
+    assert!(running.thread.send(threads(5)));
     let closed = running.thread.close();
     release.send(()).expect("held");
     assert_eq!(
         running.acks.recv_timeout(PATIENCE),
         Ok(Input::TurnStored { run: RunId(1) })
     );
-    assert_eq!(
-        listed(running.acks.recv_timeout(PATIENCE).expect("the read")),
-        [ThreadId(1)]
-    );
+    while running.seen.recv_timeout(PATIENCE).expect("seen") != Seen::ReadHeld {}
+    reading.send(()).expect("held");
+    for _ in 0..2 {
+        assert_eq!(
+            listed(running.acks.recv_timeout(PATIENCE).expect("a read")),
+            [ThreadId(1)]
+        );
+    }
     closed.blocking_recv().expect("closed");
     // Every connection let go of the file.
     std::fs::rename(scratch.db(), beside(&scratch.db(), ".moved")).expect("not held");
@@ -319,4 +333,22 @@ fn a_panicking_store_thread_fails_the_reads_waiting_on_it() {
     assert_eq!(wait.recv_timeout(PATIENCE), Ok(false));
     assert!(matches!(side.read(|_| Ok(())), Err(StoreError::Closed)));
     drop(store);
+}
+
+#[test]
+fn a_commit_is_checkpointed_by_the_helper() {
+    let scratch = Scratch::new("helper-checkpoints");
+    let running = run(Store::open(&scratch.db()).expect("store"), None);
+    let on_disk = || std::fs::metadata(scratch.db()).expect("file").len();
+    let before = on_disk();
+    assert!(running.thread.send(StoreOp::BeginTurn {
+        thread: ThreadId(1),
+        title: Some("t".to_owned()),
+        run: RunId(1),
+        text: "x".repeat(64 * 1024),
+    }));
+    assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
+    running.saw(|seen| *seen == Seen::Checkpointed);
+    assert!(on_disk() > before + 64 * 1024, "the turn reached the file");
+    running.thread.close().blocking_recv().expect("closed");
 }

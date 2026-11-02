@@ -387,7 +387,11 @@ impl StoreThread {
             barrier: Arc::new(Barrier::default()),
             checkpoints: Arc::new(Checkpoints::default()),
         };
-        let helper = page_reader::spawn_helper(&exit)?;
+        let helper = page_reader::spawn_helper(
+            &exit,
+            #[cfg(test)]
+            schedule.observed.clone(),
+        )?;
         let reader = page_reader::spawn_reader(
             reads,
             &exit,

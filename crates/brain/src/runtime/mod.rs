@@ -132,6 +132,8 @@ pub(crate) enum Seen {
     ReadHeld,
     /// A clean copy waits for a side connection in use before it's swapped in.
     SwapWaiting,
+    /// The checkpoint helper ran a checkpoint.
+    Checkpointed,
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     /// A page reply landed while the data queue was full and waits for room.
