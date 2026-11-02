@@ -842,13 +842,7 @@ fn a_store_whose_reopen_failed_serves_again_once_its_file_opens() {
     let mut store = Store::open(&scratch.db()).expect("store");
     owed_purge(&mut store);
     let copied = clean_copy(&store);
-    let wal = beside(&scratch.db(), "-wal");
-    // A folder where the reopen's WAL goes, made once the old store is closed and checked.
-    let swapped = store.swap_with(&copied, |db, old| {
-        std::fs::hard_link(db, old)?;
-        std::fs::create_dir(&wal)
-    });
-    assert!(swapped.is_err(), "the move worked but the reopen failed");
+    let wal = store.swap_failing_reopen(&copied);
     assert!(store.reconnect().is_err());
     assert!(
         store.high_water().is_err(),
@@ -865,6 +859,29 @@ fn a_store_whose_reopen_failed_serves_again_once_its_file_opens() {
     store.leftovers().remove().expect("removed");
     assert!(!contains_marker(&scratch.db()));
     assert_eq!(store.search("served", 10).expect("search"), vec![thread]);
+}
+
+#[test]
+fn a_removal_that_leaves_a_file_behind_isnt_finished() {
+    let scratch = Scratch::new("removal-leaves");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let copied = clean_copy(&store);
+    assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
+    let old = beside(&scratch.db(), ".purge-old");
+    // As a file another process holds with delete sharing keeps its name after a deletion
+    // succeeds, where the file system doesn't remove names at once.
+    let removed = store.leftovers().remove_with(|path| {
+        if path == old {
+            Ok(())
+        } else {
+            std::fs::remove_file(path)
+        }
+    });
+    assert!(removed.is_err());
+    assert!(old.exists());
+    store.leftovers().remove().expect("removed");
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
 }
 
 #[test]
@@ -1312,6 +1329,203 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
     );
 }
 
+/// A measured store's threads, events per thread, bytes per event and captures per thread.
+type Shape = (usize, usize, usize, usize);
+
+/// The stores the purge is measured on.
+const MEASURED_STORES: [(&str, Shape); 4] = [
+    ("text 20k events", (1000, 20, 2000, 0)),
+    ("text 100k events", (2000, 50, 2000, 0)),
+    ("text 20k events + 4k captures", (1000, 20, 2000, 4)),
+    ("text 20k events + 8k captures", (1000, 20, 2000, 8)),
+];
+
+/// Builds one of [`MEASURED_STORES`], with its WAL emptied.
+fn measured_store(scratch: &Scratch, (threads, events, bytes, captures): Shape) -> Store {
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do ";
+    let text = words.repeat(bytes / words.len());
+    let capture: Vec<u8> = (0..121_000_u32)
+        .map(|i| i.wrapping_mul(2_654_435_761).to_be_bytes()[0])
+        .collect();
+    let tx = store.conn.transaction().expect("tx");
+    // Stands in for slice 6's assets table, which doesn't exist yet.
+    tx.execute_batch("CREATE TABLE media (thread INTEGER NOT NULL, bytes BLOB NOT NULL)")
+        .expect("media");
+    let small = |n: usize| i64::try_from(n).expect("small");
+    for t in 1..=small(threads) {
+        tx.execute(
+            "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (?1, 't', 0, 0)",
+            [t],
+        )
+        .expect("thread");
+        tx.execute(
+            "INSERT INTO runs (id, thread, state, started_ms) VALUES (?1, ?1, 'done', 0)",
+            [t],
+        )
+        .expect("run");
+        for e in 0..small(events) {
+            tx.execute(
+                "INSERT INTO events (thread, run, kind, text, created_ms)
+                 VALUES (?1, ?1, 'assistant_text', ?2 || ?3, 0)",
+                rusqlite::params![t, e, text],
+            )
+            .expect("event");
+        }
+        for _ in 0..captures {
+            tx.execute(
+                "INSERT INTO media (thread, bytes) VALUES (?1, ?2)",
+                rusqlite::params![t, capture],
+            )
+            .expect("capture");
+        }
+    }
+    tx.commit().expect("built");
+    assert!(checkpoint_now(&store.conn).expect("settled"));
+    store
+}
+
+/// A store op the way a run makes them: a turn, then its ending.
+fn measured_op(store: &mut Store) -> [std::time::Duration; 2] {
+    let started = std::time::Instant::now();
+    let (thread, run) = turn(store, Err("measured"), "a measured turn");
+    let turned = started.elapsed();
+    let started = std::time::Instant::now();
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
+    [turned, started.elapsed()]
+}
+
+/// Deletes `thread` as a run would, its captures included.
+fn delete_measured(store: &mut Store, thread: usize) {
+    store
+        .conn
+        .execute(
+            "DELETE FROM media WHERE thread = ?1",
+            [i64::try_from(thread).expect("small")],
+        )
+        .expect("media gone");
+    let thread = ThreadId(u64::try_from(thread).expect("small"));
+    store.begin_delete(thread).expect("begin");
+    store.finish_delete(thread).expect("finish");
+}
+
+/// Rez measurement for the pull request, not a check: the swap after a reader kept a deletion out
+/// of the store's file. A reader holds a snapshot while a tenth of the store's threads, their
+/// captures included, are deleted, so no checkpoint can copy the deletion into the file; it then
+/// lets go, a copy is made with nothing else running, and the WAL's size, the whole swap and the op
+/// right behind it are logged. Three rounds a store, each deleting the next tenth. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_swap_after`; set
+/// `MEASURE_ONLY` to one store's name to run just that one.
+#[test]
+#[ignore = "a measurement, run by hand on Rez"]
+fn measure_swap_after_a_held_reader() {
+    use std::time::Instant;
+    let only = std::env::var("MEASURE_ONLY").ok();
+    for (name, shape) in MEASURED_STORES {
+        if only.as_deref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let scratch = Scratch::new("measure-wal");
+        let mut store = measured_store(&scratch, shape);
+        let size = std::fs::metadata(scratch.db()).expect("size").len();
+        let tenth = shape.0 / 10;
+        for round in 0..3 {
+            let reader = Connection::open(scratch.db()).expect("reader");
+            reader
+                .execute_batch("BEGIN; SELECT count(*) FROM events;")
+                .expect("snapshot");
+            for thread in round * tenth + 1..=(round + 1) * tenth {
+                delete_measured(&mut store, thread);
+            }
+            drop(reader);
+            // The copy's first step drains the WAL with a passive checkpoint on its own
+            // connection. In the last round that's done apart first, with ops meanwhile, since an
+            // op makes the copy stale; the ops start once the helper's connection is open, as an
+            // op that came first would checkpoint the WAL itself (each store's last line).
+            let drained = (round == 2).then(|| {
+                let db = scratch.db();
+                let (ready, opened) = std::sync::mpsc::channel();
+                let helper = std::thread::spawn(move || {
+                    let conn = Connection::open_with_flags(
+                        &db,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                    )
+                    .expect("helper");
+                    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+                        .expect("read");
+                    ready.send(()).expect("heard");
+                    let started = Instant::now();
+                    let frames: (i64, i64, i64) = conn
+                        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })
+                        .expect("drained");
+                    (started.elapsed(), frames)
+                });
+                opened.recv().expect("opened");
+                let mut ops = Vec::new();
+                while !helper.is_finished() {
+                    ops.extend(measured_op(&mut store));
+                }
+                let (drain, (busy, frames, copied)) = helper.join().expect("drained");
+                let worst = ops.iter().max().copied().unwrap_or_default();
+                format!(
+                    "; drained apart first in {drain:.1?} (busy {busy}, {copied} of {frames} \
+                     frames) with {} ops meanwhile, worst {worst:.1?}",
+                    ops.len()
+                )
+            });
+            let started = Instant::now();
+            let copied = store
+                .owed()
+                .expect("owed")
+                .expect("idle")
+                .copy(&Arc::new(AtomicBool::new(false)))
+                .expect("copy")
+                .expect("not stopped");
+            let copy = started.elapsed();
+            let wal = std::fs::metadata(beside(&scratch.db(), "-wal")).map_or(0, |wal| wal.len());
+            let started = Instant::now();
+            assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
+            let swap = started.elapsed();
+            let first = measured_op(&mut store);
+            eprintln!(
+                "{name} ({} MiB) round {}: {tenth} threads deleted behind a reader{}; copy \
+                 {copy:.1?}; WAL file at the swap {:.1} MiB; swap {swap:.1?}; op right behind it \
+                 {:.1?} + {:.1?}",
+                size >> 20,
+                round + 1,
+                drained.unwrap_or_default(),
+                f64::from(u32::try_from(wal >> 10).expect("under 4 TiB")) / 1024.0,
+                first[0],
+                first[1],
+            );
+            store.leftovers().remove().expect("removed");
+        }
+        // With no purge at all: SQLite's automatic checkpoint makes the first write after the
+        // reader lets go copy the whole deletion on the store's thread.
+        let reader = Connection::open(scratch.db()).expect("reader");
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM events;")
+            .expect("snapshot");
+        for thread in 3 * tenth + 1..=4 * tenth {
+            delete_measured(&mut store, thread);
+        }
+        drop(reader);
+        let wal = std::fs::metadata(beside(&scratch.db(), "-wal")).map_or(0, |wal| wal.len());
+        let first = measured_op(&mut store);
+        eprintln!(
+            "{name}: with no purge, {tenth} threads deleted behind a reader; WAL file {:.1} MiB; \
+             the first op after the reader let go {:.1?} + {:.1?}",
+            f64::from(u32::try_from(wal >> 10).expect("under 4 TiB")) / 1024.0,
+            first[0],
+            first[1],
+        );
+    }
+}
+
 /// Rez measurement for the pull request, not a check: the purge's phases by store size, with and
 /// without media blobs the size of slice 6's captures (architecture v1 §6.1: two capture images
 /// total about 121 KB), and how long store ops take while each phase runs. Five purges a store;
@@ -1326,29 +1540,8 @@ fn measure_purge() {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::{Duration, Instant};
     const PHASES: [&str; 3] = ["snapshot", "rebuild", "compact"];
-    // (name, threads, events per thread, bytes per event, captures per thread)
-    let stores = [
-        ("text 20k events", 1000, 20, 2000, 0),
-        ("text 100k events", 2000, 50, 2000, 0),
-        ("text 20k events + 4k captures", 1000, 20, 2000, 4),
-        ("text 20k events + 8k captures", 1000, 20, 2000, 8),
-    ];
     let only = std::env::var("MEASURE_ONLY").ok();
-    let words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do ";
-    let capture: Vec<u8> = (0..121_000_u32)
-        .map(|i| i.wrapping_mul(2_654_435_761).to_be_bytes()[0])
-        .collect();
-    // A store op the way a run makes them: a turn, then its ending.
-    let op = |store: &mut Store| -> [Duration; 2] {
-        let started = Instant::now();
-        let (thread, run) = turn(store, Err("measured"), "a measured turn");
-        let turned = started.elapsed();
-        let started = Instant::now();
-        store
-            .end_run(thread, run, &[], RunEnd::Done)
-            .expect("ended");
-        [turned, started.elapsed()]
-    };
+    let op = measured_op;
     let worst = |ops: &[Duration]| {
         let (at, worst) = ops
             .iter()
@@ -1372,48 +1565,12 @@ fn measure_purge() {
         }
         (helper.join().expect("removed"), ops)
     };
-    for (name, threads, events, bytes, captures) in stores {
+    for (name, shape) in MEASURED_STORES {
         if only.as_deref().is_some_and(|only| only != name) {
             continue;
         }
         let scratch = Scratch::new("measure-purge");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let text = words.repeat(bytes / words.len());
-        {
-            let tx = store.conn.transaction().expect("tx");
-            // Stands in for slice 6's assets table, which doesn't exist yet.
-            tx.execute_batch("CREATE TABLE media (thread INTEGER NOT NULL, bytes BLOB NOT NULL)")
-                .expect("media");
-            for t in 1..=threads {
-                tx.execute(
-                    "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (?1, 't', 0, 0)",
-                    [t],
-                )
-                .expect("thread");
-                tx.execute(
-                    "INSERT INTO runs (id, thread, state, started_ms) VALUES (?1, ?1, 'done', 0)",
-                    [t],
-                )
-                .expect("run");
-                for e in 0..events {
-                    tx.execute(
-                        "INSERT INTO events (thread, run, kind, text, created_ms)
-                         VALUES (?1, ?1, 'assistant_text', ?2 || ?3, 0)",
-                        rusqlite::params![t, e, text],
-                    )
-                    .expect("event");
-                }
-                for _ in 0..captures {
-                    tx.execute(
-                        "INSERT INTO media (thread, bytes) VALUES (?1, ?2)",
-                        rusqlite::params![t, capture],
-                    )
-                    .expect("capture");
-                }
-            }
-            tx.commit().expect("built");
-        }
-        assert!(checkpoint_now(&store.conn).expect("settled"));
+        let mut store = measured_store(&scratch, shape);
         let size = std::fs::metadata(scratch.db()).expect("size").len();
         // The same ops with no purge running, for comparison.
         let alone = |store: &mut Store| -> String {

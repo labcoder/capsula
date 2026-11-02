@@ -658,6 +658,112 @@ mod tests {
     }
 
     #[test]
+    fn an_old_store_held_with_delete_sharing_is_finished_only_once_its_name_is_gone() {
+        const FILE_SHARE_READ_WRITE_DELETE: u32 = 1 | 2 | 4;
+        let scratch = Scratch::new("old-shared");
+        let store = swapped_with_old_left(&scratch);
+        let mut holder = Some(
+            OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+                .open(beside(&scratch.db(), ".purge-old"))
+                .expect("held"),
+        );
+        let (thread, attempts) = spawn(store);
+        match next(&attempts) {
+            // NTFS with POSIX deletion drops the name at once, while the file is still open.
+            Attempt::Done => eprintln!("the old store's name went while it was held"),
+            attempt => {
+                eprintln!("the old store's name stayed while it was held");
+                assert_eq!(attempt, Attempt::Failed);
+                assert_eq!(
+                    purge_files(&scratch),
+                    vec![beside(&scratch.db(), ".purge-old")]
+                );
+                drop(holder.take());
+                done_after(&attempts, &[Attempt::Failed]);
+            }
+        }
+        assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
+        drop(holder);
+        thread.close().blocking_recv().expect("closed");
+    }
+
+    async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
+        tokio::time::timeout(Duration::from_secs(10), replies.recv())
+            .await
+            .expect("a reply in time")
+            .expect("the thread is alive")
+    }
+
+    #[tokio::test]
+    async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_can() {
+        let scratch = Scratch::new("unavailable");
+        let mut store = owing(&scratch);
+        let (kept, run) = (ThreadId(2), RunId(2));
+        store
+            .begin_turn(kept, Some("kept"), run, "kept words")
+            .expect("turn");
+        store.end_run(kept, run, &[], RunEnd::Done).expect("ended");
+        let copied = store
+            .owed()
+            .expect("owed")
+            .expect("idle")
+            .copy(&Arc::new(AtomicBool::new(false)))
+            .expect("copy")
+            .expect("not stopped");
+        let wal = store.swap_failing_reopen(&copied);
+
+        let (acks, mut replies) = mpsc::unbounded_channel();
+        let (heard, attempts) = std_mpsc::channel();
+        // The purge's retry is far off, so only an op can open the store again.
+        let schedule = Schedule {
+            first_retry: Duration::from_secs(600),
+            last_retry: Duration::from_secs(600),
+            attempts: Some(heard),
+            ..Schedule::default()
+        };
+        let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+        assert_eq!(
+            next(&attempts),
+            Attempt::Failed,
+            "the purge can't reopen it"
+        );
+        let turn = |run, text: &str| StoreOp::BeginTurn {
+            thread: ThreadId(3),
+            title: Some("new".to_owned()),
+            run,
+            text: text.to_owned(),
+        };
+        assert!(thread.send(turn(RunId(3), "refused words")));
+        assert_eq!(
+            reply(&mut replies).await,
+            Input::StoreFailed { run: RunId(3) }
+        );
+        assert!(wal.is_dir(), "nothing took the obstruction's place");
+
+        std::fs::remove_dir(&wal).expect("out of the way");
+        assert!(thread.send(turn(RunId(4), "stored words")));
+        assert_eq!(
+            reply(&mut replies).await,
+            Input::TurnStored { run: RunId(4) }
+        );
+        thread.close().await.expect("closed");
+
+        let store = Store::open(&scratch.db()).expect("reopen");
+        assert_eq!(
+            store.search("stored", 10).expect("search"),
+            vec![ThreadId(3)]
+        );
+        assert_eq!(
+            store.search("kept", 10).expect("search"),
+            vec![kept],
+            "the same file, not an empty one"
+        );
+        assert_eq!(store.search("refused", 10).expect("search"), Vec::new());
+    }
+
+    #[test]
     fn a_crash_right_after_the_link_keeps_the_store_and_the_purge_finishes() {
         let scratch = Scratch::new("crash-linked");
         let store = owing(&scratch);

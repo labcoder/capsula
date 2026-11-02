@@ -149,6 +149,19 @@ impl Store {
         Ok(Swap::Done)
     }
 
+    /// Swaps in `copied` but leaves the store unavailable, as a failed reopen does: a folder sits
+    /// where the reopened store's WAL goes. Removing the returned folder lets the file open again.
+    #[cfg(test)]
+    pub(crate) fn swap_failing_reopen(&mut self, copied: &Copied) -> PathBuf {
+        let wal = sidecar(&self.path, "-wal");
+        let swapped = self.swap_with(copied, |db, old| {
+            fs::hard_link(db, old)?;
+            fs::create_dir(&wal)
+        });
+        assert!(swapped.is_err(), "the move worked but the reopen failed");
+        wal
+    }
+
     /// Moves the clean copy over the store. The store's name never goes missing: the old file
     /// gets a second name first, so the move only drops a name and doesn't wait while the file
     /// system frees the old file's space.
@@ -200,7 +213,10 @@ impl Owed {
             .map_err(StoreError::Purge)
             .and_then(|()| {
                 let db = &leftovers.db;
-                Ok(snapshot(db, stop)? && clean(db, stop)? && compact(db, stop)?)
+                Ok(drain(db, stop)?
+                    && snapshot(db, stop)?
+                    && clean(db, stop)?
+                    && compact(db, stop)?)
             });
         if !matches!(made, Ok(true))
             && let Err(error) = leftovers.remove()
@@ -220,13 +236,21 @@ impl Leftovers {
         files(&self.db).any(|path| !missing(&path))
     }
 
-    /// Removes them all, trying each even after one fails. Runs on any thread; removing the old
-    /// store takes as long as freeing its space, about 0.12 ms per MiB on Rez. The old store
-    /// stays while the store's own file is missing: it may then be the only copy.
+    /// Removes them all, trying each even after one fails, and succeeds only once none is left.
+    /// Runs on any thread; removing the old store takes as long as freeing its space, about
+    /// 0.12 ms per MiB on Rez. The old store stays while the store's own file is missing: it may
+    /// then be the only copy.
     ///
     /// # Errors
-    /// Fails with the first file that couldn't be removed.
+    /// Fails with the first file that couldn't be removed, or when one is still there after its
+    /// removal succeeded: another process holding it with delete sharing can keep a deleted
+    /// file's name until it closes the file.
     pub fn remove(&self) -> io::Result<()> {
+        self.remove_with(|path| fs::remove_file(path))
+    }
+
+    /// [`Leftovers::remove`], removing each file with `unlink`.
+    pub(super) fn remove_with(&self, unlink: impl Fn(&Path) -> io::Result<()>) -> io::Result<()> {
         let mut first = None;
         for path in files(&self.db) {
             let removed = if path == old(&self.db) && missing(&self.db) {
@@ -234,7 +258,7 @@ impl Leftovers {
                     "the store is missing, so its old copy stays",
                 ))
             } else {
-                fs::remove_file(&path)
+                unlink(&path)
             };
             match removed {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
@@ -242,6 +266,11 @@ impl Leftovers {
                 }
                 _ => {}
             }
+        }
+        if first.is_none() && self.exist() {
+            first = Some(io::Error::other(
+                "a purge file is still there after its removal",
+            ));
         }
         first.map_or(Ok(()), Err)
     }
@@ -266,6 +295,19 @@ pub(super) fn missing(path: &Path) -> bool {
 /// The old store a swap left beside `db`.
 pub(super) fn old(db: &Path) -> PathBuf {
     sidecar(db, OLD)
+}
+
+/// Copies what the WAL holds into the store's file on its own connection, so the swap's
+/// checkpoint on the store's thread finds little left to copy: a large deletion a reader kept in
+/// the WAL took the swap past 200 ms at 1 GiB on Rez. Passive, so it never waits on the store's
+/// writer or holds it up; it can't be stopped once started, and an op meanwhile shares the disk.
+pub(super) fn drain(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(false);
+    }
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+    Ok(true)
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.
