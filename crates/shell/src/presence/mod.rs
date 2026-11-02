@@ -315,7 +315,11 @@ impl Presence {
         let action = escape::decide(self.activity, panel);
         let tell = match action {
             Escape::Stop => self.runs.stop(),
-            Escape::Clear => self.runs.clear(),
+            Escape::Clear => {
+                let effect = self.runs.clear();
+                self.grant(effect.credit);
+                effect.clear
+            }
             Escape::Dismiss => {
                 if panel == EscapePanel::Threads {
                     self.dismiss_threads(cx)?;

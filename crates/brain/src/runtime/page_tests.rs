@@ -19,7 +19,7 @@ async fn request(shell: &mut Shell<DuplexStream>, request: u32, page: PageOf) {
 
 fn exhausted_queue() -> RefCell<DataQueue> {
     let mut queue = DataQueue::new(window());
-    queue.push(Some(RunId(99)), vec![0; window()]);
+    queue.push(crate::runtime::Owner::Run(RunId(99)), vec![0; window()]);
     assert_eq!(
         queue
             .pop(std::time::Instant::now())
@@ -33,7 +33,7 @@ fn exhausted_queue() -> RefCell<DataQueue> {
 
 #[test]
 fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
-    let mut coordinator = Coordinator::new(ThreadId(0), RunId(0));
+    let mut coordinator = Coordinator::new(ThreadId(0), RunId(0), Vec::new());
     coordinator
         .handle(Input::Turn {
             thread: None,
@@ -136,6 +136,7 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
 async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let scratch = Scratch::new("page-credit");
     let mut brain = test_support::brain(&scratch, "5000 text later");
@@ -181,10 +182,17 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
             "without credit the reply stays queued"
         );
         turns_tx.send((None, "go".to_owned())).await.expect("turn");
-        let bytes = timeout(PATIENCE, control.recv())
-            .await
-            .expect("state")
-            .expect("open");
+        let mut bytes = Vec::new();
+        for _ in 0..2 {
+            bytes = timeout(PATIENCE, control.recv())
+                .await
+                .expect("state")
+                .expect("open");
+            let decoded = frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]);
+            if decoded.expect("decode") != (ControlToShell::Scenes { scenes: Vec::new() }) {
+                break;
+            }
+        }
         assert!(matches!(
             frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decode"),
             ControlToShell::RunState {
@@ -407,7 +415,9 @@ async fn read_pages_and_text(
                 assert_eq!(run, RunId(2));
                 break;
             }
-            other @ (DataToShell::StepCommit { .. } | DataToShell::PageFailed { .. }) => {
+            other @ (DataToShell::StepCommit { .. }
+            | DataToShell::PageFailed { .. }
+            | DataToShell::SceneSnapshot { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }
@@ -471,6 +481,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
     let mut brain = Brain::new(
         store,
         (ThreadId(0), RunId(0)),
+        Vec::new(),
         Fixture::parse("").expect("fixture"),
     )
     .expect("brain");
@@ -500,7 +511,9 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     let scratch = Scratch::new("page-held");
     let mut brain = test_support::brain(&scratch, "");
     let queue = RefCell::new(DataQueue::new(window()));
-    queue.borrow_mut().push(Some(RunId(99)), vec![0; DATA_CAP]);
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Run(RunId(99)), vec![0; DATA_CAP]);
     let (ready, room) = (Notify::new(), Notify::new());
     let (out, _control) = mpsc::channel(64);
     let (_controls_tx, mut controls) = mpsc::channel(64);

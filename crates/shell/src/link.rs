@@ -20,7 +20,7 @@ use capsula_protocol::constants::BRAIN_EXE;
 use capsula_protocol::frame::{self, FrameError, Pipe};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello, Incarnation,
-    MAX_PENDING_TURNS, Phase, RunId, ThreadId,
+    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId,
 };
 
 use crate::credential::{self, CredentialError};
@@ -77,6 +77,8 @@ pub(crate) enum LinkEvent {
         message: DataToShell,
         bytes: u32,
     },
+    /// The connection's visible scenes, from the control pipe.
+    Scenes(Vec<SceneDescriptor>),
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -163,6 +165,8 @@ struct Outbox {
     generation: u64,
     control: Sender<ControlToBrain>,
     data: Sender<DataOut>,
+    /// The control pipe, so the UI can end a connection that broke the protocol.
+    pipe: Arc<PipeClient>,
 }
 
 /// What the UI thread and the link thread share.
@@ -258,6 +262,12 @@ impl LinkHandle {
         self.shared
             .outbox(session, |outbox| outbox.control.try_send(message).is_ok())
             .unwrap_or(false)
+    }
+
+    /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
+    /// happens once that connection has ended. Never blocks.
+    pub(crate) fn end(&self, session: &Session) {
+        self.shared.outbox(session, |outbox| outbox.pipe.abort());
     }
 
     /// Queues a typed turn for `session`'s brain, like [`LinkHandle::send_control`].
@@ -419,6 +429,7 @@ impl Link {
             generation,
             control: control_out.clone(),
             data: data_out,
+            pipe: Arc::clone(&control),
         });
         // Quit may have come while connecting, when there was no pipe to send it on.
         if self.quitting() {
@@ -512,7 +523,12 @@ impl Link {
             Pipe::Control,
         )?;
         let incarnation = match frame::read::<ControlToShell>(&mut &control, Pipe::Control)? {
-            None | Some(ControlToShell::RunState { .. } | ControlToShell::Ping) => {
+            None
+            | Some(
+                ControlToShell::RunState { .. }
+                | ControlToShell::Ping
+                | ControlToShell::Scenes { .. },
+            ) => {
                 return Err(LinkError::Rejected);
             }
             Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -567,8 +583,8 @@ fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
     Ok(pipe)
 }
 
-/// Reads the control pipe until the connection ends: answers pings and passes run states on. A
-/// repeated handshake ends the connection, as the brain treats a protocol violation.
+/// Reads the control pipe until the connection ends: answers pings and passes run states and
+/// scenes on. A repeated handshake ends the connection, as the brain treats a protocol violation.
 fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<LinkEvent>) {
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
@@ -583,6 +599,11 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
                     .send_blocking(LinkEvent::RunState { run, thread, phase })
                     .is_err()
                 {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::Scenes { scenes })) => {
+                if events.send_blocking(LinkEvent::Scenes(scenes)).is_err() {
                     return;
                 }
             }

@@ -1,14 +1,19 @@
 use capsula_protocol::message::{
-    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, Step, ThreadId,
+    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step, ThreadId,
 };
 
 use super::{
     Coordinator, Effect, EngineEvent, Input, MAX_DELTA, MAX_TEXT, Stale, StoreOp, WALL_CLOCK,
 };
-use crate::store::{Failure, Interruption, RunEnd};
+use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
+
+#[path = "scene_tests.rs"]
+mod scenes;
 
 const T: ThreadId = ThreadId(4);
 const R: RunId = RunId(10);
+/// The scene run 10's first step begins.
+const S: SceneId = SceneId(50);
 
 fn step(label: &str) -> Step {
     Step {
@@ -29,15 +34,34 @@ fn ack(index: u32, label: &str) -> Input {
         run: R,
         index,
         step: step(label),
+        scene: S,
     }
 }
 
 fn committed(index: u32, label: &str) -> Effect {
     Effect::Data(DataToShell::StepCommit {
         run: R,
+        scene: S,
         index,
         step: step(label),
     })
+}
+
+/// Run 10's write of a step that waited for its scene's id.
+fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
+    Effect::Store(StoreOp::CommitStep {
+        thread: T,
+        run: R,
+        text: text.map(str::to_owned),
+        scene: SceneTarget::Existing(S),
+        index,
+        step: step(label),
+    })
+}
+
+/// A coordinator whose last ids were thread 3 and run 9, with nothing visible.
+fn fresh() -> Coordinator {
+    Coordinator::new(ThreadId(3), RunId(9), Vec::new())
 }
 
 fn run_end(run: RunId) -> Effect {
@@ -58,6 +82,19 @@ fn end_run(text: Option<&str>, revealed: Option<Vec<u32>>, end: RunEnd) -> Effec
         run: R,
         text: text.map(str::to_owned),
         revealed,
+        clear: None,
+        end,
+    })
+}
+
+/// Run 10's outcome after a Stop that kept none of its scene's steps, clearing the scene.
+fn end_run_clearing(revealed: Vec<u32>, end: RunEnd) -> Effect {
+    Effect::Store(StoreOp::EndRun {
+        thread: T,
+        run: R,
+        text: None,
+        revealed: Some(revealed),
+        clear: Some(S),
         end,
     })
 }
@@ -70,7 +107,7 @@ fn failed_store() -> Effect {
 /// A coordinator whose last ids were thread 3 and run 9, with run 10 started in a new thread 4
 /// and its turn stored.
 fn started() -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     core.handle(Input::Turn {
         thread: None,
         text: "hi".to_owned(),
@@ -82,7 +119,7 @@ fn started() -> Coordinator {
 
 #[test]
 fn a_turn_is_stored_before_the_engine_starts() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     let turn = core
         .handle(Input::Turn {
             thread: None,
@@ -116,7 +153,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
 
 #[test]
 fn a_blank_turn_is_ignored() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     assert_eq!(
         core.handle(Input::Turn {
             thread: None,
@@ -142,6 +179,7 @@ fn a_step_is_sent_only_once_it_is_committed() {
             thread: T,
             run: R,
             text: Some("a cat".to_owned()),
+            scene: SceneTarget::New { evict: None },
             index: 0,
             step: step("head"),
         })],
@@ -158,19 +196,17 @@ fn text_waits_behind_a_pending_step() {
     let mut core = started();
     core.handle(engine(R, EngineEvent::Text("before".to_owned())))
         .expect("current");
-    let commit = |text: &str, index: u32, label: &str| {
-        vec![Effect::Store(StoreOp::CommitStep {
-            thread: T,
-            run: R,
-            text: Some(text.to_owned()),
-            index,
-            step: step(label),
-        })]
-    };
     assert_eq!(
         core.handle(engine(R, EngineEvent::Step(step("a"))))
             .expect("current"),
-        commit("before", 0, "a")
+        vec![Effect::Store(StoreOp::CommitStep {
+            thread: T,
+            run: R,
+            text: Some("before".to_owned()),
+            scene: SceneTarget::New { evict: None },
+            index: 0,
+            step: step("a"),
+        })]
     );
     assert_eq!(
         core.handle(engine(R, EngineEvent::Text("after ".to_owned()))),
@@ -180,9 +216,9 @@ fn text_waits_behind_a_pending_step() {
     core.handle(engine(R, EngineEvent::Text("a".to_owned())))
         .expect("current");
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Step(step("b"))))
-            .expect("current"),
-        commit("after a", 1, "b")
+        core.handle(engine(R, EngineEvent::Step(step("b")))),
+        Ok(Vec::new()),
+        "b waits for a's scene id"
     );
     assert_eq!(
         core.handle(engine(R, EngineEvent::Text("after b".to_owned()))),
@@ -190,8 +226,12 @@ fn text_waits_behind_a_pending_step() {
     );
     assert_eq!(
         core.handle(ack(0, "a")).expect("current"),
-        vec![committed(0, "a"), text("after a")],
-        "released up to the next pending step, as one frame"
+        vec![
+            committed(0, "a"),
+            text("after a"),
+            commit_in_scene(Some("after a"), 1, "b")
+        ],
+        "released up to the next pending step, as one frame, and b goes to a's scene"
     );
     assert_eq!(
         core.handle(Input::Stop {
@@ -274,7 +314,7 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
 
 #[test]
 fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_starts() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     core.handle(Input::Turn {
         thread: Some(ThreadId(2)),
         text: "hi".to_owned(),
@@ -300,6 +340,7 @@ fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_
             run: R,
             text: None,
             revealed: Some(Vec::new()),
+            clear: None,
             end: RunEnd::Interrupted(Interruption::Stop),
         })]
     );
@@ -344,6 +385,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
             run: RunId(11),
             text: None,
             revealed: None,
+            clear: None,
             end: RunEnd::Done,
         })]
     );
@@ -412,7 +454,7 @@ fn a_repeated_step_ack_changes_nothing() {
     core.handle(engine(R, EngineEvent::Done)).expect("current");
     assert_eq!(
         core.handle(ack(0, "a")).expect("first ack"),
-        vec![committed(0, "a")]
+        vec![committed(0, "a"), commit_in_scene(None, 1, "b")]
     );
     assert_eq!(core.handle(ack(0, "a")), Err(Stale), "a repeat");
     assert_eq!(core.handle(ack(5, "z")), Err(Stale), "out of range");
@@ -422,7 +464,7 @@ fn a_repeated_step_ack_changes_nothing() {
         "the run ends only with the second distinct ack"
     );
 
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     core.handle(Input::Turn {
         thread: None,
         text: "hi".to_owned(),
@@ -458,22 +500,32 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     .expect("current");
     assert_eq!(
         core.handle(ack(0, "a")).expect("ending"),
-        vec![end_run(
-            None,
-            Some(Vec::new()),
+        vec![end_run_clearing(
+            Vec::new(),
             RunEnd::Interrupted(Interruption::Stop)
         )]
     );
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Failed), failed_store()],
-        "after Stop"
+        vec![
+            state(R, T, Phase::Failed),
+            Effect::Store(StoreOp::EndRun {
+                thread: T,
+                run: R,
+                text: None,
+                revealed: Some(Vec::new()),
+                clear: Some(S),
+                end: RunEnd::Failed(Failure::Store),
+            })
+        ],
+        "after Stop, with its selection, and the scene it kept nothing of is still cleared"
     );
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }),
         Ok(Vec::new()),
-        "the failed(store) write failing too is the last word"
+        "the failed(store) write failing too is the run's last word"
     );
+    assert!(!core.settled(), "but its scene's clear is still owed");
     assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
 
     let mut core = started();
@@ -600,7 +652,7 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
         ]
     );
 
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     core.handle(Input::Turn {
         thread: Some(ThreadId(99)),
         text: "hi".to_owned(),
@@ -692,12 +744,11 @@ fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
     );
     assert_eq!(
         core.handle(ack(0, "a")).expect("ending"),
-        vec![end_run(
-            None,
-            Some(Vec::new()),
+        vec![end_run_clearing(
+            Vec::new(),
             RunEnd::Interrupted(Interruption::Stop)
         )],
-        "the shell never got the step"
+        "the shell never got the step, so its scene keeps nothing and is cleared"
     );
 }
 
@@ -713,7 +764,7 @@ fn a_lost_shell_isnt_told_about_runs_still_ending() {
 
 #[test]
 fn the_engine_is_heard_only_once_its_turn_is_stored() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9));
+    let mut core = fresh();
     core.handle(Input::Turn {
         thread: None,
         text: "hi".to_owned(),
@@ -830,6 +881,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
                 run: b,
                 text: None,
                 revealed: Some(Vec::new()),
+                clear: None,
                 end: RunEnd::Interrupted(Interruption::Stop),
             }),
             turn(c, "c"),

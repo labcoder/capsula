@@ -33,6 +33,12 @@ impl Tap {
         }
     }
 
+    /// Records into `file`, whatever the build.
+    #[cfg(test)]
+    pub(crate) fn to_file(file: File) -> Self {
+        Self(Some(file))
+    }
+
     /// Records one message. Callers pass a `Hello` already redacted.
     pub(crate) fn record(&mut self, pipe: Pipe, direction: Direction, message: &impl Serialize) {
         let Some(file) = &mut self.0 else { return };

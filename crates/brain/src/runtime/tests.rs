@@ -4,7 +4,7 @@ use std::time::Duration;
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId,
-    Step, ThreadId,
+    SceneDescriptor, SceneId, Step, ThreadId,
 };
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf,
@@ -25,6 +25,8 @@ use crate::test_support::{self, Scratch};
 
 #[path = "page_tests.rs"]
 mod pages;
+#[path = "scene_tests.rs"]
+mod scenes;
 
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -39,6 +41,8 @@ struct Shell<S> {
     data_out: WriteHalf<S>,
     /// The thread of the last run state read.
     thread: Option<ThreadId>,
+    /// The last `Scenes` read.
+    scenes: Option<Vec<SceneDescriptor>>,
 }
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
@@ -51,6 +55,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             data_in,
             data_out,
             thread: None,
+            scenes: None,
         }
     }
 
@@ -72,12 +77,43 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     }
 
     async fn stop(&mut self, run: RunId) {
-        let message = ControlToBrain::Stop {
+        self.send(&ControlToBrain::Stop {
             run,
             revealed: Vec::new(),
-        };
-        let frame = frame::encode(&message, Pipe::Control).expect("encodes");
+        })
+        .await;
+    }
+
+    async fn send(&mut self, message: &ControlToBrain) {
+        let frame = frame::encode(message, Pipe::Control).expect("encodes");
         self.control_out.write_all(&frame).await.expect("sent");
+    }
+
+    /// The next control frame, answering pings on the way; `None` once the brain hangs up.
+    async fn control(&mut self) -> Option<ControlToShell> {
+        loop {
+            let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
+            match timeout(PATIENCE, next)
+                .await
+                .expect("in time")
+                .expect("readable")
+            {
+                Some(ControlToShell::Ping) => {
+                    let pong =
+                        frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
+                    self.control_out.write_all(&pong).await.expect("sent");
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// The connection's `Scenes`, which comes before any run state.
+    async fn scenes(&mut self) -> Vec<SceneDescriptor> {
+        match self.control().await {
+            Some(ControlToShell::Scenes { scenes }) => scenes,
+            other => panic!("expected Scenes, got {other:?}"),
+        }
     }
 
     /// The next run state, answering pings on the way.
@@ -97,6 +133,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                         frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
+                ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -158,6 +195,12 @@ async fn pipes(name: &str) -> ((PipeServer, PipeServer), Shell<PipeClient>) {
 
 /// A brain whose store waits up to 10 s on a lock, and the connection holding that lock.
 fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection) {
+    let brain = patient_brain(scratch, script);
+    (brain, hold(scratch))
+}
+
+/// A brain whose store waits up to 10 s on a lock.
+fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let high_water = store.high_water().expect("high water");
@@ -165,10 +208,18 @@ fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection
         .conn_for_tests()
         .busy_timeout(Duration::from_secs(10))
         .expect("busy timeout");
-    let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
-    lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
     let fixture = Fixture::parse(script).expect("script");
-    (Brain::new(store, high_water, fixture).expect("brain"), lock)
+    let scenes = store.scenes().expect("scenes");
+    Brain::new(store, high_water, scenes, fixture).expect("brain")
+}
+
+/// A connection holding the store's write lock, so the brain's writes wait until it ends.
+fn hold(scratch: &Scratch) -> rusqlite::Connection {
+    let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
+    lock.busy_timeout(Duration::from_secs(10))
+        .expect("busy timeout");
+    lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
+    lock
 }
 
 /// Every run's state and reason, oldest first.
@@ -270,6 +321,8 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             shell.data().await,
             DataToShell::StepCommit {
                 run,
+                // Events 1 and 2 are the turn and the text before the step.
+                scene: SceneId(3),
                 index: 0,
                 step: Step {
                     label: "one".to_owned()
@@ -341,6 +394,7 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
                 text("a"),
                 DataToShell::StepCommit {
                     run,
+                    scene: SceneId(3),
                     index: 0,
                     step: Step {
                         label: "one".to_owned()
@@ -639,4 +693,49 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
         "960 kB of text from its first frame to its last",
         &mut streams,
     );
+}
+
+/// Rez measurement for the pull request, not a check: the first step's latency from the turn, and
+/// the second's after it. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_first_step`.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "a measurement, run by hand on Rez"]
+async fn measure_first_step_latency() {
+    let mut firsts = Vec::new();
+    let mut seconds = Vec::new();
+    for round in 0..30 {
+        let scratch = Scratch::new("measure-step");
+        let mut brain = test_support::brain(&scratch, "0 step first\n0 step second");
+        let ((control, data), mut shell) = pipes(&format!("measure-step-{round}")).await;
+        let mut tap = Tap::from_env();
+        let client = async {
+            let sent = tokio::time::Instant::now();
+            shell.submit("draw").await;
+            let mut steps = Vec::new();
+            while steps.len() < 2 {
+                if let DataToShell::StepCommit { .. } = shell.data().await {
+                    steps.push(sent.elapsed());
+                }
+            }
+            firsts.push(steps[0]);
+            seconds.push(steps[1].saturating_sub(steps[0]));
+            drop(shell);
+        };
+        let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        brain.close().await;
+    }
+    for (name, samples) in [
+        ("turn -> first StepCommit", &mut firsts),
+        ("first -> second StepCommit", &mut seconds),
+    ] {
+        samples.sort_unstable();
+        eprintln!(
+            "{name}: p50 {:?} p95 {:?} max {:?} (n={})",
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+            samples[samples.len() - 1],
+            samples.len()
+        );
+    }
 }
