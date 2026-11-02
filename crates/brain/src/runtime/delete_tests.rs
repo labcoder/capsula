@@ -307,6 +307,11 @@ async fn a_hide_that_never_committed_leaves_the_thread_for_the_next_start() {
     assert_eq!(listed(&scratch), 1);
 
     let mut brain = patient_brain(&scratch, "");
+    assert_eq!(
+        outcomes(&scratch),
+        [outcome("interrupted", "deleted")],
+        "recovery leaves the ended run as it was"
+    );
     connection!(brain, |shell| async {
         assert_eq!(shell.scenes().await, []);
         shell.send(&resend()).await;
