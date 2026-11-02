@@ -2,7 +2,7 @@ use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
