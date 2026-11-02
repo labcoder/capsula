@@ -6,8 +6,8 @@ use capsula_protocol::message::{
     ControlToShell, DataToShell, Deleted, Phase, RunId, SceneId, ThreadId,
 };
 
-use super::{R, T, end_run, fresh, run_end, started, state, step};
-use crate::coordinator::{Coordinator, Effect, Input, Stale, StoreOp};
+use super::{R, S, T, ack, end_run, engine, fresh, run_end, started, state, step};
+use crate::coordinator::{Coordinator, Effect, EngineEvent, Input, Stale, StoreOp};
 use crate::store::{Interruption, RunEnd, SceneState};
 
 const U: ThreadId = ThreadId(8);
@@ -321,4 +321,134 @@ fn only_an_answer_that_crossed_connections_is_kept_and_none_outlives_the_next() 
     core.begin_session();
     assert!(core.crossed.is_empty());
     assert!(!core.deletes_pending());
+}
+
+/// Scenes drawn by thread 1 before the brain started.
+fn visible_before(ids: &[u64]) -> Vec<SceneState> {
+    ids.iter()
+        .map(|&id| SceneState {
+            scene: SceneId(id),
+            thread: ThreadId(1),
+            run: RunId(0),
+            revision: 1,
+            kept: vec![step("old")],
+            stopped: false,
+        })
+        .collect()
+}
+
+fn visible_ids(core: &Coordinator) -> Vec<u64> {
+    core.visible().iter().map(|state| state.scene.0).collect()
+}
+
+/// Run 10 in a new thread T over `ids`, with its first step's write queued.
+fn first_step_queued(ids: &[u64]) -> Coordinator {
+    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible_before(ids));
+    core.handle(turn(None)).expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(engine(R, EngineEvent::Step(step("a"))))
+        .expect("current");
+    core
+}
+
+/// Answers every clear and selection write in `effects`, and those they lead to, as committed.
+fn commit_writes(core: &mut Coordinator, effects: Vec<Effect>) {
+    let mut queue = effects;
+    while let Some(effect) = queue.pop() {
+        let reply = match effect {
+            Effect::Broken(why) => panic!("broken: {why}"),
+            Effect::Store(StoreOp::ClearScenes { scenes }) => {
+                Input::ScenesCleared { scenes, ok: true }
+            }
+            Effect::Store(StoreOp::KeepScene { scene, .. }) => Input::SceneKept { scene, ok: true },
+            _ => continue,
+        };
+        queue.extend(core.handle(reply).expect("owed"));
+    }
+}
+
+const OUTCOMES: [Deleted; 3] = [Deleted::Removed, Deleted::Hidden, Deleted::NotHidden];
+
+#[test]
+fn a_first_step_queued_before_the_delete_settles_with_its_eviction() {
+    for outcome in OUTCOMES {
+        for (before, evicted) in [(&[1, 2, 3][..], None), (&[1, 2, 3, 4][..], Some(1))] {
+            let mut core = first_step_queued(before);
+            core.handle(delete(T, 0)).expect("accepted");
+            // The store answers in order: the step, the outcome, then the delete.
+            core.handle(ack(0, "a")).expect("ending");
+            core.handle(Input::RunStored { run: R }).expect("ending");
+            let effects = core.handle(answer(T, outcome, Some(R))).expect("answered");
+            commit_writes(&mut core, effects);
+            let mut left: Vec<u64> = before
+                .iter()
+                .copied()
+                .filter(|id| Some(*id) != evicted)
+                .collect();
+            if outcome == Deleted::NotHidden {
+                left.push(S.0);
+            }
+            assert_eq!(
+                visible_ids(&core),
+                left,
+                "{outcome:?}, evicting {evicted:?}"
+            );
+            assert_eq!(core.ending_runs(), 0);
+            assert_eq!(core.debt(), 0);
+        }
+    }
+}
+
+/// T's run drew scene S and its outcome is stored.
+fn drawn_in_t() -> Coordinator {
+    let mut core = first_step_queued(&[]);
+    core.handle(ack(0, "a")).expect("current");
+    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(Input::RunStored { run: R }).expect("ending");
+    assert_eq!(visible_ids(&core), [S.0]);
+    core
+}
+
+#[test]
+fn a_stop_held_on_the_threads_ending_run_settles_across_the_delete() {
+    for outcome in OUTCOMES {
+        let mut core = first_step_queued(&[]);
+        core.handle(ack(0, "a")).expect("current");
+        core.handle(engine(R, EngineEvent::Done)).expect("current");
+        let mut writes = core
+            .handle(Input::Stop {
+                run: R,
+                revealed: Vec::new(),
+            })
+            .expect("held on the ending run");
+        writes.extend(core.handle(delete(T, 0)).expect("accepted"));
+        writes.extend(core.handle(Input::RunStored { run: R }).expect("ending"));
+        writes.extend(core.handle(answer(T, outcome, Some(R))).expect("answered"));
+        commit_writes(&mut core, writes);
+        assert_eq!(visible_ids(&core), Vec::<u64>::new(), "{outcome:?}");
+        assert_eq!(core.ending_runs(), 0);
+        assert_eq!(core.debt(), 0, "{outcome:?}");
+    }
+}
+
+#[test]
+fn a_clear_owed_for_the_threads_scene_retires_across_the_delete() {
+    for outcome in OUTCOMES {
+        let mut core = drawn_in_t();
+        core.handle(Input::Clear { scenes: vec![S] })
+            .expect("a clear is never stale");
+        core.handle(Input::ScenesCleared {
+            scenes: vec![S],
+            ok: false,
+        })
+        .expect("owed");
+        assert_eq!(core.debt(), 1);
+        // The owed clear goes again with the delete, the next store operation.
+        let mut writes = core.handle(delete(T, 0)).expect("accepted");
+        writes.extend(core.handle(answer(T, outcome, Some(R))).expect("answered"));
+        writes.extend(core.handle(Input::Retry).expect("retried"));
+        commit_writes(&mut core, writes);
+        assert_eq!(visible_ids(&core), Vec::<u64>::new(), "{outcome:?}");
+        assert_eq!(core.debt(), 0, "{outcome:?}");
+    }
 }
