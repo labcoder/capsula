@@ -1370,12 +1370,14 @@ async fn turns_wait_while_eight_writes_are_owed_and_resume_once_the_store_takes_
     let scratch = Scratch::new("owed-watermark");
     let four = drawn(&scratch, &[&["a"], &["b"], &["c"], &["d"]]);
     let mut brain = test_support::brain(&scratch, "0 step s");
+    let mut observed = brain.observe();
     sql(&scratch, FAIL_CLEARS);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), four);
         shell.send(&clear(&four)).await;
+        seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
         for _ in 0..4 {
             shell.submit("draw").await;
             let (run, _) = shell.state().await;
@@ -1388,6 +1390,8 @@ async fn turns_wait_while_eight_writes_are_owed_and_resume_once_the_store_takes_
             };
             while shell.state().await != (run, Phase::Done) {}
             shell.send(&clear(&[scene])).await;
+            // Control and data aren't ordered, so the clear is applied before the next turn.
+            seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
         }
         shell.submit("waits").await;
         let taken = timeout(Duration::from_millis(500), shell.state()).await;
