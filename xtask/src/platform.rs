@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 pub(crate) mod gate_capture;
+pub(crate) mod gate_pipe;
 pub(crate) mod input_session;
 
 pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {

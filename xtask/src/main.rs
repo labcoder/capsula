@@ -19,6 +19,8 @@ mod gate;
 mod platform;
 #[cfg(windows)]
 mod session;
+#[cfg(windows)]
+mod slice2;
 
 fn usage() -> String {
     format!(
@@ -49,6 +51,9 @@ tasks:
                     input-free continuous stretch, default 30s after 30s warmup;
                     baseline runs without stretch; raw cycles and bounded DWM CSV,
                     fixture totals cover its whole lifetime, not just sampling
+  slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
+                    over its real pipes by a scripted client; no input; refuses while
+                    any product process runs
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
@@ -71,6 +76,8 @@ fn main() -> Result<()> {
         Some("bench") => bench::run(args),
         #[cfg(windows)]
         Some("gate-session") => gate::run(args),
+        #[cfg(windows)]
+        Some("slice2-gate") => slice2::run(args),
         #[cfg(windows)]
         Some("cold-start") => gate::cold(args),
         #[cfg(windows)]
