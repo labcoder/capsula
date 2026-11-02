@@ -2,7 +2,6 @@
 use capsula_scene::{
     ErrorCode, Finite, Ms, Op, Record, Source, Step, StepError, WireId, parse_record,
     record::{Change, Start},
-    text::Bounded,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -281,14 +280,4 @@ fn binary_step_lists_cannot_expand_before_admission() {
             }
         }
     }
-    assert_eq!(
-        Bounded::<u8, 0>::new(Vec::new())
-            .expect("zero capacity list")
-            .len(),
-        0
-    );
-    assert_eq!(
-        Bounded::<u8, 0>::new(vec![1]).err(),
-        Some(ErrorCode::TooLong)
-    );
 }

@@ -108,6 +108,9 @@ pub enum ErrorCode {
     /// Expanded work exceeds a budget.
     #[error("scene.OverBudget")]
     OverBudget(Budget),
+    /// References form a cycle that cannot be laid out.
+    #[error("scene.ReferenceCycle")]
+    ReferenceCycle,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {
@@ -156,6 +159,19 @@ impl FieldPath {
     /// Returns the sanitized structural path.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    pub(crate) fn field(mut self, field: &'static str) -> Self {
+        assert!(
+            known_field(field),
+            "semantic paths use schema field literals"
+        );
+        self.push_field(field);
+        self
+    }
+    pub(crate) fn index(mut self, index: usize) -> Self {
+        use std::fmt::Write;
+        write!(self.0, "[{index}]").expect("writing to a string cannot fail");
+        self
     }
     fn is_op_tag(&self) -> bool {
         self.0.is_empty()
@@ -217,6 +233,10 @@ fn known_field(key: &str) -> bool {
     matches!(
         key,
         "begin"
+            | "revision"
+            | "stop"
+            | "activated"
+            | "revealed"
             | "step"
             | "end"
             | "v"
@@ -320,6 +340,13 @@ pub struct StepError {
     pub code: ErrorCode,
 }
 impl StepError {
+    pub(crate) fn in_step(step: &WireId, path: FieldPath, code: ErrorCode) -> Self {
+        Self {
+            step: Some(step.clone()),
+            path,
+            code,
+        }
+    }
     /// Builds a root-level failure.
     pub fn new(code: ErrorCode) -> Self {
         Self {

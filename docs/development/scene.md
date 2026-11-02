@@ -78,17 +78,78 @@ choose an `ErrorCode`; the parser's original message is discarded. `StepError`
 uses `MissingField` for absent required fields and appends only an allowlisted
 field name to its path. `UnknownOp` denotes only an unknown record/op tag;
 unknown vocabulary values and invalid numeric values are `OutOfRange`.
-`StepError`
-`Display` and `Debug` contain only the path and code. `tool_text` may include a
+`StepError`'s `Display` and `Debug` contain only the path and code. `tool_text` may include a
 known step id when replying to its model, but never the rejected field value.
 `Text` and `WireId` debug formatting exposes lengths only. Do not trace records,
 serialize drawing content into logs, or trace a model-facing tool reply.
 
+## Admission and identity
+
+`SceneState::begin` validates positive optional canvas dimensions. `CallState`
+guards one call's begin/step/end order; a new call gets a fresh guard and must
+repeat the stored header with typed equality. Ending a call does not end its scene.
+
+`admit` resolves references against earlier surviving objects plus every object
+declared in the same step, independent of put order. It rejects cycles, missing
+or wrongly typed parents/endpoints, properties the target does not own, invalid
+track values/times, and removals that orphan a surviving dependant. Mermaid
+expansion remains unsupported until its layout layer lands.
+
+Ids, including dropped or removed ids, stay reserved for the scene's lifetime.
+An identical typed step id is a no-op even after its step was dropped; a conflicting
+payload is an error. The 64-step cap counts all lifetime commits, not just kept
+steps. Rejecting admission consumes neither ids, revisions nor global generations.
+
+`Admission::New` owns a checked candidate. The caller persists it before calling
+`commit` and serializes all scene/global mutations across that boundary. Commit
+checks scene identity, global-context identity, scene revision and global generation
+in O(1); `StaleAdmission` is its only error and changes nothing. The generation
+currently tracks mutation stamps; expanded resource charges are the next layer.
+
+A handle encodes `(original_revision << 10) | expanded_put_slot`: revisions are
+one-based, slots are zero-based, and animation slots are not compacted away.
+Neither Stop nor append renumbers old handles. The returned commit index is
+zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
+and slots beyond the 856-operation bound.
+
+## Stop and recovery
+
+`StopCut.activated` is the revision activated **through**, not a count of kept
+steps. Zero returns `Cleared` without resetting revision. Stop first undoes all
+unactivated steps' removals, then drops their objects and retains exactly the
+revealed handles in the activated prefix. A retained object whose dependency was
+discarded becomes detached: preparation retains its already placed geometry.
+Dropped steps keep their ids and original revisions; their future sets/removals
+are no longer replayed as active work.
+
+The recovery log contains **every original committed step**, interleaved in commit
+order with **every effective StopCut**. A Stop keeping everything adds no entry.
+There is at most one effective cut per newly committed revision, so there are at
+most 64 steps and 64 cuts. This is not a normalized checkpoint or a final cut
+applied to a filtered step list: after Stop drops an unfinished dependant, an
+append may legally remove its old target. Replaying the dependant without its
+intervening cut would wrongly reject that removal.
+
+`SceneState::replay` uses the same admission, commit and Stop transitions and
+requires each original revision in order, including dropped steps. Recovery's
+kept prefix is considered activated; its removals are retired. The selected global
+budget strategy is **validate the combined final replayed result once**, rather
+than replay independent scenes against unrelated historical peaks. The budget
+layer must implement and regression-test that aggregate installation before replay
+can be used with expanded-work limits.
+
+At runtime the shell retires removals at activation; the brain calls `retire`
+only on StepShown or retires the kept prefix on Stop. Repeated retirement is a
+no-op. A failed step is not retired until clear. `clear` is terminal and idempotent;
+its separate host clear event removes the scene from the visible recovery set.
+Prepared display residency is not an admission input.
+
 ## Caps
 
-These constants describe the full admission contract. This first layer enforces
-record bytes, validated scalar types and bounded individual lists; aggregate,
-reference, motion and residency checks are added by subsequent scene layers.
+These constants describe the full admission contract. The implemented layers enforce
+record bytes, scalar types, bounded lists, identity/reference rules and lifetime steps.
+Expanded-work counters, composed transforms and prepared residency follow in the
+budget and preparation layers; their caps below are not yet enforced by admission.
 
 | Resource | Per object/scene | Global across visible scenes |
 |---|---|---|
@@ -125,7 +186,8 @@ Drain each supplied delta until `None`, then provide the next delta. At EOF call
 
 The outer object must contain exactly one `records` key and an array of record
 objects. Escaped spellings of that key work; repeated keys and additional keys
-fail. Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
+fail. A leading byte-order mark (BOM) and invalid UTF-8 outside strings are rejected.
+Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
 escapes and paired UTF-16 surrogate escapes are handled incrementally. Duplicate
 fields inside a record remain the typed parser's responsibility.
 
@@ -134,6 +196,7 @@ envelope and 32 KiB from each record's opening brace through its closing brace.
 Surrounding array whitespace is charged only to the drawing. Container depth is
 at most 16, including the envelope object and records array. One 32 KiB buffer is
 allocated at construction; scanning and record delivery allocate nothing further.
+`Malformed { at }` reports the zero-based drawing byte offset of the first invalid byte.
 Every syntax, size, depth or truncation error is terminal. There is no newline
 resynchronization, and trailing non-whitespace after the envelope fails. Earlier
 records may already have been emitted, so callers retain their committed prefix.
@@ -157,18 +220,6 @@ measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal
 priority with the lock held:
 
 ```text
+nice -n 10 cargo test -p capsula-scene --release --no-run
 cargo test -p capsula-scene --release -- --ignored --nocapture --test-threads=1
 ```
-
-Rez result, 2026-11-02 at 01:34 PST (Windows 11, i9-10900K):
-
-| Input delta | Throughput (MB/s) | Cost per delta (ns) | Allocations after construction |
-|---|---:|---:|---:|
-| 40 bytes | 271.489 | 147.326 | 0 |
-| 4 KiB | 305.390 | 13,412.341 | 0 |
-
-The lock was held from 01:33:20 until 01:34:38; existing builds finished before
-the 30-second quiet interval completed at 01:34:35. No compilation occurred in
-the timed run. Capy, Edge and Node processes remained open; their CPU usage was
-not measured. These are tokenizer-only absolute figures, not end-to-end drawing
-latencies or a speedup over a prior implementation.
