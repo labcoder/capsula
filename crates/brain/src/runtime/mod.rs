@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, RunId, ThreadId,
+    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, MAX_PENDING_TURNS,
+    RunId, ThreadId,
 };
 use capsula_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -49,8 +50,6 @@ const MAX_ENDING: usize = 16;
 const DATA_CAP: usize = 512 * 1024;
 /// Engine events queued before the engine waits [guess].
 const ENGINE_QUEUE: usize = 16;
-/// Typed turns read ahead of the core; one more ends the connection [guess].
-const TURN_QUEUE: usize = 64;
 /// How long closing waits for ended runs to reach the store, then for the store to close [guess].
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
@@ -167,7 +166,7 @@ impl Brain {
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
-        let (turns_tx, mut turns) = mpsc::channel(TURN_QUEUE);
+        let (turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
@@ -228,8 +227,11 @@ impl Brain {
                             ping_sent = None;
                             continue;
                         }
-                        // The readers end the connection on these.
-                        ControlToBrain::Hello(_) | ControlToBrain::Quitting => continue,
+                        // The readers end the connection on Hello and Quitting. The thread keeps
+                        // a cleared drawing for replay; slice 4 records the clear.
+                        ControlToBrain::Hello(_)
+                        | ControlToBrain::Quitting
+                        | ControlToBrain::ClearDrawing { .. } => continue,
                     }
                 }
                 Some(input) = self.inputs.recv() => input,

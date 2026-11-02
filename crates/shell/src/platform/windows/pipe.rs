@@ -7,12 +7,12 @@ use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_TIMEOUT, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, FlushFileBuffers, OPEN_EXISTING, ReadFile,
@@ -34,6 +34,8 @@ pub(crate) struct PipeClient {
     handle: OwnedHandle,
     /// Milliseconds each read or write may take; `INFINITE` by default.
     timeout_ms: AtomicU32,
+    /// Set by [`PipeClient::abort`]: every transfer fails from then on.
+    aborted: AtomicBool,
 }
 
 impl PipeClient {
@@ -64,7 +66,19 @@ impl PipeClient {
         Ok(Self {
             handle,
             timeout_ms: AtomicU32::new(INFINITE),
+            aborted: AtomicBool::new(false),
         })
+    }
+
+    /// Fails the transfers under way on any thread, and every later one, so the threads blocked
+    /// on this pipe return. The pipe stays open until it's dropped.
+    pub(crate) fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        // SAFETY: cancels every transfer on this handle; each waits for its own operation to
+        // finish before its buffer and `OVERLAPPED` go away (see `transfer`).
+        if let Err(error) = unsafe { CancelIoEx(self.raw(), None) } {
+            tracing::debug!(%error, "no transfer was under way to cancel");
+        }
     }
 
     /// The executable of the process serving this pipe.
@@ -105,10 +119,21 @@ impl PipeClient {
             hEvent: HANDLE(event.as_raw_handle()),
             ..Default::default()
         };
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
+        }
         if let Err(error) = start(self.raw(), &raw mut overlapped)
             && error.code() != ERROR_IO_PENDING.to_hresult()
         {
             return Err(error);
+        }
+        // An abort between the check above and the start found nothing to cancel.
+        if self.aborted.load(Ordering::SeqCst) {
+            // SAFETY: cancels only this operation; the wait below lets it finish before
+            // `overlapped` and the buffer go away.
+            if let Err(error) = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) } {
+                tracing::debug!(%error, "cancel found the transfer already done");
+            }
         }
         // SAFETY: the event handle is open for the borrow.
         let waited = unsafe {
@@ -184,6 +209,45 @@ fn process_image(pid: u32) -> io::Result<PathBuf> {
     }?;
     buffer.truncate(usize::try_from(len).expect("u32 fits in usize on Windows"));
     Ok(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+/// The server and client ends of a new pipe, for tests that play the brain. The server end uses
+/// the brain's 64 KiB buffers.
+///
+/// # Errors
+/// Fails when the pipe can't be created or opened.
+#[cfg(test)]
+pub(crate) fn test_pair(name: &str) -> io::Result<(PipeClient, PipeClient)> {
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+    let wide = HSTRING::from(name);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; no security attributes.
+    let server = unsafe {
+        CreateNamedPipeW(
+            &wide,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            None,
+        )
+    };
+    if server.is_invalid() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateNamedPipeW returned a valid handle that nothing else owns.
+    let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+    let client = PipeClient::open(name)?;
+    let server = PipeClient {
+        handle: server,
+        timeout_ms: AtomicU32::new(INFINITE),
+        aborted: AtomicBool::new(false),
+    };
+    Ok((server, client))
 }
 
 /// The Windows session this process runs in.

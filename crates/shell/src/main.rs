@@ -8,6 +8,7 @@ mod link;
 mod logging;
 mod platform;
 mod presence;
+mod runs;
 mod strings;
 
 use std::process::ExitCode;
@@ -31,8 +32,8 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!(build = capsula_protocol::BUILD_ID, "shell started");
-    let (states, state_changes) = async_channel::unbounded();
-    let (link, start) = match link::prepare(states) {
+    let (events, link_events) = async_channel::unbounded();
+    let (link, start) = match link::prepare(events) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");
@@ -66,20 +67,14 @@ fn main() -> ExitCode {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
-            let started = presence::open(
-                state_changes,
-                link.clone(),
-                &flags,
-                diagnostics,
-                observer,
-                cx,
-            )
-            .map_err(|error| tracing::error!(%error, "can't open the dock"))
-            .and_then(|()| {
-                start
-                    .spawn()
-                    .map_err(|error| tracing::error!(%error, "can't start the link"))
-            });
+            let started =
+                presence::open(link_events, link.clone(), &flags, diagnostics, observer, cx)
+                    .map_err(|error| tracing::error!(%error, "can't open the dock"))
+                    .and_then(|()| {
+                        start
+                            .spawn()
+                            .map_err(|error| tracing::error!(%error, "can't start the link"))
+                    });
             if started.is_err() {
                 link.begin_quit();
                 let diagnostics = presence::diagnostics::release(cx);

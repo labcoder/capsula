@@ -90,6 +90,40 @@ flowchart LR
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
 
+## The shell's side
+
+`crates/shell/src/link.rs` connects and reads control on the link thread, because pipe reads
+block. Once connected, each pipe gets a writer thread and data gets a reader thread. The UI
+thread sends on bounded channels and never waits: with no connection or a full channel the send
+fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as
+unsent after its local effect already happened.
+
+Each connection reaches the UI as `Connected` with a session that carries the shell's own
+connection generation, not the brain's incarnation, since the same brain may be reconnected to.
+Sends and grants go through that session, and data events carry its generation, so a turn,
+`Stop` or grant meant for a connection that has ended does nothing on the next one.
+
+| Channel | Bound | When it's full |
+|---|---|---|
+| Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong` and `Quitting` |
+| Data out | 64 turns plus 8 for credit | Not reached: the shell refuses a turn first, below |
+| Brain to UI | unbounded, one channel in arrival order | The link thread never waits on the UI |
+
+- **Credit** for a data frame is granted once the UI thread has taken it, applied or dropped by
+  the fence, so a UI that stops taking frames stops the brain within its window. Grants add up
+  in the connection's own counter, without a lock, and the data writer sends them after each
+  wake-up, so a grant waits at most for the write in progress.
+- **Data before its run is named.** A frame for a run no `RunState` has named yet is held, and its
+  credit withheld, until the state arrives: dropped if Esc cancelled that run's turn, applied
+  otherwise. Since withheld credit stops the brain, its credit window bounds what's held.
+- **Turns.** The shell keeps at most 63 turns unanswered; a 64th is refused until a new run's
+  first `RunState` answers one. The brain's queue holds 64, so the shell never sends the turn
+  that would end the connection. It refuses blank turns, which the brain ignores, and turns too
+  long for a data frame.
+- **Broken input.** A malformed frame on either pipe, or a repeated `Welcome`, ends the
+  connection, and the link reconnects as after any loss. A lost brain fences every run it knew
+  and forgets the unanswered turns.
+
 ## Starting and reconnecting
 
 A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `capsulad.exe`

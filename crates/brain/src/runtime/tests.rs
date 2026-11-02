@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Phase, RunId, Step, ThreadId,
+    ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId,
+    Step, ThreadId,
 };
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf,
@@ -13,7 +14,7 @@ use tokio::time::timeout;
 
 use super::data::DataQueue;
 use super::fixture::Fixture;
-use super::{Brain, Ended, Link, MAX_ENDING, TURN_QUEUE, window};
+use super::{Brain, Ended, Link, MAX_ENDING, window};
 use crate::coordinator::Input;
 use crate::ipc;
 #[cfg(windows)]
@@ -394,7 +395,7 @@ async fn turns_beyond_the_queue_while_the_store_is_behind_end_the_connection() {
         }
         // The reader never waits for the core: a full turn queue ends the connection rather
         // than leaving credit unread behind it.
-        for _ in 0..=TURN_QUEUE {
+        for _ in 0..=MAX_PENDING_TURNS {
             shell.submit("more").await;
         }
         shell

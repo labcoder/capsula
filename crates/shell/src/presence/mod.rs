@@ -18,22 +18,24 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use capsula_protocol::constants;
-use gpui_kit::component::input::{Escape as EscapeKey, Input, InputState};
+use capsula_protocol::message::ControlToBrain;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
-    point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, point, px,
+    size,
 };
 
 use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
-use crate::link::{LinkHandle, LinkState};
+use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::{
     self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
     PresenceNative, PresenceSurface,
 };
+use crate::runs::{Refused, Runs};
 use crate::strings::{Strings, Text};
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
@@ -62,10 +64,14 @@ struct Presence {
     text: Option<TextPanel>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
+    /// The connection the UI last applied `Connected` for, until its next state.
+    session: Option<Session>,
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
+    /// What `runs` and the typing panel last made Esc see.
     activity: Activity,
+    runs: Runs,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
@@ -286,7 +292,7 @@ impl Presence {
     }
 
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
-    /// before any brain message; slice 2 adds `Stop` and slice 4 `ClearDrawing` after it.
+    /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let panel = if self.text_open() {
             EscapePanel::Open
@@ -294,18 +300,167 @@ impl Presence {
             EscapePanel::Closed
         };
         let action = escape::decide(self.activity, panel);
-        match action {
-            Escape::Stop => {
-                self.activity.working = false;
-                self.activity.speaking = false;
+        let tell = match action {
+            Escape::Stop => self.runs.stop(),
+            Escape::Clear => self.runs.clear(),
+            Escape::Dismiss => {
+                self.dismiss_text(cx)?;
+                None
             }
-            Escape::Clear => self.activity.drawing = false,
-            Escape::Dismiss => self.dismiss_text(cx)?,
-            Escape::Ignore => {}
-        }
+            Escape::Ignore => None,
+        };
+        self.activity = self.activity();
+        self.refresh_conversation(cx);
+        // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
+        if let Some(message) = tell {
+            self.tell(message);
+        }
         self.escape_fixture = false;
         self.sync_escape(cx)
+    }
+
+    /// What's moving or on screen, as Esc sees it. shortcut: the placeholder steps show only in
+    /// the typing panel, so they count as a drawing only while it's open; slice 4 draws on the
+    /// overlay.
+    fn activity(&self) -> Activity {
+        Activity {
+            working: self.runs.working(),
+            speaking: false,
+            drawing: self.runs.drawing() && self.text_open(),
+        }
+    }
+
+    /// Follows a change in the runs or the typing panel: holds or releases Esc if what Esc sees
+    /// changed, and shows the newest run.
+    fn runs_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.refresh_conversation(cx);
+        let activity = self.activity();
+        if activity == self.activity {
+            return Ok(());
+        }
+        self.activity = activity;
+        self.sync_escape(cx)
+    }
+
+    /// Enter in the typing panel: sends the draft as a turn and empties the box, or keeps the
+    /// draft and says why it wasn't sent.
+    pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let Some(text) = &self.text else {
+            return Ok(());
+        };
+        let draft = text.input.read(cx).value();
+        let (link, session) = (&self.link, &self.session);
+        let result = self.runs.submit(&draft, |turn| {
+            session
+                .as_ref()
+                .is_some_and(|session| link.send_data(session, turn))
+        });
+        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
+        let notice = match result {
+            Ok(()) => {
+                let input = text.input.clone();
+                text.window
+                    .update(cx, |_, window, cx| {
+                        input.update(cx, |state, cx| state.set_value("", window, cx));
+                    })
+                    .map_err(|error| OpenError::Gpui(error.into()))?;
+                None
+            }
+            Err(Refused::Blank) => None,
+            Err(Refused::Busy) => Some(Text::TurnBusy),
+            Err(Refused::Offline) => Some(Text::TurnOffline),
+            Err(Refused::TooLong) => Some(Text::TurnTooLong),
+        };
+        let notice: Option<SharedString> =
+            notice.map(|notice| cx.global::<Strings>().get(notice).into());
+        text.view.update(cx, |view, cx| {
+            view.notice = notice;
+            cx.notify();
+        });
+        self.runs_changed(cx)
+    }
+
+    /// Applies what the link reported, in order, then follows the runs once.
+    fn link_events(
+        &mut self,
+        events: Vec<LinkEvent>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        for event in events {
+            match event {
+                LinkEvent::State(state) => {
+                    self.session = None;
+                    self.link_state(state, cx);
+                }
+                LinkEvent::Connected(session) => {
+                    self.session = Some(session);
+                    self.link_state(LinkState::Connected, cx);
+                }
+                LinkEvent::RunState { run, thread, phase } => {
+                    let applied = self.runs.apply_state(run, thread, phase);
+                    diagnostics::record(cx, format_args!("run phase={phase:?}"));
+                    if let Some(stop) = applied.stop {
+                        self.tell(stop);
+                    }
+                    self.grant(applied.credit);
+                }
+                LinkEvent::Data {
+                    generation,
+                    message,
+                    bytes,
+                } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        let credit = self.runs.apply_data(message, bytes);
+                        self.grant(credit);
+                    }
+                }
+            }
+        }
+        self.runs_changed(cx)
+    }
+
+    /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
+    fn tell(&self, message: ControlToBrain) {
+        let sent = self
+            .session
+            .as_ref()
+            .is_some_and(|session| self.link.send_control(session, message));
+        if !sent {
+            tracing::warn!("the brain isn't connected or isn't reading; nothing to tell");
+        }
+    }
+
+    /// Grants the connection credit for data frames the UI has taken.
+    fn grant(&self, credit: u32) {
+        if let Some(session) = self.session.as_ref().filter(|_| credit > 0) {
+            session.grant(credit);
+        }
+    }
+
+    fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        if state == LinkState::Failed {
+            self.native.enable_retry();
+        } else {
+            self.native.disable_retry();
+        }
+        if state == LinkState::Connected {
+            self.runs.connected();
+        } else {
+            self.runs.disconnected();
+        }
+        diagnostics::record(cx, format_args!("link state={state:?}"));
+        self.state = state;
+        // Listening keeps its label until the gesture ends.
+        self.refresh_dock(cx);
+        self.panel.update(cx, |panel, cx| {
+            panel.state = state;
+            cx.notify();
+        });
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
@@ -536,39 +691,6 @@ impl Render for Panel {
     }
 }
 
-/// The minimum anchored typing surface: one focused input and nothing that can't yet work.
-struct TextView {
-    input: Entity<InputState>,
-    /// The Stop fallback, here too because this panel covers the status panel's.
-    stop: bool,
-    events: Sender<PresenceEvent>,
-}
-
-impl Render for TextView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let events = self.events.clone();
-        let stop = self.stop.then(|| {
-            let events = self.events.clone();
-            Button::new("stop")
-                .label(cx.global::<Strings>().get(Text::Stop))
-                .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
-        });
-        div()
-            .size_full()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
-            .child(Input::new(&self.input))
-            .children(stop)
-    }
-}
-
 fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
     if events.try_send(event).is_err() {
         tracing::error!("presence event receiver closed");
@@ -649,7 +771,7 @@ fn configure_surface(
 /// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
 /// from the first frame. The caller starts the brain link afterwards.
 pub(crate) fn open(
-    states: Receiver<LinkState>,
+    states: Receiver<LinkEvent>,
     link: LinkHandle,
     flags: &Launch,
     diagnostics: Option<Diagnostics>,
@@ -728,9 +850,11 @@ pub(crate) fn open(
             text: None,
             events,
             link,
+            session: None,
             state: LinkState::Connecting,
             gesture: owner_gesture,
             activity: Activity::default(),
+            runs: Runs::default(),
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout {
@@ -783,8 +907,12 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
     }
 }
 
+/// Link events applied in one update at most [guess]: a fast stream is applied in batches
+/// rather than one UI update per frame.
+const EVENT_BATCH: usize = 256;
+
 fn listen(
-    states: Receiver<LinkState>,
+    states: Receiver<LinkEvent>,
     event_changes: Receiver<PresenceEvent>,
     cx: &mut Context<'_, Presence>,
 ) {
@@ -831,25 +959,17 @@ fn listen(
     })
     .detach();
     cx.spawn(async move |this, cx| {
-        while let Ok(state) = states.recv().await {
-            if this
-                .update(cx, |this: &mut Presence, cx| {
-                    if state == LinkState::Failed {
-                        this.native.enable_retry();
-                    } else {
-                        this.native.disable_retry();
-                    }
-                    this.state = state;
-                    // Listening keeps its label until the gesture ends.
-                    this.refresh_dock(cx);
-                    this.panel.update(cx, |panel, cx| {
-                        panel.state = state;
-                        cx.notify();
-                    });
-                })
-                .is_err()
+        while let Ok(first) = states.recv().await {
+            let mut events = vec![first];
+            while events.len() < EVENT_BATCH
+                && let Ok(event) = states.try_recv()
             {
-                break;
+                events.push(event);
+            }
+            match this.update(cx, |this: &mut Presence, cx| this.link_events(events, cx)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(%error, "presence update failed"),
+                Err(_) => break,
             }
         }
     })

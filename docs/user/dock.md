@@ -21,5 +21,6 @@ the panel or tray shuts down both processes. Closing the panel alone doesn't qui
 
 While you hold [the shortcut](shortcut.md), the dock shows Listening. A double tap opens a small
 typing box under the dock; [Esc](escape.md) or switching to another window hides it and keeps
-your draft. Switching away leaves your chosen window in front. Chat, threads and settings controls appear
+your draft. Enter sends what you typed and the answer appears in the box. A message that can't
+be sent stays there, with the reason. Switching away leaves your chosen window in front. Chat, threads and settings controls appear
 as those features become available; the panels don't offer commands that can't yet work.
