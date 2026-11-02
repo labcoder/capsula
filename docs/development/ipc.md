@@ -202,6 +202,8 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
   a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
   id out again, and the answer and scenes still shown belong to none of the new brain's runs.
+  The next turn goes to a new thread unless the shell knows its thread is stored: picked from
+  the threads list, or answered by a run, which starts only after its turn is stored.
 
 ## Starting and reconnecting
 
