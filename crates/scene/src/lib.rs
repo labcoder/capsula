@@ -1,4 +1,15 @@
-//! Scene v1: records, tokenizer, validator, scene state, layout and 3D geometry.
-//!
-//! Empty until slice 4. It will have no GPUI and no tokio; the shell supplies text measurement
-//! through a small trait.
+//! Strict scene v1 records shared by the brain and shell.
+//! JSON tool arguments and binary messages validate through the same types.
+
+pub mod error;
+pub mod id;
+pub mod limits;
+pub mod parse;
+pub mod record;
+pub mod text;
+
+pub use error::{Budget, ErrorCode, FieldPath, StepError};
+pub use id::{Handle, Ms, WireId};
+pub use parse::parse_record;
+pub use record::{Begin, End, Op, Record, Step};
+pub use text::{Finite, Text};
