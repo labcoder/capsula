@@ -60,8 +60,8 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Scenes` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
-| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Control | `RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
 |---|---|---|
@@ -167,6 +167,62 @@ stateDiagram-v2
   revision ≤ 64`, a label over 256 bytes, or more steps than `committed` end the connection as
   broken input. Counts are checked before a step is kept, and errors name sizes, never labels.
 
+## Deleting a thread
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `DeleteThread` | Control, shell to brain | `thread`, `after_turns` (the `TextSubmit`s this connection queued before it), `resend` |
+| `ThreadDeleted` | Control, brain to shell | `thread`, `outcome` (`NotHidden`, `Hidden` or `Removed`), `last_run` |
+| `TurnRefused` | Control, brain to shell | the `thread` the refused turn named |
+| `ScenesRemoved` | Data, brain to shell | the deleted thread's visible scenes |
+
+```mermaid
+sequenceDiagram
+  participant S as Shell
+  participant B as Brain core
+  participant ST as Store thread
+  S->>S: confirmed: thread marked Deleting, a slot taken
+  S->>B: DeleteThread(thread, after_turns, resend=false)
+  B->>B: end its current run as interrupted(deleted)
+  B->>ST: Delete(thread)
+  S->>B: TextSubmit naming the thread
+  B-->>S: TurnRefused (no run id)
+  ST-->>B: Hidden or Removed, last_run
+  B-->>S: ThreadDeleted(outcome, last_run)
+  B-->>S: ScenesRemoved, on data
+  S->>S: fence runs up to last_run, then drop the rows
+```
+
+- **Admission.** A delete ends the thread's current run and queues one store operation. One
+  for a thread already being deleted only moves its watermark. The brain keeps at most eight
+  in flight, twice the shell's four slots [guess], because deletes outlive the connection that
+  sent them and a restarted shell can't know about them. A ninth is answered `NotHidden` at once
+  with no store operation; the accepted ones stay.
+- **Refused turns.** Until the answer, a turn naming the thread gets `TurnRefused` before it
+  gets a run id. After `Hidden` or `Removed`, so does any of the first `after_turns` turns this
+  connection reads, since the shell sent them before the delete. A blank turn is refused the
+  same way. The shell counts a refusal as one answered turn, and as one cancelled turn and one
+  turn sent before the latest selection when it has any. Nothing is stopped, fenced or
+  retargeted, and a refusal says nothing about whether a thread is stored.
+- **The answer.** `last_run` is the thread's newest run, stored or still ending. The shell
+  fences every run up to it, so the thread's frames still queued, or held for a `RunState`, are
+  dropped, and their credit is granted once. The thread's scenes leave the visible set, and
+  `ScenesRemoved` takes them off the drawing on the data pipe. `NotHidden` changes nothing: the
+  panel says the delete failed, and the user can try again.
+- **Across connections.** The shell keeps each confirmed delete until it's answered, and sends
+  it once per connection, after that connection's `Scenes`. A full control queue is retried
+  every 250 ms [guess]. A delete that reached an earlier connection goes with `resend: true`,
+  through every failed enqueue; a delete the user confirms goes with `false`. A new connection
+  drops the old connection's watermarks and fences. An answer the brain gives on a later
+  connection than the one that sent the delete covers that connection's resend: the resend is
+  consumed with no store operation and no second answer. A resend that arrives before the
+  answer moves the watermark to this connection. When the answer arrives, the shell drops a
+  resend it hasn't queued yet. A brain that restarted knows nothing of a delete and runs it
+  again, and a thread that's already gone answers `Removed` with no `last_run`.
+- **Quit.** The shell queues every held delete before `Quitting`, and the brain's quit waits
+  for deletes in flight as it does for ending runs. A delete that hid nothing makes the quit
+  incomplete. A delete read with the control pipe's end is still applied.
+
 ## The shell's side
 
 `crates/shell/src/link.rs` connects and reads control on the link thread, because pipe reads
@@ -182,7 +238,7 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
 
 | Channel | Bound | When it's full |
 |---|---|---|
-| Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong` and `Quitting` |
+| Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong`, `DeleteThread` and `Quitting`; a delete is tried again |
 | Data out | 64 turns plus 8 for pages and credit | Not reached: the shell refuses a turn first and keeps at most two page requests unanswered |
 | Brain to UI | unbounded, one channel in arrival order | The link thread never waits on the UI |
 
@@ -197,8 +253,8 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   reply when applied, but still earns credit. Page frames are never held for a RunState.
 - **Turns.** The shell keeps at most 63 turns unanswered; a 64th is refused until a new run's
   first `RunState` answers one. The brain's queue holds 64, so the shell never sends the turn
-  that would end the connection. It refuses blank turns, which the brain ignores, and turns too
-  long for a data frame.
+  that would end the connection. It refuses blank turns, which the brain would refuse too, and turns
+  too long for a data frame.
 - **Broken input.** A malformed frame on either pipe, a repeated `Welcome`, or scenes or
   chunks that break the rules above end the connection, and the link reconnects as after any
   loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to

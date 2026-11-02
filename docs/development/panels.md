@@ -3,8 +3,14 @@
 The dock's **Threads…** command opens an interactive surface anchored against the dock,
 clamped to the work area like the typing panel. Opening a thread selects the thread that the
 next typed turn continues; **New thread** clears that selection and opens the typing panel.
-Neither action sends a thread mutation or creates a row until a turn is submitted. There is no delete
-command, dialog, or protocol operation in this panel.
+Neither action sends a thread mutation or creates a row until a turn is submitted.
+
+The open thread's **Delete** asks first, in a gpui-kit alert dialog. The dialog names what
+Capsula can't remove: issues already filed on GitHub, and what the model provider keeps. A
+confirmed thread stays listed until the brain answers, its row marked Deleting… and disabled,
+and the next turn no longer continues it. Then its row and messages go. While four deletes
+[guess] are unanswered, or waiting on turns sent before them, Delete says to wait. A delete that
+hid nothing leaves the thread and says so. The protocol is in [ipc](ipc.md#deleting-a-thread).
 
 `shell/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
 and nonblocking requests; `presence/thread_view.rs` composes the two virtualized lists:

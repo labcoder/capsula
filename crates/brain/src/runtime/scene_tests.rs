@@ -26,9 +26,8 @@ use crate::store::{RunEnd, SceneTarget, Store, Swap};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, SENTINEL, Scratch};
 
-/// The first step's write starts this long after the run's text, so a test can hold the store
-/// before it.
-const SCRIPT: &str = "0 text a\n300 step one\n5000 text never";
+/// A run's text, then its first step, whose write a test holds at the store's gate.
+const SCRIPT: &str = "0 text a\n0 step one\n5000 text never";
 
 /// Scenes drawn before the brain starts, each by its own thread's run from `labels`. A fifth
 /// evicts the oldest, as the brain does.
@@ -84,12 +83,19 @@ fn clear(scenes: &[SceneId]) -> ControlToBrain {
     }
 }
 
-/// Submits a turn, waits for its text, then holds the store, so the run's first step waits on
-/// the lock once it's written. Returns the run and the lock.
+/// Whether `op` writes a run's first step.
+fn first_step(op: &StoreOp) -> bool {
+    matches!(op, StoreOp::CommitStep { index: 0, .. })
+}
+
+/// Submits a turn and waits for its text, while `release`'s gate holds the run's first step
+/// before it runs; then takes the store's lock and lets the step go, so it waits on the lock.
+/// Returns the run and the lock.
 async fn hold_first_step<S: AsyncRead + AsyncWrite>(
     shell: &mut Shell<S>,
     scratch: &Scratch,
     observed: &mut UnboundedReceiver<Seen>,
+    release: &std::sync::mpsc::Sender<()>,
 ) -> (RunId, rusqlite::Connection) {
     shell.submit("go").await;
     let (run, _) = shell.state().await;
@@ -100,8 +106,9 @@ async fn hold_first_step<S: AsyncRead + AsyncWrite>(
             other => panic!("unexpected {other:?}"),
         }
     }
-    let lock = hold(scratch);
     step_started(observed, 0).await;
+    let lock = hold(scratch);
+    release.send(()).expect("the step waits at the gate");
     (run, lock)
 }
 
@@ -175,11 +182,12 @@ async fn a_held_first_step_holds_back_scenes_and_turns_and_the_connection_ends_u
     let scratch = Scratch::new("barrier-held");
     let mut brain = patient_brain(&scratch, SCRIPT);
     let mut observed = brain.observe();
+    let release = brain.hold_store(first_step);
     let mut tap = Tap::from_env();
     let ((control, data), mut shell) = duplex();
     let client = async {
         assert_eq!(shell.scenes().await, []);
-        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
+        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed, &release).await;
         drop(shell);
         lock
     };
@@ -237,11 +245,12 @@ async fn held_fifth_scene(
     let four = drawn(scratch, &[&["a"], &["b"], &["c"], &["d"]]);
     let mut brain = patient_brain(scratch, SCRIPT);
     let mut observed = brain.observe();
+    let release = brain.hold_store(first_step);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), four);
-        let (_, lock) = hold_first_step(&mut shell, scratch, &mut observed).await;
+        let (_, lock) = hold_first_step(&mut shell, scratch, &mut observed, &release).await;
         drop(shell);
         lock
     };
@@ -311,11 +320,12 @@ async fn a_stop_that_kept_nothing_brings_no_scene_back_once_its_late_ack_lands()
     let three = drawn(&scratch, &[&["a"], &["b"], &["c"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
     let mut observed = brain.observe();
+    let release = brain.hold_store(first_step);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), three);
-        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
+        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed, &release).await;
         shell.stop(run).await;
         while shell.state().await != (run, Phase::Interrupted) {}
         lock.execute_batch("ROLLBACK").expect("unlocked");
@@ -411,11 +421,12 @@ async fn a_quit_applies_a_queued_stop_and_clear_and_waits_for_a_late_first_ack()
     let drawn = drawn(&scratch, &[&["a"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
     let mut observed = brain.observe();
+    let release = brain.hold_store(first_step);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), drawn);
-        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
+        let (run, lock) = hold_first_step(&mut shell, &scratch, &mut observed, &release).await;
         shell
             .send(&ControlToBrain::Stop {
                 run,
@@ -450,11 +461,12 @@ async fn a_quit_ends_a_current_run_whose_first_ack_is_pending() {
     let drawn = drawn(&scratch, &[&["a"]]);
     let mut brain = patient_brain(&scratch, SCRIPT);
     let mut observed = brain.observe();
+    let release = brain.hold_store(first_step);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(ids(&shell.scenes().await), drawn);
-        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed).await;
+        let (_, lock) = hold_first_step(&mut shell, &scratch, &mut observed, &release).await;
         shell.send(&clear(&drawn)).await;
         shell.send(&ControlToBrain::Quitting).await;
         drop(shell);
@@ -1013,9 +1025,8 @@ async fn a_second_stop_of_a_finished_run_never_trims_its_scene_again() {
 
 /// The first step commits, then the next two wait on the store's lock while the run ends:
 /// replaced by a new turn, or failed by its engine.
-const STEPS_HELD_THEN_REPLACED: &str =
-    "0 step a\n300 text t\n300 step b\n0 step c\n5000 text never";
-const STEPS_HELD_THEN_FAILED: &str = "0 step a\n300 text t\n300 step b\n0 step c\n100 fail";
+const STEPS_HELD_THEN_REPLACED: &str = "0 step a\n0 text t\n0 step b\n0 step c\n5000 text never";
+const STEPS_HELD_THEN_FAILED: &str = "0 step a\n0 text t\n0 step b\n0 step c\n100 fail";
 
 /// Ends a run while two of its step writes wait on the store, then stops it with `revealed`, as
 /// Esc does while the shell drains the ended run. Returns the committed count the next
@@ -1027,6 +1038,7 @@ async fn stopped_while_ending(
 ) -> (Option<u32>, Option<(u32, Vec<String>)>) {
     let mut brain = patient_brain(scratch, script);
     let mut observed = brain.observe();
+    let release = brain.hold_store(|op| matches!(op, StoreOp::CommitStep { index: 1, .. }));
     let replace = script == STEPS_HELD_THEN_REPLACED;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -1039,15 +1051,21 @@ async fn stopped_while_ending(
             shell.data().await,
             DataToShell::AssistantText { .. }
         ));
+        // Step b reaching the gate and step c being queued come in either order.
+        let (mut b_started, mut c_queued) = (false, false);
+        while !(b_started && c_queued) {
+            let event = timeout(PATIENCE, observed.recv())
+                .await
+                .expect("seen in time")
+                .expect("the brain reports");
+            match event {
+                Seen::StoreOpStarted(StoreOp::CommitStep { index: 1, .. }) => b_started = true,
+                Seen::StoreOpQueued(StoreOp::CommitStep { index: 2, .. }) => c_queued = true,
+                _ => {}
+            }
+        }
         let lock = hold(scratch);
-        // Steps b and c are both queued behind the lock.
-        seen(&mut observed, |seen| {
-            matches!(
-                seen,
-                Seen::StoreOpQueued(StoreOp::CommitStep { index: 2, .. })
-            )
-        })
-        .await;
+        release.send(()).expect("step b waits at the gate");
         if replace {
             shell.submit("next").await;
             while shell.state().await != (run, Phase::Interrupted) {}
@@ -1313,8 +1331,9 @@ enum FirstEnd {
 }
 
 /// Runs three steps to Done, then sends the control `last` makes for the run and its scene and
-/// ends the control pipe in the same write, so the reader sees both in one poll. Returns the
-/// scene and what a reconnect names.
+/// ends the control pipe in the same write, so the reader sees both in one poll. When data
+/// ends first, the control goes only once the brain has entered its grace. Returns the scene
+/// and what a reconnect names.
 async fn control_then_eof(
     name: &str,
     first: FirstEnd,
@@ -1322,6 +1341,7 @@ async fn control_then_eof(
 ) -> (Scratch, SceneId, Vec<SceneDescriptor>) {
     let scratch = Scratch::new(name);
     let mut brain = test_support::brain(&scratch, "0 step a\n0 step b\n0 step c");
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -1340,6 +1360,7 @@ async fn control_then_eof(
         let data = (data_in, data_out);
         if let FirstEnd::Data = first {
             drop(data);
+            seen(&mut observed, |seen| *seen == Seen::Grace).await;
         }
         let last = frame::encode(&last(run, scene), Pipe::Control).expect("encodes");
         control_out.write_all(&last).await.expect("sent");
@@ -1410,9 +1431,7 @@ async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped(
         .owed()
         .expect("owed")
         .expect("a purge is owed")
-        .copy(&std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            false,
-        )))
+        .copy(&std::sync::Arc::new(crate::store::Cancel::default()))
         .expect("copy")
         .expect("not stopped");
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
@@ -1509,5 +1528,7 @@ async fn an_idle_connection_with_nothing_owed_pings_and_writes_nothing() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
-    assert_eq!(observed.try_recv().ok(), None, "no store op");
+    let ops = std::iter::from_fn(|| observed.try_recv().ok())
+        .filter(|seen| matches!(seen, Seen::StoreOpQueued(_) | Seen::StoreOpStarted(_)));
+    assert_eq!(ops.count(), 0, "no store op");
 }

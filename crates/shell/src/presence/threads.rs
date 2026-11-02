@@ -62,7 +62,9 @@ impl Presence {
     }
 
     pub(super) fn select_thread(&mut self, thread: Option<ThreadId>, cx: &mut Context<'_, Self>) {
-        self.runs.select_thread(thread);
+        if !self.runs.select_thread(thread) {
+            return;
+        }
         self.threads.update(cx, |state, cx| {
             state.select(thread);
             cx.notify();

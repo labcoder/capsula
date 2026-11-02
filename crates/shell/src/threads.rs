@@ -47,6 +47,12 @@ pub(crate) struct Threads {
     pub(crate) search_error: Option<SearchError>,
     /// The last read failed; cleared by the next page that lands.
     pub(crate) failed: bool,
+    /// Threads whose delete is unanswered; they show as deleting and can't be chosen.
+    pub(crate) deleting: Vec<ThreadId>,
+    /// Every delete slot is held, so no other thread can be deleted yet.
+    pub(crate) deletes_full: bool,
+    /// The last delete answered that nothing changed; cleared by the next confirm.
+    pub(crate) delete_failed: bool,
     connected: bool,
     /// Pages are read only while the panel is shown.
     shown: bool,
@@ -168,6 +174,19 @@ impl Threads {
         self.loaded = false;
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = thread.map(|_| Read::First);
+    }
+
+    /// `thread` was hidden or removed: its row, its open messages and every read in flight
+    /// about it go, so no reply sent before the brain hid it lands.
+    pub(crate) fn deleted(&mut self, thread: ThreadId) {
+        self.rows.retain(|row| row.id != thread);
+        self.list_revision = self.list_revision.wrapping_add(1);
+        if self.list_pending.is_some() && self.list_needed.is_none() {
+            self.list_needed = Some(Read::Repair);
+        }
+        if self.open == Some(thread) {
+            self.select(None);
+        }
     }
 
     pub(crate) fn more_threads(&mut self) {
@@ -357,7 +376,8 @@ impl Threads {
             DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. }
-            | DataToShell::SceneSnapshot { .. } => {}
+            | DataToShell::SceneSnapshot { .. }
+            | DataToShell::ScenesRemoved { .. } => {}
         }
     }
 

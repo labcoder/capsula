@@ -1,6 +1,7 @@
 //! The resting dock, its stretch, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
+mod deletes;
 pub(crate) mod diagnostics;
 mod geometry;
 mod gesture;
@@ -86,6 +87,8 @@ struct Presence {
     scale: f32,
     pointer_settle: Option<Task<()>>,
     stretch: Stretch,
+    /// Retries deletes the control queue had no room for.
+    delete_retry: Option<Task<()>>,
 }
 
 impl Presence {
@@ -838,6 +841,7 @@ pub(crate) fn open(
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,
+            delete_retry: None,
             stretch,
         }
     });

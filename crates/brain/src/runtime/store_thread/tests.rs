@@ -2,17 +2,17 @@ use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{DataToShell, PageOf, RunId, Step, ThreadId};
+use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, Step, ThreadId};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
 use super::{Attempt, Job, Purger, Schedule, StoreThread, serve_op};
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{RunEnd, SceneTarget, Store, Swap};
+use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, SceneTarget, Store, Swap};
 use crate::test_support::Scratch;
 
 /// A store owing the purge of its deleted thread 1.
@@ -44,6 +44,8 @@ fn spawn_with_room(
         free_space,
         attempts: Some(heard),
         observed: None,
+        gates: None,
+        pauses: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
     (thread, attempts)
@@ -167,7 +169,7 @@ fn swapped_with_old_left(scratch: &Scratch) -> Store {
         .owed()
         .expect("owed")
         .expect("idle")
-        .copy(&Arc::new(AtomicBool::new(false)))
+        .copy(&Arc::new(Cancel::default()))
         .expect("copy")
         .expect("not stopped");
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
@@ -280,7 +282,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         .owed()
         .expect("owed")
         .expect("idle")
-        .copy(&Arc::new(AtomicBool::new(false)))
+        .copy(&Arc::new(Cancel::default()))
         .expect("copy")
         .expect("not stopped");
     let wal = store.swap_failing_reopen(&copied);
@@ -343,7 +345,7 @@ fn a_crash_right_after_the_link_keeps_the_store_and_the_purge_finishes() {
         .owed()
         .expect("owed")
         .expect("idle")
-        .copy(&Arc::new(AtomicBool::new(false)))
+        .copy(&Arc::new(Cancel::default()))
         .expect("copy")
         .expect("not stopped");
     drop((copied, store));
@@ -536,7 +538,7 @@ fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
     );
 
     let copying = store.owed().expect("owed").expect("idle");
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Cancel::default());
     let stopping = Arc::clone(&stop);
     let (started, running) = std_mpsc::channel();
     let (resume, paused) = std_mpsc::channel();
@@ -546,7 +548,7 @@ fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
         copying.copy(&stopping)
     });
     purger.job = Some(Job::Copy {
-        stop: Arc::clone(&stop),
+        cancel: Arc::clone(&stop),
         helper,
     });
     running
@@ -554,10 +556,7 @@ fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
         .expect("helper running");
     serve_op(&mut store, &mut purger, &acks, read());
     assert_eq!(replies.try_recv().expect("reply"), expected);
-    assert!(
-        !stop.load(Ordering::Relaxed),
-        "the read didn't cancel the copy"
-    );
+    assert!(!stop.stopped(), "the read didn't cancel the copy");
     assert_eq!(purger.next, next);
     resume.send(()).expect("resume");
     let copy = purger.job.take().expect("copy running");
@@ -757,4 +756,303 @@ fn measure_page_reads() {
         thread.close().blocking_recv().expect("closed");
         eprintln!("{}", lines.join("\n  "));
     }
+}
+
+#[test]
+fn a_delete_in_session_purges_its_thread() {
+    let scratch = Scratch::new("delete-purge");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for thread in [1, 2] {
+        store
+            .begin_turn(ThreadId(thread), Some("t"), RunId(thread), "text")
+            .expect("turn");
+        store
+            .end_run(ThreadId(thread), RunId(thread), &[], RunEnd::Done)
+            .expect("ended");
+    }
+    assert_eq!(owed(&scratch), 0, "no purge is owed before the delete");
+    let (thread, attempts) = spawn(store);
+    assert!(thread.send(StoreOp::Delete {
+        thread: ThreadId(1)
+    }));
+    assert_eq!(next(&attempts), Attempt::Done);
+    thread.close().blocking_recv().expect("closed");
+    assert_eq!(owed(&scratch), 0);
+    let store = Store::open(&scratch.db()).expect("reopen");
+    assert!(!store.leftovers().exist(), "no copy is left");
+    let threads: Vec<ThreadId> = store
+        .thread_page(None, 50)
+        .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
+        .expect("threads");
+    assert_eq!(threads, [ThreadId(2)]);
+}
+
+/// A purge copy paused at each of `points`, with how a test reaches and releases each.
+struct Paused {
+    thread: StoreThread,
+    attempts: std_mpsc::Receiver<Attempt>,
+    acks: std_mpsc::Receiver<Input>,
+    /// Hears that a write waits for the copy to let go of the live store.
+    waiting: std_mpsc::Receiver<()>,
+    points: Vec<(std_mpsc::Receiver<()>, std_mpsc::Sender<()>)>,
+}
+
+/// Threads 1 to 3 with an ended run each, the store's thread pausing its first copy at
+/// `points`, and thread 1 deleted to arm that copy.
+fn armed_and_paused(scratch: &Scratch, points: &[Point]) -> Paused {
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for thread in 1..=3 {
+        store
+            .begin_turn(ThreadId(thread), Some("t"), RunId(thread), "text")
+            .expect("turn");
+        store
+            .end_run(ThreadId(thread), RunId(thread), &[], RunEnd::Done)
+            .expect("ended");
+    }
+    let (heard, attempts) = std_mpsc::channel();
+    let (waits, waiting) = std_mpsc::channel();
+    let mut holds = Vec::new();
+    let mut handles = Vec::new();
+    for &at in points {
+        let (reached, reaching) = std_mpsc::channel();
+        let (releasing, release) = std_mpsc::channel();
+        holds.push(Pause {
+            at,
+            reached,
+            release,
+        });
+        handles.push((reaching, releasing));
+    }
+    let schedule = Schedule {
+        quiet: Duration::from_millis(1),
+        first_retry: Duration::from_millis(20),
+        last_retry: Duration::from_millis(20),
+        free_space: |_| Ok(u64::MAX),
+        attempts: Some(heard),
+        pauses: Some(Pauses {
+            at: std::sync::Mutex::new(holds),
+            waiting: Some(waits),
+        }),
+        ..Schedule::default()
+    };
+    let (acks_tx, mut replies) = mpsc::unbounded_channel();
+    let (forward, acks) = std_mpsc::channel();
+    std::thread::spawn(move || {
+        while let Some(input) = replies.blocking_recv() {
+            if forward.send(input).is_err() {
+                return;
+            }
+        }
+    });
+    let thread = StoreThread::spawn(store, acks_tx, schedule).expect("thread");
+    let paused = Paused {
+        thread,
+        attempts,
+        acks,
+        waiting,
+        points: handles,
+    };
+    assert!(paused.thread.send(StoreOp::Delete {
+        thread: ThreadId(1)
+    }));
+    assert_removed(&paused, 1);
+    paused
+}
+
+const PATIENCE: Duration = Duration::from_secs(10);
+
+fn assert_removed(paused: &Paused, thread: u64) {
+    let ack = paused.acks.recv_timeout(PATIENCE).expect("acknowledged");
+    assert!(
+        matches!(
+            ack,
+            Input::Deleted {
+                thread: acked,
+                outcome: Deleted::Removed,
+                ..
+            } if acked == ThreadId(thread)
+        ),
+        "{ack:?}"
+    );
+}
+
+fn reached(paused: &Paused, point: usize) {
+    paused.points[point]
+        .0
+        .recv_timeout(PATIENCE)
+        .expect("the copy got there");
+}
+
+fn release(paused: &Paused, point: usize) {
+    paused.points[point].1.send(()).expect("the copy waits");
+}
+
+fn live(scratch: &Scratch, thread: i64) -> bool {
+    Connection::open(scratch.db())
+        .expect("watcher")
+        .query_row(
+            "SELECT state = 'live' FROM threads WHERE id = ?1",
+            [thread],
+            |row| row.get(0),
+        )
+        .expect("the thread's row")
+}
+
+/// The purge retries and finishes, and the next op works.
+fn then_purged(paused: Paused) {
+    done_after(&paused.attempts, &[Attempt::Stale]);
+    assert!(paused.thread.send(StoreOp::Delete {
+        thread: ThreadId(3)
+    }));
+    assert_removed(&paused, 3);
+    paused.thread.close().blocking_recv().expect("closed");
+}
+
+#[test]
+fn a_write_waits_for_a_copy_reading_the_live_store_but_not_for_its_cleanup() {
+    for at in [Point::Drain, Point::Snapshot] {
+        let scratch = Scratch::new("source-held");
+        let paused = armed_and_paused(&scratch, &[at, Point::Cleanup]);
+        reached(&paused, 0);
+        assert!(paused.thread.send(StoreOp::Delete {
+            thread: ThreadId(2)
+        }));
+        paused
+            .waiting
+            .recv_timeout(PATIENCE)
+            .expect("the write waits");
+        assert!(
+            paused.acks.try_recv().is_err(),
+            "{at:?}: no write before the release"
+        );
+        assert!(live(&scratch, 2), "{at:?}");
+        release(&paused, 0);
+        reached(&paused, 1);
+        assert_removed(&paused, 2);
+        release(&paused, 1);
+        then_purged(paused);
+    }
+}
+
+#[test]
+fn a_write_after_the_copy_let_go_of_the_live_store_never_waits() {
+    for at in [Point::Source, Point::Clean] {
+        let scratch = Scratch::new("source-free");
+        let paused = armed_and_paused(&scratch, &[at]);
+        reached(&paused, 0);
+        assert!(paused.thread.send(StoreOp::Delete {
+            thread: ThreadId(2)
+        }));
+        assert_removed(&paused, 2);
+        release(&paused, 0);
+        then_purged(paused);
+    }
+}
+
+/// Rez measurement for the pull request, not a check: a delete that arrives while the real
+/// purge's copy reads the live store, from enqueue to acknowledgement, the wait for the copy to
+/// let go included, and the ordinary write right behind it. The delete that armed the purge, with
+/// nothing running, is the baseline. Five samples with the copy in its drain, five in its
+/// snapshot. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_delete_during_a_purge`;
+/// `MEASURE_ONLY` names another store than the largest.
+#[test]
+#[ignore = "a measurement, run by hand on Rez"]
+fn measure_delete_during_a_purge() {
+    use crate::store::tests::{MEASURED_STORES, measured_store};
+    const SAMPLES: u64 = 5;
+    let only = std::env::var("MEASURE_ONLY").unwrap_or_else(|_| MEASURED_STORES[3].0.to_owned());
+    let (name, shape) = MEASURED_STORES
+        .into_iter()
+        .find(|(name, _)| *name == only)
+        .expect("a measured store");
+    let scratch = Scratch::new("measure-purge-delete");
+    let mut store = Some(measured_store(&scratch, shape));
+    let size = std::fs::metadata(scratch.db()).expect("size").len() >> 20;
+    let worst = |took: &[Duration]| took.iter().max().copied().unwrap_or_default();
+    let (mut armed, mut during, mut behind) = (Vec::new(), Vec::new(), Vec::new());
+    let mut sample = 0;
+    for at in [Point::Drain, Point::Snapshot] {
+        for _ in 0..SAMPLES {
+            let (reached, reaching) = std_mpsc::channel();
+            let (releasing, release) = std_mpsc::channel();
+            let (heard, attempts) = std_mpsc::channel();
+            let schedule = Schedule {
+                first_retry: Duration::from_millis(20),
+                last_retry: Duration::from_millis(20),
+                attempts: Some(heard),
+                pauses: Some(Pauses {
+                    at: std::sync::Mutex::new(vec![Pause {
+                        at,
+                        reached,
+                        release,
+                    }]),
+                    waiting: None,
+                }),
+                ..Schedule::default()
+            };
+            let opened = store
+                .take()
+                .unwrap_or_else(|| Store::open(&scratch.db()).expect("reopen"));
+            let (acks, mut replies) = mpsc::unbounded_channel();
+            let thread = StoreThread::spawn(opened, acks, schedule).expect("thread");
+            let mut timed = |op: StoreOp| {
+                let started = Instant::now();
+                assert!(thread.send(op));
+                let ack = replies.blocking_recv().expect("acknowledged");
+                assert!(
+                    matches!(
+                        ack,
+                        Input::Deleted {
+                            outcome: Deleted::Removed,
+                            ..
+                        } | Input::TurnStored { .. }
+                    ),
+                    "{ack:?}"
+                );
+                started.elapsed()
+            };
+            armed.push(timed(StoreOp::Delete {
+                thread: ThreadId(1 + 2 * sample),
+            }));
+            reaching
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the copy reads the store");
+            releasing.send(()).expect("the copy waits");
+            during.push(timed(StoreOp::Delete {
+                thread: ThreadId(2 + 2 * sample),
+            }));
+            let turn = (ThreadId(100_000 + sample), RunId(100_000 + sample));
+            behind.push(timed(StoreOp::BeginTurn {
+                thread: turn.0,
+                title: Some("t".to_owned()),
+                run: turn.1,
+                text: "a measured turn".to_owned(),
+            }));
+            assert!(thread.send(StoreOp::EndRun {
+                thread: turn.0,
+                run: turn.1,
+                text: None,
+                revealed: None,
+                clear: None,
+                end: RunEnd::Done,
+            }));
+            while attempts.recv().expect("the purge goes on") != Attempt::Done {}
+            thread.close().blocking_recv().expect("closed");
+            eprintln!(
+                "{name} ({size} MiB), copy in its {at:?}: armed {:.1?}, during {:.1?}, behind {:.1?}",
+                armed[armed.len() - 1],
+                during[during.len() - 1],
+                behind[behind.len() - 1],
+            );
+            sample += 1;
+        }
+    }
+    eprintln!(
+        "{name} ({size} MiB): worst delete with nothing running {:.1?}; during a copy's read {:.1?}; \
+         the write behind it {:.1?}",
+        worst(&armed),
+        worst(&during),
+        worst(&behind),
+    );
 }

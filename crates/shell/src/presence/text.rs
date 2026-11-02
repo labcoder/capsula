@@ -138,6 +138,7 @@ impl Presence {
                 stop,
                 steps: Vec::new(),
                 answer: SharedString::default(),
+                deleting: false,
                 notice: None,
                 events,
             })
@@ -263,10 +264,16 @@ impl Presence {
             .runs
             .shown()
             .map_or_else(Default::default, |shown| answer_tail(&shown.text).into());
+        let deleting = self.runs.shown().is_some_and(|shown| {
+            shown
+                .thread
+                .is_some_and(|thread| self.runs.deleting().contains(&thread))
+        });
         text.view.update(cx, |view, cx| {
-            if view.steps != steps || view.answer != answer {
+            if view.steps != steps || view.answer != answer || view.deleting != deleting {
                 view.steps = steps;
                 view.answer = answer;
+                view.deleting = deleting;
                 cx.notify();
             }
         });
@@ -281,6 +288,8 @@ pub(super) struct TextView {
     pub(super) stop: bool,
     steps: Vec<SharedString>,
     answer: SharedString,
+    /// The answer's thread is being deleted, so the next turn starts a new thread.
+    deleting: bool,
     pub(super) notice: Option<SharedString>,
     events: Sender<PresenceEvent>,
 }
@@ -330,9 +339,19 @@ impl Render for TextView {
                     .justify_end()
                     .gap_1()
                     .text_xs()
+                    .text_color(if self.deleting {
+                        cx.theme().muted_foreground
+                    } else {
+                        cx.theme().popover_foreground
+                    })
                     .children(steps)
                     .child(self.answer.clone()),
             )
+            .children(self.deleting.then(|| {
+                div()
+                    .text_xs()
+                    .child(cx.global::<Strings>().get(Text::ThreadDeleting))
+            }))
             .children(
                 self.notice
                     .clone()

@@ -18,10 +18,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsula_protocol::constants;
-use capsula_protocol::message::{RunId, ThreadId};
+use capsula_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
-pub use purge::{Copied, Leftovers, Owed, Swap};
+pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
+#[cfg(test)]
+pub(crate) use purge::{Pause, Pauses, Point};
 pub(crate) use scenes::cleared_body;
 pub use scenes::{SceneState, SceneTarget};
 
@@ -145,6 +147,8 @@ pub enum Interruption {
     ShellLost,
     /// The shell stopped taking data.
     ViewStalled,
+    /// The user deleted the run's thread. A thread whose hide didn't commit keeps this outcome.
+    Deleted,
 }
 
 /// Why a run failed.
@@ -169,6 +173,7 @@ impl RunEnd {
                     Interruption::Replaced => "replaced",
                     Interruption::ShellLost => "shell_lost",
                     Interruption::ViewStalled => "view_stalled",
+                    Interruption::Deleted => "deleted",
                 }),
             ),
             Self::Failed(why) => (
@@ -186,6 +191,27 @@ impl RunEnd {
 /// A thread's deletion generation. Work stamped with an older one is stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub i64);
+
+/// What [`Store::delete`] came to.
+#[derive(Debug)]
+pub struct Deletion {
+    /// How far it got.
+    pub outcome: Deleted,
+    /// The thread's newest stored run, read before any row went; `None` on `NotHidden`.
+    pub last_run: Option<RunId>,
+    /// What stopped it short of `Removed`.
+    pub error: Option<StoreError>,
+}
+
+impl Deletion {
+    fn removed(last_run: Option<RunId>) -> Self {
+        Self {
+            outcome: Deleted::Removed,
+            last_run,
+            error: None,
+        }
+    }
+}
 
 /// What the recovery scan changed at start.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -437,6 +463,52 @@ impl Store {
         insert_events(&tx, thread, run, events, now_ms())?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Deletes a thread whatever state it's in: a live one is hidden, then removed; one already
+    /// being deleted is removed; an absent one is already gone. The thread's newest run is read
+    /// before any row goes. A failure before the hide commits leaves it `NotHidden`, and after
+    /// it `Hidden`, which the next start finishes.
+    pub fn delete(&mut self, thread: ThreadId) -> Deletion {
+        // An id past i64::MAX names nothing.
+        let Ok(id) = i64::try_from(thread.0) else {
+            return Deletion::removed(None);
+        };
+        let found = self
+            .conn
+            .query_row(
+                "SELECT state = 'live', (SELECT max(id) FROM runs WHERE thread = ?1)
+                 FROM threads WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional();
+        let (live, last_run) = match found {
+            Ok(Some((live, run))) => (live, run.map(|run| RunId(row_id(run)))),
+            Ok(None) => return Deletion::removed(None),
+            Err(error) => {
+                return Deletion {
+                    outcome: Deleted::NotHidden,
+                    last_run: None,
+                    error: Some(error.into()),
+                };
+            }
+        };
+        if live && let Err(error) = self.begin_delete(thread) {
+            return Deletion {
+                outcome: Deleted::NotHidden,
+                last_run: None,
+                error: Some(error),
+            };
+        }
+        match self.finish_delete(thread) {
+            Ok(()) => Deletion::removed(last_run),
+            Err(error) => Deletion {
+                outcome: Deleted::Hidden,
+                last_run,
+                error: Some(error),
+            },
+        }
     }
 
     /// Deletion's first transaction: from here the thread is hidden, can't be sent as context,

@@ -22,6 +22,8 @@ pub(crate) enum Owner {
     /// A recovery snapshot chunk of a scene: no run's, so a Stop never drops it, but a clear of
     /// its scene does.
     Scene(SceneId),
+    /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete.
+    Marker,
 }
 
 #[derive(Debug)]

@@ -94,6 +94,7 @@ never lost:
 | A new turn | `interrupted(replaced)` | at once |
 | The shell went away | `interrupted(shell_lost)` | no |
 | The shell took no data for 2 s | `interrupted(view_stalled)` | at once |
+| Its thread is being deleted | `interrupted(deleted)` | at once |
 | A budget ran out | `failed(budget)` | at once |
 | The engine failed or sent an oversized step | `failed(engine)` | at once |
 | A store write failed | `failed(store)` | at once |
@@ -150,7 +151,9 @@ described in `ipc.md`. A shell that disconnects ends the current run as
 applied first, even one read in the same poll as the end. Store replies keep reaching the coordinator while no shell is
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close. A deletion's purge (`store.md`) copies the store on a helper thread only
-while no run is active, and an op arriving, or closing, stops the copy without waiting for it.
+while no run is active. A write arriving, or closing, stops the copy and waits only until it has
+let go of the live store, never for the rest of the copy: the worst of 10 samples at 984 MiB on
+Rez was 29 ms, though none forced the cancel deep into `VACUUM INTO`.
 Removing its files runs on a helper too, so turns and runs stop only for the swap, about
 10 ms on Rez up to 984 MiB, and otherwise share the disk with the helper.
 

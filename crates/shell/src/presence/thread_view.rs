@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use capsula_protocol::message::{EventId, PageEventKind, ThreadId};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::Escape as EscapeKey;
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::scroll::Scrollbar;
@@ -81,11 +82,21 @@ impl ListDelegate for ThreadsDelegate {
         _: &mut Window,
         cx: &mut Context<'_, ListState<Self>>,
     ) -> Option<Self::Item> {
-        let row = self.model.read(cx).rows.get(ix.row)?;
+        let state = self.model.read(cx);
+        let row = state.rows.get(ix.row)?;
+        let deleting = state.deleting.contains(&row.id);
+        let label = deleting.then(|| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(cx.global::<Strings>().get(Text::ThreadDeleting))
+        });
         Some(
             ListItem::new(("thread", row.id.0))
                 .accessibility_label(row.title.clone())
-                .child(div().min_w_0().truncate().child(row.title.clone())),
+                .disabled(deleting)
+                .child(div().min_w_0().truncate().child(row.title.clone()))
+                .children(label),
         )
     }
 
@@ -370,7 +381,67 @@ impl ThreadsView {
             .into_any_element()
     }
 
+    /// The open thread's Delete, which asks first, or why it can't be deleted now.
+    fn delete_bar(&self, cx: &App) -> Option<gpui_kit::AnyElement> {
+        let state = self.model.read(cx);
+        let thread = state.open?;
+        let strings = cx.global::<Strings>();
+        let note = if state.deleting.contains(&thread) {
+            Some(Text::ThreadDeleting)
+        } else if state.deletes_full {
+            Some(Text::ThreadDeletesFull)
+        } else {
+            None
+        };
+        let owner = self.owner.clone();
+        let button = Button::new("delete-thread")
+            .small()
+            .danger()
+            .disabled(note.is_some())
+            .label(strings.get(Text::DeleteThread))
+            .on_click(move |_, window, cx| {
+                let owner = owner.clone();
+                window.open_alert_dialog(cx, move |alert, _, cx| {
+                    let strings = cx.global::<Strings>();
+                    let owner = owner.clone();
+                    alert
+                        .title(strings.get(Text::DeleteThreadTitle))
+                        .description(strings.get(Text::DeleteThreadBody))
+                        .show_cancel(true)
+                        .ok_text(strings.get(Text::DeleteThread))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(strings.get(Text::DeleteThreadCancel))
+                        .on_ok(move |_, _, cx| {
+                            let owner = owner.clone();
+                            cx.defer(move |cx| {
+                                let _gone = owner.update(cx, |owner, cx| {
+                                    owner.delete_thread(thread, cx);
+                                });
+                            });
+                            true
+                        })
+                });
+            });
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .p_2()
+                .children(note.map(|note| {
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(strings.get(note))
+                }))
+                .child(button)
+                .into_any_element(),
+        )
+    }
+
     fn detail(&self, cx: &mut Context<'_, Self>) -> gpui_kit::AnyElement {
+        let delete_bar = self.delete_bar(cx);
         let state = self.model.read(cx);
         let empty = if state.open.is_none() {
             Some(Text::SelectThread)
@@ -393,6 +464,7 @@ impl ThreadsView {
             .border_color(cx.theme().border)
             .flex()
             .flex_col()
+            .children(delete_bar)
             .children(more.then(|| {
                 Button::new("older-messages")
                     .small()
@@ -428,6 +500,8 @@ impl Render for ThreadsView {
             Some(Text::ThreadsOffline)
         } else if state.failed {
             Some(Text::ThreadsFailed)
+        } else if state.delete_failed {
+            Some(Text::ThreadDeleteFailed)
         } else {
             None
         }

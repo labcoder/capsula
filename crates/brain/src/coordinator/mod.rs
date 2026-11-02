@@ -8,6 +8,7 @@
 //! how a late completion after `Stop` is refused. A run that ended stays accountable to the
 //! store until its outcome is written, so a failed write is still reported.
 
+mod delete;
 mod scenes;
 mod store_op;
 #[cfg(test)]
@@ -17,8 +18,8 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use capsula_protocol::message::{
-    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, SceneId, Step,
-    ThreadId,
+    ControlToShell, DataToShell, Deleted, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, SceneId,
+    Step, ThreadId,
 };
 
 use crate::store::{Failure, Interruption, RunEnd, SceneState, SceneTarget};
@@ -137,6 +138,24 @@ pub enum Input {
     },
     /// The timer for owed clears and selections fired.
     Retry,
+    /// The user confirmed deleting `thread`.
+    Delete {
+        /// The thread.
+        thread: ThreadId,
+        /// The submits the shell sent on this connection before it.
+        after_turns: u32,
+        /// A resend of a delete the shell sent on an earlier connection.
+        resend: bool,
+    },
+    /// A `Delete` op finished.
+    Deleted {
+        /// The thread.
+        thread: ThreadId,
+        /// What it came to.
+        outcome: Deleted,
+        /// The thread's newest stored run, read before its rows went.
+        last_run: Option<RunId>,
+    },
 }
 
 /// What an engine produces.
@@ -197,6 +216,8 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
+    /// The shell broke the protocol: end its connection.
+    Broken(&'static str),
 }
 
 /// The input named a run that isn't current, or an acknowledgement nothing is waiting for, so
@@ -290,6 +311,16 @@ pub struct Coordinator {
     retry_after: Duration,
     /// The wait of the `ArmRetry` that's out and hasn't come back as `Retry`.
     retry_armed: Option<Duration>,
+    /// Deletes sent to the store and not answered yet, from any connection.
+    deleting: Vec<delete::Deleting>,
+    /// Threads hidden or removed on this connection while a submit sent before their delete is
+    /// still unread, with how many submits came before it.
+    fenced: Vec<(ThreadId, u32)>,
+    /// Threads whose delete, sent on an earlier connection, was answered on this one before the
+    /// shell's resend of it was read; that resend needs no second op.
+    crossed: Vec<ThreadId>,
+    /// The turns taken on this connection.
+    turns_read: u32,
 }
 
 impl Coordinator {
@@ -307,6 +338,10 @@ impl Coordinator {
             session_start: RunId(last_run.0 + 1),
             retry_after: scenes::FIRST_RETRY,
             retry_armed: None,
+            deleting: Vec::new(),
+            fenced: Vec::new(),
+            crossed: Vec::new(),
+            turns_read: 0,
         }
     }
 
@@ -344,11 +379,7 @@ impl Coordinator {
                 return Ok(vec![Effect::Store(op)]);
             }
             Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
-            Input::Turn { thread, text } => {
-                if !text.trim().is_empty() {
-                    self.turn(thread, text, &mut effects);
-                }
-            }
+            Input::Turn { thread, text } => self.typed(thread, text, &mut effects),
             Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
@@ -422,6 +453,9 @@ impl Coordinator {
             Input::SceneKept { scene, ok: true } => self.kept(scene),
             Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
             Input::Retry => self.retry_now(&mut effects),
+            input @ (Input::Delete { .. } | Input::Deleted { .. }) => {
+                self.deletion(&input, &mut effects)?;
+            }
         }
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
@@ -785,7 +819,9 @@ impl Coordinator {
         run.waiting.clear();
         if matches!(
             outcome,
-            RunEnd::Interrupted(Interruption::Stop | Interruption::Replaced)
+            RunEnd::Interrupted(
+                Interruption::Stop | Interruption::Replaced | Interruption::Deleted
+            )
         ) {
             effects.push(Effect::Revoke { run: run.id });
         }

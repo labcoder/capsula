@@ -23,6 +23,8 @@ use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
+#[path = "delete_tests.rs"]
+mod deletes;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]

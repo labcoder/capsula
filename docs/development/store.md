@@ -51,6 +51,34 @@ the store thread still services due or completed purge work while pages arrive.
 
 ## Deleting a thread
 
+`Store::delete` runs one `DeleteThread`. It reads the thread's state and newest run first, so
+`last_run` still names that run once its rows are gone. A failure before the first transaction
+commits answers `NotHidden` and leaves the thread live. A failure after it answers `Hidden`, and
+the next start finishes the deletion. A thread that's already gone answers `Removed`. Only the
+error's kind is logged.
+
+How long the store thread spends on one delete, the thread's stand-in captures included
+(`measure_big_delete`, release build on Rez, 20 samples a store, then 5 after a reader let go):
+
+| Store | p50 / p95 / worst | After a reader held the WAL | WAL held |
+|---|---|---|---|
+| 46 MiB | 7.4 / 9.8 / 10.2 ms | 21.9 / 22.2 / 24.3 ms | 13.4 MiB |
+| 232 MiB | 18.0 / 23.3 / 26.2 ms | 75.0 / 83.8 / 88.8 ms | 41.7 MiB |
+| 515 MiB | 25.9 / 35.2 / 36.1 ms | 86.4 / 88.0 / 97.0 ms | 36.0 MiB |
+| 984 MiB | 41.6 / 52.6 / 54.3 ms | 153.4 / 155.0 / 156.0 ms | 58.9 MiB |
+
+The purge's copy is the one reader of the live store besides the store thread, so a write never
+commits under its snapshot: before any write the store thread stops the copy and waits until it
+has closed its connections to the live store, its drain and its snapshot, and nothing more of the
+copy. At 984 MiB (`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a
+delete from enqueue to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during
+the snapshot, against 9.9 ms with nothing running, and the write right behind it 1.1 ms.
+
+shortcut: a reader outside the store thread that held a snapshot through a big write makes the
+next commit checkpoint that WAL, past the ~100 ms foreground bound (the right-hand column above,
+156 ms at 984 MiB). Only the purge reads that way today, and it lets go first; OSC-152 brings
+long-lived readers and the checkpoint lifecycle that bounds them.
+
 ```mermaid
 sequenceDiagram
   participant S as Store thread

@@ -19,7 +19,7 @@ use capsula_protocol::BUILD_ID;
 use capsula_protocol::constants::BRAIN_EXE;
 use capsula_protocol::frame::{self, FrameError, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello, Incarnation,
+    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
     MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId,
 };
 
@@ -39,7 +39,7 @@ const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A second brain loss within this long needs the user's Retry [guess, v1 §2.3].
 const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 /// Control messages waiting for the brain to read them before a send fails [guess]. The shell
-/// sends a handful at a time: Stop, `ClearDrawing`, `Pong` and `Quitting`.
+/// sends a handful at a time: Stop, `ClearDrawing`, `Pong`, up to four deletes and `Quitting`.
 const CONTROL_QUEUE: usize = 64;
 /// Data messages waiting for the brain to read them: the turns the shell may leave unanswered,
 /// and room for credit.
@@ -79,6 +79,14 @@ pub(crate) enum LinkEvent {
     },
     /// The connection's visible scenes, from the control pipe.
     Scenes(Vec<SceneDescriptor>),
+    /// A delete's answer, from the control pipe.
+    ThreadDeleted {
+        thread: ThreadId,
+        outcome: Deleted,
+        last_run: Option<RunId>,
+    },
+    /// The brain refused the oldest unanswered turn, from the control pipe.
+    TurnRefused,
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -173,6 +181,51 @@ struct Outbox {
     data: Sender<DataOut>,
     /// The control pipe, so the UI can end a connection that broke the protocol.
     pipe: Arc<PipeClient>,
+    /// The `TextSubmit`s queued on this connection, which a delete's `after_turns` counts.
+    submits: AtomicU32,
+}
+
+/// A delete the user confirmed, until the brain answers it.
+#[derive(Debug)]
+struct Held {
+    thread: ThreadId,
+    /// The connection it was last queued on.
+    sent_on: Option<u64>,
+    /// It reached an earlier connection, whose brain may already have answered it.
+    resend: bool,
+}
+
+/// Queues every held delete not yet queued on `outbox`'s connection, in order, each with the
+/// turns queued before it. False when the control queue is full.
+fn queue_deletes(outbox: &Outbox, deletes: &mut [Held]) -> bool {
+    let after_turns = outbox.submits.load(Ordering::SeqCst);
+    queue_on(&outbox.control, outbox.generation, after_turns, deletes)
+}
+
+/// [`queue_deletes`] on connection `generation`'s control queue. A delete that reached an
+/// earlier connection stays a resend through every retry.
+fn queue_on(
+    control: &Sender<ControlToBrain>,
+    generation: u64,
+    after_turns: u32,
+    deletes: &mut [Held],
+) -> bool {
+    for held in deletes
+        .iter_mut()
+        .filter(|held| held.sent_on != Some(generation))
+    {
+        held.resend |= held.sent_on.is_some();
+        let delete = ControlToBrain::DeleteThread {
+            thread: held.thread,
+            after_turns,
+            resend: held.resend,
+        };
+        if control.try_send(delete).is_err() {
+            return false;
+        }
+        held.sent_on = Some(generation);
+    }
+    true
 }
 
 /// What the UI thread and the link thread share.
@@ -185,6 +238,9 @@ struct Shared {
     outbox: Mutex<Option<Outbox>>,
     /// The last connection's generation.
     generations: AtomicU64,
+    /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
+    /// queued.
+    deletes: Mutex<Vec<Held>>,
 }
 
 impl Shared {
@@ -196,6 +252,22 @@ impl Shared {
             .as_ref()
             .filter(|outbox| outbox.generation == session.generation)
             .map(use_it)
+    }
+
+    fn deletes(&self) -> std::sync::MutexGuard<'_, Vec<Held>> {
+        self.deletes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queues the held deletes and then `Quitting` on the current connection, so a delete the
+    /// user confirmed reaches the brain before Quit. False when there's no connection or its
+    /// control queue is full.
+    fn tell_quit(&self) -> bool {
+        let outbox = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(outbox) = outbox.as_ref() else {
+            return false;
+        };
+        queue_deletes(outbox, &mut self.deletes())
+            && outbox.control.try_send(ControlToBrain::Quitting).is_ok()
     }
 }
 
@@ -218,41 +290,64 @@ impl LinkHandle {
         first
     }
 
-    /// Tells a connected brain the user quit, so it ends its helpers and exits instead of
-    /// relaunching the shell, then waits for the link to end. A link that's still connecting
-    /// sends `Quitting` itself once connected. Blocks for up to [`CONNECT_TIMEOUT`] plus
-    /// [`QUIT_TIMEOUT`], so call it off the UI thread.
+    /// Tells a connected brain the user quit, after every delete the user confirmed that it
+    /// hasn't been sent, so it ends its helpers and exits instead of relaunching the shell; then
+    /// waits for the link to end. A link that's still connecting tells it once connected, and
+    /// a full control queue is tried again. Blocks for up to [`CONNECT_TIMEOUT`] plus
+    /// [`QUIT_TIMEOUT`], so call it off the UI thread; if the brain never takes them, the
+    /// deletes and Quit aren't sent.
     pub(crate) fn finish_quit(&self) {
-        let control = self
-            .shared
-            .control
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(control) = control {
-            // A stalled brain can't hold the shell open.
-            control.set_timeout(Some(QUIT_TIMEOUT));
-            let queued = self
-                .shared
-                .outbox
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .is_some_and(|outbox| outbox.control.try_send(ControlToBrain::Quitting).is_ok());
-            if !queued {
-                tracing::warn!("couldn't tell the brain about Quit");
-            }
-        }
-        // A brain this link already started must connect before it can be told.
         let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
+        let mut told = false;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
         // needs more than this one wait.
         while !self.done.is_closed() && Instant::now() < deadline {
+            if !told {
+                let control = self
+                    .shared
+                    .control
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                // A stalled brain can't hold the shell open.
+                if let Some(control) = control {
+                    control.set_timeout(Some(QUIT_TIMEOUT));
+                }
+                told = self.shared.tell_quit();
+            }
             thread::sleep(Duration::from_millis(10));
+        }
+        if !told {
+            tracing::warn!("couldn't tell the brain about Quit");
         }
         if !self.done.is_closed() {
             tracing::warn!("the brain didn't close the pipe after Quit");
         }
+    }
+
+    /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
+    /// [`LinkHandle::send_deletes`], and by Quit.
+    pub(crate) fn delete(&self, thread: ThreadId) {
+        self.shared.deletes().push(Held {
+            thread,
+            sent_on: None,
+            resend: false,
+        });
+    }
+
+    /// Queues the held deletes `session`'s connection hasn't been sent. False when some
+    /// couldn't be: that connection has ended or its control queue is full. Never blocks.
+    pub(crate) fn send_deletes(&self, session: &Session) -> bool {
+        self.shared
+            .outbox(session, |outbox| {
+                queue_deletes(outbox, &mut self.shared.deletes())
+            })
+            .unwrap_or(false)
+    }
+
+    /// The brain answered `thread`'s delete, so it's no longer sent.
+    pub(crate) fn settle_delete(&self, thread: ThreadId) {
+        self.shared.deletes().retain(|held| held.thread != thread);
     }
 
     /// Tries to reach the brain again after `Failed`.
@@ -276,11 +371,22 @@ impl LinkHandle {
         self.shared.outbox(session, |outbox| outbox.pipe.abort());
     }
 
-    /// Queues a typed turn for `session`'s brain, like [`LinkHandle::send_control`].
+    /// Queues a typed turn or a page request for `session`'s brain, like
+    /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
+    /// connection instead.
     pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         self.shared
             .outbox(session, |outbox| {
-                outbox.data.try_send(DataOut::Submit(message)).is_ok()
+                let turn = matches!(message, DataToBrain::TextSubmit { .. });
+                if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
+                    outbox.pipe.abort();
+                    return false;
+                }
+                let queued = outbox.data.try_send(DataOut::Submit(message)).is_ok();
+                if queued && turn {
+                    outbox.submits.fetch_add(1, Ordering::SeqCst);
+                }
+                queued
             })
             .unwrap_or(false)
     }
@@ -440,11 +546,13 @@ impl Link {
             control: control_out.clone(),
             data: data_out,
             pipe: Arc::clone(&control),
+            submits: AtomicU32::new(0),
         });
-        // Quit may have come while connecting, when there was no pipe to send it on.
+        // Quit may have come while connecting, when there was no pipe to send it on; held
+        // deletes go first. A full queue is retried by Quit's wait.
         if self.quitting() {
             control.set_timeout(Some(QUIT_TIMEOUT));
-            let _queued = control_out.try_send(ControlToBrain::Quitting);
+            let _told = self.shared.tell_quit();
         }
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
@@ -541,7 +649,9 @@ impl Link {
             | Some(
                 ControlToShell::RunState { .. }
                 | ControlToShell::Ping
-                | ControlToShell::Scenes { .. },
+                | ControlToShell::Scenes { .. }
+                | ControlToShell::ThreadDeleted { .. }
+                | ControlToShell::TurnRefused { .. },
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -618,6 +728,25 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
             }
             Ok(Some(ControlToShell::Scenes { scenes })) => {
                 if events.send_blocking(LinkEvent::Scenes(scenes)).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::ThreadDeleted {
+                thread,
+                outcome,
+                last_run,
+            })) => {
+                let deleted = LinkEvent::ThreadDeleted {
+                    thread,
+                    outcome,
+                    last_run,
+                };
+                if events.send_blocking(deleted).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TurnRefused { .. })) => {
+                if events.send_blocking(LinkEvent::TurnRefused).is_err() {
                     return;
                 }
             }
@@ -725,3 +854,7 @@ fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
 #[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "link_delete_tests.rs"]
+mod delete_tests;

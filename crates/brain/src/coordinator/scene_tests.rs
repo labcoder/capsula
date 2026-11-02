@@ -471,32 +471,33 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
 #[test]
 fn a_partial_commit_resets_the_wait_and_replaces_a_longer_deadline() {
     let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
-    let failed = |ids: &[u64]| Input::ScenesCleared {
-        scenes: ids.iter().copied().map(SceneId).collect(),
-        ok: false,
+    let cleared = |id: u64, ok: bool| Input::ScenesCleared {
+        scenes: vec![SceneId(id)],
+        ok,
     };
     core.handle(Input::Clear {
         scenes: vec![SceneId(1)],
     })
     .expect("a clear is never stale");
-    core.handle(Input::Clear {
-        scenes: vec![SceneId(2)],
-    })
-    .expect("a clear is never stale");
-    assert_eq!(core.handle(failed(&[1])), Ok(vec![arm(500)]));
-    assert_eq!(core.handle(failed(&[2])), Ok(Vec::new()));
-    assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1, 2])]));
-    assert_eq!(core.handle(failed(&[1, 2])), Ok(vec![arm(1000)]));
-    assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1, 2])]));
-    assert_eq!(core.handle(failed(&[1, 2])), Ok(vec![arm(2000)]));
-    let partly = Input::ScenesCleared {
-        scenes: vec![SceneId(1)],
-        ok: true,
-    };
+    assert_eq!(core.handle(cleared(1, false)), Ok(vec![arm(500)]));
+    assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1])]));
+    // A separate clear while A's retry is in flight goes on its own.
     assert_eq!(
-        core.handle(partly),
+        core.handle(Input::Clear {
+            scenes: vec![SceneId(2)],
+        }),
+        Ok(vec![
+            Effect::RevokeScenes {
+                scenes: vec![SceneId(2)],
+            },
+            clear_scenes(&[2]),
+        ])
+    );
+    assert_eq!(core.handle(cleared(1, false)), Ok(vec![arm(1000)]));
+    assert_eq!(
+        core.handle(cleared(2, true)),
         Ok(vec![arm(500)]),
-        "a commit resets the wait, and the 2 s deadline is replaced"
+        "a commit resets the wait, and the 1 s deadline is replaced"
     );
     assert_eq!(core.debt(), 1);
 }

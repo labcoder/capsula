@@ -93,6 +93,11 @@ pub struct SceneDescriptor {
 /// rarely waits on a grant.
 pub const DATA_WINDOW: u32 = 512 * 1024;
 
+/// Deletes the shell holds unanswered, or answered while a turn sent before them still is
+/// [guess]. The brain keeps twice as many in flight: those that outlived an earlier connection,
+/// whose shell may have restarted and forgotten them, and the current shell's.
+pub const MAX_PENDING_DELETES: usize = 4;
+
 /// The most typed turns the brain holds before it has taken them. One more ends the connection
 /// as broken, so the shell keeps fewer than this many `TextSubmit`s unanswered [guess].
 pub const MAX_PENDING_TURNS: usize = 64;
@@ -145,6 +150,29 @@ pub enum ControlToBrain {
         /// The scenes cleared, at most [`MAX_VISIBLE_SCENES`]; more ends the connection.
         scene_ids: Vec<SceneId>,
     },
+    /// The user confirmed deleting a thread. The shell never targets it again while the delete
+    /// is unanswered.
+    DeleteThread {
+        /// The thread.
+        thread: ThreadId,
+        /// How many `TextSubmit`s the shell sent on this connection before this delete, so the
+        /// brain refuses any of them that names the thread.
+        after_turns: u32,
+        /// A resend, at a connection's start, of a delete the shell sent on an earlier one.
+        resend: bool,
+    },
+}
+
+/// What a thread's delete came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Deleted {
+    /// Nothing changed: the thread is live and whole.
+    NotHidden,
+    /// The thread is hidden and takes no new work, but its rows remain until the next start
+    /// removes them.
+    Hidden,
+    /// The thread's rows are gone, or it was already absent.
+    Removed,
 }
 
 /// Brain to shell, on the control pipe.
@@ -177,6 +205,24 @@ pub enum ControlToShell {
     Scenes {
         /// At most [`MAX_VISIBLE_SCENES`], each named once.
         scenes: Vec<SceneDescriptor>,
+    },
+    /// The answer to [`ControlToBrain::DeleteThread`]. A thread's drawing leaves on the data
+    /// pipe's [`DataToShell::ScenesRemoved`], not with this.
+    ThreadDeleted {
+        /// The thread.
+        thread: ThreadId,
+        /// What the delete came to.
+        outcome: Deleted,
+        /// On `Hidden` and `Removed`, at least the newest run of the thread the brain named; the
+        /// shell fences every run up to it.
+        last_run: Option<RunId>,
+    },
+    /// A `TextSubmit` the brain refused before giving it a run: its thread is being or was
+    /// deleted, or it was blank. It answers one submit, in order with the `Thinking` of
+    /// admitted ones.
+    TurnRefused {
+        /// The thread the submit named.
+        thread: Option<ThreadId>,
     },
 }
 
@@ -270,14 +316,19 @@ pub enum DataToShell {
         /// The scene's last chunk; the shell installs the snapshot only then.
         last: bool,
     },
+    /// A deleted thread's scenes left the visible set; nothing of them installs after this.
+    ScenesRemoved {
+        /// At most [`MAX_VISIBLE_SCENES`].
+        scenes: Vec<SceneId>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Hello, Incarnation, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, SceneDescriptor,
-        SceneId, Secret, Step,
+        Deleted, Hello, Incarnation, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, RunId,
+        SceneDescriptor, SceneId, Secret, Step, ThreadId,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -341,6 +392,31 @@ mod tests {
         };
         // Tag and length, then 10 + 5 + 5 bytes per descriptor.
         assert_eq!(payload(&scenes, Pipe::Control), 2 + 4 * 20);
+    }
+
+    #[test]
+    fn worst_case_delete_frames_fit_their_pipes() {
+        let thread = ThreadId(u64::MAX);
+        let delete = ControlToBrain::DeleteThread {
+            thread,
+            after_turns: u32::MAX,
+            resend: true,
+        };
+        assert_eq!(payload(&delete, Pipe::Control), 1 + 10 + 5 + 1);
+        let deleted = ControlToShell::ThreadDeleted {
+            thread,
+            outcome: Deleted::Removed,
+            last_run: Some(RunId(u64::MAX)),
+        };
+        assert_eq!(payload(&deleted, Pipe::Control), 1 + 10 + 1 + 1 + 10);
+        let refused = ControlToShell::TurnRefused {
+            thread: Some(thread),
+        };
+        assert_eq!(payload(&refused, Pipe::Control), 1 + 1 + 10);
+        let removed = DataToShell::ScenesRemoved {
+            scenes: vec![SCENE; MAX_VISIBLE_SCENES],
+        };
+        assert_eq!(payload(&removed, Pipe::Data), 2 + 4 * 10);
     }
 
     #[test]
