@@ -494,6 +494,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
 async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     let scratch = Scratch::new("page-held");
     let mut brain = test_support::brain(&scratch, "");
+    let mut observed = brain.observe();
     let queue = RefCell::new(DataQueue::new(window()));
     queue
         .borrow_mut()
@@ -516,9 +517,16 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
             })
             .await
             .expect("request");
-        // shortcut: nothing signals the held reply, so this gives an empty store's read time to land.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(queue.borrow().frames_for_tests(), 1, "the reply is held");
+        timeout(PATIENCE, async {
+            while observed.recv().await != Some(crate::runtime::Seen::PageHeld) {}
+        })
+        .await
+        .expect("the reply is held");
+        assert_eq!(
+            queue.borrow().frames_for_tests(),
+            1,
+            "nothing else is queued"
+        );
         queue.borrow_mut().revoke(RunId(99));
         room.notify_one();
         timeout(PATIENCE, async {
