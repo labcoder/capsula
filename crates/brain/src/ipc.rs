@@ -7,12 +7,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use capsula_protocol::BUILD_ID;
-use capsula_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::BUILD_ID;
+use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
+use kumochi_protocol::message::{
     Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
 };
-use capsula_protocol::tap::Direction;
+use kumochi_protocol::tap::Direction;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
@@ -333,8 +333,8 @@ pub(crate) async fn read<T: DeserializeOwned>(
 mod tests {
     use std::path::PathBuf;
 
-    use capsula_protocol::message::{CAPABILITY_LEN, Hello, Incarnation};
-    use capsula_protocol::{BUILD_ID, Secret};
+    use kumochi_protocol::message::{CAPABILITY_LEN, Hello, Incarnation};
+    use kumochi_protocol::{BUILD_ID, Secret};
 
     use tokio::sync::oneshot;
 
@@ -346,7 +346,7 @@ mod tests {
         Identity {
             capability: Secret::new([1; CAPABILITY_LEN]),
             incarnation: Incarnation(1),
-            shell_image: PathBuf::from(r"C:\capsula.exe"),
+            shell_image: PathBuf::from(r"C:\app.exe"),
         }
     }
 

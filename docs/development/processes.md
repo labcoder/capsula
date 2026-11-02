@@ -1,18 +1,18 @@
 # Processes, jobs and recovery
 
-Capsula runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
+Kumochi runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
 nothing it started can outlive it.
 
 ```mermaid
 flowchart LR
-  Shell["capsula.exe (no job)"]
+  Shell["kumochi.exe (no job)"]
   subgraph BrainJob["brain job (kill on close)"]
-    Screen["capsulad --screen"]
+    Screen["kumochid --screen"]
     subgraph RunJob["run job, one per run"]
       Child["a run's helper"]
     end
   end
-  Brain["capsulad.exe (holds the job handles)"]
+  Brain["kumochid.exe (holds the job handles)"]
   Shell <-->|pipes| Brain
   Brain -.->|owns| BrainJob
 ```

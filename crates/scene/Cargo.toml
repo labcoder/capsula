@@ -1,5 +1,5 @@
 [package]
-name = "capsula-scene"
+name = "kumochi-scene"
 description = "The drawing format, its validator and its layout, shared by the brain and the shell."
 version.workspace = true
 edition.workspace = true

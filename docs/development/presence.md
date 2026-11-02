@@ -51,7 +51,7 @@ until the brain's settings flow and Settings → General arrive. No settings fil
 the shell. Closing a transient panel is not Quit. Quit uses the existing idempotent link
 shutdown and waits off the UI thread before exiting.
 
-`capsula --smoke` shows the panel programmatically after one second and requests the same
+`kumochi --smoke` shows the panel programmatically after one second and requests the same
 graceful Quit after ten seconds, without moving the pointer or sending input. Initial surfaces are
 small even before placement, so a transparency failure cannot cover the desktop. This is a
 bounded launch check, not a performance benchmark or permission to inject input.
@@ -135,7 +135,7 @@ flowchart LR
   the 80 ms grace timer covers the 4 px gap between the pill and the panel. Windows may not
   report the outline moving under a still pointer, so after each accepted mask update the owner
   checks whether the pointer's side of the outline changed, and rechecks hover only then.
-- **Per frame**, Capsula's code allocates nothing and takes no lock. GPUI itself still boxes
+- **Per frame**, Kumochi's code allocates nothing and takes no lock. GPUI itself still boxes
   each `on_next_frame` callback and rebuilds the dock's small element tree when it repaints.
 
 Unit tests cover the outline's edge, interior and exterior pixels, a stretched body beyond the
@@ -145,7 +145,7 @@ margin rule for proxy moves, the spring settling without overshoot, the bulb's r
 release, and the fixture's path. Real click receipt over the body and through
 to another process is checked only in an approved input session.
 
-`capsula --stretch-fixture` (with `--quit-after-ms` or `--smoke`, or it refuses to start)
+`kumochi --stretch-fixture` (with `--quit-after-ms` or `--smoke`, or it refuses to start)
 drives the same frame path from a clock instead of the pointer: out to full reach and back every
 two seconds, toward the middle of the overlay, until Quit. It sends no input. With
 `--input-diagnostics=<file>` the shell writes `stretch active` and `stretch settled` lines, and
@@ -161,13 +161,13 @@ pre-launch cycle-rate calibration as idle and GetProcessTimes beside it. After Q
 `failed=0`. Lifetime counters are printed separately and are never divided into the sample's
 cycles. A bounded 1 Hz `typeperf` samples DWM's CPU and PID alongside. Its first row is blank,
 so it's kept as an invalid warm-up and never read as zero. DWM's bounded window extends past
-the CPU sample; use its CSV timestamps. It's whole-desktop context, not Capsula's CPU. A baseline (older main)
+the CPU sample; use its CSV timestamps. It's whole-desktop context, not Kumochi's CPU. A baseline (older main)
 gets neither fixture nor diagnostics: it has no stretch, so the pair compares a stretching
 presence with a still one, not like for like. Run only in an agreed quiet window.
 
 ## Gate observer
 
-`capsula --gate-observer=<file>` records what the dock really did, for the gate harness. Like
+`kumochi --gate-observer=<file>` records what the dock really did, for the gate harness. Like
 the fixtures it needs `--quit-after-ms` or `--smoke`, or the shell refuses to start, and so
 does `--receipt-fixture`, which also needs the observer and only starts the dock middle-left
 for the gate's click-receipt phases. The tray's nine positions are unchanged. A normal run has no observer, no file and no writer thread;

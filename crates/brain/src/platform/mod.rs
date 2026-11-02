@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use capsula_protocol::constants;
+use kumochi_protocol::constants;
 
 #[cfg(windows)]
 #[expect(
@@ -38,7 +38,7 @@ fn data_dir_under(base: Option<OsString>) -> Option<PathBuf> {
 mod tests {
     use std::path::PathBuf;
 
-    use capsula_protocol::constants::DATA_DIR;
+    use kumochi_protocol::constants::DATA_DIR;
 
     use super::data_dir_under;
 

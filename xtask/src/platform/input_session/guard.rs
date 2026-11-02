@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
-use capsula_protocol::constants::FOCUS_INPUT_MARKER;
+use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTHEADER, RID_INPUT,

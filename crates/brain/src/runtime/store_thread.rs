@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 

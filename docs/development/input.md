@@ -45,7 +45,7 @@ sequenceDiagram
   16 ms [guess, unmeasured on Rez].
 - **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
   Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys
-  released while Capsula couldn't see them would otherwise stay held. A desktop switch arrives
+  released while Kumochi couldn't see them would otherwise stay held. A desktop switch arrives
   through an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher
   can't be registered, arming fails and undoes what it registered, rather than running without
   a reset source. Delivery isn't guaranteed in every
@@ -57,7 +57,7 @@ sequenceDiagram
 |---|---|
 | Listening | The dock shows Listening, overriding the link status until the gesture ends |
 | Resting | The dock shows the link status again |
-| HoldStarted | Every Capsula window gets `WDA_EXCLUDEFROMCAPTURE`, then the hold is logged. Slice 7 sends `HoldRecognized` only after this call returns |
+| HoldStarted | Every Kumochi window gets `WDA_EXCLUDEFROMCAPTURE`, then the hold is logged. Slice 7 sends `HoldRecognized` only after this call returns |
 | HoldEnded | Capture exclusion is removed |
 | OpenInput | The typing panel opens and takes focus (see [Taking the front](#taking-the-front)) |
 
@@ -67,7 +67,7 @@ A double tap opens a small panel where the status panel would be, with one gpui-
 Like the [threads panel](panels.md), it activates only on a user command, as described in
 [Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
-front back to that window, but only if Capsula still has the front and that window still exists.
+front back to that window, but only if Kumochi still has the front and that window still exists.
 Switching to another window also hides it and keeps the draft, without restoring the old
 foreground: the user has already chosen the new window. Hidden and stale deactivation events
 do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
@@ -79,15 +79,15 @@ It has no Send, history or other controls yet.
 
 Windows lets a process call `SetForegroundWindow` only if one of a few conditions holds, among
 them that it "received the last input event" ([SetForegroundWindow, Remarks][sfw]). Raw Input
-with `RIDEV_INPUTSINK` gives Capsula a copy of the shortcut's keys, but the keys themselves still
+with `RIDEV_INPUTSINK` gives Kumochi a copy of the shortcut's keys, but the keys themselves still
 go to the app in front, so a plain activation fails (`focused=false` on c39d553). Pressing Alt
 doesn't help: "the system automatically enables calls to SetForegroundWindow if the user presses
 the ALT key" ([LockSetForegroundWindow, Remarks][lsfw]) only lifts a `LockSetForegroundWindow` lock.
 It doesn't meet any of the conditions above.
 
-So on each `OpenInput`, immediately before `SetForegroundWindow`, Capsula sends exactly one
+So on each `OpenInput`, immediately before `SetForegroundWindow`, Kumochi sends exactly one
 input: `INPUT_MOUSE` with no motion, no flags, no wheel or button data, and `dwExtraInfo` set to
-`FOCUS_INPUT_MARKER`. That makes Capsula the last input's sender. PowerToys Run uses the same
+`FOCUS_INPUT_MARKER`. That makes Kumochi the last input's sender. PowerToys Run uses the same
 method ([microsoft/PowerToys#4362][ptr]). There's no retry and no fallback. If `SendInput` is
 refused or the activation still fails, the panel stays open, unfocused and clickable, and the
 log says `focused=false`.
@@ -141,12 +141,12 @@ local effect always happens first, and nothing waits on the brain:
 - With no brain connected, or a control queue the brain isn't reading, the local effect still
   happens and the unsent message is logged, without content.
 
-Esc is held system-wide with `RegisterHotKey` only while Capsula speaks or shows a drawing.
+Esc is held system-wide with `RegisterHotKey` only while Kumochi speaks or shows a drawing.
 Listening and an open status panel never hold it. Until slice 4 draws on the overlay, the
 placeholder steps count as a drawing only while the typing panel shows them, and there's no
 speech yet, so Esc is held only then. If registration is refused, the status panel shows Stop
 instead, and the refusal is logged without key or text content. An ignored fixture,
-`cargo test -p capsula-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
+`cargo test -p kumochi-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.
 

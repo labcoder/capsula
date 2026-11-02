@@ -1,4 +1,4 @@
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step, ThreadId,
 };
 

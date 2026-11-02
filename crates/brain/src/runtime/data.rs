@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{MAX_PENDING_PAGES, RunId, SceneId};
+use kumochi_protocol::message::{MAX_PENDING_PAGES, RunId, SceneId};
 
 /// How long the shell may leave the queue blocked on credit before the run ends as
 /// `view_stalled` (architecture v1 §3.2) [guess].
@@ -137,7 +137,7 @@ impl DataQueue {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use capsula_protocol::message::{RunId, SceneId};
+    use kumochi_protocol::message::{RunId, SceneId};
 
     use super::{DataQueue, ENTRY, Owner, STALL};
 
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn page_admission_is_released_only_when_its_reply_finishes_writing() {
         let mut queue = DataQueue::new(100);
-        for _ in 0..capsula_protocol::message::MAX_PENDING_PAGES {
+        for _ in 0..kumochi_protocol::message::MAX_PENDING_PAGES {
             assert!(queue.admit_page());
         }
         assert!(!queue.admit_page());
@@ -252,7 +252,7 @@ mod tests {
         queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
         queue.wrote();
-        for _ in 1..capsula_protocol::message::MAX_PENDING_PAGES {
+        for _ in 1..kumochi_protocol::message::MAX_PENDING_PAGES {
             assert!(queue.admit_page());
         }
         assert!(

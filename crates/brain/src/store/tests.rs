@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use capsula_protocol::message::{Deleted, RunId, ThreadId};
+use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::Connection;
 
 use crate::test_support::Scratch;
@@ -1492,7 +1492,7 @@ fn delete_measured(store: &mut Store, thread: usize) {
 /// captures included, are deleted, so no checkpoint can copy the deletion into the file; it then
 /// lets go, a copy is made with nothing else running, and the WAL's size, the whole swap and the op
 /// right behind it are logged. Three rounds a store, each deleting the next tenth. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_swap_after`; set
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_swap_after`; set
 /// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
@@ -1607,7 +1607,7 @@ fn measure_swap_after_a_held_reader() {
 /// a reader that held a snapshot while a twentieth of the store's threads were deleted lets go,
 /// so the delete may have to checkpoint that WAL itself. Reports p50, p95 and the worst sample
 /// against the ~100 ms foreground bound. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_big_delete`; set
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_big_delete`; set
 /// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
@@ -1687,7 +1687,7 @@ fn measure_big_delete() {
 /// total about 121 KB), and how long store ops take while each phase runs. Five purges a store;
 /// in each, ops run during a copy that's then thrown away, and a second copy is swapped in
 /// with nothing else running, followed by one op. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_purge`; set
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_purge`; set
 /// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]

@@ -1,7 +1,7 @@
 //! The threads panel's page state, independent of GPUI and the connection transport.
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     DataToBrain, DataToShell, EventId, PageEvent, PageOf, ThreadCursor, ThreadId, ThreadRow,
 };
 

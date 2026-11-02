@@ -3,9 +3,9 @@
 
 use std::fs::File;
 
-use capsula_protocol::constants::PIPE_TAP_ENV;
-use capsula_protocol::frame::{self, HEADER_LEN, Pipe};
-use capsula_protocol::tap::{self as record, Direction, Record};
+use kumochi_protocol::constants::PIPE_TAP_ENV;
+use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
+use kumochi_protocol::tap::{self as record, Direction, Record};
 use serde::Serialize;
 
 /// An open recording, or nothing.

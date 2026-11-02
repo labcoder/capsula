@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_channel::{Receiver, bounded};
-use capsula_protocol::message::{ControlToBrain, ThreadId};
+use kumochi_protocol::message::{ControlToBrain, ThreadId};
 
 use super::{LinkHandle, Shared, queue_on};
 

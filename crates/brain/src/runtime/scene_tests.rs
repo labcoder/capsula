@@ -3,8 +3,8 @@
 use std::fs::File;
 use std::time::Duration;
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToShell, Phase, RunId, SceneDescriptor, SceneId, Step,
     ThreadId,
 };
@@ -756,12 +756,12 @@ async fn a_reconnect_restores_whole_scenes_in_chunks_while_a_stop_and_a_clear_ar
 
 /// Rez measurement for the pull request, not a check: from a connection to four full scenes
 /// installed. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_scene_recovery`.
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_scene_recovery`.
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "a measurement, run by hand on Rez"]
 async fn measure_scene_recovery() {
-    use capsula_protocol::message::{MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES};
+    use kumochi_protocol::message::{MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES};
     let label = "x".repeat(MAX_STEP_LABEL);
     let labels = vec![label.as_str(); MAX_STEPS];
     let mut samples = Vec::new();

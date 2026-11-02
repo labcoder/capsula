@@ -1,5 +1,5 @@
 //! Exact default, unit and architecture-example semantics.
-use capsula_scene::{
+use kumochi_scene::{
     Record, Step, parse_record,
     record::{
         Align, AxisScale, ChartKind, Color, Direction, Ease, HighlightStyle, NodeShape, Op, Start,

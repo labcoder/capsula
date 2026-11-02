@@ -3,7 +3,7 @@
 use std::cell::Cell;
 
 use anyhow::{Context as _, Result, ensure};
-use capsula_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
+use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_WINDOW, GetMonitorInfoW, GetSysColorBrush, MONITOR_DEFAULTTONEAREST, MONITORINFO,

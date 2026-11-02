@@ -1,6 +1,6 @@
 # Scene v1
 
-`capsula-scene` is the shared, synchronous drawing format. It depends on neither
+`kumochi-scene` is the shared, synchronous drawing format. It depends on neither
 GPUI nor tokio. The brain parses model JSON; the shell decodes the same validated
 types from postcard. There is no renderer or scene-state caller yet; preparation is synchronous and host-independent.
 
@@ -369,6 +369,6 @@ measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal
 priority with the lock held:
 
 ```text
-nice -n 10 cargo test -p capsula-scene --release --no-run
-cargo test -p capsula-scene --release -- --ignored --nocapture --test-threads=1
+nice -n 10 cargo test -p kumochi-scene --release --no-run
+cargo test -p kumochi-scene --release -- --ignored --nocapture --test-threads=1
 ```

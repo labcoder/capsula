@@ -1,8 +1,8 @@
 //! The instance capability in Windows Credential Manager, the only place it's stored.
 
-use capsula_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
-use capsula_protocol::message::Capability;
 use keyring::Entry;
+use kumochi_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
+use kumochi_protocol::message::Capability;
 
 /// Credential Manager refused an operation.
 #[derive(Debug, thiserror::Error)]

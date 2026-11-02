@@ -1,5 +1,5 @@
 //! Additional semantic-boundary and Stop/replay conformance cases.
-use capsula_scene::{
+use kumochi_scene::{
     Admission, Begin, CallState, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState,
     Step, StopCut, StopOutcome, WireId, parse_record, text::Bounded,
 };

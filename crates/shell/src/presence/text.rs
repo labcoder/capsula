@@ -51,7 +51,7 @@ impl Typing {
     }
 }
 
-/// The typing surface: the one window Capsula activates, and only on a double tap.
+/// The typing surface: the one window Kumochi activates, and only on a double tap.
 pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,

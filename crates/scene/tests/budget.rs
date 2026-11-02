@@ -1,5 +1,5 @@
 //! Expanded-work admission, retirement and final-result replay budgets.
-use capsula_scene::{
+use kumochi_scene::{
     Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState,
     Step, StepError, StopCut, WireId, parse_record, text::Bounded,
 };
@@ -179,7 +179,7 @@ fn removal_and_replacement_charges_are_asymmetric_and_idempotent() {
     brain.retire(1, &mut a).expect("duplicate StepShown");
     assert_eq!(a.generation(), generation);
     brain.clear(&mut a).expect("clear");
-    assert_eq!(a.usage(), capsula_scene::budget::Usage::default());
+    assert_eq!(a.usage(), kumochi_scene::budget::Usage::default());
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn four_scenes_fit_and_foreign_budget_mutations_are_rejected_without_corruption(
     );
     assert_eq!(
         (budget.usage(), foreign.usage()),
-        (original, capsula_scene::budget::Usage::default())
+        (original, kumochi_scene::budget::Usage::default())
     );
     let Admission::New(pending) = candidate(
         &scenes[0],
@@ -281,7 +281,7 @@ fn four_scenes_fit_and_foreign_budget_mutations_are_rejected_without_corruption(
         .expect("clear before activation");
     assert_eq!(
         scenes[0].commit(pending, &mut budget),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
 }
 
@@ -668,9 +668,9 @@ fn a_detached_replay_has_its_own_mutation_fence_before_budget_installation() {
     assert_eq!(detached.revision(), 1);
     assert_eq!(
         detached.commit(pending, &mut first),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
-    assert_eq!(first.usage(), capsula_scene::budget::Usage::default());
+    assert_eq!(first.usage(), kumochi_scene::budget::Usage::default());
     assert_eq!((second.usage().objects, second.usage().scenes), (0, 1));
 }
 

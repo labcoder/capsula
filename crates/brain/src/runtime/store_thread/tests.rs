@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, Step, ThreadId};
+use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, Step, ThreadId};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
@@ -619,7 +619,7 @@ fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
 /// a page read, and a write queued right behind it, on the large measured stores with a purge
 /// owed. Pages are a thread's 50 newest events at near the frame budget each, and a search for a
 /// phrase every event holds. The write alone, with no read ahead of it, is the before. Run it
-/// with `cargo test --release -p capsula-brain -- --ignored --nocapture measure_page_reads`;
+/// with `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_page_reads`;
 /// set `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
@@ -954,7 +954,7 @@ fn a_write_after_the_copy_let_go_of_the_live_store_never_waits() {
 /// let go included, and the ordinary write right behind it. The delete that armed the purge, with
 /// nothing running, is the baseline. Five samples with the copy in its drain, five in its
 /// snapshot. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_delete_during_a_purge`;
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_delete_during_a_purge`;
 /// `MEASURE_ONLY` names another store than the largest.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]

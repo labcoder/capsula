@@ -17,12 +17,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
 };
-use capsula_protocol::tap::Direction;
+use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -134,6 +134,10 @@ pub(crate) enum Seen {
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
     Grace,
+    /// A control the reader forwarded as its pipe ended is applied after the core has gone.
+    ControlDrained,
+    /// The store answered a delete, and the brain applied the answer.
+    DeleteAnswered,
 }
 
 impl Brain {
@@ -207,7 +211,7 @@ impl Brain {
         self.seen.take().expect("observed once")
     }
 
-    /// Reports a control input as it's taken. Tests run on one thread, so they hear it only
+    /// Reports a control input, or a delete's answer, as it's taken. Tests run on one thread, so they hear it only
     /// once its effects are applied and the brain waits again.
     #[cfg(test)]
     fn control_taken(&self, input: &Input) {
@@ -217,6 +221,9 @@ impl Brain {
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
+        }
+        if matches!(input, Input::Deleted { .. }) {
+            self.observer.send(Seen::DeleteAnswered).ok();
         }
     }
 
@@ -228,7 +235,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
-        let mut undeleted = false;
+        let mut undeleted = self.coordinator.refused_delete();
         let cleared = tokio::time::timeout_at(deadline, async {
             while self.coordinator.ending_runs() > 0
                 || self.coordinator.clears_in_flight()
@@ -350,7 +357,7 @@ impl Brain {
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
         let (turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
-        let (pages_tx, mut pages) = mpsc::channel(capsula_protocol::message::MAX_PENDING_PAGES);
+        let (pages_tx, mut pages) = mpsc::channel(kumochi_protocol::message::MAX_PENDING_PAGES);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
@@ -400,6 +407,8 @@ impl Brain {
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
         while let Ok(message) = controls.try_recv() {
+            #[cfg(test)]
+            self.observer.send(Seen::ControlDrained).ok();
             self.control_offline(message, tap);
         }
         let ended = match quit.get() {

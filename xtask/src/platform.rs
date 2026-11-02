@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use windows::Win32::Foundation::{
     ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 pub(crate) mod gate_capture;
+pub(crate) mod gate_pipe;
 pub(crate) mod input_session;
 
 pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {

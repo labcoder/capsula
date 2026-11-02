@@ -1,4 +1,4 @@
-use capsula_protocol::message::{RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{RunId, SceneId, ThreadId};
 use rusqlite::params;
 
 use super::super::{Recovered, RunEnd, Store, StoreError};

@@ -21,7 +21,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
-use capsula_protocol::constants;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
@@ -30,6 +29,7 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, point, px,
     size,
 };
+use kumochi_protocol::constants;
 
 use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
@@ -266,7 +266,7 @@ impl Presence {
         }
     }
 
-    /// Hides every Capsula surface from capture before the hold is announced, and shows them
+    /// Hides every Kumochi surface from capture before the hold is announced, and shows them
     /// again when it ends. Slice 6 captures and slice 7 sends `HoldRecognized` after this.
     fn set_capture(&self, capture: Capture, dock: &Window, cx: &mut Context<'_, Self>) {
         let mut all = true;

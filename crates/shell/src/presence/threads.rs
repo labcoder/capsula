@@ -1,7 +1,7 @@
 //! Lifetime, focus, and page requests for the anchored threads surface.
 
-use capsula_protocol::message::ThreadId;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription, Window};
+use kumochi_protocol::message::ThreadId;
 
 use super::text::{Hide, Typing};
 use super::thread_view::ThreadsView;

@@ -7,7 +7,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, ensure};
-use capsula_protocol::constants::{OBJECT_PREFIX, SHELL_EXE};
+use kumochi_protocol::constants::{OBJECT_PREFIX, SHELL_EXE};
 
 use crate::platform::{Process, gate_capture};
 

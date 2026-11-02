@@ -280,7 +280,11 @@ mod tests {
 
     #[test]
     fn a_missing_pipe_is_not_found() {
-        let error = PipeClient::open(r"\\.\pipe\capsula-test-no-such-pipe").expect_err("no server");
+        let error = PipeClient::open(&format!(
+            r"\\.\pipe\{}-test-no-such-pipe",
+            kumochi_protocol::constants::OBJECT_PREFIX
+        ))
+        .expect_err("no server");
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error:?}");
     }
 }

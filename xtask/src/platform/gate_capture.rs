@@ -340,7 +340,7 @@ mod tests {
     fn file_handle_resolves_to_the_retained_transcript_path() {
         let path = std::env::temp_dir().join(format!(
             "{}-transcript-test-{}",
-            capsula_protocol::constants::OBJECT_PREFIX,
+            kumochi_protocol::constants::OBJECT_PREFIX,
             std::process::id()
         ));
         let file = std::fs::File::create_new(&path).unwrap();
@@ -355,7 +355,7 @@ mod tests {
     fn sha256_matches_standard_empty_file_vector() {
         let path = std::env::temp_dir().join(format!(
             "{}-hash-test-{}",
-            capsula_protocol::constants::OBJECT_PREFIX,
+            kumochi_protocol::constants::OBJECT_PREFIX,
             std::process::id()
         ));
         drop(std::fs::File::create_new(&path).unwrap());

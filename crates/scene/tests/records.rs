@@ -1,6 +1,6 @@
 //! Scene-format behavior and privacy regressions.
-use capsula_scene::record::{Anchor, Cell, Color, KeyValue, Point, Start};
-use capsula_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_record};
+use kumochi_scene::record::{Anchor, Cell, Color, KeyValue, Point, Start};
+use kumochi_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_record};
 use serde::{Serialize, de::DeserializeOwned};
 
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq>(value: &T) {

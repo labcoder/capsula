@@ -17,8 +17,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use capsula_protocol::constants;
-use capsula_protocol::message::{Deleted, RunId, ThreadId};
+use kumochi_protocol::constants;
+use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
@@ -36,7 +36,7 @@ pub enum StoreError {
     /// The store's folder couldn't be created.
     #[error("can't create the store's folder")]
     Folder(#[source] io::Error),
-    /// The file was written by a newer Capsula; an older brain never opens it.
+    /// The file was written by a newer Kumochi; an older brain never opens it.
     #[error("the store has schema {found}, newer than this build's {known}")]
     NewerSchema {
         /// The file's `user_version`.
@@ -59,7 +59,7 @@ pub enum StoreError {
     /// The store's file is gone but the old store a purge replaced is still beside it, so
     /// something went wrong mid-swap; nothing is opened or removed until a person looks.
     /// shortcut: the brain only logs this and doesn't start; tell the user what to do with
-    /// `capsula.db.purge-old` once the shell can show brain errors.
+    /// `kumochi.db.purge-old` once the shell can show brain errors.
     #[error("the store's file is missing, but a purge's old copy of it remains")]
     Retired,
     /// A page couldn't be read or encoded; SQLite details may contain user content.
@@ -302,7 +302,7 @@ impl Store {
     ///
     /// shortcut: two sessions of the same user run two brains on one store, and the second's
     /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
-    /// so a per-session store or a lock waits until Capsula supports them.
+    /// so a per-session store or a lock waits until Kumochi supports them.
     ///
     /// # Errors
     /// Fails when SQLite fails.

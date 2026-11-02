@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Capsula's dev tasks: cargo xtask <task>."
+description = "Kumochi's dev tasks: cargo xtask <task>."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,15 +9,20 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1"
-capsula-protocol.workspace = true
+kumochi-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+keyring.workspace = true
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+serde.workspace = true
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Registry",
     "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
     "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_Security_Cryptography",
