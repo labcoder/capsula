@@ -932,6 +932,26 @@ fn a_move_that_fails_after_the_link_keeps_the_old_store_under_one_name() {
 }
 
 #[test]
+fn a_reopen_never_creates_a_missing_store_and_its_old_copy_stays() {
+    let scratch = Scratch::new("reopen-missing");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let copied = clean_copy(&store);
+    let old = beside(&scratch.db(), ".purge-old");
+    // The store's name goes missing after the old store's second name is made.
+    let swapped = store.swap_with(&copied, |db, old| {
+        std::fs::hard_link(db, old)?;
+        std::fs::remove_file(db)?;
+        Err(std::io::Error::other("in the way"))
+    });
+    assert!(swapped.is_err());
+    assert!(store.reconnect().is_err());
+    assert!(!scratch.db().exists(), "no empty store was made");
+    assert!(store.leftovers().remove().is_err());
+    assert!(old.exists(), "the only copy stays");
+}
+
+#[test]
 fn a_missing_store_beside_its_old_copy_fails_closed() {
     let scratch = Scratch::new("missing");
     let mut store = Store::open(&scratch.db()).expect("store");

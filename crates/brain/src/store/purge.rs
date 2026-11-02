@@ -140,7 +140,11 @@ impl Store {
         // A WAL left beside the new file would be replayed onto it; one survives the close only
         // while another connection holds the store.
         let moved = no_wal(&self.path).and_then(|()| self.replace(link));
-        self.reconnect()?;
+        let reopened = self.reconnect();
+        if let (Err(error), Err(_)) = (&moved, &reopened) {
+            tracing::warn!(%error, "the move failed before the reopen did");
+        }
+        reopened?;
         moved.map_err(StoreError::Purge)?;
         Ok(Swap::Done)
     }
@@ -213,37 +217,50 @@ impl Leftovers {
     /// Whether any is left. One that can't be checked counts as left.
     #[must_use]
     pub fn exist(&self) -> bool {
-        files(&self.db).any(|path| {
-            !fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-        })
+        files(&self.db).any(|path| !missing(&path))
     }
 
-    /// Removes them all. Runs on any thread; removing the old store takes as long as freeing
-    /// its space, about 0.12 ms per MiB on Rez.
+    /// Removes them all, trying each even after one fails. Runs on any thread; removing the old
+    /// store takes as long as freeing its space, about 0.12 ms per MiB on Rez. The old store
+    /// stays while the store's own file is missing: it may then be the only copy.
     ///
     /// # Errors
-    /// Fails on the first file that can't be removed; the rest may stay.
+    /// Fails with the first file that couldn't be removed.
     pub fn remove(&self) -> io::Result<()> {
+        let mut first = None;
         for path in files(&self.db) {
-            match fs::remove_file(path) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            let removed = if path == old(&self.db) && missing(&self.db) {
+                Err(io::Error::other(
+                    "the store is missing, so its old copy stays",
+                ))
+            } else {
+                fs::remove_file(&path)
+            };
+            match removed {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    first.get_or_insert(error);
+                }
                 _ => {}
             }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 }
 
-/// Every file a purge may leave beside `db`.
+/// Every file a purge may leave beside `db`, the old store first.
 fn files(db: &Path) -> impl Iterator<Item = PathBuf> + '_ {
-    [SNAPSHOT, CLEAN]
+    [sidecar(db, OLD)]
         .into_iter()
-        .flat_map(move |copy| {
+        .chain([SNAPSHOT, CLEAN].into_iter().flat_map(move |copy| {
             ["", "-journal", "-wal", "-shm"]
                 .into_iter()
                 .map(move |suffix| sidecar(&sidecar(db, copy), suffix))
-        })
-        .chain([sidecar(db, OLD)])
+        }))
+}
+
+/// Whether `path` is known not to exist; one that can't be checked may exist.
+pub(super) fn missing(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
 /// The old store a swap left beside `db`.

@@ -19,7 +19,9 @@ use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap};
 
 /// How often the thread looks at a running helper.
 const POLL: Duration = Duration::from_millis(50);
-/// Free space a copy leaves for foreground writes [guess].
+/// Free space a copy leaves for foreground writes [guess]. shortcut: the snapshot's FTS rebuild
+/// may grow it by about the index's size before old segments are freed, which this doesn't
+/// count; add `events_fts_idx`'s size once indexes near 256 MiB.
 const RESERVE: u64 = 256 * 1024 * 1024;
 
 /// When an owed purge is tried.
@@ -201,6 +203,8 @@ impl Purger {
         }
         let owed = match store.owed() {
             Ok(Some(owed)) => owed,
+            // The swap went through but a failed reopen kept it from settling.
+            Ok(None) if !store.purge_pending() => return self.settle(Attempt::Done, store),
             Ok(None) => return self.settle(Attempt::Busy, store),
             Err(error) => return self.settle(failed(&error), store),
         };
@@ -683,7 +687,16 @@ mod tests {
     fn a_copy_waits_until_the_volume_has_room_for_it_and_the_foreground() {
         let scratch = Scratch::new("no-room");
         let store = owing(&scratch);
-        ROOM.store(0, Ordering::SeqCst);
+        let bytes: i64 = store
+            .conn_for_tests()
+            .query_row(
+                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+                [],
+                |row| row.get(0),
+            )
+            .expect("size");
+        let needs = 2 * u64::try_from(bytes).expect("a size") + super::RESERVE;
+        ROOM.store(needs - 1, Ordering::SeqCst);
         let (thread, attempts) = spawn_with_room(store, |_| Ok(ROOM.load(Ordering::SeqCst)));
         assert_eq!(next(&attempts), Attempt::NoRoom);
         assert_eq!(
@@ -692,10 +705,26 @@ mod tests {
             "nothing was written"
         );
         assert_eq!(owed(&scratch), 1);
-        ROOM.store(u64::MAX, Ordering::SeqCst);
+        ROOM.store(needs, Ordering::SeqCst);
         done_after(&attempts, &[Attempt::NoRoom]);
         thread.close().blocking_recv().expect("closed");
         assert_eq!(owed(&scratch), 0);
+    }
+
+    #[test]
+    fn a_purge_found_finished_resets_the_backoff() {
+        let scratch = Scratch::new("found-done");
+        let mut store = Store::open(&scratch.db()).expect("store");
+        let schedule = Schedule {
+            first_retry: Duration::from_secs(60),
+            last_retry: Duration::from_secs(240),
+            ..Schedule::default()
+        };
+        let mut purger = Purger::new(schedule, &store);
+        purger.retry = Duration::from_secs(240);
+        purger.start(&mut store);
+        assert_eq!(purger.retry, Duration::from_secs(60));
+        assert!(purger.next.is_none());
     }
 
     #[test]

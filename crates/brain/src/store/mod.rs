@@ -52,6 +52,8 @@ pub enum StoreError {
     StaleId,
     /// The store's file is gone but the old store a purge replaced is still beside it, so
     /// something went wrong mid-swap; nothing is opened or removed until a person looks.
+    /// shortcut: the brain only logs this and doesn't start; tell the user what to do with
+    /// `capsula.db.purge-old` once the shell can show brain errors.
     #[error("the store's file is missing, but a purge's old copy of it remains")]
     Retired,
     /// A purge's copy of the store couldn't be written, moved or removed.
@@ -237,11 +239,7 @@ impl Store {
         // Files a purge left are removed by the store's thread, not here on the way to the first
         // turn. Only a store missing beside its old copy stops the start: creating an empty
         // store there would hide the old one.
-        let missing = |path: &Path| {
-            std::fs::symlink_metadata(path)
-                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-        };
-        if missing(path) && !missing(&purge::old(path)) {
+        if purge::missing(path) && !purge::missing(&purge::old(path)) {
             return Err(StoreError::Retired);
         }
         let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;

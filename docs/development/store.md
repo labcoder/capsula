@@ -94,7 +94,8 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
 5. **Remove**, on a helper. `purge-old` still holds the deleted rows' bytes, so the purge isn't
    done until it's deleted, along with any copy an attempt didn't use. Deleting the old store
    takes as long as freeing its space (about 60 ms at 515 MiB, 110 ms at 984 MiB on Rez), and
-   ops keep running meanwhile. `purge-old` is never opened through SQLite.
+   ops keep running meanwhile. `purge-old` is never opened through SQLite, and it's kept while
+   `capsula.db` is missing, since it may then be the only copy.
 
 **What store work waits for.** Only the swap stops the store thread: 7–11 ms from 46 MiB to
 984 MiB on Rez, flat with size (`measure_purge`, logged with the pull request). During a copy or
