@@ -512,6 +512,9 @@ fn keep_end(text: &mut String, max: usize) {
 }
 
 #[cfg(test)]
+mod delete_tests;
+
+#[cfg(test)]
 mod tests {
     use capsula_protocol::frame::Pipe;
     use capsula_protocol::message::{
