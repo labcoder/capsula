@@ -9,7 +9,7 @@ use crate::{
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Motion {
+pub(crate) struct Motion {
     pub keys: usize,
     pub min: [f32; 2],
     pub max: [f32; 2],
@@ -20,7 +20,7 @@ impl Motion {
         min: [0.0; 2],
         max: [1.0; 2],
     };
-    pub(super) fn peak(self, other: Self) -> Self {
+    pub(crate) fn peak(self, other: Self) -> Self {
         Self {
             keys: self.keys.max(other.keys),
             min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1])],
@@ -30,7 +30,7 @@ impl Motion {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Domain {
+pub(crate) struct Domain {
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub log: bool,
@@ -45,7 +45,7 @@ impl From<&Axis> for Domain {
     }
 }
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Chart {
+pub(crate) struct Chart {
     pub kind: ChartKind,
     pub x: Domain,
     pub y: Domain,
@@ -53,7 +53,7 @@ pub(super) struct Chart {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct Work {
+pub(crate) struct Work {
     pub usage: Usage,
     pub columns: usize,
     pub cells: usize,
@@ -72,7 +72,7 @@ pub(super) struct Work {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Data {
+pub(crate) enum Data {
     Stored(Arc<[Point]>),
     Put(usize),
     Set(usize),
@@ -216,6 +216,7 @@ fn fixed_segments(op: &Op) -> usize {
         Op::Node(r) => match r.shape {
             crate::record::NodeShape::Diamond => 4,
             crate::record::NodeShape::Cylinder => path::CYLINDER_CAP_SEGMENTS,
+            crate::record::NodeShape::Note => 7,
             _ => 0,
         },
         Op::Edge(_) => path::PROCEDURAL_CURVE_PIECES + 3,
@@ -312,7 +313,7 @@ fn entrance(op: &Op) -> Option<Enter> {
     }
 }
 
-pub(super) fn property(track: Track) -> &'static str {
+pub(crate) fn property(track: Track) -> &'static str {
     match track {
         Track::X => "x",
         Track::Y => "y",
@@ -325,7 +326,7 @@ pub(super) fn property(track: Track) -> &'static str {
     }
 }
 
-pub(super) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, StepError> {
+pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, StepError> {
     let fail =
         |field, code| StepError::in_step(&step.id, op_path(index, "anim").field(field), code);
     let period = anim
@@ -446,16 +447,6 @@ pub(super) fn changes(
         if let Some(data) = &change.data {
             object.work.data = Some(Data::Set(index));
             object.work.usage.marks = data.len();
-        }
-        if step.remove.contains(&change.target) {
-            return Err(StepError::in_step(
-                &step.id,
-                FieldPath::default()
-                    .field("set")
-                    .index(index)
-                    .field("target"),
-                ErrorCode::UnknownRef,
-            ));
         }
     }
     Ok(original)

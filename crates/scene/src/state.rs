@@ -1,7 +1,7 @@
 //! Canonical semantic state, atomic admission and replayable Stop cuts.
-mod metrics;
-mod object;
-mod work;
+pub(crate) mod metrics;
+pub(crate) mod object;
+pub(crate) mod work;
 
 use crate::{
     Begin, Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Record, Step, StepError, WireId,
@@ -13,7 +13,7 @@ use crate::{
 use object::Object;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     sync::Arc,
 };
@@ -85,7 +85,7 @@ impl fmt::Debug for Admitted {
 }
 
 /// The installed lifetime index and deterministic identities of a committed step.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Committed {
     /// Zero-based lifetime commit index, not a dense index into the kept steps.
     pub index: u32,
@@ -93,6 +93,27 @@ pub struct Committed {
     pub revision: u32,
     /// Handles in expanded put order.
     pub handles: Vec<(WireId, Handle)>,
+    /// Immutable preparation facts captured by this commit, not a later scene tip.
+    pub preparation: Preparation,
+}
+
+/// Opaque preparation ticket, independent of pending charges and retirement timing.
+#[derive(PartialEq)]
+pub struct Preparation {
+    pub(crate) owner: Arc<()>,
+    pub(crate) cut_revision: u32,
+    pub(crate) revision: u32,
+    pub(crate) step: Arc<Step>,
+    pub(crate) path_scales: BTreeMap<Handle, f32>,
+    pub(crate) canvas_size: Option<[f32; 2]>,
+}
+impl fmt::Debug for Preparation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Preparation")
+            .field("revision", &self.revision)
+            .field("paths", &self.path_scales.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The owner, scene revision or global generation changed after admission.
@@ -136,6 +157,36 @@ impl fmt::Debug for SceneState {
     }
 }
 impl SceneState {
+    pub(crate) fn preparation_owner(&self) -> Arc<()> {
+        Arc::clone(&self.identity)
+    }
+    pub(crate) fn preparation_cut(&self) -> u32 {
+        self.last_cut_revision
+    }
+    pub(crate) fn preparation_is_current(&self, ticket: &Preparation) -> bool {
+        !self.cleared
+            && Arc::ptr_eq(&self.identity, &ticket.owner)
+            && self.last_cut_revision == ticket.cut_revision
+            && self
+                .steps
+                .get(&ticket.revision)
+                .is_some_and(|step| step.kept)
+    }
+    pub(crate) fn preparation_objects(
+        &self,
+    ) -> impl Iterator<Item = (&WireId, Handle, Option<Handle>, &[WireId])> {
+        self.objects.iter().map(|(id, object)| {
+            (
+                id,
+                object.handle,
+                object
+                    .parent
+                    .as_ref()
+                    .map(|parent| self.objects[parent].handle),
+                object.references.as_slice(),
+            )
+        })
+    }
     /// Creates an empty scene from a typed header with positive canvas dimensions.
     /// # Errors
     /// Returns `OutOfRange` for a non-positive canvas dimension.
@@ -214,7 +265,7 @@ impl SceneState {
     }
 
     fn current_usage(&self) -> Usage {
-        if self.cleared {
+        if self.cleared || self.revision == 0 {
             return Usage::default();
         }
         metrics::charge(
@@ -321,6 +372,15 @@ impl SceneState {
         global
             .check(self.bound_usage(), minimum)
             .map_err(|code| fail(FieldPath::default(), code))?;
+        let mut removal_ids = HashSet::with_capacity(step.remove.len());
+        for (index, id) in step.remove.iter().enumerate() {
+            if !removal_ids.insert(id) {
+                return Err(fail(
+                    FieldPath::default().field("remove").index(index),
+                    ErrorCode::DuplicateKey,
+                ));
+            }
+        }
         let mut after = self.objects.clone();
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
@@ -339,10 +399,10 @@ impl SceneState {
             }
         }
         for (index, op) in step.put.iter().enumerate() {
-            object::validate_op(op, index, step, &after)?;
+            object::validate_op(op, index, step, &after, &removal_ids)?;
         }
         object::acyclic(step, &after)?;
-        object::validate_changes(step, &after)?;
+        object::validate_changes(step, &after, &removal_ids)?;
         let mut changed = work::changes(step, &mut after, revision)?;
         metrics::validate(step, &mut after)?;
         for (id, object) in &after {
@@ -364,7 +424,7 @@ impl SceneState {
         global
             .check(self.bound_usage(), usage)
             .map_err(|code| fail(FieldPath::default(), code))?;
-        let mut removed = object::removals(step, &mut after)?;
+        let mut removed = object::removals(step, &mut after, &removal_ids)?;
         for object in after
             .values_mut()
             .chain(removed.iter_mut().map(|(_, object)| object))
@@ -406,6 +466,34 @@ impl SceneState {
             return Err(StaleAdmission);
         }
         let revision = self.revision + 1;
+        let resized: HashSet<_> = admitted
+            .changed
+            .iter()
+            .filter_map(|(id, old)| {
+                admitted
+                    .after
+                    .get(id)
+                    .filter(|new| new.work.usage.segments != old.work.usage.segments)
+                    .map(|_| id)
+            })
+            .collect();
+        let path_scales = admitted
+            .after
+            .iter()
+            .filter_map(|(id, object)| {
+                let path = object.work.path.as_ref()?;
+                (object.handle.revision() == revision || resized.contains(id))
+                    .then_some((object.handle, path.composed_scale))
+            })
+            .collect();
+        let preparation = Preparation {
+            owner: Arc::clone(&self.identity),
+            cut_revision: self.last_cut_revision,
+            revision,
+            step: Arc::new((*admitted.step).clone()),
+            path_scales,
+            canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
+        };
         self.reserved
             .extend(admitted.created.iter().map(|(id, _)| id.clone()));
         self.step_ids.insert(admitted.step.id.clone(), revision);
@@ -430,6 +518,7 @@ impl SceneState {
             index: revision - 1,
             revision,
             handles: admitted.created,
+            preparation,
         })
     }
 
@@ -635,8 +724,16 @@ impl SceneState {
     /// # Panics
     /// Panics if the crate violates its synchronous admission/commit invariant.
     pub fn replay(header: Begin, log: &[SceneEvent]) -> Result<Self, StepError> {
+        Self::replay_observe(header, log, |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn replay_observe<E: From<StepError>>(
+        header: Begin,
+        log: &[SceneEvent],
+        mut observe: impl FnMut(&Self, &SceneEvent, Option<Committed>) -> Result<(), E>,
+    ) -> Result<Self, E> {
         if log.len() > MAX_STEPS * 2 {
-            return Err(StepError::new(ErrorCode::TooLong));
+            return Err(StepError::new(ErrorCode::TooLong).into());
         }
         let mut state = Self::begin(header)?;
         let mut global = GlobalBudget::replay();
@@ -648,28 +745,32 @@ impl SceneState {
                             step: Some(step.id.clone()),
                             path: FieldPath::default().field("revision"),
                             code: ErrorCode::OutOfRange,
-                        });
+                        }
+                        .into());
                     }
                     let Admission::New(admitted) = state.admit(step, &global)? else {
                         return Err(StepError::in_step(
                             &step.id,
                             FieldPath::default().field("id"),
                             ErrorCode::DuplicateStepConflict,
-                        ));
+                        )
+                        .into());
                     };
-                    state
+                    let committed = state
                         .commit(admitted, &mut global)
                         .expect("isolated replay has no intervening transition");
                     state.retire_through(*revision);
                     let usage = state.current_usage();
                     state.apply_usage(&mut global, usage);
+                    observe(&state, event, Some(committed))?;
                 }
                 SceneEvent::Stop(cut) => {
                     let before = state.log.len();
                     state.stop(cut, &mut global)?;
                     if before == state.log.len() {
-                        return Err(StepError::new(ErrorCode::Malformed));
+                        return Err(StepError::new(ErrorCode::Malformed).into());
                     }
+                    observe(&state, event, None)?;
                 }
             }
         }

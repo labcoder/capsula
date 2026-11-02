@@ -296,6 +296,15 @@ fn preparation_failure_is_an_ordered_cut_before_the_next_call() {
             .expect("failure cut"),
         StopOutcome::Kept
     );
+    assert_eq!((state.usage().objects, state.usage().scenes), (1, 1));
+    assert_eq!(global.usage(), state.usage());
+    let before = (state.usage(), global.generation());
+    state
+        .stop(&cut(1, vec![x]), &mut global)
+        .expect("repeat cut is inert");
+    assert_eq!((state.usage(), global.generation()), before);
+    let restored = SceneState::replay(header(), state.recovery_log()).expect("cut usage replay");
+    assert_eq!(restored.usage(), state.usage());
     let next = commit(
         &mut state,
         &mut global,
@@ -312,6 +321,9 @@ fn preparation_failure_is_an_ordered_cut_before_the_next_call() {
     assert_eq!(replay.handle(&id("x")), Some(x));
     assert_eq!(replay.handle(&id("c")), Some(next));
     assert_eq!(replay.recovery_log(), state.recovery_log());
+    assert_eq!((state.usage().objects, state.usage().scenes), (2, 1));
+    assert_eq!(global.usage(), state.usage());
+    assert_eq!(replay.usage(), state.usage());
 }
 
 #[test]
