@@ -128,6 +128,12 @@ first, and nothing waits on the brain:
 - **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames
   already queued in the shell are dropped too.
+  - A run counts as moving until both its terminal `RunState` and its `RunEnd` have been
+    applied, in either order, since the pipes aren't ordered with each other. An older run's
+    ending never settles a newer one.
+  - Turns sent and not yet answered by a `RunState` count as work too. Esc cancels every one
+    sent before the press: when a cancelled turn's run is first named, it's fenced before any of
+    its output is applied and gets its own `Stop`. A turn sent after the press isn't covered.
 - **Clear**, the next Esc, removes the run's steps, keeps its text, keeps its late steps out, and
   queues `ClearDrawing`. The brain ignores it until slice 4 draws.
 - With no brain connected, or a control queue the brain isn't reading, the local effect still
