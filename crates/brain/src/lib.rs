@@ -86,7 +86,7 @@ pub async fn run() -> Result<(), BrainError> {
     tracing::info!(
         crashed_runs = recovered.crashed_runs,
         finished_deletions = recovered.finished_deletions,
-        pending_deletions = recovered.pending_deletions,
+        purge_pending = recovered.purge_pending,
         failed_deletions = recovered.failed_deletions,
         "store recovered"
     );

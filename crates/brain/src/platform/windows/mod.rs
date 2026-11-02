@@ -1,9 +1,11 @@
 //! Win32 implementations of the brain's platform functions.
 
+mod fs;
 mod job;
 mod pipe;
 mod process;
 
+pub use fs::{free_space, links_unsupported, replace_file};
 pub use job::{Helper, Job};
 pub use pipe::{Instance, PipeServer, client_image, create_owner_only, session_id};
 #[cfg(test)]

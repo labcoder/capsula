@@ -138,7 +138,10 @@ thread and the deadline timer report back as inputs, and the pipes' readers and 
 described in `ipc.md`. A shell that disconnects ends the current run as
 `interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
-the store to close.
+the store to close. A deletion's purge (`store.md`) copies the store on a helper thread only
+while no run is active, and an op arriving, or closing, stops the copy without waiting for it.
+Removing its files runs on a helper too, so turns and runs stop only for the swap, about
+10 ms on Rez up to 984 MiB, and otherwise share the disk with the helper.
 
 shortcut: a store that never answers leaves a finished run unconfirmed. At the next start, runs
 still active in the store become `failed(crash)`; outcomes already committed stay, and work not

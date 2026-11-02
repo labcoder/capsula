@@ -93,7 +93,8 @@ impl Brain {
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
-        let store = StoreThread::spawn(store, inputs_tx.clone())?;
+        let store =
+            StoreThread::spawn(store, inputs_tx.clone(), store_thread::Schedule::default())?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
             coordinator: Coordinator::new(last_thread, last_run),
