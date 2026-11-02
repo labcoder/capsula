@@ -9,8 +9,8 @@ use rusqlite::Connection;
 use crate::test_support::Scratch;
 
 use super::{
-    EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, Store, StoreError, Swap,
-    checkpoint_now, purge as steps,
+    EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, SceneTarget, Store, StoreError,
+    Swap, checkpoint_now, purge as steps,
 };
 
 const MARKER: &str = "zqxplantedmarker";
@@ -68,18 +68,18 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
             }],
         )
         .expect("text");
-    let body = format!(r#"{{"label":"{MARKER}"}}"#);
-    store
-        .append(
-            thread,
-            run,
-            &[NewEvent {
-                kind: EventKind::SceneStep,
-                text: Some("label"),
-                body: Some(&body),
-            }],
+    // A scene of one step: its `scene_begin`, a `scene_step` whose label is the marker, and its
+    // `scene_cleared`.
+    let scene = store
+        .commit_step(
+            (thread, run),
+            None,
+            SceneTarget::New { evict: None },
+            0,
+            MARKER,
         )
         .expect("step");
+    store.clear_scenes(&[scene]).expect("cleared");
     (thread, run)
 }
 
@@ -469,6 +469,14 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
         contains_marker(&scratch.db()),
         "the marker is on disk before the delete"
     );
+    let deleted_scene: i64 = store
+        .conn
+        .query_row(
+            "SELECT max(id) FROM events WHERE kind = 'scene_begin'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("scene id");
 
     store.begin_delete(thread).expect("begin");
     store.finish_delete(thread).expect("finish");
@@ -484,9 +492,17 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     drop(store);
     assert!(!contains_marker(&scratch.db()), "found after close");
 
-    let store = Store::open(&scratch.db()).expect("reopen");
+    let mut store = Store::open(&scratch.db()).expect("reopen");
     assert!(store.search(MARKER, 10).expect("search").is_empty());
     assert_eq!(store.search("unrelated", 10).expect("search"), vec![kept]);
+    let next = turn(&mut store, Err("next"), "x");
+    let scene = store
+        .commit_step(next, None, SceneTarget::New { evict: None }, 0, "next")
+        .expect("step");
+    assert!(
+        i64::try_from(scene.0).expect("small") > deleted_scene,
+        "scene ids aren't reused"
+    );
 }
 
 #[test]

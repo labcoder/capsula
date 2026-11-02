@@ -254,3 +254,21 @@ is one line:
 Records hold geometry, handles and times only: no text, prompts, screenshots or other apps'
 content. Unit tests cover the exact rows, the overflow, the epoch rule and every line's format;
 display timing and click receipt need an approved session.
+
+## The drawing
+
+`crates/shell/src/drawing.rs` holds what's drawn: at most four scenes by `SceneId`, each a list of
+steps, and the recovery that restores them on each connection. It's plain state, no GPUI, so its
+rules are unit-tested. `runs.rs` keeps the runs, turns, the fence and the answer text, and hands
+it the steps it lets through.
+
+- A live step for a new scene admits it the way the brain does: the newest four, evicting the
+  oldest, so a `ClearDrawing` never names more than four.
+- `drawing()` is true while a scene is shown or a recovery Esc could cancel is awaiting or
+  receiving, so Esc with nothing moving clears, recovery included. A moving run still stops
+  first.
+- On a disconnect the shown scenes stay until the next `Scenes` reconciles them; recovery state
+  and held chunks go.
+- Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
+
+[ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::{Attempt, Job, Purger, Schedule, StoreThread, serve_op};
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{RunEnd, Store, Swap};
+use crate::store::{RunEnd, SceneTarget, Store, Swap};
 use crate::test_support::Scratch;
 
 /// A store owing the purge of its deleted thread 1.
@@ -85,6 +85,7 @@ fn an_owed_purge_waits_for_the_active_run_and_then_runs_in_session() {
         run: RunId(2),
         text: None,
         revealed: None,
+        clear: None,
         end: RunEnd::Done,
     }));
     assert_eq!(next(&attempts), Attempt::Done);
@@ -441,6 +442,7 @@ fn every_operation_gets_one_reply_in_order() {
             thread: ThreadId(2),
             run,
             text: None,
+            scene: SceneTarget::New { evict: None },
             index: 0,
             step: Step {
                 label: "s".to_owned(),
@@ -451,6 +453,7 @@ fn every_operation_gets_one_reply_in_order() {
             run,
             text: None,
             revealed: None,
+            clear: None,
             end: RunEnd::Done,
         },
         StoreOp::ReadPage {

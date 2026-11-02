@@ -68,6 +68,25 @@ pub const MAX_STEPS: usize = 64;
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
 
+/// The most scenes on screen at once. A fifth scene evicts the oldest.
+pub const MAX_VISIBLE_SCENES: usize = 4;
+
+/// One drawing: the id of the store event that began it. Ids only grow, even across deletions
+/// and restarts, and none leaves the brain before its first step is committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SceneId(pub u64);
+
+/// A visible scene, as [`ControlToShell::Scenes`] names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneDescriptor {
+    /// The scene.
+    pub scene: SceneId,
+    /// Every step committed to it, kept or not; it never goes back.
+    pub revision: u32,
+    /// The steps it keeps after any Stop, which its snapshot carries.
+    pub committed: u32,
+}
+
 /// Bytes of data-pipe frames the brain may send before the shell grants more with
 /// [`DataToBrain::Credit`] [guess]. It holds the largest frame the data pipe allows, so no frame
 /// is too big to send, and several of the 64 KiB text frames runs stream, so a reading shell
@@ -121,11 +140,10 @@ pub enum ControlToBrain {
     /// The answer to [`ControlToShell::Ping`].
     Pong,
     /// The second Esc, after the shell has already cleared the drawing locally. The thread keeps
-    /// the drawing for replay. shortcut: names the run whose drawing was cleared; slice 4 names
-    /// scenes.
+    /// the drawing for replay; the brain records the clear so it doesn't come back.
     ClearDrawing {
-        /// The run whose drawing was cleared.
-        run: RunId,
+        /// The scenes cleared, at most [`MAX_VISIBLE_SCENES`]; more ends the connection.
+        scene_ids: Vec<SceneId>,
     },
 }
 
@@ -154,6 +172,12 @@ pub enum ControlToShell {
     },
     /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
     Ping,
+    /// The visible scenes, once per connection before any turn is taken. It's authoritative: a
+    /// scene it doesn't name is no longer visible. Their snapshots follow on the data pipe.
+    Scenes {
+        /// At most [`MAX_VISIBLE_SCENES`], each named once.
+        scenes: Vec<SceneDescriptor>,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -197,7 +221,9 @@ pub enum DataToShell {
     StepCommit {
         /// The run it belongs to.
         run: RunId,
-        /// Its place in the run's drawing, from 0.
+        /// The scene it draws in.
+        scene: SceneId,
+        /// Its place in its scene, from 0.
         index: u32,
         /// The step.
         step: Step,
@@ -228,13 +254,27 @@ pub enum DataToShell {
         /// Continue before this id, or stop when absent.
         before: Option<EventId>,
     },
+    /// Part of a visible scene's kept steps, in order, after [`ControlToShell::Scenes`] named it.
+    SceneSnapshot {
+        /// The scene.
+        scene: SceneId,
+        /// The revision its descriptor named.
+        revision: u32,
+        /// Whole steps, never empty.
+        chunk: Vec<Step>,
+        /// The scene's last chunk; the shell installs the snapshot only then.
+        last: bool,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation, Secret,
+        CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
+        Hello, Incarnation, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, SceneDescriptor,
+        SceneId, Secret, Step,
     };
+    use crate::frame::{self, HEADER_LEN, Pipe};
 
     /// The bytes another build must be able to read: the handshake and its answers. A new
     /// variant goes at the end of its enum, or these tags move.
@@ -271,5 +311,61 @@ mod tests {
             })),
             [1, 1, b'b']
         );
+    }
+
+    /// Worst-case ids and revisions: the largest varints postcard writes.
+    const SCENE: SceneId = SceneId(u64::MAX);
+
+    /// The payload a frame carries, checked against the pipe's cap by encoding it.
+    fn payload<T: serde::Serialize>(message: &T, pipe: Pipe) -> usize {
+        frame::encode(message, pipe)
+            .expect("fits the pipe's cap")
+            .len()
+            - HEADER_LEN
+    }
+
+    #[test]
+    fn four_worst_case_descriptors_fit_the_control_pipe() {
+        let descriptor = SceneDescriptor {
+            scene: SCENE,
+            revision: u32::MAX,
+            committed: u32::MAX,
+        };
+        let scenes = ControlToShell::Scenes {
+            scenes: vec![descriptor; MAX_VISIBLE_SCENES],
+        };
+        // Tag and length, then 10 + 5 + 5 bytes per descriptor.
+        assert_eq!(payload(&scenes, Pipe::Control), 2 + 4 * 20);
+    }
+
+    #[test]
+    fn a_clear_of_four_worst_case_ids_fits_the_control_pipe() {
+        let clear = ControlToBrain::ClearDrawing {
+            scene_ids: vec![SCENE; MAX_VISIBLE_SCENES],
+        };
+        assert_eq!(payload(&clear, Pipe::Control), 2 + 4 * 10);
+    }
+
+    #[test]
+    fn a_chunk_of_every_step_at_the_longest_label_fits_a_data_frame_and_the_window() {
+        let chunk = DataToShell::SceneSnapshot {
+            scene: SCENE,
+            revision: u32::MAX,
+            chunk: vec![
+                Step {
+                    label: "é".repeat(MAX_STEP_LABEL / 2),
+                };
+                MAX_STEPS
+            ],
+            last: true,
+        };
+        let payload = payload(&chunk, Pipe::Data);
+        // Tag, id, revision, length, then a 2-byte length and 256 bytes per label, then last.
+        assert_eq!(
+            payload,
+            1 + 10 + 5 + 1 + MAX_STEPS * (2 + MAX_STEP_LABEL) + 1
+        );
+        let window = usize::try_from(DATA_WINDOW).expect("the window fits in usize");
+        assert!(payload + HEADER_LEN <= window, "{payload} bytes");
     }
 }

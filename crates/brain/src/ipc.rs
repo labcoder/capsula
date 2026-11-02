@@ -61,8 +61,11 @@ pub enum IpcError {
 /// How one shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Session {
-    /// The shell sent `Quitting`.
-    Quit,
+    /// The shell sent `Quitting`; shutting down must finish by `deadline`.
+    Quit {
+        /// One absolute deadline for every stage of the shutdown.
+        deadline: tokio::time::Instant,
+    },
     /// A shell from another build connected; it starts its own brain.
     BuildMismatch,
     /// The shell went away without `Quitting`: it crashed or was killed.
@@ -86,6 +89,8 @@ enum SessionError {
     WrongCapability,
     #[error("protocol error: {0}")]
     Protocol(&'static str),
+    #[error("the visible scenes didn't settle in time")]
+    Unavailable,
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
@@ -239,9 +244,11 @@ impl Pipes {
         tracing::info!("shell connected");
         Ok(
             match brain.serve(&mut self.control, &mut self.data, tap).await {
-                Ended::Quit => Session::Quit,
+                Ended::Quit { deadline } => Session::Quit { deadline },
                 Ended::Lost => Session::ShellLost,
                 Ended::Broken(reason) => return Err(SessionError::Protocol(reason)),
+                // The shell is still there and reconnects, so it isn't relaunched.
+                Ended::Unavailable => return Err(SessionError::Unavailable),
             },
         )
     }

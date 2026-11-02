@@ -147,4 +147,9 @@ shortcut: a store that never answers leaves a finished run unconfirmed. At the n
 still active in the store become `failed(crash)`; outcomes already committed stay, and work not
 yet committed may be lost. Fine while the store is local SQLite.
 
-The step is a labelled placeholder until slice 4's scene format.
+On Quit the brain shuts down by one deadline instead, described in [processes](processes.md).
+
+The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
+its first step's write begins the scene and returns its id, and the steps after it wait in the
+run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
+steps, and the run still settles.

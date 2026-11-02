@@ -170,6 +170,7 @@ impl Store {
                 "SELECT e.id, e.run, e.kind, coalesce(e.text, '') FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
+             AND e.kind NOT IN ('scene_begin', 'scene_cleared')
              ORDER BY e.id DESC LIMIT ?3",
             )
             .map_err(|_| StoreError::Read)?;

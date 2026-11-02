@@ -15,7 +15,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap};
+use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap, cleared_body};
 
 /// How often the thread looks at a running helper.
 const POLL: Duration = Duration::from_millis(50);
@@ -343,7 +343,7 @@ impl StoreThread {
 }
 
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
-    let write = op.run().is_some();
+    let write = !matches!(op, StoreOp::ReadPage { .. });
     if write {
         purger.op_arriving();
     }
@@ -357,8 +357,8 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
     }
 }
 
-/// Runs one operation in one transaction and answers it. Errors are logged by kind and run id
-/// only, never content.
+/// Runs one operation in one transaction and answers it. Errors are logged by kind, run id and
+/// count only, never content.
 fn apply(store: &mut Store, op: StoreOp) -> Input {
     if let StoreOp::ReadPage {
         epoch,
@@ -375,60 +375,59 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             reply: reply.ok(),
         };
     }
+    if let StoreOp::ClearScenes { scenes } = op {
+        return clear(store, scenes);
+    }
     let run = op.run().expect("a write belongs to a run");
     // After a swap's reopen failed: fails closed until the file opens again.
     if let Err(error) = store.reconnect() {
         tracing::warn!(%error, run = run.0, "the store is unavailable");
         return Input::StoreFailed { run };
     }
-    let (result, stored, what) = match op {
-        StoreOp::ReadPage { .. } => unreachable!("reads were handled above"),
+    let (result, what) = match op {
+        StoreOp::ReadPage { .. } | StoreOp::ClearScenes { .. } => {
+            unreachable!("reads and clears were handled above")
+        }
         StoreOp::BeginTurn {
             thread,
             title,
             run,
             text,
         } => (
-            store.begin_turn(thread, title.as_deref(), run, &text),
-            Input::TurnStored { run },
+            store
+                .begin_turn(thread, title.as_deref(), run, &text)
+                .map(|()| Input::TurnStored { run }),
             "turn",
         ),
         StoreOp::CommitStep {
             thread,
             run,
             text,
+            scene,
             index,
             step,
-        } => {
-            let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
-            events.push(NewEvent {
-                kind: EventKind::SceneStep,
-                text: Some(step.label.as_str()),
-                body: Some(body.as_str()),
-            });
-            (
-                store.append(thread, run, &events),
-                Input::StepStored { run, index, step },
-                "step",
-            )
-        }
+        } => (
+            store
+                .commit_step((thread, run), text.as_deref(), scene, index, &step.label)
+                .map(|scene| Input::StepStored {
+                    run,
+                    index,
+                    step,
+                    scene,
+                }),
+            "step",
+        ),
         StoreOp::EndRun {
             thread,
             run,
             text,
             revealed,
+            clear,
             end,
         } => {
             let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
-            let mut events = Vec::with_capacity(2);
+            let clear = clear.map(cleared_body);
+            let mut events = Vec::with_capacity(3);
             if let Some(text) = &text {
                 events.push(NewEvent {
                     kind: EventKind::AssistantText,
@@ -443,20 +442,37 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
                     body: Some(revealed.as_str()),
                 });
             }
+            if let Some(clear) = &clear {
+                events.push(NewEvent {
+                    kind: EventKind::SceneCleared,
+                    text: None,
+                    body: Some(clear.as_str()),
+                });
+            }
             (
-                store.end_run(thread, run, &events, end),
-                Input::RunStored { run },
+                store
+                    .end_run(thread, run, &events, end)
+                    .map(|()| Input::RunStored { run }),
                 "outcome",
             )
         }
     };
-    match result {
-        Ok(()) => stored,
+    result.unwrap_or_else(|error| {
+        tracing::warn!(%error, run = run.0, what, "a store operation failed");
+        Input::StoreFailed { run }
+    })
+}
+
+/// Writes a clear. A failed one is retried, so it's only logged, by how many scenes it names.
+fn clear(store: &mut Store, scenes: Vec<capsula_protocol::message::SceneId>) -> Input {
+    let ok = match store.reconnect().and_then(|()| store.clear_scenes(&scenes)) {
+        Ok(()) => true,
         Err(error) => {
-            tracing::warn!(%error, run = run.0, what, "a store operation failed");
-            Input::StoreFailed { run }
+            tracing::warn!(%error, scenes = scenes.len(), "a clear failed; it's retried");
+            false
         }
-    }
+    };
+    Input::ScenesCleared { scenes, ok }
 }
 
 #[cfg(test)]

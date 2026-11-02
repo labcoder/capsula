@@ -91,7 +91,9 @@ pub async fn run() -> Result<(), BrainError> {
         "store recovered"
     );
     let high_water = store.high_water()?;
-    let mut brain = Brain::new(store, high_water, fixture()?).map_err(BrainError::StoreThread)?;
+    let scenes = store.scenes()?;
+    let mut brain =
+        Brain::new(store, high_water, scenes, fixture()?).map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
@@ -105,7 +107,12 @@ pub async fn run() -> Result<(), BrainError> {
     credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let ended = serve(&mut pipes, &identity, &mut brain).await;
-    brain.close().await;
+    match ended {
+        Ok(Some(deadline)) => {
+            brain.quit(deadline).await;
+        }
+        Ok(None) | Err(_) => brain.close().await,
+    }
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.terminate()).await {
         Ok(Ok(())) => {}
@@ -117,7 +124,7 @@ pub async fn run() -> Result<(), BrainError> {
     if let Err(error) = credential::delete(session) {
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
-    ended.map_err(BrainError::from)
+    ended.map(|_| ()).map_err(BrainError::from)
 }
 
 /// The script the fixture engine plays: the built-in one, or in a dev build the file
@@ -133,12 +140,13 @@ fn fixture() -> Result<Fixture, BrainError> {
         .map_err(|error| BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error)))
 }
 
-/// Serves shells until one quits or is from another build, relaunching a shell that dies.
+/// Serves shells until one quits or is from another build, relaunching a shell that dies. A quit
+/// returns its shutdown deadline.
 async fn serve(
     pipes: &mut Pipes,
     identity: &Identity,
     brain: &mut Brain,
-) -> Result<(), ipc::IpcError> {
+) -> Result<Option<tokio::time::Instant>, ipc::IpcError> {
     let mut tap = tap::Tap::from_env();
     let mut crashes = Crashes::default();
     let mut launched = None;
@@ -151,17 +159,17 @@ async fn serve(
         // A shell connected or the relaunched one died; either way nothing waits on it now.
         launched = None;
         match session {
-            Session::Quit => {
+            Session::Quit { deadline } => {
                 tracing::info!("quit");
-                return Ok(());
+                return Ok(Some(deadline));
             }
             Session::BuildMismatch => {
                 tracing::info!("a shell from another build connected; exiting");
-                return Ok(());
+                return Ok(None);
             }
             Session::NoShell => {
                 tracing::info!("no shell connected; exiting");
-                return Ok(());
+                return Ok(None);
             }
             Session::ShellLost => {
                 let Some(delay) = crashes.record(Instant::now()) else {

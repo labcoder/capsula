@@ -1,8 +1,9 @@
 //! Helpers shared by the brain's tests.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use capsula_protocol::constants;
@@ -59,5 +60,44 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let high_water = store.high_water().expect("high water");
-    Brain::new(store, high_water, Fixture::parse(script).expect("script")).expect("brain")
+    let scenes = store.scenes().expect("scenes");
+    let fixture = Fixture::parse(script).expect("script");
+    Brain::new(store, high_water, scenes, fixture).expect("brain")
 }
+
+/// Collects what `tracing` writes while it's the default subscriber.
+#[derive(Clone, Default)]
+pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl Captured {
+    pub(crate) fn text(&self) -> String {
+        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Sets a subscriber writing here as this thread's default until the guard drops.
+    pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let captured = self.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || captured.clone())
+            .finish();
+        tracing::subscriber::set_default(subscriber)
+    }
+}
+
+impl Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A label no log line, tap record or error may carry.
+pub(crate) const SENTINEL: &str = "zqxsentinellabel";

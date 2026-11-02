@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod credential;
+mod drawing;
 mod escape;
 mod input;
 mod link;

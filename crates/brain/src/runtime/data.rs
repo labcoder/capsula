@@ -10,11 +10,22 @@ use capsula_protocol::message::{MAX_PENDING_PAGES, RunId};
 /// `view_stalled` (architecture v1 §3.2) [guess].
 pub(crate) const STALL: Duration = Duration::from_secs(2);
 /// What a queued frame costs beyond its bytes.
-const ENTRY: usize = std::mem::size_of::<(Option<RunId>, Vec<u8>)>();
+const ENTRY: usize = std::mem::size_of::<(Owner, Vec<u8>)>();
+
+/// What a queued frame belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Owner {
+    /// A run's output, which a Stop or a replacement drops.
+    Run(RunId),
+    /// A page reply, which counts against the unanswered page requests until it's written.
+    Page,
+    /// A recovery snapshot chunk: no run's, and never dropped by a Stop.
+    Scene,
+}
 
 #[derive(Debug)]
 pub(crate) struct DataQueue {
-    frames: VecDeque<(Option<RunId>, Vec<u8>)>,
+    frames: VecDeque<(Owner, Vec<u8>)>,
     pending_pages: usize,
     writing_page: bool,
     /// The memory the queued frames hold.
@@ -39,9 +50,9 @@ impl DataQueue {
         }
     }
 
-    pub(crate) fn push(&mut self, run: Option<RunId>, frame: Vec<u8>) {
+    pub(crate) fn push(&mut self, owner: Owner, frame: Vec<u8>) {
         self.bytes += frame.len() + ENTRY;
-        self.frames.push_back((run, frame));
+        self.frames.push_back((owner, frame));
     }
 
     pub(crate) fn admit_page(&mut self) -> bool {
@@ -64,7 +75,7 @@ impl DataQueue {
 
     /// Drops a stopped run's frames that haven't started writing; the shell would drop them.
     pub(crate) fn revoke(&mut self, run: RunId) {
-        self.frames.retain(|(owner, _)| *owner != Some(run));
+        self.frames.retain(|(owner, _)| *owner != Owner::Run(run));
         self.bytes = self
             .frames
             .iter()
@@ -90,7 +101,7 @@ impl DataQueue {
         self.writing_page = self
             .frames
             .front()
-            .is_some_and(|(owner, _)| owner.is_none());
+            .is_some_and(|(owner, _)| *owner == Owner::Page);
         self.frames.pop_front().map(|(_, frame)| frame)
     }
 
@@ -116,17 +127,17 @@ mod tests {
 
     use capsula_protocol::message::RunId;
 
-    use super::{DataQueue, ENTRY, STALL};
+    use super::{DataQueue, ENTRY, Owner, STALL};
 
-    const A: RunId = RunId(1);
-    const B: RunId = RunId(2);
+    const A: Owner = Owner::Run(RunId(1));
+    const B: Owner = Owner::Run(RunId(2));
 
     #[test]
     fn frames_go_in_order_and_only_against_credit() {
         let start = Instant::now();
         let mut queue = DataQueue::new(10);
-        queue.push(Some(A), vec![1; 6]);
-        queue.push(Some(A), vec![2; 6]);
+        queue.push(A, vec![1; 6]);
+        queue.push(A, vec![2; 6]);
         assert_eq!(queue.pop(start), Some(vec![1; 6]));
         assert_eq!(queue.pop(start), None, "4 bytes of credit left");
         queue.grant(1);
@@ -140,7 +151,7 @@ mod tests {
     fn credit_never_exceeds_the_window() {
         let mut queue = DataQueue::new(8);
         queue.grant(u32::MAX);
-        queue.push(Some(A), vec![0; 9]);
+        queue.push(A, vec![0; 9]);
         assert_eq!(queue.pop(Instant::now()), None);
     }
 
@@ -148,10 +159,10 @@ mod tests {
     fn a_stopped_run_loses_only_its_unsent_frames() {
         let start = Instant::now();
         let mut queue = DataQueue::new(100);
-        queue.push(Some(A), vec![1]);
-        queue.push(Some(B), vec![2]);
-        queue.push(Some(A), vec![3]);
-        queue.revoke(A);
+        queue.push(A, vec![1]);
+        queue.push(B, vec![2]);
+        queue.push(A, vec![3]);
+        queue.revoke(RunId(1));
         assert_eq!(queue.bytes(), 1 + ENTRY);
         assert_eq!(queue.pop(start), Some(vec![2]));
         assert_eq!(queue.pop(start), None);
@@ -163,8 +174,8 @@ mod tests {
         let start = Instant::now();
         let mut queue = DataQueue::new(5);
         assert!(!queue.stalled(start + STALL * 2), "empty never stalls");
-        queue.push(Some(A), vec![0; 3]);
-        queue.push(Some(A), vec![0; 5]);
+        queue.push(A, vec![0; 3]);
+        queue.push(A, vec![0; 5]);
         assert_eq!(queue.pop(start), Some(vec![0; 3]));
         queue.wrote();
         assert_eq!(queue.pop(start), None, "2 bytes of credit left");
@@ -180,7 +191,7 @@ mod tests {
     fn a_write_the_shell_never_drains_stalls_too() {
         let start = Instant::now();
         let mut queue = DataQueue::new(100);
-        queue.push(Some(A), vec![0; 3]);
+        queue.push(A, vec![0; 3]);
         assert_eq!(queue.pop(start), Some(vec![0; 3]), "credit is plenty");
         assert!(queue.stalled(start + STALL), "but the write never finished");
     }
@@ -192,9 +203,9 @@ mod tests {
             assert!(queue.admit_page());
         }
         assert!(!queue.admit_page());
-        queue.push(None, vec![1]);
-        queue.push(Some(A), vec![2]);
-        queue.revoke(A);
+        queue.push(Owner::Page, vec![1]);
+        queue.push(A, vec![2]);
+        queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
         assert!(
             !queue.admit_page(),
@@ -204,5 +215,28 @@ mod tests {
         assert!(queue.admit_page());
         assert!(!queue.admit_page());
         assert_eq!(queue.pop(Instant::now()), None);
+    }
+
+    #[test]
+    fn a_snapshot_chunk_is_never_revoked_and_never_answers_a_page() {
+        let mut queue = DataQueue::new(100);
+        assert!(queue.admit_page());
+        queue.push(Owner::Scene, vec![1]);
+        queue.push(A, vec![2]);
+        queue.revoke(RunId(1));
+        assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
+        queue.wrote();
+        for _ in 1..capsula_protocol::message::MAX_PENDING_PAGES {
+            assert!(queue.admit_page());
+        }
+        assert!(
+            !queue.admit_page(),
+            "the chunk didn't release the page's slot"
+        );
+        assert_eq!(
+            queue.pop(Instant::now()),
+            None,
+            "the run's frame was revoked"
+        );
     }
 }

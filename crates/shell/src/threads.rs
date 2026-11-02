@@ -307,7 +307,8 @@ impl Threads {
             }
             DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
-            | DataToShell::RunEnd { .. } => {}
+            | DataToShell::RunEnd { .. }
+            | DataToShell::SceneSnapshot { .. } => {}
         }
     }
 

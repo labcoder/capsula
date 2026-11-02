@@ -60,8 +60,8 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
-| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Control | `RunState`, `Ping`, `Scenes` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `SceneSnapshot` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
 |---|---|---|
@@ -100,6 +100,61 @@ flowchart LR
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
 
+## Scenes and recovery
+
+A drawing is a **scene**, named by a `SceneId`: the id of the store event that began it. At most
+four scenes are visible; [processes](processes.md) has the rule that keeps that set durable. Each
+`StepCommit` names its scene and its index in it.
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `Scenes` | Control, brain to shell, once per connection | up to four `SceneDescriptor`s: `scene`, `revision` (every step committed, never goes back), `committed` (the steps kept after any Stop) |
+| `SceneSnapshot` | Data, brain to shell | `scene`, `revision`, `chunk` of whole steps, `last` |
+| `ClearDrawing` | Control, shell to brain | `scene_ids`, at most four; five or more end the connection as broken |
+
+- **The connect barrier.** Each connection starts awaiting `Scenes`. The brain serves `Stop`,
+  `ClearDrawing` and `Pong` but takes no turn, and sends `Scenes` only once the visible set has
+  settled: no earlier connection's run still ending and no clear still being written. If it
+  hasn't settled within 2 s [guess], the brain ends the connection as unavailable and the shell
+  reconnects; it never sends a partial list.
+- **Snapshots.** After `Scenes`, each scene's kept steps go out in chunks of whole steps packed up
+  to 32 KiB [guess], one at a time whenever the data queue has room, ahead of engine events. A
+  step bigger than the target goes alone. Turns are taken only after `Scenes`, so no live step
+  belongs to a scene in recovery. A `ClearDrawing` stops the cleared scenes' chunks not yet
+  queued. Snapshot frames are data, so the tap never records them.
+- **Clears.** A cleared scene leaves the visible set at once, so no later `Scenes` lists it, and
+  counts as cleared once its write commits. A failed write is retried with the next store
+  operation, and at the latest at the next connect barrier. An id that isn't visible changes
+  nothing.
+
+The shell's [`Drawing`](presence.md#the-drawing) follows each connection's recovery:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Awaiting: Connected
+  Awaiting --> Awaiting: SceneSnapshot held, credit withheld
+  Awaiting --> Receiving: Scenes (held chunks applied in order)
+  Receiving --> Receiving: SceneSnapshot, credited as it's classified
+  Awaiting --> Offline: connection lost
+  Receiving --> Offline: connection lost
+  Offline --> Awaiting: Connected
+```
+
+- **`Scenes` is authoritative.** A shown scene it doesn't name goes at once. A named one stays
+  until its snapshot installs and then is replaced, even at the same revision.
+- **Install.** A scene's `last` chunk installs it only on the connection that described it, with
+  no clear since, the descriptor's revision, and exactly `committed` steps. Installed steps show
+  as already activated, and installing sends nothing.
+- **Esc during recovery.** While awaiting, Esc drops the held chunks, granting their credit, and
+  keeps a clear intent through disconnects and Retry: the next complete `Scenes` clears every id
+  it names in one `ClearDrawing`. Once `Scenes` has arrived, Esc clears the shown and recovering
+  scenes at once and leaves no intent, so a later scene is never cleared by it.
+- **Cleared ids.** The shell remembers the newest 64 cleared ids [guess]. One that `Scenes` lists
+  again, after a clear the brain never got, is sent again and never shown.
+- **Validation.** More than four descriptors, a repeated id, counts outside `committed ≤
+  revision ≤ 64`, a label over 256 bytes, or more steps than `committed` end the connection as
+  broken input. Counts are checked before a step is kept, and errors name sizes, never labels.
+
 ## The shell's side
 
 `crates/shell/src/link.rs` connects and reads control on the link thread, because pipe reads
@@ -132,8 +187,8 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   first `RunState` answers one. The brain's queue holds 64, so the shell never sends the turn
   that would end the connection. It refuses blank turns, which the brain ignores, and turns too
   long for a data frame.
-- **Broken input.** A malformed frame on either pipe, or a repeated `Welcome`, ends the
-  connection, and the link reconnects as after any loss. A lost brain fences every run it knew
+- **Broken input.** A malformed frame on either pipe, a repeated `Welcome`, or scenes or
+  chunks that break the rules above end the connection, and the link reconnects as after any loss. A lost brain fences every run it knew
   and forgets the unanswered turns.
 
 ## Starting and reconnecting
