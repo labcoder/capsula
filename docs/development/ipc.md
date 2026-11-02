@@ -42,6 +42,54 @@ The capability is checked before anything else, so a client without it learns no
 whether its build matches. A shell that meets a brain from another build waits for that brain to
 exit and starts the one beside itself.
 
+## After the handshake
+
+Each pipe has its own reader and writer, all polled together in one task with the core loop
+(`crates/brain/src/runtime/`). A reader never waits behind a write, so `Stop` reaches the
+coordinator even while the data writer is blocked on a shell that stopped reading.
+
+```mermaid
+flowchart LR
+  CR[control reader] --> L[core loop]
+  DR[data reader] --> L
+  SYS[store thread, engine, timers] --> L
+  L --> CQ[control queue, 256 frames] --> CW[control writer]
+  L --> DQ[data queue] --> DW[data writer]
+  DR -. Credit .-> DQ
+```
+
+| Pipe | Carries | Bound | When it's full |
+|---|---|---|---|
+| Control | `RunState`, `Ping` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Data | `AssistantText`, `StepCommit`, `RunEnd` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+
+- **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
+  grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
+  big to send, and several 64 KiB text frames. Grants never raise the credit past the window.
+- **Stop drops the stopped run's unsent data**, and so does a new turn that replaces a run, so
+  the replacement's first frame isn't stuck behind text nobody will show. Only a `Stop` or turn
+  the coordinator accepts drops anything, and the run's `RunEnd` is queued after the drop, so it
+  still arrives, as long as the shell keeps reading data.
+- **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
+  connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
+  runs there are no timers, and a run's deadline goes when the run does.
+- **The tap** records control frames only; data frames carry what the user typed and the
+  answer, so they're never written to it.
+- **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
+  control frames and store replies, so `Stop` is never queued behind data. The data reader never
+  waits on the core either, so credit is always read. While the data queue holds 512 KiB,
+  frames and their bookkeeping counted, engine events wait in a 16-event channel and the engine
+  waits on it, and new turns wait too. While 16 ended runs wait on the store, new turns wait
+  until it catches up [guess]. Memory stays bounded however slow the store or the shell is: the
+  cap is checked before each event and each turn, and only a turn adds a run and so a `RunEnd`,
+  so the queue can reach the cap plus one event, the text held behind a step, and one small
+  `RunEnd` per run still ending. That bound excludes typed turns not yet taken: up to 64
+  `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
+  as broken.
+- shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
+  `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
+  both come with the first urgent brain-to-shell message.
+
 ## Starting and reconnecting
 
 A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `capsulad.exe`
@@ -51,6 +99,6 @@ restarting.
 
 ## Debugging
 
-A debug brain records every frame it sends and receives when `CAPSULA_PIPE_TAP` names a file,
-with capabilities zeroed. `cargo xtask pipe-dump <file>` decodes the recording with the same
-message types.
+A debug brain records the control frames it sends and receives, and the handshake with
+capabilities zeroed, when `CAPSULA_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
+decodes the recording with the same message types.

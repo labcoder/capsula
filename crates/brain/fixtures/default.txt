@@ -1,0 +1,6 @@
+# The fixture engine's default answer: some text, three steps, more text.
+120 text Here's a quick sketch.
+80 step First box
+200 step Second box
+200 step An arrow between them
+60 text  The first box feeds the second.

@@ -9,8 +9,11 @@ pub mod ipc;
 pub mod logging;
 pub mod platform;
 mod relaunch;
+mod runtime;
 pub mod store;
 mod tap;
+#[cfg(test)]
+mod test_support;
 
 use std::io;
 use std::path::PathBuf;
@@ -18,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capsula_protocol::BUILD_ID;
-use capsula_protocol::constants::SHELL_EXE;
+use capsula_protocol::constants::{self, SHELL_EXE};
 use capsula_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -26,6 +29,8 @@ use tokio::task::JoinSet;
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::relaunch::Crashes;
+use crate::runtime::Brain;
+use crate::runtime::fixture::{self, Fixture};
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
 /// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
@@ -53,6 +58,12 @@ pub enum BrainError {
     /// The store couldn't be opened or recovered.
     #[error("can't open the store")]
     Store(#[from] store::StoreError),
+    /// The fixture script a dev build was pointed at doesn't load or parse.
+    #[error("can't load the fixture script")]
+    Fixture(#[source] io::Error),
+    /// The store's thread couldn't be started.
+    #[error("can't start the store's thread")]
+    StoreThread(#[source] io::Error),
     /// The helpers' Job Object or a helper couldn't be created.
     #[error("can't start the helpers")]
     Helpers(#[source] io::Error),
@@ -79,9 +90,8 @@ pub async fn run() -> Result<(), BrainError> {
         failed_deletions = recovered.failed_deletions,
         "store recovered"
     );
-    // shortcut: the store is opened and recovered but unused until the run coordinator's store
-    // thread takes it (slice 2, PR 3).
-    drop(store);
+    let high_water = store.high_water()?;
+    let mut brain = Brain::new(store, high_water, fixture()?).map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
@@ -94,7 +104,8 @@ pub async fn run() -> Result<(), BrainError> {
     };
     credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
-    let ended = serve(&mut pipes, &identity).await;
+    let ended = serve(&mut pipes, &identity, &mut brain).await;
+    brain.close().await;
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.terminate()).await {
         Ok(Ok(())) => {}
@@ -109,8 +120,25 @@ pub async fn run() -> Result<(), BrainError> {
     ended.map_err(BrainError::from)
 }
 
+/// The script the fixture engine plays: the built-in one, or in a dev build the file
+/// [`constants::FIXTURE_ENV`] names.
+fn fixture() -> Result<Fixture, BrainError> {
+    let path = std::env::var_os(constants::FIXTURE_ENV).filter(|_| cfg!(debug_assertions));
+    let Some(path) = path else {
+        let parsed = Fixture::parse(fixture::DEFAULT);
+        return Ok(parsed.expect("the built-in script parses, as a test checks"));
+    };
+    let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
+    Fixture::parse(&script)
+        .map_err(|error| BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error)))
+}
+
 /// Serves shells until one quits or is from another build, relaunching a shell that dies.
-async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcError> {
+async fn serve(
+    pipes: &mut Pipes,
+    identity: &Identity,
+    brain: &mut Brain,
+) -> Result<(), ipc::IpcError> {
     let mut tap = tap::Tap::from_env();
     let mut crashes = Crashes::default();
     let mut launched = None;
@@ -118,7 +146,7 @@ async fn serve(pipes: &mut Pipes, identity: &Identity) -> Result<(), ipc::IpcErr
     let mut relaunches = JoinSet::new();
     loop {
         let session = pipes
-            .next_session(identity, &mut tap, &mut launched)
+            .next_session(identity, brain, &mut tap, &mut launched)
             .await?;
         // A shell connected or the relaunched one died; either way nothing waits on it now.
         launched = None;

@@ -126,6 +126,11 @@ pub enum Effect {
         /// The run.
         run: RunId,
     },
+    /// Drop `run`'s data not yet sent to the shell, which no longer shows it.
+    Revoke {
+        /// The run.
+        run: RunId,
+    },
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.
@@ -175,6 +180,17 @@ pub enum StoreOp {
         /// How it ended.
         end: RunEnd,
     },
+}
+
+impl StoreOp {
+    /// The run the operation belongs to.
+    pub fn run(&self) -> RunId {
+        match self {
+            Self::BeginTurn { run, .. }
+            | Self::CommitStep { run, .. }
+            | Self::EndRun { run, .. } => *run,
+        }
+    }
 }
 
 /// The input named a run that isn't current, or an acknowledgement nothing is waiting for, so
@@ -252,6 +268,16 @@ impl Coordinator {
         }
     }
 
+    /// The run in flight, if any.
+    pub fn current_run(&self) -> Option<RunId> {
+        self.current.as_ref().map(|run| run.id)
+    }
+
+    /// How many ended runs still wait on the store.
+    pub fn ending_runs(&self) -> usize {
+        self.ending.len()
+    }
+
     /// Acts on one input.
     ///
     /// # Errors
@@ -318,7 +344,7 @@ impl Coordinator {
                     ..
                 }) = done.ending
                 {
-                    effects.push(run_state(&done, Phase::Done));
+                    told(&done, Phase::Done, &mut effects);
                 }
             }
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
@@ -450,14 +476,21 @@ impl Coordinator {
                         cut -= 1;
                     }
                     let (piece, tail) = rest.split_at(cut);
-                    let frame = DataToShell::AssistantText {
+                    let frame = || DataToShell::AssistantText {
                         run,
                         delta: piece.to_owned(),
                     };
-                    if let Some(behind) = current.held.back_mut() {
-                        behind.push(frame);
-                    } else {
-                        effects.push(Effect::Data(frame));
+                    // Held text joins the frame before it, so small deltas don't each cost an entry.
+                    match current.held.back_mut() {
+                        Some(behind) => match behind.last_mut() {
+                            Some(DataToShell::AssistantText { delta, .. })
+                                if delta.len() + piece.len() <= MAX_DELTA =>
+                            {
+                                delta.push_str(piece);
+                            }
+                            _ => behind.push(frame()),
+                        },
+                        None => effects.push(Effect::Data(frame())),
                     }
                     rest = tail;
                 }
@@ -571,6 +604,10 @@ impl Coordinator {
                 thread,
                 phase: Phase::Failed,
             }));
+            // Every ending but Done was already told, with its data's end.
+            if ending.outcome == RunEnd::Done {
+                effects.push(Effect::Data(DataToShell::RunEnd { run: id }));
+            }
         }
         if ended.turn.is_some() || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
@@ -602,13 +639,19 @@ impl Coordinator {
         if run.turn.is_none() && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
         }
+        if matches!(
+            outcome,
+            RunEnd::Interrupted(Interruption::Stop | Interruption::Replaced)
+        ) {
+            effects.push(Effect::Revoke { run: run.id });
+        }
         run.held.clear();
         if notify == Notify::Shell && outcome != RunEnd::Done {
             let phase = match outcome {
                 RunEnd::Interrupted(_) => Phase::Interrupted,
                 RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
             };
-            effects.push(run_state(&run, phase));
+            told(&run, phase, effects);
         }
         run.ending = Some(Ending {
             outcome,
@@ -694,6 +737,13 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         thread: run.thread,
         phase,
     })
+}
+
+/// Tells the shell a run ended: its terminal phase on the control pipe, and the end of its data on
+/// the data pipe, after every frame it was sent.
+fn told(run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
+    effects.push(run_state(run, phase));
+    effects.push(Effect::Data(DataToShell::RunEnd { run: run.id }));
 }
 
 /// The text streamed since the last write, taken for the next one.

@@ -99,6 +99,10 @@ never lost:
 
 ### What the shell can rely on
 
+- **A run's data is complete at its `RunEnd`, on the data pipe.** Every run that reaches a
+  terminal `RunState` also gets one `RunEnd`, after all of its data frames. The two pipes aren't
+  ordered with each other, so a terminal `RunState` on control says nothing about what has
+  arrived on data; the shell keeps reading the run's data until its `RunEnd`.
 - `RunState Done` means the run's text, steps and outcome are committed.
 - Every other terminal `RunState` comes at once, whatever the store is doing, so `Stop`'s
   answer never waits on an fsync or a long write. It's the shell's to show, not a promise that
@@ -113,12 +117,31 @@ never lost:
 
 Budgets are absolute for the run and never reset (OSC-105 boundary 5): 120 s of wall clock, 1 MiB
 of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, and the text or
-step that went over is never sent. The wall clock covers the engine only: once it says it's done,
-the deadline no longer applies, even while its last step is still being stored. Model rounds, tool calls and speech budgets arrive with the
-engines that use them.
+step that went over is never sent. The wall clock starts when the turn is accepted, so time a held
+turn spends waiting counts against it, and it stops applying once the engine says it's done, even
+while the run's last writes are still pending. Model rounds, tool calls and speech budgets arrive
+with the engines that use them.
 
-## Not here yet
+## The fixture engine
 
-The coordinator isn't wired to the pipes until the next pull request, which adds the store
-thread, the fixture engine, the per-pipe writers and the watchdog. The step is a labelled
-placeholder until slice 4's scene format.
+Until slice 3 brings real engines, every run plays a fixture script
+(`crates/brain/fixtures/default.txt`, or in a dev build the file `CAPSULA_FIXTURE` names). One
+line per event: `<ms> text <words>`, `<ms> fill <bytes>`, `<ms> step <label>`, `<ms> fail`, and
+`late <label>`, a step the engine still finishes after it's cancelled. The coordinator refuses
+that late step as stale, and the store would refuse it too.
+
+## Around the coordinator
+
+The store runs on its own thread, which owns the connection and keeps the store contract above:
+operations in order, one transaction each, every one answered. The fixture engine, the store
+thread and the deadline timer report back as inputs, and the pipes' readers and writers are
+described in `ipc.md`. A shell that disconnects ends the current run as
+`interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
+connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
+the store to close.
+
+shortcut: a store that never answers leaves a finished run unconfirmed. At the next start, runs
+still active in the store become `failed(crash)`; outcomes already committed stay, and work not
+yet committed may be lost. Fine while the store is local SQLite.
+
+The step is a labelled placeholder until slice 4's scene format.

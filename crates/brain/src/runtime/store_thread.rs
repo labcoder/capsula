@@ -1,0 +1,195 @@
+//! The store's thread: one thread owns the connection and runs the coordinator's store
+//! operations in order, answering with acknowledgements.
+
+use std::sync::mpsc;
+use std::thread;
+
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
+
+use crate::coordinator::{Input, StoreOp};
+use crate::store::{EventKind, NewEvent, Store};
+
+#[derive(Debug)]
+pub(crate) struct StoreThread {
+    ops: mpsc::Sender<StoreOp>,
+    /// Fires when the thread has run every queued op and closed the store.
+    done: oneshot::Receiver<()>,
+}
+
+impl StoreThread {
+    pub(crate) fn spawn(mut store: Store, acks: UnboundedSender<Input>) -> std::io::Result<Self> {
+        let (ops, queue) = mpsc::channel();
+        let (finished, done) = oneshot::channel();
+        thread::Builder::new()
+            .name("store".to_owned())
+            .spawn(move || {
+                // Every queued op runs, even with nobody left to hear the acknowledgement.
+                // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
+                // never leave the coordinator and new turns stop once 16 pile up; release builds
+                // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
+                for op in queue {
+                    if acks.send(apply(&mut store, op)).is_err() {
+                        tracing::debug!("an acknowledgement had no listener");
+                    }
+                }
+                drop(store);
+                if finished.send(()).is_err() {
+                    tracing::debug!("nobody waited for the store to close");
+                }
+            })?;
+        Ok(Self { ops, done })
+    }
+
+    /// Queues an operation. False when the thread has gone, which only a panic there causes.
+    pub(crate) fn send(&self, op: StoreOp) -> bool {
+        self.ops.send(op).is_ok()
+    }
+
+    /// Lets the queued operations finish, then closes the store. The receiver fires when it has,
+    /// and fails if the thread panicked; nothing blocks on the thread itself.
+    pub(crate) fn close(self) -> oneshot::Receiver<()> {
+        drop(self.ops);
+        self.done
+    }
+}
+
+/// Runs one operation in one transaction and answers it. Errors are logged by kind and run id
+/// only, never content.
+fn apply(store: &mut Store, op: StoreOp) -> Input {
+    let run = op.run();
+    let (result, stored, what) = match op {
+        StoreOp::BeginTurn {
+            thread,
+            title,
+            run,
+            text,
+        } => (
+            store.begin_turn(thread, title.as_deref(), run, &text),
+            Input::TurnStored { run },
+            "turn",
+        ),
+        StoreOp::CommitStep {
+            thread,
+            run,
+            text,
+            index,
+            step,
+        } => {
+            let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
+            let mut events = Vec::with_capacity(2);
+            if let Some(text) = &text {
+                events.push(NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some(text.as_str()),
+                    body: None,
+                });
+            }
+            events.push(NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some(step.label.as_str()),
+                body: Some(body.as_str()),
+            });
+            (
+                store.append(thread, run, &events),
+                Input::StepStored { run, index, step },
+                "step",
+            )
+        }
+        StoreOp::EndRun {
+            thread,
+            run,
+            text,
+            revealed,
+            end,
+        } => {
+            let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
+            let mut events = Vec::with_capacity(2);
+            if let Some(text) = &text {
+                events.push(NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some(text.as_str()),
+                    body: None,
+                });
+            }
+            if let Some(revealed) = &revealed {
+                events.push(NewEvent {
+                    kind: EventKind::Revealed,
+                    text: None,
+                    body: Some(revealed.as_str()),
+                });
+            }
+            (
+                store.end_run(thread, run, &events, end),
+                Input::RunStored { run },
+                "outcome",
+            )
+        }
+    };
+    match result {
+        Ok(()) => stored,
+        Err(error) => {
+            tracing::warn!(%error, run = run.0, what, "a store operation failed");
+            Input::StoreFailed { run }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use capsula_protocol::message::{RunId, Step, ThreadId};
+    use tokio::sync::mpsc;
+
+    use super::StoreThread;
+    use crate::coordinator::{Input, StoreOp};
+    use crate::store::{RunEnd, Store};
+    use crate::test_support::Scratch;
+
+    #[test]
+    fn every_operation_gets_one_reply_in_order() {
+        let scratch = Scratch::new("replies");
+        let store = Store::open(&scratch.db()).expect("store");
+        let (thread, run) = (ThreadId(1), RunId(1));
+        let (acks, mut replies) = mpsc::unbounded_channel();
+        let store = StoreThread::spawn(store, acks).expect("thread");
+        for op in [
+            StoreOp::BeginTurn {
+                thread,
+                title: Some("t".to_owned()),
+                run,
+                text: "hi".to_owned(),
+            },
+            StoreOp::CommitStep {
+                thread: ThreadId(2),
+                run,
+                text: None,
+                index: 0,
+                step: Step {
+                    label: "s".to_owned(),
+                },
+            },
+            StoreOp::EndRun {
+                thread,
+                run,
+                text: None,
+                revealed: None,
+                end: RunEnd::Done,
+            },
+        ] {
+            assert!(store.send(op));
+        }
+        store.close().blocking_recv().expect("closed");
+        let mut got = Vec::new();
+        while let Ok(reply) = replies.try_recv() {
+            got.push(reply);
+        }
+        assert_eq!(
+            got,
+            [
+                Input::TurnStored { run },
+                Input::StoreFailed { run },
+                Input::RunStored { run },
+            ]
+        );
+    }
+}

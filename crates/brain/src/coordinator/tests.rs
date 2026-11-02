@@ -40,6 +40,10 @@ fn committed(index: u32, label: &str) -> Effect {
     })
 }
 
+fn run_end(run: RunId) -> Effect {
+    Effect::Data(DataToShell::RunEnd { run })
+}
+
 fn text(delta: &str) -> Effect {
     Effect::Data(DataToShell::AssistantText {
         run: R,
@@ -169,10 +173,12 @@ fn text_waits_behind_a_pending_step() {
         commit("before", 0, "a")
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("after a".to_owned()))),
+        core.handle(engine(R, EngineEvent::Text("after ".to_owned()))),
         Ok(Vec::new()),
         "held behind a"
     );
+    core.handle(engine(R, EngineEvent::Text("a".to_owned())))
+        .expect("current");
     assert_eq!(
         core.handle(engine(R, EngineEvent::Step(step("b"))))
             .expect("current"),
@@ -185,7 +191,7 @@ fn text_waits_behind_a_pending_step() {
     assert_eq!(
         core.handle(ack(0, "a")).expect("current"),
         vec![committed(0, "a"), text("after a")],
-        "released up to the next pending step"
+        "released up to the next pending step, as one frame"
     );
     assert_eq!(
         core.handle(Input::Stop {
@@ -195,7 +201,9 @@ fn text_waits_behind_a_pending_step() {
         .expect("Stop is handled while a step is pending"),
         vec![
             Effect::CancelEngine { run: R },
-            state(R, T, Phase::Interrupted)
+            Effect::Revoke { run: R },
+            state(R, T, Phase::Interrupted),
+            run_end(R)
         ]
     );
     assert_eq!(
@@ -230,7 +238,9 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
         .expect("current"),
         vec![
             Effect::CancelEngine { run: R },
-            state(R, T, Phase::Interrupted)
+            Effect::Revoke { run: R },
+            state(R, T, Phase::Interrupted),
+            run_end(R)
         ],
         "the outcome waits for the step still in the store"
     );
@@ -276,7 +286,11 @@ fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_
             revealed: vec![0],
         })
         .expect("current"),
-        vec![state(R, ThreadId(2), Phase::Interrupted)],
+        vec![
+            Effect::Revoke { run: R },
+            state(R, ThreadId(2), Phase::Interrupted),
+            run_end(R)
+        ],
         "nothing to cancel"
     );
     assert_eq!(
@@ -301,10 +315,12 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         })
         .expect("turn");
     assert_eq!(
-        next[..4],
+        next[..6],
         [
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
+            run_end(R),
             end_run(None, None, RunEnd::Interrupted(Interruption::Replaced)),
             Effect::Store(StoreOp::BeginTurn {
                 thread: T,
@@ -334,7 +350,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
     assert_eq!(
         core.handle(Input::RunStored { run: RunId(11) })
             .expect("ending"),
-        vec![state(RunId(11), T, Phase::Done)]
+        vec![state(RunId(11), T, Phase::Done), run_end(RunId(11))]
     );
 }
 
@@ -349,7 +365,7 @@ fn done_is_told_only_once_it_is_stored_and_needs_no_cancel() {
     );
     assert_eq!(
         core.handle(Input::RunStored { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Done)]
+        vec![state(R, T, Phase::Done), run_end(R)]
     );
     assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()), "no run left");
 }
@@ -374,7 +390,7 @@ fn done_waits_for_the_last_step_to_be_committed_and_sent() {
     );
     assert_eq!(
         core.handle(Input::RunStored { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Done)]
+        vec![state(R, T, Phase::Done), run_end(R)]
     );
 }
 
@@ -419,7 +435,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     core.handle(engine(R, EngineEvent::Done)).expect("current");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Failed), failed_store()],
+        vec![state(R, T, Phase::Failed), run_end(R), failed_store()],
         "after Done, the shell is never told Done"
     );
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
@@ -499,6 +515,7 @@ fn a_store_failure_mid_run_records_failed_store() {
         vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Failed),
+            run_end(R),
             failed_store(),
         ]
     );
@@ -516,12 +533,16 @@ fn budgets_are_absolute_for_the_run() {
         .handle(engine(R, EngineEvent::Text("y".to_owned())))
         .expect("current");
     assert_eq!(
-        over[..2],
-        [Effect::CancelEngine { run: R }, state(R, T, Phase::Failed)],
+        over[..3],
+        [
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Failed),
+            run_end(R)
+        ],
         "the byte past the cap is never sent"
     );
     assert!(matches!(
-        &over[2],
+        &over[3],
         Effect::Store(StoreOp::EndRun {
             text: Some(stored),
             end: RunEnd::Failed(Failure::Budget),
@@ -535,6 +556,7 @@ fn budgets_are_absolute_for_the_run() {
         vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Failed),
+            run_end(R),
             end_run(None, None, RunEnd::Failed(Failure::Budget)),
         ]
     );
@@ -565,6 +587,7 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
         vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Interrupted),
+            run_end(R),
             end_run(None, None, RunEnd::Interrupted(Interruption::ViewStalled)),
         ]
     );
@@ -577,7 +600,7 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
     .expect("turn");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("current"),
-        vec![state(R, ThreadId(99), Phase::Failed)],
+        vec![state(R, ThreadId(99), Phase::Failed), run_end(R)],
         "nothing more is written for a turn the store refused"
     );
     assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
@@ -587,6 +610,7 @@ fn ends_failed(failure: Failure) -> Vec<Effect> {
     vec![
         Effect::CancelEngine { run: R },
         state(R, T, Phase::Failed),
+        run_end(R),
         end_run(None, None, RunEnd::Failed(failure)),
     ]
 }
@@ -653,7 +677,9 @@ fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
         .expect("still current"),
         vec![
             Effect::CancelEngine { run: R },
-            state(R, T, Phase::Interrupted)
+            Effect::Revoke { run: R },
+            state(R, T, Phase::Interrupted),
+            run_end(R)
         ]
     );
     assert_eq!(
@@ -711,7 +737,7 @@ fn a_deadline_after_done_leaves_the_finished_run_alone() {
     );
     assert_eq!(
         core.handle(Input::RunStored { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Done)]
+        vec![state(R, T, Phase::Done), run_end(R)]
     );
 }
 
@@ -739,7 +765,9 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         .expect("turn"),
         vec![
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
+            run_end(R),
             state(b, T, Phase::Thinking),
             Effect::ArmDeadline {
                 run: b,
@@ -754,7 +782,11 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             revealed: Vec::new(),
         })
         .expect("current"),
-        vec![state(b, T, Phase::Interrupted)]
+        vec![
+            Effect::Revoke { run: b },
+            state(b, T, Phase::Interrupted),
+            run_end(b)
+        ]
     );
     assert_eq!(core.handle(Input::TurnStored { run: b }), Err(Stale));
     assert_eq!(

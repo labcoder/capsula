@@ -55,6 +55,12 @@ pub const MAX_STEPS: usize = 64;
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
 
+/// Bytes of data-pipe frames the brain may send before the shell grants more with
+/// [`DataToBrain::Credit`] [guess]. It holds the largest frame the data pipe allows, so no frame
+/// is too big to send, and several of the 64 KiB text frames runs stream, so a reading shell
+/// rarely waits on a grant.
+pub const DATA_WINDOW: u32 = 512 * 1024;
+
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +101,8 @@ pub enum ControlToBrain {
         /// Indices of the steps that stayed on screen.
         revealed: Vec<u32>,
     },
+    /// The answer to [`ControlToShell::Ping`].
+    Pong,
 }
 
 /// Brain to shell, on the control pipe.
@@ -120,6 +128,8 @@ pub enum ControlToShell {
         /// Its new phase.
         phase: Phase,
     },
+    /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
+    Ping,
 }
 
 /// Shell to brain, on the data pipe.
@@ -133,6 +143,12 @@ pub enum DataToBrain {
         thread: Option<ThreadId>,
         /// What the user typed.
         text: String,
+    },
+    /// The shell has taken `bytes` more of the brain's data frames, header included, and the
+    /// brain may send that many more.
+    Credit {
+        /// How many bytes.
+        bytes: u32,
     },
 }
 
@@ -154,6 +170,12 @@ pub enum DataToShell {
         index: u32,
         /// The step.
         step: Step,
+    },
+    /// The run's last data frame. The pipes aren't ordered with each other, so a terminal
+    /// `RunState` on the control pipe doesn't mean the run's data has arrived; this does.
+    RunEnd {
+        /// The run that ended.
+        run: RunId,
     },
 }
 

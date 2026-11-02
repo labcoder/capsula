@@ -1,42 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
+
+use crate::test_support::Scratch;
 
 use super::{
     Deletion, EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, Store, StoreError,
 };
-
-/// A store file in its own temp folder, removed afterwards.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "{}-store-{}-{name}",
-            constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
-        // A folder left by an earlier aborted run would make the test start from old data.
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("old scratch folder removable");
-        }
-        Self(dir)
-    }
-
-    fn db(&self) -> PathBuf {
-        self.0.join("store.db")
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.0) {
-            eprintln!("scratch folder left behind: {error}");
-        }
-    }
-}
 
 const MARKER: &str = "zqxplantedmarker";
 
