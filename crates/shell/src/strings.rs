@@ -48,11 +48,18 @@ pub(crate) enum Text {
     ThreadsOffline,
     ThreadSearchTooLong,
     ThreadsFailed,
+    DeleteThread,
+    DeleteThreadTitle,
+    DeleteThreadBody,
+    DeleteThreadCancel,
+    ThreadDeleting,
+    ThreadDeleteFailed,
+    ThreadDeletesFull,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 39] = [
+    const ALL: [Self; 46] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -92,6 +99,13 @@ impl Text {
         Self::ThreadsOffline,
         Self::ThreadSearchTooLong,
         Self::ThreadsFailed,
+        Self::DeleteThread,
+        Self::DeleteThreadTitle,
+        Self::DeleteThreadBody,
+        Self::DeleteThreadCancel,
+        Self::ThreadDeleting,
+        Self::ThreadDeleteFailed,
+        Self::ThreadDeletesFull,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -147,6 +161,13 @@ impl Text {
             Self::ThreadsOffline => "threads-offline",
             Self::ThreadSearchTooLong => "threads-search-too-long",
             Self::ThreadsFailed => "threads-failed",
+            Self::DeleteThread => "thread-delete",
+            Self::DeleteThreadTitle => "thread-delete-title",
+            Self::DeleteThreadBody => "thread-delete-body",
+            Self::DeleteThreadCancel => "thread-delete-cancel",
+            Self::ThreadDeleting => "thread-deleting",
+            Self::ThreadDeleteFailed => "thread-delete-failed",
+            Self::ThreadDeletesFull => "thread-deletes-full",
         }
     }
 }

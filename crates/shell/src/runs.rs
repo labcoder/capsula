@@ -9,8 +9,8 @@
 
 use capsula_protocol::frame::Pipe;
 use capsula_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
-    SceneDescriptor, ThreadId,
+    ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES,
+    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId,
 };
 
 use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
@@ -37,6 +37,8 @@ pub(crate) enum Refused {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Shown {
     pub(crate) run: RunId,
+    /// Its thread, when its run was the live one as it began showing.
+    pub(crate) thread: Option<ThreadId>,
     /// The end of its answer, at most [`TEXT_KEPT`] bytes.
     pub(crate) text: String,
 }
@@ -54,6 +56,7 @@ pub(crate) struct Applied {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Live {
     run: RunId,
+    thread: ThreadId,
     state_ended: bool,
     data_ended: bool,
 }
@@ -85,11 +88,18 @@ pub(crate) struct Runs {
     drawing: Drawing,
     /// The brain the last connection reached.
     incarnation: Option<Incarnation>,
+    /// Threads confirmed deleted whose delete isn't answered yet.
+    deleting: Vec<ThreadId>,
+    /// Threads hidden or removed while turns sent before were unanswered, with how many still
+    /// are. Each holds one of the slots `deleting` shares.
+    gone: Vec<(ThreadId, usize)>,
 }
 
 impl Runs {
     /// Selects the thread the next typed turn continues; no message or store write is needed.
+    /// A thread being deleted is never selected: the next turn starts a new one.
     pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) {
+        let thread = thread.filter(|thread| !self.holds(*thread));
         self.thread = thread;
         self.durable = thread.is_some();
         self.selection_pending = self.pending;
@@ -209,6 +219,107 @@ impl Runs {
         self.drawing.forget_runs();
     }
 
+    /// A delete slot is free.
+    pub(crate) fn can_delete(&self) -> bool {
+        self.deleting.len() + self.gone.len() < MAX_PENDING_DELETES
+    }
+
+    /// `thread` holds a delete slot: its delete is unanswered, or turns sent before it are.
+    pub(crate) fn holds(&self, thread: ThreadId) -> bool {
+        self.deleting.contains(&thread) || self.gone.iter().any(|(gone, _)| *gone == thread)
+    }
+
+    /// The threads whose delete is unanswered.
+    pub(crate) fn deleting(&self) -> &[ThreadId] {
+        &self.deleting
+    }
+
+    /// The user confirmed deleting `thread`: it takes a slot, and the next turn no longer
+    /// continues it. False when every slot is held or it already holds one.
+    pub(crate) fn confirm_delete(&mut self, thread: ThreadId) -> bool {
+        if !self.can_delete() || self.holds(thread) {
+            return false;
+        }
+        self.deleting.push(thread);
+        if self.thread == Some(thread) {
+            self.thread = None;
+            self.durable = false;
+        }
+        true
+    }
+
+    /// The brain answered `thread`'s delete. On a hide or removal, every run up to `last_run`
+    /// is fenced before the thread's text goes, and held frames the fence now covers are dropped
+    /// with their credit, which this returns. An answer for a thread with no slot is ignored.
+    pub(crate) fn deleted(
+        &mut self,
+        thread: ThreadId,
+        outcome: Deleted,
+        last_run: Option<RunId>,
+    ) -> u32 {
+        let Some(at) = self.deleting.iter().position(|held| *held == thread) else {
+            return 0;
+        };
+        self.deleting.remove(at);
+        if outcome == Deleted::NotHidden {
+            return 0;
+        }
+        self.fence = self.fence.max(last_run.unwrap_or_default());
+        let fence = self.fence;
+        let mut credit = 0_u32;
+        self.held.retain(|(message, bytes)| {
+            let fenced = run_of(message).is_some_and(|run| run <= fence);
+            if fenced {
+                credit = credit.saturating_add(*bytes);
+            }
+            !fenced
+        });
+        if self.pending > 0 {
+            self.gone.push((thread, self.pending));
+        }
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.thread == Some(thread))
+        {
+            self.shown = None;
+        }
+        if self.live.is_some_and(|live| live.thread == thread) {
+            self.live = None;
+        }
+        credit
+    }
+
+    /// The brain refused the oldest pending turn before giving it a run. It settles only the
+    /// counts: nothing is shown, stopped, fenced or targeted.
+    pub(crate) fn refused(&mut self) {
+        if self.pending == 0 {
+            return;
+        }
+        self.pending -= 1;
+        self.answered_one();
+        self.cancelled = self.cancelled.saturating_sub(1);
+        self.selection_pending = self.selection_pending.saturating_sub(1);
+    }
+
+    /// One pending turn was answered: every `gone` entry waits on one fewer.
+    fn answered_one(&mut self) {
+        for (_, waiting) in &mut self.gone {
+            *waiting -= 1;
+        }
+        self.gone.retain(|(_, waiting)| *waiting > 0);
+    }
+
+    /// A deleted thread's scenes left the visible set; returns the credit of held chunks dropped.
+    pub(crate) fn remove_scenes(&mut self, scenes: &[SceneId]) -> u32 {
+        self.drawing.remove(scenes)
+    }
+
+    /// `Scenes` has been applied on this connection, so resent deletes follow it.
+    pub(crate) fn described(&self) -> bool {
+        self.drawing.described()
+    }
+
     /// The link connected, as connection `generation`.
     pub(crate) fn connected(&mut self, generation: u64) {
         self.connected = true;
@@ -225,6 +336,7 @@ impl Runs {
         self.selection_pending = 0;
         self.cancelled = 0;
         self.held.clear();
+        self.gone.clear();
         self.drawing.disconnected();
     }
 
@@ -235,14 +347,20 @@ impl Runs {
         let mut applied = Applied::default();
         if run > self.answered {
             self.answered = run;
-            if self.selection_pending == 0 {
+            // A turn sent before its thread's delete never targets it, and shows nothing.
+            let deleted = self.holds(thread);
+            if deleted {
+                self.fence = self.fence.max(run);
+            }
+            if self.selection_pending > 0 {
+                self.selection_pending -= 1;
+            } else if !deleted {
                 self.durable &= self.thread == Some(thread);
                 self.thread = Some(thread);
-            } else {
-                self.selection_pending -= 1;
             }
             if self.pending > 0 {
                 self.pending -= 1;
+                self.answered_one();
                 if self.cancelled > 0 {
                     self.cancelled -= 1;
                     self.fence = self.fence.max(run);
@@ -255,6 +373,7 @@ impl Runs {
             if run > self.fence {
                 self.live = Some(Live {
                     run,
+                    thread,
                     state_ended: false,
                     data_ended: false,
                 });
@@ -302,6 +421,7 @@ impl Runs {
                 if let Some(shown) = self.view(run) {
                     shown.text.push_str(&delta);
                     keep_end(&mut shown.text, TEXT_KEPT);
+                    self.answered_from(run);
                 }
             }
             DataToShell::StepCommit {
@@ -312,13 +432,26 @@ impl Runs {
             } => {
                 if self.view(run).is_some() {
                     self.drawing.step(run, scene, index, step);
+                    self.answered_from(run);
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
-            | DataToShell::SceneSnapshot { .. } => {}
+            | DataToShell::SceneSnapshot { .. }
+            | DataToShell::ScenesRemoved { .. } => {}
+        }
+    }
+
+    /// Output of the live run of the target thread proves the thread stored, since a run's
+    /// engine starts only once its turn is; an older run's output proves nothing.
+    fn answered_from(&mut self, run: RunId) {
+        if self
+            .live
+            .is_some_and(|live| live.run == run && self.thread == Some(live.thread))
+        {
+            self.durable = true;
         }
     }
 
@@ -339,8 +472,13 @@ impl Runs {
             return None;
         }
         if self.shown.as_ref().is_none_or(|shown| run > shown.run) {
+            let thread = self
+                .live
+                .filter(|live| live.run == run)
+                .map(|live| live.thread);
             self.shown = Some(Shown {
                 run,
+                thread,
                 ..Shown::default()
             });
         }
@@ -356,7 +494,8 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         DataToShell::ThreadList { .. }
         | DataToShell::Page { .. }
         | DataToShell::PageFailed { .. }
-        | DataToShell::SceneSnapshot { .. } => None,
+        | DataToShell::SceneSnapshot { .. }
+        | DataToShell::ScenesRemoved { .. } => None,
     }
 }
 

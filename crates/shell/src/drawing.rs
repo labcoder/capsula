@@ -108,6 +108,39 @@ impl Drawing {
         self.recovery = Recovery::Offline;
     }
 
+    /// `Scenes` has been applied on this connection.
+    pub(crate) fn described(&self) -> bool {
+        matches!(self.recovery, Recovery::Receiving { .. })
+    }
+
+    /// A deleted thread's scenes leave: shown, still recovering or held for `Scenes`. They're
+    /// remembered as cleared first, so nothing of them installs later. Returns the withheld
+    /// credit of the held chunks dropped.
+    pub(crate) fn remove(&mut self, scenes: &[SceneId]) -> u32 {
+        for scene in scenes {
+            self.remember(*scene);
+            self.shown.remove(scene);
+        }
+        match &mut self.recovery {
+            Recovery::Offline => 0,
+            Recovery::Receiving { pending } => {
+                pending.retain(|scene, _| !scenes.contains(scene));
+                0
+            }
+            Recovery::Awaiting { held } => {
+                let mut credit = 0_u32;
+                held.retain(|chunk| {
+                    let removed = scenes.contains(&chunk.scene);
+                    if removed {
+                        credit = credit.saturating_add(chunk.bytes);
+                    }
+                    !removed
+                });
+                credit
+            }
+        }
+    }
+
     /// A scene is shown, or a recovery Esc could cancel is awaiting or receiving.
     pub(crate) fn active(&self) -> bool {
         !self.shown.is_empty()
