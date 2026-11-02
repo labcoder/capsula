@@ -397,6 +397,11 @@ fn apply(runs: &mut Runs, handle: &LinkHandle, event: LinkEvent) -> u32 {
     }
 }
 
+fn frame_size(message: &DataToShell) -> u32 {
+    let size = frame::encode(message, Pipe::Data).expect("encodes").len();
+    u32::try_from(size).expect("small")
+}
+
 fn delete_of(thread: ThreadId, after_turns: u32) -> ControlToBrain {
     ControlToBrain::DeleteThread {
         thread,
@@ -460,6 +465,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             last_run: None,
         },
         ControlToShell::TurnRefused { thread: Some(t) },
+        run_state(1, u, Phase::Done),
     ];
     let mut credit = Vec::new();
     for answer in answers {
@@ -470,9 +476,9 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             assert!(!runs.select_thread(Some(t)));
         }
     }
-    assert_eq!(credit, [bytes, 0, 0], "the held text's credit, once");
+    assert_eq!(credit, [bytes, 0, 0, 0], "the held text's credit, once");
     assert!(!runs.holds(t));
-    assert!(runs.working(), "U's run is live");
+    assert!(runs.working(), "U's data hasn't ended");
     assert_eq!(
         runs.shown(),
         Some(&Shown {
@@ -486,6 +492,11 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
         Some(DataToBrain::Credit { bytes })
     );
+    // With U ended, only a turn still counted as pending would keep the runs working.
+    let end = DataToShell::RunEnd { run: RunId(1) };
+    frame::write(&mut &*link.data, &end, Pipe::Data).expect("written");
+    assert_eq!(apply(&mut runs, handle, next(&events)), frame_size(&end));
+    assert!(!runs.working(), "U's turn was answered and T's refused");
 
     runs.submit("next", send).expect("queued");
     assert_eq!(
@@ -596,11 +607,8 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     .expect("written");
     assert_eq!(apply(&mut runs, &handle, next(&events)), 0);
     frame::write(&mut &b_data, &text(4, "b"), Pipe::Data).expect("written");
-    let size = frame::encode(&text(4, "b"), Pipe::Data)
-        .expect("encodes")
-        .len();
     let credit = apply(&mut runs, &handle, next(&events));
-    assert_eq!(usize::try_from(credit).expect("small"), size, "not fenced");
+    assert_eq!(credit, frame_size(&text(4, "b")), "not fenced");
     assert_eq!(
         runs.shown(),
         Some(&Shown {
