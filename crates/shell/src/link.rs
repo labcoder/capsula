@@ -198,20 +198,32 @@ struct Held {
 /// Queues every held delete not yet queued on `outbox`'s connection, in order, each with the
 /// turns queued before it. False when the control queue is full.
 fn queue_deletes(outbox: &Outbox, deletes: &mut [Held]) -> bool {
+    let after_turns = outbox.submits.load(Ordering::SeqCst);
+    queue_on(&outbox.control, outbox.generation, after_turns, deletes)
+}
+
+/// [`queue_deletes`] on connection `generation`'s control queue. A delete that reached an
+/// earlier connection stays a resend through every retry.
+fn queue_on(
+    control: &Sender<ControlToBrain>,
+    generation: u64,
+    after_turns: u32,
+    deletes: &mut [Held],
+) -> bool {
     for held in deletes
         .iter_mut()
-        .filter(|held| held.sent_on != Some(outbox.generation))
+        .filter(|held| held.sent_on != Some(generation))
     {
         held.resend |= held.sent_on.is_some();
         let delete = ControlToBrain::DeleteThread {
             thread: held.thread,
-            after_turns: outbox.submits.load(Ordering::SeqCst),
+            after_turns,
             resend: held.resend,
         };
-        if outbox.control.try_send(delete).is_err() {
+        if control.try_send(delete).is_err() {
             return false;
         }
-        held.sent_on = Some(outbox.generation);
+        held.sent_on = Some(generation);
     }
     true
 }
@@ -842,3 +854,7 @@ fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
 #[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "link_delete_tests.rs"]
+mod delete_tests;
