@@ -36,7 +36,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PIPE_BUSY: i32 = 231;
 /// How long Quit waits for the brain to take `Quitting` and close the pipe.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
-/// A second brain loss within this long needs the user's Retry [guess, v1 Â§2.3].
+/// A second brain loss within this long needs the user's Retry [guess, v1 §2.3].
 const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 /// Control messages waiting for the brain to read them before a send fails [guess]. The shell
 /// sends a handful at a time: Stop, `ClearDrawing`, `Pong` and `Quitting`.

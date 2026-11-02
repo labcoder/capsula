@@ -147,6 +147,8 @@ impl ListDelegate for ThreadsDelegate {
         let state = self.model.read(cx);
         let text = if state.search_error.is_some() {
             Text::ThreadSearchTooLong
+        } else if state.failed {
+            Text::ThreadsFailed
         } else if state.searching() {
             Text::EmptyThreadSearch
         } else {
@@ -422,8 +424,15 @@ impl Render for ThreadsView {
         let escape_events = self.events.clone();
         let cancel_events = self.events.clone();
         let stop_events = self.events.clone();
-        let offline = (!self.model.read(cx).online())
-            .then(|| cx.global::<Strings>().get(Text::ThreadsOffline));
+        let state = self.model.read(cx);
+        let notice = if !state.online() {
+            Some(Text::ThreadsOffline)
+        } else if state.failed {
+            Some(Text::ThreadsFailed)
+        } else {
+            None
+        }
+        .map(|text| cx.global::<Strings>().get(text));
         let stop_label = cx.global::<Strings>().get(Text::Stop);
         let search = cx.global::<Strings>().get(Text::SearchThreads);
         let toolbar = self.toolbar(cx);
@@ -460,7 +469,7 @@ impl Render for ThreadsView {
                     )
                     .child(detail),
             )
-            .children(offline.map(|text| {
+            .children(notice.map(|text| {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)

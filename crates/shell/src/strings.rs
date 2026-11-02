@@ -48,11 +48,12 @@ pub(crate) enum Text {
     ThreadRevealed,
     ThreadsOffline,
     ThreadSearchTooLong,
+    ThreadsFailed,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 39] = [
+    const ALL: [Self; 40] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -92,6 +93,7 @@ impl Text {
         Self::ThreadRevealed,
         Self::ThreadsOffline,
         Self::ThreadSearchTooLong,
+        Self::ThreadsFailed,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -147,6 +149,7 @@ impl Text {
             Self::ThreadRevealed => "thread-revealed",
             Self::ThreadsOffline => "threads-offline",
             Self::ThreadSearchTooLong => "threads-search-too-long",
+            Self::ThreadsFailed => "threads-failed",
         }
     }
 }

@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use capsula_protocol::message::{DataToShell, PageOf, RunId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -343,55 +344,28 @@ impl StoreThread {
 }
 
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
-    let write = op.run().is_some();
-    if write {
-        purger.op_arriving();
-    }
-    if acks.send(apply(store, op)).is_err() {
-        tracing::debug!("an acknowledgement had no listener");
-    }
-    if write {
-        purger.op_arrived(store);
-    } else {
-        purger.tick(store);
-    }
-}
-
-/// Runs one operation in one transaction and answers it. Errors are logged by kind and run id
-/// only, never content.
-fn apply(store: &mut Store, op: StoreOp) -> Input {
-    if let StoreOp::ReadPage {
-        epoch,
-        request,
-        page,
-    } = op
-    {
-        let reply = store
-            .reconnect()
-            .and_then(|()| store.read_page(request, page));
-        return Input::PageRead {
+    match op {
+        StoreOp::ReadPage {
             epoch,
             request,
-            reply: reply.ok(),
-        };
-    }
-    let run = op.run().expect("a write belongs to a run");
-    // After a swap's reopen failed: fails closed until the file opens again.
-    if let Err(error) = store.reconnect() {
-        tracing::warn!(%error, run = run.0, "the store is unavailable");
-        return Input::StoreFailed { run };
-    }
-    let (result, stored, what) = match op {
-        StoreOp::ReadPage { .. } => unreachable!("reads were handled above"),
+            page,
+        } => {
+            answer(acks, read(store, epoch, request, page));
+            purger.tick(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,
             run,
             text,
-        } => (
-            store.begin_turn(thread, title.as_deref(), run, &text),
-            Input::TurnStored { run },
+        } => write(
+            store,
+            purger,
+            acks,
+            run,
             "turn",
+            Input::TurnStored { run },
+            |store| store.begin_turn(thread, title.as_deref(), run, &text),
         ),
         StoreOp::CommitStep {
             thread,
@@ -401,24 +375,31 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             step,
         } => {
             let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
-            events.push(NewEvent {
-                kind: EventKind::SceneStep,
-                text: Some(step.label.as_str()),
-                body: Some(body.as_str()),
-            });
-            (
-                store.append(thread, run, &events),
-                Input::StepStored { run, index, step },
+            let label = step.label.clone();
+            write(
+                store,
+                purger,
+                acks,
+                run,
                 "step",
-            )
+                Input::StepStored { run, index, step },
+                |store| {
+                    let mut events = Vec::with_capacity(2);
+                    if let Some(text) = &text {
+                        events.push(NewEvent {
+                            kind: EventKind::AssistantText,
+                            text: Some(text.as_str()),
+                            body: None,
+                        });
+                    }
+                    events.push(NewEvent {
+                        kind: EventKind::SceneStep,
+                        text: Some(label.as_str()),
+                        body: Some(body.as_str()),
+                    });
+                    store.append(thread, run, &events)
+                },
+            );
         }
         StoreOp::EndRun {
             thread,
@@ -426,36 +407,80 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             text,
             revealed,
             end,
-        } => {
-            let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
-            if let Some(revealed) = &revealed {
-                events.push(NewEvent {
-                    kind: EventKind::Revealed,
-                    text: None,
-                    body: Some(revealed.as_str()),
-                });
-            }
-            (
-                store.end_run(thread, run, &events, end),
-                Input::RunStored { run },
-                "outcome",
-            )
-        }
+        } => write(
+            store,
+            purger,
+            acks,
+            run,
+            "outcome",
+            Input::RunStored { run },
+            |store| {
+                let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
+                let mut events = Vec::with_capacity(2);
+                if let Some(text) = &text {
+                    events.push(NewEvent {
+                        kind: EventKind::AssistantText,
+                        text: Some(text.as_str()),
+                        body: None,
+                    });
+                }
+                if let Some(revealed) = &revealed {
+                    events.push(NewEvent {
+                        kind: EventKind::Revealed,
+                        text: None,
+                        body: Some(revealed.as_str()),
+                    });
+                }
+                store.end_run(thread, run, &events, end)
+            },
+        ),
+    }
+}
+
+/// Reads one page, never holding off the purge. A failure is logged by kind only.
+fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
+    let reply = store
+        .reconnect()
+        .and_then(|()| store.read_page(request, page));
+    if let Err(error) = &reply {
+        tracing::warn!(%error, "a page read failed");
+    }
+    Input::PageRead {
+        epoch,
+        request,
+        reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+    }
+}
+
+/// Runs one write in one transaction and answers it, holding off the purge meanwhile. Errors are
+/// logged by kind and run id only, never content.
+fn write(
+    store: &mut Store,
+    purger: &mut Purger,
+    acks: &UnboundedSender<Input>,
+    run: RunId,
+    what: &'static str,
+    stored: Input,
+    op: impl FnOnce(&mut Store) -> Result<(), StoreError>,
+) {
+    purger.op_arriving();
+    // After a swap's reopen failed: fails closed until the file opens again.
+    let reply = if let Err(error) = store.reconnect() {
+        tracing::warn!(%error, run = run.0, "the store is unavailable");
+        Input::StoreFailed { run }
+    } else if let Err(error) = op(store) {
+        tracing::warn!(%error, run = run.0, what, "a store operation failed");
+        Input::StoreFailed { run }
+    } else {
+        stored
     };
-    match result {
-        Ok(()) => stored,
-        Err(error) => {
-            tracing::warn!(%error, run = run.0, what, "a store operation failed");
-            Input::StoreFailed { run }
-        }
+    answer(acks, reply);
+    purger.op_arrived(store);
+}
+
+fn answer(acks: &UnboundedSender<Input>, reply: Input) {
+    if acks.send(reply).is_err() {
+        tracing::debug!("an acknowledgement had no listener");
     }
 }
 

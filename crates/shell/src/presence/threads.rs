@@ -1,7 +1,7 @@
 //! Lifetime, focus, and page requests for the anchored threads surface.
 
 use capsula_protocol::message::ThreadId;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription, Window};
 
 use super::text::{Hide, Typing};
 use super::thread_view::ThreadsView;
@@ -124,7 +124,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         self.threads.update(cx, |state, cx| {
-            state.refresh();
+            state.show();
             cx.notify();
         });
         self.request_pages(cx);
@@ -160,26 +160,11 @@ impl Presence {
         let owner = cx.weak_entity();
         cx.defer(move |cx| {
             let result = window.update(cx, |_, window, cx| {
-                owner.update(cx, |this, cx| {
-                    let activation = cx.observe_window_activation(window, |this, window, cx| {
-                        let active = window.is_window_active();
-                        if let Some(panel) = &mut this.thread_panel {
-                            panel.focused = active;
-                            if active { panel.typing.activated(); }
-                        }
-                        if !active {
-                            let owner = cx.weak_entity();
-                            cx.defer(move |cx| {
-                                if let Ok(Err(error)) = owner.update(cx, |this, cx| this.hide_threads(Hide::Deactivated, cx)) {
-                                    tracing::error!(%error, "can't hide the inactive threads panel");
-                                }
-                            });
-                        }
-                    });
-                    if let Some(panel) = &mut this.thread_panel { panel.activation = Some(activation); }
-                })
+                owner.update(cx, |this, cx| this.observe_threads_activation(window, cx))
             });
-            if let Err(error) = result { tracing::error!(%error, "can't observe threads panel activation"); }
+            if let Err(error) = result {
+                tracing::error!(%error, "can't observe threads panel activation");
+            }
         });
         Ok(ThreadsPanel {
             window,
@@ -190,6 +175,36 @@ impl Presence {
             previous: None,
             activation: None,
         })
+    }
+
+    fn observe_threads_activation(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.threads_activation(window, cx);
+        });
+        if let Some(panel) = &mut self.thread_panel {
+            panel.activation = Some(activation);
+        }
+    }
+
+    fn threads_activation(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+        let active = window.is_window_active();
+        if let Some(panel) = &mut self.thread_panel {
+            panel.focused = active;
+            if active {
+                panel.typing.activated();
+            }
+        }
+        if active {
+            return;
+        }
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            if let Ok(Err(error)) =
+                owner.update(cx, |this, cx| this.hide_threads(Hide::Deactivated, cx))
+            {
+                tracing::error!(%error, "can't hide the inactive threads panel");
+            }
+        });
     }
 
     pub(super) fn dismiss_threads(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -220,7 +235,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         self.threads.update(cx, |state, cx| {
-            state.select(None);
+            state.hide();
             cx.notify();
         });
         self.request_pages(cx);

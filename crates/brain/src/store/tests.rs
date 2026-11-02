@@ -1360,10 +1360,10 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
 }
 
 /// A measured store's threads, events per thread, bytes per event and captures per thread.
-type Shape = (usize, usize, usize, usize);
+pub(crate) type Shape = (usize, usize, usize, usize);
 
 /// The stores the purge is measured on.
-const MEASURED_STORES: [(&str, Shape); 4] = [
+pub(crate) const MEASURED_STORES: [(&str, Shape); 4] = [
     ("text 20k events", (1000, 20, 2000, 0)),
     ("text 100k events", (2000, 50, 2000, 0)),
     ("text 20k events + 4k captures", (1000, 20, 2000, 4)),
@@ -1371,7 +1371,10 @@ const MEASURED_STORES: [(&str, Shape); 4] = [
 ];
 
 /// Builds one of [`MEASURED_STORES`], with its WAL emptied.
-fn measured_store(scratch: &Scratch, (threads, events, bytes, captures): Shape) -> Store {
+pub(crate) fn measured_store(
+    scratch: &Scratch,
+    (threads, events, bytes, captures): Shape,
+) -> Store {
     let mut store = Store::open(&scratch.db()).expect("store");
     let words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do ";
     let text = words.repeat(bytes / words.len());

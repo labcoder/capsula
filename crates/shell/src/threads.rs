@@ -20,6 +20,8 @@ struct Pending {
     request: u32,
     revision: u64,
     read: Read,
+    /// A `RunState` arrived while this list read was in flight, so its reply may predate it.
+    stale: bool,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -29,6 +31,10 @@ pub(crate) enum SearchError {
 }
 
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the panel and its reads, not a state machine"
+)]
 pub(crate) struct Threads {
     pub(crate) rows: Vec<ThreadRow>,
     pub(crate) next: Option<ThreadCursor>,
@@ -39,7 +45,11 @@ pub(crate) struct Threads {
     pub(crate) listed: bool,
     pub(crate) loaded: bool,
     pub(crate) search_error: Option<SearchError>,
+    /// The last read failed; cleared by the next page that lands.
+    pub(crate) failed: bool,
     connected: bool,
+    /// Pages are read only while the panel is shown.
+    shown: bool,
     search: Option<String>,
     counter: u32,
     list_revision: u64,
@@ -84,6 +94,18 @@ impl Threads {
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = self.open.map(|_| Read::First);
         self.loaded = false;
+    }
+
+    /// The panel opened: reads start again, from a fresh first page.
+    pub(crate) fn show(&mut self) {
+        self.shown = true;
+        self.refresh();
+    }
+
+    /// The panel closed: nothing more is read until it opens.
+    pub(crate) fn hide(&mut self) {
+        self.shown = false;
+        self.select(None);
     }
 
     pub(crate) fn disconnected(&mut self) {
@@ -165,14 +187,15 @@ impl Threads {
         if self.open == Some(thread) && self.event_needed != Some(Read::First) {
             self.event_needed = Some(Read::Repair);
         }
-        if self.searching() || self.rows.first().is_some_and(|row| row.id == thread) {
+        if self.searching() {
             return;
         }
-        if self.list_needed.is_none()
-            && !self
-                .list_pending
-                .is_some_and(|pending| pending.read == Read::Repair)
-        {
+        // The read in flight may predate this change, so it earns one more read when it lands.
+        if let Some(pending) = &mut self.list_pending {
+            pending.stale = true;
+            return;
+        }
+        if self.list_needed.is_none() && self.rows.first().is_none_or(|row| row.id != thread) {
             self.list_needed = Some(Read::Repair);
         }
     }
@@ -180,7 +203,7 @@ impl Threads {
     /// Marks requests in flight before handing them to the nonblocking sender. A failed send
     /// disconnects this state; changing a query or selection never frees an unanswered slot.
     pub(crate) fn requests(&mut self) -> Vec<DataToBrain> {
-        if !self.connected {
+        if !self.connected || !self.shown {
             return Vec::new();
         }
         let mut requests = Vec::new();
@@ -193,6 +216,7 @@ impl Threads {
                 request,
                 revision: self.list_revision,
                 read,
+                stale: false,
             });
             requests.push(DataToBrain::PageRequest {
                 request,
@@ -211,6 +235,7 @@ impl Threads {
                 request,
                 revision: self.event_revision,
                 read,
+                stale: false,
             });
             requests.push(DataToBrain::PageRequest {
                 request,
@@ -227,6 +252,13 @@ impl Threads {
         requests
     }
 
+    /// Applies a page frame and returns its credit: the whole frame, used or dropped, since the
+    /// brain counted all of it against the window.
+    pub(crate) fn receive(&mut self, message: DataToShell, bytes: u32) -> u32 {
+        self.apply(message);
+        bytes
+    }
+
     pub(crate) fn apply(&mut self, message: DataToShell) {
         match message {
             DataToShell::ThreadList {
@@ -241,6 +273,9 @@ impl Threads {
                     return;
                 };
                 self.list_pending = None;
+                if pending.stale && self.list_needed.is_none() {
+                    self.list_needed = Some(Read::Repair);
+                }
                 if pending.revision != self.list_revision {
                     return;
                 }
@@ -269,6 +304,7 @@ impl Threads {
                     }
                 }
                 self.listed = true;
+                self.failed = false;
             }
             DataToShell::Page {
                 request,
@@ -289,6 +325,16 @@ impl Threads {
                 if pending.read == Read::First || !self.loaded {
                     self.events = events;
                     self.before = before;
+                } else if pending.read == Read::Repair
+                    && before.is_some()
+                    && self
+                        .events
+                        .first()
+                        .is_some_and(|shown| events.iter().all(|event| event.id > shown.id))
+                {
+                    // No overlap with what's shown: the gap is only reachable through this page's cursor.
+                    self.events = events;
+                    self.before = before;
                 } else if pending.read == Read::Repair {
                     let newest = self.events.first().map(|event| event.id);
                     let fresh = events
@@ -304,11 +350,32 @@ impl Threads {
                     self.before = before;
                 }
                 self.loaded = true;
+                self.failed = false;
             }
+            DataToShell::PageFailed { request } => self.read_failed(request),
             DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. } => {}
         }
+    }
+
+    /// Frees the failed request's slot. No retry here: the next refresh, selection or
+    /// `RunState` reads again.
+    fn read_failed(&mut self, request: u32) {
+        if self
+            .list_pending
+            .is_some_and(|pending| pending.request == request)
+        {
+            self.list_pending = None;
+        } else if self
+            .event_pending
+            .is_some_and(|pending| pending.request == request)
+        {
+            self.event_pending = None;
+        } else {
+            return;
+        }
+        self.failed = true;
     }
 
     fn number(&mut self) -> u32 {

@@ -285,12 +285,9 @@ impl Brain {
                     }
                 }
             };
-            if let Input::PageRead { epoch, reply, .. } = &input {
+            if let Input::PageRead { epoch, .. } = &input {
                 if *epoch != self.epoch {
                     continue;
-                }
-                if reply.is_none() {
-                    return Ended::Lost;
                 }
                 if !take_engine {
                     held_pages.push_back(input);
@@ -515,7 +512,9 @@ impl Link<'_, '_> {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
             | DataToShell::RunEnd { run } => Some(*run),
-            DataToShell::ThreadList { .. } | DataToShell::Page { .. } => None,
+            DataToShell::ThreadList { .. }
+            | DataToShell::Page { .. }
+            | DataToShell::PageFailed { .. } => None,
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");

@@ -273,7 +273,9 @@ impl Runs {
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
-            DataToShell::ThreadList { .. } | DataToShell::Page { .. } => {}
+            DataToShell::ThreadList { .. }
+            | DataToShell::Page { .. }
+            | DataToShell::PageFailed { .. } => {}
         }
     }
 
@@ -308,7 +310,9 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         DataToShell::AssistantText { run, .. }
         | DataToShell::StepCommit { run, .. }
         | DataToShell::RunEnd { run } => Some(*run),
-        DataToShell::ThreadList { .. } | DataToShell::Page { .. } => None,
+        DataToShell::ThreadList { .. }
+        | DataToShell::Page { .. }
+        | DataToShell::PageFailed { .. } => None,
     }
 }
 

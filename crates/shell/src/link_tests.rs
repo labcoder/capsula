@@ -23,6 +23,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
     let events = patient(link.events);
     let session = connected(next(&events));
     let mut threads = Threads::default();
+    threads.show();
     threads.connected();
     let request = threads.requests().remove(0);
     assert!(link.handle.send_data(&session, request.clone()));
@@ -70,8 +71,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
             usize::try_from(bytes).expect("small"),
             frame::encode(&sent, Pipe::Data).expect("frame").len()
         );
-        threads.apply(message);
-        session.grant(bytes);
+        session.grant(threads.receive(message, bytes));
         assert_eq!(
             frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("credit"),
             Some(DataToBrain::Credit { bytes })

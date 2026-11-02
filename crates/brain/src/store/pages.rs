@@ -116,6 +116,9 @@ impl Store {
         if words.contains('\0') {
             return Ok((Vec::new(), None));
         }
+        // shortcut: every page scores every matching event before taking its rows, ahead of the
+        // next write: about 65 ms at 20k matching events and 335 ms at 100k on Rez; OSC-152 moves
+        // page reads to their own read-only connection.
         let phrase = format!("\"{}\"", words.replace('"', "\"\""));
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
         let mut query = self

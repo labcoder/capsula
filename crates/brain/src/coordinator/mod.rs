@@ -41,14 +41,14 @@ pub enum Input {
         /// The page to read.
         page: PageOf,
     },
-    /// A page read finished; a failed read ends its connection in the runtime.
+    /// A page read finished.
     PageRead {
         /// The connection that requested the page.
         epoch: u64,
         /// The shell's request counter.
         request: u32,
-        /// The page, or `None` when the read failed.
-        reply: Option<DataToShell>,
+        /// The page, or `PageFailed` when the read failed.
+        reply: DataToShell,
     },
     /// The user typed a turn, in `thread` or in a new thread.
     Turn {
@@ -225,7 +225,7 @@ impl StoreOp {
             Self::ReadPage { epoch, request, .. } => Input::PageRead {
                 epoch: *epoch,
                 request: *request,
-                reply: None,
+                reply: DataToShell::PageFailed { request: *request },
             },
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
@@ -342,9 +342,7 @@ impl Coordinator {
                 };
                 return Ok(vec![Effect::Store(op)]);
             }
-            Input::PageRead { reply, .. } => {
-                return Ok(reply.into_iter().map(Effect::Data).collect());
-            }
+            Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
             Input::Turn { thread, text } => {
                 if !text.trim().is_empty() {
                     self.turn(thread, text, &mut effects);
