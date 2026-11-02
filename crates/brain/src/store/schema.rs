@@ -63,8 +63,8 @@ CREATE TRIGGER events_fts_delete AFTER DELETE ON events WHEN old.text IS NOT NUL
 END;
 ";
 
-/// The purge a deletion still owes: one row from its second transaction until the FTS rebuild,
-/// VACUUM and checkpoint after it have all succeeded.
+/// The purge a deletion still owes: one row from its second transaction until a clean copy
+/// replaces the file.
 const V2: &str = "
 CREATE TABLE purge_pending (id INTEGER PRIMARY KEY CHECK (id = 1)) STRICT;
 ";

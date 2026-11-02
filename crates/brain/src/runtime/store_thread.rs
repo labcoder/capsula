@@ -1,36 +1,193 @@
 //! The store's thread: one thread owns the connection and runs the coordinator's store
-//! operations in order, answering with acknowledgements.
+//! operations in order, answering with acknowledgements. Once no run is active it also runs an
+//! owed purge: a helper thread copies the store while this one keeps serving, then this one swaps
+//! the copy in.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{EventKind, NewEvent, Purge, Queue, Store};
+use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap};
 
-/// How long the queue stays empty before an owed purge starts [guess].
-const QUIET: Duration = Duration::from_millis(200);
-/// How long a purge waits after a reader blocked its checkpoint [guess].
-const RETRY: Duration = Duration::from_secs(1);
+/// How often the thread looks at a running copy.
+const POLL: Duration = Duration::from_millis(50);
+
+/// When an owed purge is tried.
+#[derive(Debug)]
+pub(crate) struct Schedule {
+    /// How long after the last op [guess].
+    pub(crate) quiet: Duration,
+    /// The wait after an attempt that failed or met a reader, doubling up to `last_retry`, so a
+    /// full disk isn't rewritten constantly [guess].
+    pub(crate) first_retry: Duration,
+    pub(crate) last_retry: Duration,
+    /// Hears every attempt's outcome.
+    #[cfg(test)]
+    pub(crate) attempts: Option<mpsc::Sender<Attempt>>,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            quiet: Duration::from_millis(200),
+            first_retry: Duration::from_secs(60),
+            last_retry: Duration::from_mins(30),
+            #[cfg(test)]
+            attempts: None,
+        }
+    }
+}
+
+/// What a purge attempt came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// A run was active, so it waits for the next op.
+    Busy,
+    /// An op arrived during the copy, or after it, so the copy was thrown away.
+    Stale,
+    /// A reader kept the old file open.
+    Blocked,
+    /// SQLite or the file system failed.
+    Failed,
+    /// The clean copy replaced the store.
+    Done,
+}
+
+/// A copy running on its helper thread.
+struct Copying {
+    stop: Arc<AtomicBool>,
+    helper: JoinHandle<Result<Option<Copied>, StoreError>>,
+}
+
+/// The purge's side of the thread: what's running and when to try next.
+struct Purger {
+    schedule: Schedule,
+    next: Option<Instant>,
+    retry: Duration,
+    copying: Option<Copying>,
+}
+
+impl Purger {
+    /// How long the thread may wait for an op before the purge needs it.
+    fn timeout(&self) -> Option<Duration> {
+        if self.copying.is_some() {
+            return Some(POLL);
+        }
+        self.next
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+
+    /// An op arrived: a running copy is stale, and an owed purge waits for quiet again, but no
+    /// sooner than a retry already set.
+    fn op_arrived(&mut self, store: &Store) {
+        if let Some(copying) = &self.copying {
+            copying.stop.store(true, Ordering::Relaxed);
+        } else if store.purge_pending() {
+            let quiet = Instant::now() + self.schedule.quiet;
+            self.next = Some(self.next.map_or(quiet, |next| next.max(quiet)));
+        }
+    }
+
+    /// The wait for an op ran out: finishes a copy that's done, or starts one that's due.
+    fn tick(&mut self, store: &mut Store) {
+        if let Some(copying) = self.copying.take_if(|copying| copying.helper.is_finished()) {
+            let attempt = match copying.helper.join() {
+                Ok(Ok(Some(copied))) => match store.swap(copied) {
+                    Ok(Swap::Done) => Attempt::Done,
+                    Ok(Swap::Stale) => Attempt::Stale,
+                    Ok(Swap::Blocked) => Attempt::Blocked,
+                    Err(error) => failed(&error),
+                },
+                Ok(Ok(None)) => Attempt::Stale,
+                Ok(Err(error)) => failed(&error),
+                Err(_) => {
+                    tracing::error!("the purge's helper panicked");
+                    Attempt::Failed
+                }
+            };
+            self.settle(attempt);
+        } else if self.copying.is_none() && self.next.is_some_and(|at| at <= Instant::now()) {
+            self.start(store);
+        }
+    }
+
+    fn start(&mut self, store: &Store) {
+        let owed = match store.owed() {
+            Ok(Some(owed)) => owed,
+            Ok(None) => return self.settle(Attempt::Busy),
+            Err(error) => return self.settle(failed(&error)),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        match thread::Builder::new()
+            .name("purge".to_owned())
+            .spawn(move || owed.copy(&stopping))
+        {
+            Ok(helper) => self.copying = Some(Copying { stop, helper }),
+            Err(error) => {
+                tracing::error!(%error, "the purge's helper didn't start");
+                self.settle(Attempt::Failed);
+            }
+        }
+    }
+
+    fn settle(&mut self, attempt: Attempt) {
+        let now = Instant::now();
+        self.next = match attempt {
+            Attempt::Done | Attempt::Busy => None,
+            Attempt::Stale => Some(now + self.schedule.quiet),
+            Attempt::Blocked | Attempt::Failed => {
+                let at = now + self.retry;
+                self.retry = (self.retry * 2).min(self.schedule.last_retry);
+                Some(at)
+            }
+        };
+        if attempt == Attempt::Done {
+            self.retry = self.schedule.first_retry;
+        }
+        #[cfg(test)]
+        if let Some(attempts) = &self.schedule.attempts {
+            attempts.send(attempt).ok();
+        }
+    }
+
+    /// Stops a running copy and waits for its helper to clean up.
+    fn stop(self) {
+        if let Some(copying) = self.copying {
+            copying.stop.store(true, Ordering::Relaxed);
+            if copying.helper.join().is_err() {
+                tracing::error!("the purge's helper panicked");
+            }
+        }
+    }
+}
+
+fn failed(error: &StoreError) -> Attempt {
+    tracing::error!(%error, "the purge failed; it's retried later");
+    Attempt::Failed
+}
 
 #[derive(Debug)]
 pub(crate) struct StoreThread {
     ops: mpsc::Sender<StoreOp>,
-    /// Counts the queued ops, so a purge gives way to them.
-    queue: Queue,
     /// Fires when the thread has run every queued op and closed the store.
     done: oneshot::Receiver<()>,
 }
 
 impl StoreThread {
-    pub(crate) fn spawn(mut store: Store, acks: UnboundedSender<Input>) -> std::io::Result<Self> {
+    pub(crate) fn spawn(
+        mut store: Store,
+        acks: UnboundedSender<Input>,
+        schedule: Schedule,
+    ) -> std::io::Result<Self> {
         let (ops_tx, ops) = mpsc::channel();
         let (finished, done) = oneshot::channel();
-        let queue = store.queue();
-        let taken = queue.clone();
         thread::Builder::new()
             .name("store".to_owned())
             .spawn(move || {
@@ -38,71 +195,48 @@ impl StoreThread {
                 // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
-                // An owed purge, from a deletion or found at start, runs once the queue is quiet.
-                let mut next_purge = store.purge_pending().then(Instant::now);
+                let mut purger = Purger {
+                    retry: schedule.first_retry,
+                    next: store.purge_pending().then(Instant::now),
+                    schedule,
+                    copying: None,
+                };
                 loop {
-                    let op = match next_purge {
-                        None => ops.recv().ok(),
-                        // An owed purge waits for a quiet queue, so it doesn't start mid-run.
-                        Some(at) => match ops
-                            .recv_timeout(at.saturating_duration_since(Instant::now()).max(QUIET))
-                        {
-                            Ok(op) => Some(op),
-                            Err(RecvTimeoutError::Timeout) => {
-                                next_purge = purge(&mut store);
-                                continue;
+                    let op = match purger.timeout() {
+                        None => ops.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                        Some(timeout) => ops.recv_timeout(timeout),
+                    };
+                    match op {
+                        Ok(op) => {
+                            if acks.send(apply(&mut store, op)).is_err() {
+                                tracing::debug!("an acknowledgement had no listener");
                             }
-                            Err(RecvTimeoutError::Disconnected) => None,
-                        },
-                    };
-                    let Some(op) = op else {
-                        break;
-                    };
-                    taken.pop();
-                    if acks.send(apply(&mut store, op)).is_err() {
-                        tracing::debug!("an acknowledgement had no listener");
+                            purger.op_arrived(&store);
+                        }
+                        Err(RecvTimeoutError::Timeout) => purger.tick(&mut store),
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
+                purger.stop();
                 drop(store);
                 if finished.send(()).is_err() {
                     tracing::debug!("nobody waited for the store to close");
                 }
             })?;
-        Ok(Self {
-            ops: ops_tx,
-            queue,
-            done,
-        })
+        Ok(Self { ops: ops_tx, done })
     }
 
-    /// Queues an operation, interrupting a purge so the op doesn't wait behind it. False when
-    /// the thread has gone, which only a panic there causes.
+    /// Queues an operation. False when the thread has gone, which only a panic there causes.
     pub(crate) fn send(&self, op: StoreOp) -> bool {
-        self.queue.push(|| self.ops.send(op).is_ok())
+        self.ops.send(op).is_ok()
     }
 
-    /// Lets the queued operations finish, then closes the store; a running purge stops, and the
-    /// next start runs it. The receiver fires when it has, and fails if the thread panicked;
+    /// Lets the queued operations finish, then closes the store; a running copy stops, and the
+    /// purge stays owed. The receiver fires when it has, and fails if the thread panicked;
     /// nothing blocks on the thread itself.
     pub(crate) fn close(self) -> oneshot::Receiver<()> {
-        let Self { ops, queue, done } = self;
-        queue.push(|| drop(ops));
-        done
-    }
-}
-
-/// Tries an owed purge; when to try again, or `None` once nothing is owed or it failed. A failed
-/// purge waits for the next start, so a full disk isn't rewritten every second.
-fn purge(store: &mut Store) -> Option<Instant> {
-    match store.purge() {
-        Ok(Purge::Done) => None,
-        // The op it gave way to is already queued, so the next try waits for quiet again.
-        Ok(Purge::Yielded) => Some(Instant::now()),
-        Ok(Purge::Blocked) => Some(Instant::now() + RETRY),
-        Err(error) => {
-            tracing::error!(%error, "the purge failed; the next start retries it");
-            None
-        }
+        drop(self.ops);
+        self.done
     }
 }
 
@@ -189,74 +323,133 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
 
     use capsula_protocol::message::{RunId, Step, ThreadId};
     use rusqlite::Connection;
     use tokio::sync::mpsc;
 
-    use super::StoreThread;
+    use super::{Attempt, Schedule, StoreThread};
     use crate::coordinator::{Input, StoreOp};
-    use crate::store::{Deletion, RunEnd, Store};
+    use crate::store::{RunEnd, Store};
     use crate::test_support::Scratch;
 
-    /// A store with its one thread hidden for deletion.
-    fn deleting(scratch: &Scratch) -> Store {
+    /// A store owing the purge of its deleted thread 1.
+    fn owing(scratch: &Scratch) -> Store {
         let mut store = Store::open(&scratch.db()).expect("store");
         store
             .begin_turn(ThreadId(1), Some("t"), RunId(1), "doomed")
             .expect("turn");
         store.begin_delete(ThreadId(1)).expect("begin");
+        store.finish_delete(ThreadId(1)).expect("finish");
         store
     }
 
-    fn finish(store: &mut Store) {
-        assert_eq!(
-            store.finish_delete(ThreadId(1)).expect("finish"),
-            Deletion::Pending
-        );
+    /// The store's thread with short waits, and every purge attempt it makes.
+    fn spawn(store: Store) -> (StoreThread, std_mpsc::Receiver<Attempt>) {
+        let (acks, _replies) = mpsc::unbounded_channel();
+        let (heard, attempts) = std_mpsc::channel();
+        let schedule = Schedule {
+            quiet: Duration::from_millis(1),
+            first_retry: Duration::from_millis(20),
+            last_retry: Duration::from_millis(20),
+            attempts: Some(heard),
+        };
+        let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+        (thread, attempts)
     }
 
-    /// Waits for the store's thread to finish the owed purge, with nothing sent to it.
-    fn purged_in_session(scratch: &Scratch, store: Store) {
-        let (acks, _replies) = mpsc::unbounded_channel();
-        let thread = StoreThread::spawn(store, acks).expect("thread");
-        let watcher = Connection::open(scratch.db()).expect("watcher");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let owed = || -> i64 {
-            watcher
-                .query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))
-                .expect("count")
-        };
-        while owed() > 0 {
-            assert!(Instant::now() < deadline, "the purge is still owed");
-            std::thread::sleep(Duration::from_millis(20));
+    fn next(attempts: &std_mpsc::Receiver<Attempt>) -> Attempt {
+        attempts
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the store's thread tried the purge")
+    }
+
+    /// Waits out repeats of `attempt`, which a retry already under way can add, then expects
+    /// the purge to finish.
+    fn done_after(attempts: &std_mpsc::Receiver<Attempt>, attempt: Attempt) {
+        let mut next_one = next(attempts);
+        while next_one == attempt {
+            next_one = next(attempts);
         }
-        drop(watcher);
-        thread.close().blocking_recv().expect("closed");
+        assert_eq!(next_one, Attempt::Done);
+    }
+
+    fn owed(scratch: &Scratch) -> i64 {
+        Connection::open(scratch.db())
+            .expect("watcher")
+            .query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))
+            .expect("count")
     }
 
     #[test]
-    fn a_purge_that_gave_way_finishes_once_the_queue_is_quiet() {
-        let scratch = Scratch::new("quiet-purge");
-        let mut store = deleting(&scratch);
-        store.queue().push(|| ());
-        finish(&mut store);
-        store.queue().pop();
-        purged_in_session(&scratch, store);
+    fn an_owed_purge_waits_for_the_active_run_and_then_runs_in_session() {
+        let scratch = Scratch::new("idle-purge");
+        let mut store = owing(&scratch);
+        store
+            .begin_turn(ThreadId(2), Some("kept"), RunId(2), "busy")
+            .expect("an active run");
+        let (thread, attempts) = spawn(store);
+        assert_eq!(next(&attempts), Attempt::Busy);
+        assert_eq!(owed(&scratch), 1);
+        assert!(thread.send(StoreOp::EndRun {
+            thread: ThreadId(2),
+            run: RunId(2),
+            text: None,
+            revealed: None,
+            end: RunEnd::Done,
+        }));
+        assert_eq!(next(&attempts), Attempt::Done);
+        thread.close().blocking_recv().expect("closed");
+        assert_eq!(owed(&scratch), 0);
     }
 
     #[test]
     fn a_purge_a_reader_blocked_is_retried_in_session() {
         let scratch = Scratch::new("blocked-purge");
-        let mut store = deleting(&scratch);
+        let mut store = owing(&scratch);
         let reader = Connection::open(scratch.db()).expect("reader");
         reader
             .execute_batch("BEGIN; SELECT count(*) FROM events;")
             .expect("snapshot");
-        finish(&mut store);
+        // A write past the reader's snapshot, so the WAL can't be emptied under it.
+        store
+            .begin_turn(ThreadId(2), Some("later"), RunId(2), "later")
+            .expect("turn");
+        store
+            .end_run(ThreadId(2), RunId(2), &[], RunEnd::Done)
+            .expect("ended");
+        let (thread, attempts) = spawn(store);
+        assert_eq!(next(&attempts), Attempt::Blocked);
         drop(reader);
-        purged_in_session(&scratch, store);
+        done_after(&attempts, Attempt::Blocked);
+        thread.close().blocking_recv().expect("closed");
+        assert_eq!(owed(&scratch), 0);
+    }
+
+    #[test]
+    fn a_failed_purge_is_retried_in_session() {
+        let scratch = Scratch::new("failed-purge");
+        let store = owing(&scratch);
+        // The copy carries the trigger, so clearing its owed row fails.
+        store
+            .conn_for_tests()
+            .execute_batch(
+                "CREATE TRIGGER keep_owed BEFORE DELETE ON purge_pending BEGIN
+                     SELECT RAISE(ABORT, 'kept');
+                 END;",
+            )
+            .expect("trigger");
+        let (thread, attempts) = spawn(store);
+        assert_eq!(next(&attempts), Attempt::Failed);
+        Connection::open(scratch.db())
+            .expect("fixer")
+            .execute_batch("DROP TRIGGER keep_owed")
+            .expect("drop");
+        done_after(&attempts, Attempt::Failed);
+        thread.close().blocking_recv().expect("closed");
+        assert_eq!(owed(&scratch), 0);
     }
 
     #[test]
@@ -265,7 +458,7 @@ mod tests {
         let store = Store::open(&scratch.db()).expect("store");
         let (thread, run) = (ThreadId(1), RunId(1));
         let (acks, mut replies) = mpsc::unbounded_channel();
-        let store = StoreThread::spawn(store, acks).expect("thread");
+        let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
         for op in [
             StoreOp::BeginTurn {
                 thread,

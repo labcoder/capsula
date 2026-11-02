@@ -2,22 +2,24 @@
 //!
 //! One file in WAL mode. Every commit is durable (`synchronous=FULL`), so "saved" means the
 //! transaction committed. Deleting a thread is two transactions: the first hides it and bumps its
-//! deletion generation, the second removes every row, and a purge then rebuilds the FTS index,
-//! vacuums the file and truncates the WAL, so no copy of the deleted text survives in page gaps
-//! or FTS index keys (architecture v1 §6.4).
+//! deletion generation, the second removes every row and records a purge as owed. The purge
+//! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
+//! FTS index keys (architecture v1 §6.4).
 
+mod purge;
 mod schema;
 #[cfg(test)]
 mod tests;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
-use rusqlite::{Connection, ErrorCode, InterruptHandle, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
+
+pub use purge::{Copied, Owed, Swap};
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +50,9 @@ pub enum StoreError {
     /// A new thread or run id isn't above the highest ever issued.
     #[error("the id was issued before")]
     StaleId,
+    /// A purge's copy of the store couldn't be written, moved or removed.
+    #[error("a purge file couldn't be written, moved or removed")]
+    Purge(#[source] io::Error),
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
@@ -177,85 +182,6 @@ impl std::fmt::Debug for Thread {
     }
 }
 
-/// How far a deletion got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum Deletion {
-    /// The rows are gone and the purge after them finished.
-    Finished,
-    /// The rows are gone, but the purge is still owed, so old copies of them may remain in the
-    /// files until it's retried.
-    Pending,
-}
-
-/// How a purge attempt ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum Purge {
-    /// Nothing is owed: the FTS rebuild, VACUUM and checkpoint all succeeded, or none was due.
-    Done,
-    /// It gave way to queued store work and is still owed.
-    Yielded,
-    /// A reader blocked the checkpoint; it's still owed.
-    Blocked,
-}
-
-/// Counts work queued for the store, so a purge gives way to it: a step checks the count before
-/// it starts, a progress handler stops a running statement while the count is above zero, and
-/// queuing work interrupts a step too, which also reaches a checkpoint the handler can't.
-/// Clones share the count.
-#[derive(Clone)]
-pub struct Queue(Arc<QueueShared>);
-
-struct QueueShared {
-    state: Mutex<QueueState>,
-    interrupt: InterruptHandle,
-}
-
-#[derive(Default)]
-struct QueueState {
-    queued: usize,
-    purging: bool,
-}
-
-impl std::fmt::Debug for Queue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Queue").finish_non_exhaustive()
-    }
-}
-
-impl Queue {
-    /// Counts one more piece of work, handed over by `hand_over`, and interrupts a running purge
-    /// step. Counting and sending under one lock means a step either sees the count or is
-    /// interrupted.
-    pub fn push<T>(&self, hand_over: impl FnOnce() -> T) -> T {
-        let mut state = self.lock();
-        state.queued += 1;
-        let handed = hand_over();
-        if state.purging {
-            self.0.interrupt.interrupt();
-        }
-        handed
-    }
-
-    /// The store took one piece of queued work.
-    pub fn pop(&self) {
-        let mut state = self.lock();
-        state.queued = state.queued.saturating_sub(1);
-    }
-
-    /// Whether a running purge step should stop: work is waiting for it.
-    fn waiting_on_purge(&self) -> bool {
-        let state = self.lock();
-        state.purging && state.queued > 0
-    }
-
-    fn lock(&self) -> MutexGuard<'_, QueueState> {
-        // The state is two plain fields, valid whatever a panicking holder left.
-        self.0.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
 /// A thread's deletion generation. Work stamped with an older one is stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub i64);
@@ -267,7 +193,7 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
-    /// A deletion's purge is owed; the store's thread runs it once its queue is quiet.
+    /// A deletion's purge is owed; the store's thread runs it once no run is active.
     pub purge_pending: bool,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
@@ -277,11 +203,9 @@ pub struct Recovered {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
-    queue: Queue,
+    path: PathBuf,
     /// Mirrors the `purge_pending` row.
     purge_pending: bool,
-    /// The rebuild and VACUUM succeeded since the last deletion, so only the checkpoint is owed.
-    vacuumed: bool,
 }
 
 /// The store's file, in the data folder.
@@ -304,41 +228,16 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
-        let mut conn = Connection::open(path)?;
-        // journal_mode answers with a row, so it's read rather than set.
-        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-        if mode != "wal" {
-            return Err(StoreError::NoWal(mode));
-        }
-        conn.execute_batch(
-            "PRAGMA synchronous = FULL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA secure_delete = ON;
-             PRAGMA temp_store = MEMORY;",
-        )?;
+        // A copy a purge left behind when the brain died; the purge is still owed.
+        purge::discard(path).map_err(StoreError::Purge)?;
+        let mut conn = connect(path)?;
         schema::migrate(&mut conn)?;
-        let purge_pending = conn
-            .query_row("SELECT 1 FROM purge_pending", [], |_| Ok(()))
-            .optional()?
-            .is_some();
-        let queue = Queue(Arc::new(QueueShared {
-            state: Mutex::default(),
-            interrupt: conn.get_interrupt_handle(),
-        }));
-        let waiting = queue.clone();
-        // Every 1,000 VM steps [guess]: often enough to stop a VACUUM within a millisecond or so.
-        conn.progress_handler(1000, Some(move || waiting.waiting_on_purge()))?;
+        let purge_pending = owes(&conn)?;
         Ok(Self {
             conn,
-            queue,
+            path: path.to_owned(),
             purge_pending,
-            vacuumed: false,
         })
-    }
-
-    /// The count of work queued for this store, which a purge gives way to.
-    pub fn queue(&self) -> Queue {
-        self.queue.clone()
     }
 
     /// Whether a deletion's purge is still owed.
@@ -348,7 +247,8 @@ impl Store {
 
     /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
     /// deletions left pending finish. An owed purge is only reported: the store's thread runs
-    /// it, where it gives way to turns, so a slow or failing purge can't hold up the start. Run it once at start, before any new run.
+    /// it once no run is active, so a slow or failing purge can't hold up the start. Run it
+    /// once at start, before any new run.
     ///
     /// shortcut: two sessions of the same user run two brains on one store, and the second's
     /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
@@ -585,13 +485,12 @@ impl Store {
     }
 
     /// Deletion's second transaction: removes every row of a thread [`Store::begin_delete`]
-    /// fenced and records the purge as owed, then runs the purge. Returns
-    /// [`Deletion::Pending`] when the purge gave way to queued work, met a reader or failed;
-    /// the rows are gone either way.
+    /// fenced and records the purge as owed. The store's thread runs the purge once no run is
+    /// active; until then old copies of the rows may remain in the files.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't being deleted.
-    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<Deletion, StoreError> {
+    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<(), StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
         let deleting: Option<i64> = self
             .conn
@@ -604,86 +503,7 @@ impl Store {
         if deleting.is_none() {
             return Err(StoreError::NoThread);
         }
-        self.remove(thread)?;
-        Ok(match self.purge() {
-            Ok(Purge::Done) => Deletion::Finished,
-            Ok(Purge::Yielded | Purge::Blocked) => Deletion::Pending,
-            Err(error) => {
-                tracing::error!(%error, "the purge failed; it stays owed");
-                Deletion::Pending
-            }
-        })
-    }
-
-    /// Removes what deleted rows leave behind: FTS `rebuild` drops the separator keys in
-    /// `events_fts_idx`, `VACUUM` rewrites every page so no gap keeps an old cell, and a TRUNCATE
-    /// checkpoint moves the result into the main file and empties the WAL. Only then is the purge
-    /// marked done. Each step gives way to queued work, and an interrupted step rolls back, so
-    /// the purge stays owed. A retry in the same session skips the steps that already succeeded;
-    /// after a restart it runs whole.
-    ///
-    /// # Errors
-    /// Fails when SQLite fails for another reason; the purge stays owed.
-    pub fn purge(&mut self) -> Result<Purge, StoreError> {
-        if !self.purge_pending {
-            return Ok(Purge::Done);
-        }
-        if !self.vacuumed {
-            let rebuild = "INSERT INTO events_fts (events_fts) VALUES ('rebuild')";
-            if self.step(|conn| conn.execute_batch(rebuild))?.is_none()
-                || self.step(|conn| conn.execute_batch("VACUUM"))?.is_none()
-            {
-                return Ok(Purge::Yielded);
-            }
-            // Later writes never bring deleted text back, so a retry only owes the checkpoint.
-            self.vacuumed = true;
-        }
-        match self.step(checkpoint_now)? {
-            None => return Ok(Purge::Yielded),
-            Some(false) => {
-                tracing::warn!("a reader blocked the purge's checkpoint; it's retried later");
-                return Ok(Purge::Blocked);
-            }
-            Some(true) => {}
-        }
-        self.conn.execute("DELETE FROM purge_pending", [])?;
-        self.purge_pending = false;
-        // The WAL now holds only the cleared row, so a reader blocking this leaves nothing behind.
-        match checkpoint_now(&self.conn) {
-            Ok(true) => {}
-            Ok(false) => tracing::debug!("a reader blocked the checkpoint after the purge"),
-            Err(error) => tracing::debug!(%error, "the checkpoint after the purge failed"),
-        }
-        Ok(Purge::Done)
-    }
-
-    /// Runs one purge step unless work is queued; `None` when it gave way, before or during it.
-    /// shortcut: a checkpoint runs as one VM step, so work queued just before it starts waits for
-    /// it (tens of milliseconds at 500 MiB on Rez); fine while only deletion purges.
-    /// shortcut: `VACUUM` copies its result back without checking for an interrupt, so work
-    /// queued during that copy waits for it; the PR that added the purge measured it.
-    fn step<T>(
-        &self,
-        run: impl FnOnce(&Connection) -> rusqlite::Result<T>,
-    ) -> Result<Option<T>, StoreError> {
-        {
-            let mut state = self.queue.lock();
-            if state.queued > 0 {
-                return Ok(None);
-            }
-            state.purging = true;
-        }
-        let result = run(&self.conn);
-        self.queue.lock().purging = false;
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == ErrorCode::OperationInterrupted =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
-        }
+        self.remove(thread)
     }
 
     /// Deletes a thread's rows and records the purge as owed, in one transaction. The foreign
@@ -697,13 +517,37 @@ impl Store {
         tx.execute("INSERT OR IGNORE INTO purge_pending (id) VALUES (1)", [])?;
         tx.commit()?;
         self.purge_pending = true;
-        self.vacuumed = false;
         Ok(())
     }
 }
 
+/// Opens the store's file in WAL mode with its settings.
+fn connect(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open(path)?;
+    // journal_mode answers with a row, so it's read rather than set.
+    let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    if mode != "wal" {
+        return Err(StoreError::NoWal(mode));
+    }
+    conn.execute_batch(
+        "PRAGMA synchronous = FULL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA secure_delete = ON;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok(conn)
+}
+
+/// Whether the file records an owed purge.
+fn owes(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(conn
+        .query_row("SELECT 1 FROM purge_pending", [], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
 /// Copies the WAL into the main file and truncates it to zero bytes; false when a reader holding
-/// an older snapshot blocked it. It never waits on that reader, so queued work isn't held up.
+/// an older snapshot blocked it. It never waits on that reader.
 fn checkpoint_now(conn: &Connection) -> rusqlite::Result<bool> {
     let wait: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
     conn.busy_timeout(Duration::ZERO)?;

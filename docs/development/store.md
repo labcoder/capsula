@@ -8,11 +8,11 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 | Pragma | Why |
 |---|---|
-| `journal_mode=WAL` | Readers don't block the writer, and the checkpoint after a delete's purge truncates the WAL. A store that refuses WAL doesn't open |
+| `journal_mode=WAL` | Readers don't block the writer, so a purge can copy the file while it serves. A store that refuses WAL doesn't open |
 | `synchronous=FULL` | Every commit is durable, so "saved" means the transaction committed |
 | `foreign_keys=ON` | Rows can't point at a missing thread or run |
-| `secure_delete=ON` | Deleted rows are overwritten with zeros, not left in freeblocks or free pages. Stale cell copies in the gaps a page rebuild leaves are out of its reach, so the purge's `VACUUM` removes them (see below) |
-| `temp_store=MEMORY` | Statement journals, which hold the pages a delete removes, and `VACUUM`'s temporary copy never spill to `%TEMP%` |
+| `secure_delete=ON` | Deleted rows are overwritten with zeros, not left in freeblocks or free pages. Stale cell copies in the gaps a page rebuild leaves are out of its reach, so the purge replaces the file (see below) |
+| `temp_store=MEMORY` | Statement journals, which hold the pages a delete removes, never spill to `%TEMP%` |
 
 ## Tables
 
@@ -21,7 +21,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
 | `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused |
-| `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge's `rebuild` (see below) |
+| `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
@@ -39,14 +39,21 @@ and never returns a thread being deleted.
 
 ```mermaid
 sequenceDiagram
-  participant B as Brain
-  participant DB as SQLite
-  B->>DB: tx 1: state=deleting, deletion_generation+1
-  Note over B: hidden from lists and search, takes no new runs or events
-  B->>B: stop the thread's producers (later slices)
-  B->>DB: tx 2: delete events (and FTS rows), runs, thread; purge_pending=1
-  B->>DB: purge: FTS rebuild, VACUUM, wal_checkpoint(TRUNCATE)
-  B->>DB: purge_pending=0
+  participant S as Store thread
+  participant H as Purge helper
+  participant DB as capsula.db
+  S->>DB: tx 1: state=deleting, deletion_generation+1
+  Note over S: hidden from lists and search, takes no new runs or events
+  S->>S: stop the thread's producers (later slices)
+  S->>DB: tx 2: delete events (and FTS rows), runs, thread; purge_pending=1
+  Note over S: no run active, no op for 200 ms
+  S->>H: copy
+  H->>DB: read-only: VACUUM INTO capsula.db.purge-snapshot
+  H->>H: on the snapshot: purge_pending=0, FTS rebuild, optimize
+  H->>H: VACUUM INTO capsula.db.purge-clean, sync, remove the snapshot
+  H-->>S: copied
+  S->>DB: no change since the snapshot? TRUNCATE checkpoint, close
+  S->>DB: rename purge-clean over capsula.db, reopen
 ```
 
 The foreign keys have no cascade, so the second transaction names every table and fails if it
@@ -59,43 +66,52 @@ CAPS-22 review found, because two kinds of copy survive secure-delete:
 - **FTS5 separator keys.** `events_fts_idx` keeps a prefix of each leaf page's first term, often
   the whole term, and secure-delete removes it only when the page loses its last term.
 
-So the second transaction also records a **purge** as owed, and the purge runs right after it:
-FTS `rebuild` rewrites the index from the remaining events, `VACUUM` rewrites every page, and a
-TRUNCATE checkpoint copies the result into the main file and empties the WAL. Only then is the
-`purge_pending` row cleared, followed by one more checkpoint, which has only that row to copy.
+So the second transaction also records a **purge** as owed. The purge replaces the file with a
+clean copy, built off the store's thread so turns and runs don't wait for it:
 
-The purge is cleanup that can be retried, and it never holds up a run:
+1. **Snapshot.** A helper thread opens the file read-only and runs `VACUUM INTO` into
+   `capsula.db.purge-snapshot`. A WAL reader never holds the writer, so the store keeps serving.
+2. **Clean.** On the snapshot it clears the `purge_pending` row, runs FTS `rebuild`, which
+   rewrites the index from the remaining events and so drops the deleted terms' separator keys,
+   then `optimize`, which merges the rebuilt index into one segment. Without `optimize`, FTS5's
+   first merges after a rebuild stalled single store ops for up to about 180 ms at 232 MiB on Rez.
+3. **Compact.** `VACUUM INTO` writes the snapshot into fresh pages in
+   `capsula.db.purge-clean`, so no gap or free page the rebuild left keeps an old key. The
+   result is synced and the snapshot removed.
+4. **Swap**, on the store thread. Unless its connection changed something since the snapshot
+   started, it TRUNCATE-checkpoints the WAL so no committed data lives only there, closes the
+   file, checks that no WAL is left that SQLite could replay onto the new file, renames the copy
+   over `capsula.db` and reopens. This is the only step store work waits for, tens of
+   milliseconds at the sizes the purge's pull request measured. Should the reopen fail after the
+   rename, every later operation fails rather than write anywhere else.
 
-- **It gives way to store work.** Every op queued for the store thread is counted under a lock.
-  A purge step doesn't start while the count is above zero, and while it runs a progress handler
-  stops it as soon as the count rises, backed by SQLite's interrupt for the checkpoint. The step
-  rolls back, the purge stays owed, and the op runs. Two parts can't be stopped: `VACUUM`'s final
-  copy back into the file, and a checkpoint that had already started, so an op arriving then
-  waits for them. Stop's answer never waits on the store at all (`runs.md`).
-- **It's retried in-session.** The store thread retries an owed purge once its queue has been
-  empty for 200 ms [guess], so a purge doesn't start mid-run. After a reader blocked the
-  checkpoint it waits 1 s [guess] first. A purge that fails, a full disk for example, waits for
-  the next start rather than rewriting the file every second. Within a session a retry only redoes
-  the steps that didn't succeed; once the rebuild and `VACUUM` are done, only the checkpoint is
-  owed, because later writes never bring deleted text back.
-- **It's retried at start.** The row survives a crash. Recovery only reports it, so a slow or
-  failing purge can't hold up the start, and the store thread runs the whole purge once its
-  queue is quiet.
-- **The checkpoint never waits on a reader.** It runs with no busy timeout, so a reader holding an
-  older snapshot makes it return at once, and `finish_delete` reports `Deletion::Pending`.
+The purge is cleanup that can be retried:
 
-The cost grows with the file: `VACUUM` rewrites every page, media included once slice 6 stores
-captures, and needs room for a second copy, in memory for the temporary database and in the
-WAL. The pull request that added the purge measured it at several sizes on Rez.
+- **It runs only while nothing else does.** It starts once no run is `active` and no op has
+  come for 200 ms [guess]. An op that arrives during the copy stops it, and the swap throws away
+  a copy made before a write, so no write is lost; the purge waits for the next quiet moment.
+- **It's retried in session.** A swap a reader blocked, a rename that failed (a scanner holding
+  the file, say) and any SQLite or file error leave the old file serving and the purge owed. The
+  next try waits 1 minute [guess], doubling up to 30 minutes [guess], so a full disk isn't
+  rewritten constantly. Every try runs all four steps. Once nothing is owed the thread sleeps
+  until an op arrives.
+- **It's retried at start.** The row survives a crash. A crash before the rename leaves the old
+  file and a copy, which opening the store deletes; after it, the new file has no owed row.
+  Recovery only reports an owed purge.
+- **It costs disk, not memory.** While it runs it needs room for two more copies of the store,
+  and `VACUUM INTO` writes straight to its file, with no in-memory temporary database.
 
 A test ports CAPS-22's remnants scan: it writes 100 threads one event per transaction and
 deletes 30 of them, first checking that their FTS keys survive until a rebuild and that, on a
-copy of the file, a deleted cell survives the rebuild in a page gap. Then it purges and scans the
-raw `.db`, `-wal` and `-shm` bytes, with the store open and after closing it, and checks every
-`events_fts_idx` key. It fails if the purge skips the rebuild, `VACUUM` or the checkpoints.
+copy of the file, a deleted cell survives a rebuild in a page gap. Then it purges and scans the
+raw `.db`, `-wal` and `-shm` bytes, with the store open and after closing it, checks every
+`events_fts_idx` key, and checks that no purge copy is left. It fails if the purge skips the
+rebuild or replaces nothing. It doesn't fail if the compact step is skipped: at its scale no gap
+the rebuild leaves keeps a deleted key, so that step rests on the mechanism CAPS-22 found.
 
-Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a truncated WAL
-frees, Volume Shadow Copy restore points, backups and the pagefile.
+Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a removed or
+truncated file frees (the old store, the snapshot, the WAL), Volume Shadow Copy restore points,
+backups and the pagefile.
 
 ## Recovery at start
 
@@ -105,7 +121,7 @@ The brain opens the store and runs the recovery scan before it serves any shell:
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;
 - runs still `active` in live threads become `failed` with reason `crash`, keeping what they
   committed;
-- an owed purge is reported, and the store thread runs it once its queue is quiet.
+- an owed purge is reported, and the store thread runs it once no run is active.
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
 deletions, and whether the purge is still owed.

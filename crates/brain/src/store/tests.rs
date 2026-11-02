@@ -1,5 +1,7 @@
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
@@ -7,8 +9,8 @@ use rusqlite::Connection;
 use crate::test_support::Scratch;
 
 use super::{
-    Deletion, EventKind, Failure, Interruption, NewEvent, Purge, Recovered, RunEnd, Store,
-    StoreError, checkpoint_now,
+    EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, Store, StoreError, Swap,
+    checkpoint_now, purge as steps,
 };
 
 const MARKER: &str = "zqxplantedmarker";
@@ -104,6 +106,28 @@ fn run_row(store: &Store, run: RunId) -> (String, Option<String>) {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("run row")
+}
+
+/// What the store's thread does with an owed purge, in one go.
+fn purge(store: &mut Store) -> Swap {
+    let owed = store
+        .owed()
+        .expect("owed")
+        .expect("a purge is owed and no run is active");
+    let copied = owed
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy")
+        .expect("nothing stopped it");
+    store.swap(copied).expect("swap")
+}
+
+/// The purge's copies left beside the store.
+fn purge_files(db: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(db.parent().expect("a folder"))
+        .expect("folder")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.to_string_lossy().contains(".purge-"))
+        .collect()
 }
 
 #[test]
@@ -285,10 +309,7 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
         "events are append-only"
     );
     store.begin_delete(b).expect("begin");
-    assert_eq!(
-        store.finish_delete(b).expect("b deletes cleanly"),
-        Deletion::Finished
-    );
+    store.finish_delete(b).expect("b deletes cleanly");
 }
 
 #[test]
@@ -349,10 +370,7 @@ fn ids_are_never_reused_after_a_deletion() {
     };
     let deleted_event = newest_event(&store);
     store.begin_delete(thread).expect("begin");
-    assert_eq!(
-        store.finish_delete(thread).expect("finish"),
-        Deletion::Finished
-    );
+    store.finish_delete(thread).expect("finish");
     drop(store);
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(store.high_water().expect("high water"), (thread, run));
@@ -431,7 +449,8 @@ fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
 fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     let scratch = Scratch::new("delete");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (kept, _) = turn(&mut store, Err("kept"), "unrelated");
+    let (kept, run) = turn(&mut store, Err("kept"), "unrelated");
+    store.end_run(kept, run, &[], RunEnd::Done).expect("ended");
     let (thread, _) = plant(&mut store);
     assert!(
         contains_marker(&scratch.db()),
@@ -439,10 +458,8 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     );
 
     store.begin_delete(thread).expect("begin");
-    assert_eq!(
-        store.finish_delete(thread).expect("finish"),
-        Deletion::Finished
-    );
+    store.finish_delete(thread).expect("finish");
+    assert_eq!(purge(&mut store), Swap::Done);
     assert!(!contains_marker(&scratch.db()), "found while open");
     for table in ["events", "runs", "threads"] {
         assert_eq!(
@@ -479,35 +496,34 @@ fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
         },
         "the deleted thread's run isn't counted as crashed"
     );
-    // What the store's thread does next.
-    assert_eq!(store.purge().expect("purge"), Purge::Done);
+    // The dead brain's connection goes, as its process does; while it held the file, the swap
+    // couldn't move the copy over it.
+    drop(crashed);
+    assert_eq!(purge(&mut store), Swap::Done);
     assert!(!contains_marker(&scratch.db()));
     assert!(matches!(
         store.finish_delete(thread),
         Err(StoreError::NoThread)
     ));
-    drop(crashed);
 }
 
 #[test]
-fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
+fn a_checkpoint_a_reader_blocks_keeps_the_old_file_and_the_purge_owed() {
     let scratch = Scratch::new("blocked");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (first, _) = plant(&mut store);
-    // Without the marker, so the raw scan below can only find the first thread's residue.
-    let (second, _) = turn(&mut store, Err("plain"), "plain");
-    store.begin_delete(first).expect("begin");
-    store.begin_delete(second).expect("begin");
+    owed_purge(&mut store);
     let reader = Connection::open(scratch.db()).expect("reader");
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM events;")
         .expect("snapshot");
+    // A write past the reader's snapshot, so the WAL can't be emptied under it.
+    let (thread, run) = turn(&mut store, Err("later"), "later");
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
 
     let started = std::time::Instant::now();
-    assert_eq!(
-        store.finish_delete(first).expect("finish"),
-        Deletion::Pending
-    );
+    assert_eq!(purge(&mut store), Swap::Blocked);
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "the checkpoint didn't wait out the busy timeout"
@@ -517,23 +533,48 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
         .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
         .expect("timeout");
     assert_eq!(wait, 5000, "other work keeps its busy timeout");
-    assert!(
-        contains_marker(&scratch.db()),
-        "the old pages are still in the files"
-    );
-    assert_eq!(
-        store.recover().expect("recover"),
-        Recovered {
-            finished_deletions: 1,
-            purge_pending: true,
-            ..Recovered::default()
-        }
-    );
+    assert!(contains_marker(&scratch.db()), "the old file stays");
+    assert!(store.purge_pending());
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
 
-    reader.execute_batch("COMMIT").expect("end snapshot");
-    assert_eq!(store.purge().expect("retry"), Purge::Done);
+    drop(reader);
+    assert_eq!(purge(&mut store), Swap::Done);
     assert!(!contains_marker(&scratch.db()));
     assert!(!store.recover().expect("recover").purge_pending);
+}
+
+/// Windows can't move a file over one another process holds open; elsewhere the move succeeds.
+#[cfg(windows)]
+#[test]
+fn a_copy_that_cant_replace_the_file_keeps_the_old_store_serving() {
+    let scratch = Scratch::new("held");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let holder = Connection::open(scratch.db()).expect("holder");
+    holder
+        .query_row("SELECT count(*) FROM threads", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("opened");
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("idle")
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy")
+        .expect("not stopped");
+    assert!(matches!(store.swap(copied), Err(StoreError::Purge(_))));
+    assert!(store.purge_pending());
+    assert_eq!(rows(&store.conn, "purge_pending"), 1);
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    let (thread, run) = turn(&mut store, Err("served"), "still served");
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
+
+    drop(holder);
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert_eq!(store.search("served", 10).expect("search"), vec![thread]);
 }
 
 #[test]
@@ -628,105 +669,168 @@ fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
     );
 }
 
-/// The FTS segments, in order: a rebuild replaces them all.
-fn segments(store: &Store) -> String {
-    store
-        .conn
-        .query_row(
-            "SELECT group_concat(segid) FROM (SELECT DISTINCT segid FROM events_fts_idx ORDER BY segid)",
-            [],
-            |row| row.get(0),
-        )
-        .expect("segments")
-}
-
-/// A deleted thread whose purge gave way to one queued piece of work, still counted.
+/// A store owing the purge of a planted thread, beside a kept thread whose run ended.
 fn owed_purge(store: &mut Store) -> ThreadId {
-    turn(store, Err("kept"), "kept");
+    let (kept, run) = turn(store, Err("kept"), "kept");
+    store.end_run(kept, run, &[], RunEnd::Done).expect("ended");
     let (thread, _) = plant(store);
     store.begin_delete(thread).expect("begin");
-    store.queue().push(|| ());
-    assert_eq!(
-        store.finish_delete(thread).expect("finish"),
-        Deletion::Pending
-    );
+    store.finish_delete(thread).expect("finish");
     thread
 }
 
 #[test]
-fn a_purge_gives_way_to_queued_work_and_stays_owed_until_it_finishes() {
-    let scratch = Scratch::new("yield");
+fn a_purge_waits_while_a_run_is_active() {
+    let scratch = Scratch::new("active");
     let mut store = Store::open(&scratch.db()).expect("store");
     owed_purge(&mut store);
-    let before = segments(&store);
-    assert_eq!(store.purge().expect("purge"), Purge::Yielded);
-    assert_eq!(segments(&store), before, "nothing ran");
-    drop(store);
-
-    let mut store = Store::open(&scratch.db()).expect("reopen");
-    assert!(store.purge_pending(), "owed across a restart");
-    assert_eq!(store.purge().expect("purge"), Purge::Done);
-    assert_eq!(rows(&store.conn, "purge_pending"), 0);
-    drop(store);
-    assert!(!Store::open(&scratch.db()).expect("reopen").purge_pending());
+    let (thread, run) = turn(&mut store, Err("busy"), "busy");
+    assert!(store.owed().expect("owed").is_none());
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
+    assert!(store.owed().expect("owed").is_some());
 }
 
 #[test]
-fn work_queued_during_a_purge_step_interrupts_it() {
-    let scratch = Scratch::new("interrupt");
+fn a_write_after_the_snapshot_keeps_the_old_file_and_the_purge_owed() {
+    let scratch = Scratch::new("stale");
     let mut store = Store::open(&scratch.db()).expect("store");
     owed_purge(&mut store);
-    store.queue().pop();
-    let before = segments(&store);
-    // Work arrives while the first step is running. This handler replaces the store's own, so
-    // only the interrupt can stop the step.
-    let queue = store.queue();
-    let mut queued = false;
+    let owed = store.owed().expect("owed").expect("idle");
+    let copied = owed
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy")
+        .expect("not stopped");
+    let (late, run) = turn(&mut store, Err("late"), "written after the snapshot");
+    assert_eq!(store.swap(copied).expect("swap"), Swap::Stale);
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    assert!(store.purge_pending());
+    assert!(contains_marker(&scratch.db()), "the old file stays");
+
+    store.end_run(late, run, &[], RunEnd::Done).expect("ended");
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert!(!contains_marker(&scratch.db()));
+    assert_eq!(store.search("snapshot", 10).expect("search"), vec![late]);
+}
+
+#[test]
+fn a_stopped_copy_leaves_nothing_and_the_purge_owed() {
+    let scratch = Scratch::new("stopped");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let owed = store.owed().expect("owed").expect("idle");
+    assert!(
+        owed.copy(&Arc::new(AtomicBool::new(true)))
+            .expect("copy")
+            .is_none()
+    );
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    assert!(store.purge_pending());
+}
+
+#[test]
+fn a_failed_copy_leaves_nothing_and_a_retry_finishes() {
+    let scratch = Scratch::new("copy-fails");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    // The copy carries the trigger, so clearing its owed row fails after the snapshot.
     store
         .conn
-        .progress_handler(
-            1,
-            Some(move || {
-                if !std::mem::replace(&mut queued, true) {
-                    queue.push(|| ());
-                }
-                false
-            }),
+        .execute_batch(
+            "CREATE TRIGGER keep_owed BEFORE DELETE ON purge_pending BEGIN
+                 SELECT RAISE(ABORT, 'kept');
+             END;",
         )
-        .expect("handler");
-    assert_eq!(store.purge().expect("purge"), Purge::Yielded);
-    assert_eq!(segments(&store), before, "the rebuild rolled back");
+        .expect("trigger");
+    let owed = store.owed().expect("owed").expect("idle");
+    assert!(matches!(
+        owed.copy(&Arc::new(AtomicBool::new(false))),
+        Err(StoreError::Sql(_))
+    ));
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    assert_eq!(
+        rows(&store.conn, "threads"),
+        1,
+        "the deleted rows stay gone"
+    );
+    assert_eq!(rows(&store.conn, "purge_pending"), 1);
     assert!(store.purge_pending());
 
     store
         .conn
-        .progress_handler(0, None::<fn() -> bool>)
-        .expect("no handler");
-    store.queue().pop();
-    // Without its handler the store still finishes, so the retry shows the purge was only paused.
-    assert_eq!(store.purge().expect("retry"), Purge::Done);
-    assert!(!store.purge_pending());
+        .execute_batch("DROP TRIGGER keep_owed")
+        .expect("drop");
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert!(!contains_marker(&scratch.db()));
 }
 
 #[test]
-fn work_queued_as_a_step_starts_still_stops_its_statement() {
-    let scratch = Scratch::new("late-push");
-    let store = Store::open(&scratch.db()).expect("store");
-    let queue = store.queue();
-    // Queued after the step checked the count but before its statement ran: SQLite clears an
-    // interrupt that arrives between statements, so only the progress handler can stop it.
-    let stepped = store
-        .step(|conn| {
-            queue.push(|| ());
-            conn.query_row(
-                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 1000000)
-                 SELECT count(*) FROM n",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .expect("step");
-    assert_eq!(stepped, None);
+fn a_failed_swap_restores_the_busy_timeout_and_a_retry_finishes() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let scratch = Scratch::new("swap-fails");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    store
+        .conn
+        .execute_batch("PRAGMA busy_timeout = 1234")
+        .expect("timeout");
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("idle")
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy")
+        .expect("not stopped");
+    store
+        .conn
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Pragma {
+                pragma_name: "wal_checkpoint",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .expect("authorizer");
+    assert!(matches!(store.swap(copied), Err(StoreError::Sql(_))));
+    let wait: i64 = store
+        .conn
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .expect("timeout");
+    assert_eq!(wait, 1234);
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    assert_eq!(rows(&store.conn, "purge_pending"), 1);
+    assert!(store.purge_pending());
+    assert!(contains_marker(&scratch.db()), "the old file stays");
+
+    store
+        .conn
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("no authorizer");
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert!(!contains_marker(&scratch.db()));
+}
+
+#[test]
+fn a_copy_left_by_a_crash_is_removed_at_start() {
+    let scratch = Scratch::new("crashed-copy");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("idle")
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy")
+        .expect("not stopped");
+    // The brain dies before the swap.
+    assert!(!purge_files(&scratch.db()).is_empty());
+    drop((copied, store));
+
+    let mut store = Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+    assert!(store.purge_pending());
+    assert_eq!(purge(&mut store), Swap::Done);
 }
 
 /// A tiny xorshift generator, so the remnants test builds the same store every run.
@@ -773,8 +877,12 @@ fn raw_remnants(db: &Path, deleted: &[usize]) -> Vec<String> {
     for suffix in ["", "-wal", "-shm"] {
         let mut path = db.as_os_str().to_owned();
         path.push(suffix);
-        let Ok(mut bytes) = std::fs::read(&path) else {
-            continue;
+        let mut bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if !suffix.is_empty() && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => panic!("can't scan {}: {error}", path.display()),
         };
         bytes.make_ascii_lowercase();
         for at in 0..bytes.len() {
@@ -914,13 +1022,7 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
                 let t = live.remove(rng.below(live.len()));
                 let thread = ids[t].expect("every thread had a turn");
                 store.begin_delete(thread).expect("begin");
-                // Deletion as it was before the purge: the rows' transaction alone.
-                store.queue().push(|| ());
-                assert_eq!(
-                    store.finish_delete(thread).expect("finish"),
-                    Deletion::Pending
-                );
-                store.queue().pop();
+                store.finish_delete(thread).expect("finish");
                 deleted.push(t);
             }
         }
@@ -945,10 +1047,11 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
     drop(copy);
     assert!(
         !raw_remnants(&unvacuumed.db(), &deleted).is_empty(),
-        "no page gap kept a deleted cell, so this seed no longer tests the VACUUM"
+        "no page gap kept a deleted cell, so this seed no longer shows why the file is replaced"
     );
 
-    assert_eq!(store.purge().expect("purge"), Purge::Done);
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
     // Read while the store is open, before closing checkpoints and removes the WAL.
     assert_eq!(raw_remnants(&scratch.db(), &deleted), Vec::<String>::new());
     store
@@ -968,22 +1071,24 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
     );
 }
 
-/// Rez measurement for the pull request, not a check: the purge's cost by store size, with and
+/// Rez measurement for the pull request, not a check: the purge's phases by store size, with and
 /// without media blobs the size of slice 6's captures (architecture v1 §6.1: two capture images
-/// total about 121 KB). Run it with
+/// total about 121 KB), and how long store ops take while each phase runs. Five purges a store;
+/// in each, ops run during a copy that's then thrown away, and a second copy is swapped in
+/// with nothing else running, followed by one op. Run it with
 /// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_purge`; set
 /// `MEASURE_ONLY` to one store's name to run just that one.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
 #[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
 fn measure_purge() {
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::{Duration, Instant};
+    const PHASES: [&str; 3] = ["snapshot", "rebuild", "compact"];
     // (name, threads, events per thread, bytes per event, captures per thread)
     let stores = [
-        ("text 2k events", 100, 20, 2000, 0),
         ("text 20k events", 1000, 20, 2000, 0),
         ("text 100k events", 2000, 50, 2000, 0),
-        ("text 20k events + 1k captures", 1000, 20, 2000, 1),
         ("text 20k events + 4k captures", 1000, 20, 2000, 4),
     ];
     let only = std::env::var("MEASURE_ONLY").ok();
@@ -991,6 +1096,17 @@ fn measure_purge() {
     let capture: Vec<u8> = (0..121_000_u32)
         .map(|i| i.wrapping_mul(2_654_435_761).to_be_bytes()[0])
         .collect();
+    // A store op the way a run makes them: a turn, then its ending.
+    let op = |store: &mut Store| -> [Duration; 2] {
+        let started = Instant::now();
+        let (thread, run) = turn(store, Err("measured"), "a measured turn");
+        let turned = started.elapsed();
+        let started = Instant::now();
+        store
+            .end_run(thread, run, &[], RunEnd::Done)
+            .expect("ended");
+        [turned, started.elapsed()]
+    };
     for (name, threads, events, bytes, captures) in stores {
         if only.as_deref().is_some_and(|only| only != name) {
             continue;
@@ -1034,55 +1150,106 @@ fn measure_purge() {
         }
         assert!(checkpoint_now(&store.conn).expect("settled"));
         let size = std::fs::metadata(scratch.db()).expect("size").len();
-        let thread = ThreadId(1);
-        store
-            .conn
-            .execute("DELETE FROM media WHERE thread = 1", [])
-            .expect("media gone");
-        store.begin_delete(thread).expect("begin");
-        let started = Instant::now();
-        assert_eq!(
-            store.finish_delete(thread).expect("finish"),
-            Deletion::Finished
-        );
-        let total = started.elapsed();
-        let time = |sql: &str| {
-            let started = Instant::now();
-            store.conn.execute_batch(sql).expect("step");
-            started.elapsed()
+        // The same ops with no purge running, for comparison.
+        let alone = |store: &mut Store| -> String {
+            let mut took: Vec<(Duration, usize)> = (0..500)
+                .flat_map(|_| op(store))
+                .enumerate()
+                .map(|(at, took)| (took, at))
+                .collect();
+            took.sort_unstable();
+            format!(
+                "1,000 ops with no purge running: median {:.1?}, 99th percentile {:.1?}, worst {:.1?} at op {}",
+                took[took.len() / 2].0,
+                took[took.len() * 99 / 100].0,
+                took[took.len() - 1].0,
+                took[took.len() - 1].1
+            )
         };
-        let rebuild = time("INSERT INTO events_fts (events_fts) VALUES ('rebuild')");
-        let vacuum = time("VACUUM");
-        let started = Instant::now();
-        assert!(checkpoint_now(&store.conn).expect("checkpoint"));
-        let checkpoint = started.elapsed();
-        // How long queued work waits when it arrives 50 ms in, halfway through the VACUUM, and
-        // nine tenths of the way through it, where its copy back may be running.
-        let mut waits = Vec::new();
-        for (other, after) in [
-            (2, Duration::from_millis(50)),
-            (3, rebuild + vacuum / 2),
-            (4, rebuild + vacuum * 9 / 10),
-        ] {
-            let other = ThreadId(other);
-            store.begin_delete(other).expect("begin");
-            store.queue().push(|| ());
-            assert_eq!(
-                store.finish_delete(other).expect("finish"),
-                Deletion::Pending
-            );
-            store.queue().pop();
-            let queue = store.queue();
-            let arrival = std::thread::spawn(move || {
-                std::thread::sleep(after);
-                queue.push(Instant::now)
+        eprintln!("{name}: {} MiB; {}", size >> 20, alone(&mut store));
+        for purge_number in 1..=5 {
+            let thread = ThreadId(purge_number);
+            store
+                .conn
+                .execute(
+                    "DELETE FROM media WHERE thread = ?1",
+                    [i64::try_from(purge_number).expect("small")],
+                )
+                .expect("media gone");
+            store.begin_delete(thread).expect("begin");
+            store.finish_delete(thread).expect("finish");
+
+            // Ops while each phase of a copy runs: an op counts for a phase only when that phase
+            // was running both when it started and when it ended.
+            let db = scratch.db();
+            let phase = Arc::new(AtomicU8::new(0));
+            let running = Arc::clone(&phase);
+            let helper = std::thread::spawn(move || {
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut took = Vec::new();
+                for (at, step) in [steps::snapshot, steps::clean, steps::compact]
+                    .into_iter()
+                    .enumerate()
+                {
+                    running.store(u8::try_from(at).expect("three") + 1, Ordering::SeqCst);
+                    let started = Instant::now();
+                    assert!(step(&db, &stop).expect("step"));
+                    took.push(started.elapsed());
+                }
+                running.store(0, Ordering::SeqCst);
+                took
             });
-            let outcome = store.purge().expect("purge");
-            waits.push((after, arrival.join().expect("arrived").elapsed(), outcome));
+            while phase.load(Ordering::SeqCst) == 0 && !helper.is_finished() {
+                std::thread::yield_now();
+            }
+            let mut during: [Vec<Duration>; 3] = Default::default();
+            loop {
+                let before = phase.load(Ordering::SeqCst);
+                if before == 0 {
+                    break;
+                }
+                let took = op(&mut store);
+                if phase.load(Ordering::SeqCst) == before {
+                    during[usize::from(before) - 1].extend(took);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let took = helper.join().expect("copied");
+            steps::discard(&scratch.db()).expect("thrown away");
+
+            let owed = store.owed().expect("owed").expect("idle");
+            let started = Instant::now();
+            let copied = owed
+                .copy(&Arc::new(AtomicBool::new(false)))
+                .expect("copy")
+                .expect("not stopped");
+            let copy = started.elapsed();
+            let started = Instant::now();
+            assert_eq!(store.swap(copied).expect("swap"), Swap::Done);
+            let swap = started.elapsed();
+            let first = op(&mut store);
+            let mut line = format!("{name} purge {purge_number}:");
+            for ((phase, took), ops) in PHASES.iter().zip(&took).zip(&during) {
+                let (at, worst) = ops
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, took)| **took)
+                    .map_or((0, Duration::ZERO), |(at, took)| (at, *took));
+                write!(
+                    line,
+                    " {phase} {took:.1?} ({} ops, worst {worst:.1?} at op {at});",
+                    ops.len()
+                )
+                .expect("a String takes any write");
+            }
+            write!(
+                line,
+                " quiet copy {copy:.1?}; swap {swap:.1?}; first op after it {:.1?} + {:.1?}",
+                first[0], first[1]
+            )
+            .expect("a String takes any write");
+            eprintln!("{line}");
         }
-        eprintln!(
-            "{name}: {} MiB; finish_delete {total:.1?} (rebuild {rebuild:.1?}, VACUUM {vacuum:.1?}, checkpoint {checkpoint:.1?}); work queued at (arrival, wait, outcome) {waits:.1?}",
-            size >> 20
-        );
+        eprintln!("{name} after the purges: {}", alone(&mut store));
     }
 }
