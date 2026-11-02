@@ -111,6 +111,9 @@ pub enum ErrorCode {
     /// References form a cycle that cannot be laid out.
     #[error("scene.ReferenceCycle")]
     ReferenceCycle,
+    /// The scene is charged to a different global budget instance.
+    #[error("scene.BudgetContext")]
+    BudgetContext,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {

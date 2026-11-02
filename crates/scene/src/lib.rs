@@ -6,6 +6,7 @@ pub mod error;
 pub mod id;
 pub mod limits;
 pub mod parse;
+mod path;
 pub mod record;
 pub mod state;
 pub mod text;

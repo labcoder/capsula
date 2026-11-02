@@ -1,8 +1,11 @@
 //! Canonical semantic state, atomic admission and replayable Stop cuts.
+mod metrics;
 mod object;
+mod work;
 
 use crate::{
     Begin, Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Record, Step, StepError, WireId,
+    budget::Usage,
     limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
     record::Start,
     text::Bounded,
@@ -64,10 +67,13 @@ pub struct Admitted {
     global: Arc<()>,
     revision: u32,
     generation: u64,
+    mutation: u64,
+    usage: Usage,
     step: Box<Step>,
     after: BTreeMap<WireId, Object>,
     created: Vec<(WireId, Handle)>,
     removed: Vec<(WireId, Object)>,
+    changed: Vec<(WireId, Object)>,
 }
 impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -99,12 +105,16 @@ struct StoredStep {
     kept: bool,
     retired: bool,
     removed: Vec<(WireId, Object)>,
+    changed: Vec<(WireId, Object)>,
 }
 
 /// A scene's prospective committed state, separate from its activation-time view.
 pub struct SceneState {
     header: Begin,
     identity: Arc<()>,
+    context: Option<Arc<()>>,
+    mutation: u64,
+    usage: Usage,
     revision: u32,
     objects: BTreeMap<WireId, Object>,
     reserved: BTreeSet<WireId>,
@@ -144,6 +154,9 @@ impl SceneState {
         Ok(Self {
             header,
             identity: Arc::new(()),
+            context: None,
+            mutation: 0,
+            usage: Usage::default(),
             revision: 0,
             objects: BTreeMap::new(),
             reserved: BTreeSet::new(),
@@ -167,6 +180,59 @@ impl SceneState {
     /// Returns the number of prospectively surviving objects.
     pub fn object_count(&self) -> usize {
         self.objects.len()
+    }
+
+    /// Returns logical work still charged, including pending removals.
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    fn check_context(&self, global: &GlobalBudget) -> Result<(), StepError> {
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| !Arc::ptr_eq(context, &global.identity))
+        {
+            return Err(StepError::new(ErrorCode::BudgetContext));
+        }
+        Ok(())
+    }
+
+    fn bound_usage(&self) -> Usage {
+        if self.context.is_some() {
+            self.usage
+        } else {
+            Usage::default()
+        }
+    }
+
+    fn pending(&self) -> impl Iterator<Item = &(WireId, Object)> {
+        self.steps
+            .values()
+            .filter(|step| step.kept && !step.retired)
+            .flat_map(|step| step.removed.iter().chain(&step.changed))
+    }
+
+    fn current_usage(&self) -> Usage {
+        if self.cleared {
+            return Usage::default();
+        }
+        metrics::charge(
+            self.objects
+                .iter()
+                .chain(self.pending().map(|(id, object)| (id, object))),
+        )
+        .expect("retirement and cuts only reduce previously checked charges")
+    }
+
+    fn apply_usage(&mut self, global: &mut GlobalBudget, usage: Usage) {
+        global.replace(self.bound_usage(), usage);
+        self.context = Some(Arc::clone(&global.identity));
+        self.usage = usage;
+        self.mutation = self
+            .mutation
+            .checked_add(1)
+            .expect("scene mutations cannot exhaust u64 within a process lifetime");
     }
     /// Returns the number of retained steps, which may be less than revision.
     pub fn committed(&self) -> usize {
@@ -200,7 +266,12 @@ impl SceneState {
     /// Checks a closed step without changing identities, state or counters.
     /// # Errors
     /// Rejects invalid identities, references, ownership, values or a cleared scene.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the ordered preflight checks and owned candidate construction visible at the trust boundary"
+    )]
     pub fn admit(&self, step: &Step, global: &GlobalBudget) -> Result<Admission, StepError> {
+        self.check_context(global)?;
         let fail = |path, code| StepError::in_step(&step.id, path, code);
         if self.cleared {
             return Err(fail(FieldPath::default(), ErrorCode::SceneCleared));
@@ -234,6 +305,22 @@ impl SceneState {
             ));
         }
         let revision = self.revision + 1;
+        let mut minimum = self.usage;
+        minimum.objects += step
+            .put
+            .iter()
+            .filter(|op| object::visual(op).is_some())
+            .count();
+        minimum.scenes = 1;
+        if minimum.objects > MAX_LIVE_OBJECTS {
+            return Err(fail(
+                FieldPath::default(),
+                ErrorCode::OverBudget(Budget::LiveObjects),
+            ));
+        }
+        global
+            .check(self.bound_usage(), minimum)
+            .map_err(|code| fail(FieldPath::default(), code))?;
         let mut after = self.objects.clone();
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
@@ -246,7 +333,7 @@ impl SceneState {
                 }
                 let handle = Handle::new(revision, index)
                     .map_err(|code| fail(object::path(index, v.name).field("id"), code))?;
-                let object = object::object(&v, op, handle);
+                let object = object::object(&v, op, handle, index, step)?;
                 after.insert(v.id.clone(), object);
                 created.push((v.id.clone(), handle));
             }
@@ -256,16 +343,48 @@ impl SceneState {
         }
         object::acyclic(step, &after)?;
         object::validate_changes(step, &after)?;
-        let removed = object::removals(step, &mut after)?;
+        let mut changed = work::changes(step, &mut after, revision)?;
+        metrics::validate(step, &mut after)?;
+        for (id, object) in &after {
+            if let Some(previous) = self.objects.get(id)
+                && previous.work.usage != object.work.usage
+            {
+                changed
+                    .entry(id.clone())
+                    .or_insert_with(|| previous.clone());
+            }
+        }
+        let usage = metrics::charge(
+            after
+                .iter()
+                .chain(self.pending().map(|(id, object)| (id, object)))
+                .chain(changed.iter()),
+        )
+        .map_err(|code| fail(FieldPath::default(), code))?;
+        global
+            .check(self.bound_usage(), usage)
+            .map_err(|code| fail(FieldPath::default(), code))?;
+        let mut removed = object::removals(step, &mut after)?;
+        for object in after
+            .values_mut()
+            .chain(removed.iter_mut().map(|(_, object)| object))
+        {
+            if let Some(data) = &mut object.work.data {
+                data.freeze(step);
+            }
+        }
         Ok(Admission::New(Admitted {
             owner: Arc::clone(&self.identity),
             global: Arc::clone(&global.identity),
             revision: self.revision,
             generation: global.generation(),
+            mutation: self.mutation,
+            usage,
             step: Box::new(step.clone()),
             after,
             created,
             removed,
+            changed: changed.into_iter().collect(),
         }))
     }
 
@@ -278,6 +397,7 @@ impl SceneState {
         global: &mut GlobalBudget,
     ) -> Result<Committed, StaleAdmission> {
         if self.cleared
+            || admitted.mutation != self.mutation
             || admitted.revision != self.revision
             || admitted.generation != global.generation()
             || !Arc::ptr_eq(&admitted.owner, &self.identity)
@@ -296,6 +416,7 @@ impl SceneState {
                 kept: true,
                 retired: false,
                 removed: admitted.removed,
+                changed: admitted.changed,
             },
         );
         self.log.push(SceneEvent::Step {
@@ -304,7 +425,7 @@ impl SceneState {
         });
         self.objects = admitted.after;
         self.revision = revision;
-        global.advance();
+        self.apply_usage(global, admitted.usage);
         Ok(Committed {
             index: revision - 1,
             revision,
@@ -316,17 +437,20 @@ impl SceneState {
     /// # Errors
     /// Returns `OutOfRange` for an index that was never committed.
     pub fn retire(&mut self, index: u32, global: &mut GlobalBudget) -> Result<(), StepError> {
+        self.check_context(global)?;
         let revision = index
             .checked_add(1)
             .ok_or_else(|| StepError::new(ErrorCode::OutOfRange))?;
         let stored = self
             .steps
-            .get_mut(&revision)
+            .get(&revision)
             .ok_or_else(|| StepError::new(ErrorCode::OutOfRange))?;
         if stored.kept && !stored.retired {
-            stored.retired = true;
+            self.retire_through(revision);
             self.activated = self.activated.max(revision);
-            global.advance();
+            self.forget_activated();
+            let usage = self.current_usage();
+            self.apply_usage(global, usage);
         }
         Ok(())
     }
@@ -342,6 +466,13 @@ impl SceneState {
         changed
     }
 
+    fn forget_activated(&mut self) {
+        for (_, stored) in self.steps.range_mut(..=self.activated) {
+            stored.removed.clear();
+            stored.changed.clear();
+        }
+    }
+
     /// Drops unactivated work and retains precisely the finished handles.
     ///
     /// A Stop never reduces revision or frees a reserved model id. Finished objects
@@ -349,11 +480,16 @@ impl SceneState {
     /// # Errors
     /// Rejects invalid bounds, duplicate/unknown handles or more than one effective
     /// cut without an intervening commit. A rejected cut changes nothing.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Stop validates a candidate then installs it atomically; keep those two phases together"
+    )]
     pub fn stop(
         &mut self,
         cut: &StopCut,
         global: &mut GlobalBudget,
     ) -> Result<StopOutcome, StepError> {
+        self.check_context(global)?;
         if self.cleared {
             return Ok(StopOutcome::Cleared);
         }
@@ -363,7 +499,7 @@ impl SceneState {
             code,
         };
         if cut.activated > self.revision
-            || (cut.activated != 0 && cut.activated < self.activated)
+            || cut.activated < self.activated
             || (cut.activated != 0 && !self.steps.get(&cut.activated).is_some_and(|s| s.kept))
         {
             return Err(at("activated", ErrorCode::OutOfRange));
@@ -377,6 +513,9 @@ impl SceneState {
         for revision in dropped.iter().rev() {
             let stored = &self.steps[revision];
             for (id, object) in &stored.removed {
+                after.insert(id.clone(), object.clone());
+            }
+            for (id, object) in &stored.changed {
                 after.insert(id.clone(), object.clone());
             }
             after.retain(|_, object| object.handle.revision() != *revision);
@@ -405,17 +544,27 @@ impl SceneState {
                 });
             }
         }
+        metrics::freeze_detached(&mut after, &revealed).map_err(StepError::new)?;
         after.retain(|_, object| revealed.contains(&object.handle));
         let effective =
             !dropped.is_empty() || after.len() != self.objects.len() || cut.activated == 0;
+        let usage = if cut.activated == 0 {
+            Usage::default()
+        } else {
+            metrics::charge(after.iter()).map_err(StepError::new)?
+        };
+        global
+            .check(self.bound_usage(), usage)
+            .map_err(StepError::new)?;
         if effective && self.revision > 0 && self.last_cut_revision == self.revision {
             return Err(at("activated", ErrorCode::OutOfRange));
         }
         if !effective {
             let changed = self.retire_through(cut.activated) || self.activated != cut.activated;
             self.activated = cut.activated;
+            self.forget_activated();
             if changed {
-                global.advance();
+                self.apply_usage(global, usage);
             }
             return Ok(StopOutcome::Kept);
         }
@@ -433,10 +582,12 @@ impl SceneState {
         for (_, stored) in self.steps.range_mut(cut.activated + 1..) {
             stored.kept = false;
             stored.removed.clear();
+            stored.changed.clear();
         }
         self.objects = after;
         self.activated = cut.activated;
         self.retire_through(cut.activated);
+        self.forget_activated();
         if self.revision > 0 {
             self.log.push(SceneEvent::Stop(cut.clone()));
             self.last_cut_revision = self.revision;
@@ -448,7 +599,7 @@ impl SceneState {
                 stored.removed.clear();
             }
         }
-        global.advance();
+        self.apply_usage(global, usage);
         Ok(if self.cleared {
             StopOutcome::Cleared
         } else {
@@ -457,17 +608,22 @@ impl SceneState {
     }
 
     /// Clears visible state once; historical log and revision remain intact.
-    pub fn clear(&mut self, global: &mut GlobalBudget) {
+    /// # Errors
+    /// Returns `BudgetContext` for a foreign budget instance.
+    pub fn clear(&mut self, global: &mut GlobalBudget) -> Result<(), StepError> {
+        self.check_context(global)?;
         if self.cleared {
-            return;
+            return Ok(());
         }
         self.objects.clear();
         for step in self.steps.values_mut() {
             step.kept = false;
             step.removed.clear();
+            step.changed.clear();
         }
         self.cleared = true;
-        global.advance();
+        self.apply_usage(global, Usage::default());
+        Ok(())
     }
 
     /// Rebuilds a scene in an isolated context from original steps and ordered cuts.
@@ -483,7 +639,7 @@ impl SceneState {
             return Err(StepError::new(ErrorCode::TooLong));
         }
         let mut state = Self::begin(header)?;
-        let mut global = GlobalBudget::default();
+        let mut global = GlobalBudget::replay();
         for event in log {
             match event {
                 SceneEvent::Step { revision, step } => {
@@ -504,6 +660,9 @@ impl SceneState {
                     state
                         .commit(admitted, &mut global)
                         .expect("isolated replay has no intervening transition");
+                    state.retire_through(*revision);
+                    let usage = state.current_usage();
+                    state.apply_usage(&mut global, usage);
                 }
                 SceneEvent::Stop(cut) => {
                     let before = state.log.len();
@@ -515,6 +674,8 @@ impl SceneState {
             }
         }
         state.retire_through(state.revision);
+        state.usage = state.current_usage();
+        state.context = None;
         if !state.cleared {
             state.activated = state
                 .steps
@@ -523,7 +684,33 @@ impl SceneState {
                 .find_map(|(revision, step)| step.kept.then_some(*revision))
                 .unwrap_or_default();
         }
+        state.forget_activated();
         Ok(state)
+    }
+
+    /// Rebuilds and atomically charges an entire visible snapshot batch.
+    /// # Errors
+    /// Rejects invalid histories, more than four scenes or excessive final totals.
+    pub fn replay_all(
+        sources: &[(&Begin, &[SceneEvent])],
+    ) -> Result<(Vec<Self>, GlobalBudget), StepError> {
+        if sources.len() > crate::limits::MAX_VISIBLE_SCENES {
+            return Err(StepError::new(ErrorCode::OverBudget(Budget::VisibleScenes)));
+        }
+        let mut scenes = Vec::with_capacity(sources.len());
+        let mut usage = Usage::default();
+        for (header, log) in sources {
+            let state = Self::replay((*header).clone(), log)?;
+            usage = usage.add(state.usage);
+            scenes.push(state);
+        }
+        usage.validate_global().map_err(StepError::new)?;
+        let mut global = GlobalBudget::default();
+        global.install(usage);
+        for state in &mut scenes {
+            state.context = Some(Arc::clone(&global.identity));
+        }
+        Ok((scenes, global))
     }
 }
 

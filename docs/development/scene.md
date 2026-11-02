@@ -57,8 +57,8 @@ element before decoding or storing it.
 
 Path data (`d`) and Mermaid source (`src`) use `Source`, not display `Text`.
 Each is capped at 8 KiB of UTF-8 bytes (`MAX_SOURCE_BYTES`); the path figure comes
-from S1, while the Mermaid figure is a starting cap. A5 separately enforces the
-512-command path limit. Source Debug exposes byte length only.
+from S1, while the Mermaid figure is a starting cap. Admission's shared SVG preflight
+enforces the 512-command path limit. Source Debug exposes byte length only.
 
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary
@@ -105,9 +105,10 @@ steps. Rejecting admission consumes neither ids, revisions nor global generation
 
 `Admission::New` owns a checked candidate. The caller persists it before calling
 `commit` and serializes all scene/global mutations across that boundary. Commit
-checks scene identity, global-context identity, scene revision and global generation
-in O(1); `StaleAdmission` is its only error and changes nothing. The generation
-currently tracks mutation stamps; expanded resource charges are the next layer.
+checks scene identity, global-context identity, scene revision, its own mutation
+stamp and global generation in O(1); `StaleAdmission` is its only error and changes
+nothing. Admission computes charges without mutating either state; commit installs
+them. A scene bound to one budget rejects mutations through a different instance.
 
 A handle encodes `(original_revision << 10) | expanded_put_slot`: revisions are
 one-based, slots are zero-based, and animation slots are not compacted away.
@@ -150,8 +151,12 @@ requires each original revision in order, including dropped steps. Recovery's
 kept prefix is considered activated; its removals are retired. The selected global
 budget strategy is **validate the combined final replayed result once**, rather
 than replay independent scenes against unrelated historical peaks. The budget
-layer must implement and regression-test that aggregate installation before replay
-can be used with expanded-work limits.
+layer implements this through `SceneState::replay_all`, returning the restored
+scenes and their shared budget atomically. Standalone `replay` returns an unbound
+scene; its next mutation must install its entire remaining charge. During replay,
+each commit releases removal/replacement charges without advancing the activated
+bound, so a later `Stop(1)` still works after replaying steps 1 and 2. Undo metadata
+stays available until actual activation or a cut.
 
 At runtime the shell retires removals at activation; the brain calls `retire`
 only on StepShown or retires the kept prefix on Stop. Repeated retirement is a
@@ -169,10 +174,35 @@ Prepared display residency is not an admission input.
 
 ## Caps
 
-These constants describe the full admission contract. The implemented layers enforce
-record bytes, scalar types, bounded lists, identity/reference rules and lifetime steps.
-Expanded-work counters, composed transforms and prepared residency follow in the
-budget and preparation layers; their caps below are not yet enforced by admission.
+Admission enforces the logical caps below, independently of prepared residency.
+`SceneState::usage` and `GlobalBudget::usage` report the installed charges. A pending
+removal still counts until the shell activates it or the brain receives StepShown.
+Pending replacements reserve each object's maximum expanded cost and the union of
+its property owners, rather than charging the same identity twice. Retirement,
+Stop and terminal `clear` return charges exactly once.
+
+Table rows charge padded cells. Charts charge every data point, reject invalid log
+domains and non-finite stacked sums, and reserve generated data motion. Diagram
+groups reserve their generated position glide; entrances and edge flow also count
+as motion owners. Repeated finite animations, including delay, must fit 60 seconds;
+infinite repeat remains bounded by the later scene deadline. A7 supplies that clock
+and the remaining property-ownership rules.
+
+The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
+repetitions. It validates coordinates and counts commands before vertices exist.
+Quadratic and cubic second differences determine power-of-two subdivision counts at
+0.25 logical-pixel tolerance after conservative composed scale bounds. A5 must use
+the same walker and subdivision function when producing vertices. Procedural curves,
+rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
+segment reservations in `path.rs`; A5/A6 must keep generated output within them.
+
+Transform checks compose conservative scale, translation and rotation envelopes down
+the parent graph, including spring overshoot, and reject overflow or scale underflow.
+These envelopes can reject near-cap combinations whose extrema never coincide.
+Detaching an object preserves its inherited bounds so later admissions cannot forget
+its path cost or transform basis. This is budget metadata, not placed geometry: A5
+still prepares stepwise through the ordered log and validates measured layout output.
+Prepared residency remains the preparation layer's separate limit.
 
 | Resource | Per object/scene | Global across visible scenes |
 |---|---|---|
