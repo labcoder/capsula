@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use capsula_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::Connection;
@@ -9,8 +8,8 @@ use rusqlite::Connection;
 use crate::test_support::Scratch;
 
 use super::{
-    EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, SceneTarget, Store, StoreError,
-    Swap, checkpoint_now, purge as steps,
+    Cancel, EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, SceneTarget, Store,
+    StoreError, Swap, checkpoint_now, purge as steps,
 };
 
 const MARKER: &str = "zqxplantedmarker";
@@ -122,7 +121,7 @@ fn clean_copy(store: &Store) -> super::Copied {
         .owed()
         .expect("owed")
         .expect("a purge is owed and no run is active")
-        .copy(&Arc::new(AtomicBool::new(false)))
+        .copy(&Arc::new(Cancel::default()))
         .expect("copy")
         .expect("nothing stopped it")
 }
@@ -763,9 +762,13 @@ fn a_stopped_copy_leaves_nothing_and_the_purge_owed() {
     owed_purge(&mut store);
     let owed = store.owed().expect("owed").expect("idle");
     assert!(
-        owed.copy(&Arc::new(AtomicBool::new(true)))
-            .expect("copy")
-            .is_none()
+        owed.copy(&{
+            let cancel = Cancel::default();
+            cancel.stop_and_release();
+            Arc::new(cancel)
+        })
+        .expect("copy")
+        .is_none()
     );
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
     assert!(store.purge_pending());
@@ -787,7 +790,7 @@ fn a_failed_copy_leaves_nothing_and_a_retry_finishes() {
         .expect("trigger");
     let owed = store.owed().expect("owed").expect("idle");
     assert!(matches!(
-        owed.copy(&Arc::new(AtomicBool::new(false))),
+        owed.copy(&Arc::new(Cancel::default())),
         Err(StoreError::Sql(_))
     ));
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
@@ -914,7 +917,7 @@ fn a_reader_holding_the_wal_defers_the_copy_until_it_lets_go() {
         .owed()
         .expect("owed")
         .expect("idle")
-        .copy(&Arc::new(AtomicBool::new(false)))
+        .copy(&Arc::new(Cancel::default()))
         .expect("copy");
     assert!(copied.is_none(), "the swap would have had the WAL to copy");
     assert!(store.purge_pending());
@@ -1075,7 +1078,7 @@ fn compacting_leaves_out_what_the_snapshot_freed_and_keeps_its_rows() {
         "the freed row's bytes stayed in the snapshot"
     );
 
-    assert!(steps::compact(&scratch.db(), &Arc::new(AtomicBool::new(false))).expect("compact"));
+    assert!(steps::compact(&scratch.db(), &Arc::new(Cancel::default())).expect("compact"));
     let clean = beside(&scratch.db(), ".purge-clean");
     assert!(!has_marker(&clean));
     let kept: String = Connection::open(&clean)
@@ -1103,7 +1106,7 @@ fn a_leftover_that_cant_be_removed_doesnt_stop_the_start() {
             .owed()
             .expect("owed")
             .expect("idle")
-            .copy(&Arc::new(AtomicBool::new(false))),
+            .copy(&Arc::new(Cancel::default())),
         Err(StoreError::Purge(_))
     ));
     std::fs::remove_dir(&clean).expect("out of the way");
@@ -1134,7 +1137,12 @@ fn a_stop_ends_a_running_statement() {
         .collect();
     store.append(thread, run, &events).expect("events");
     let mut reader = Connection::open(scratch.db()).expect("reader");
-    steps::stoppable(&mut reader, &Arc::new(AtomicBool::new(true))).expect("handler");
+    steps::stoppable(&mut reader, &{
+        let cancel = Cancel::default();
+        cancel.stop_and_release();
+        Arc::new(cancel)
+    })
+    .expect("handler");
     let mut copy = scratch.db().into_os_string();
     copy.push(".purge-snapshot");
     let copy = copy.into_string().expect("a UTF-8 path");
@@ -1550,7 +1558,7 @@ fn measure_swap_after_a_held_reader() {
                 .owed()
                 .expect("owed")
                 .expect("idle")
-                .copy(&Arc::new(AtomicBool::new(false)))
+                .copy(&Arc::new(Cancel::default()))
                 .expect("copy")
                 .expect("not stopped");
             let copy = started.elapsed();
@@ -1756,7 +1764,7 @@ fn measure_purge() {
             let phase = Arc::new(AtomicU8::new(0));
             let running = Arc::clone(&phase);
             let helper = std::thread::spawn(move || {
-                let stop = Arc::new(AtomicBool::new(false));
+                let stop = Arc::new(Cancel::default());
                 let mut took = Vec::new();
                 for (at, step) in [steps::snapshot, steps::clean, steps::compact]
                     .into_iter()
@@ -1806,7 +1814,7 @@ fn measure_purge() {
             let owed = store.owed().expect("owed").expect("idle");
             let started = Instant::now();
             let copied = owed
-                .copy(&Arc::new(AtomicBool::new(false)))
+                .copy(&Arc::new(Cancel::default()))
                 .expect("copy")
                 .expect("not stopped");
             let copy = started.elapsed();

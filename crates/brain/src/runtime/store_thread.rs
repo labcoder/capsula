@@ -6,7 +6,6 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -16,7 +15,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{Copied, Deletion, EventKind, NewEvent, Store, StoreError, Swap, cleared_body};
+use crate::store::{
+    Cancel, Copied, Deletion, EventKind, NewEvent, Store, StoreError, Swap, cleared_body,
+};
 
 /// How often the thread looks at a running helper.
 const POLL: Duration = Duration::from_millis(50);
@@ -45,6 +46,9 @@ pub(crate) struct Schedule {
     /// Gates that each hold one op before it runs.
     #[cfg(test)]
     pub(crate) gates: Option<mpsc::Receiver<Gate>>,
+    /// Where the first copy pauses.
+    #[cfg(test)]
+    pub(crate) pauses: Option<crate::store::Pauses>,
 }
 
 /// Holds the next op `matches` accepts, after it's reported started and before it runs, until
@@ -75,6 +79,8 @@ impl Default for Schedule {
             observed: None,
             #[cfg(test)]
             gates: None,
+            #[cfg(test)]
+            pauses: None,
         }
     }
 }
@@ -99,9 +105,9 @@ pub(crate) enum Attempt {
 /// The one purge job running on a helper thread. Only one runs at a time, so a removal never
 /// takes a later copy's file.
 enum Job {
-    /// A copy; any op stops it.
+    /// A copy; any write stops it, and waits until it has let go of the live store.
     Copy {
-        stop: Arc<AtomicBool>,
+        cancel: Arc<Cancel>,
         helper: JoinHandle<Result<Option<Copied>, StoreError>>,
     },
     /// Removing the purge's files: the old store after a swap, an unused copy, or what a crash
@@ -160,10 +166,12 @@ impl Purger {
             .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
-    /// An op is about to run, so a running copy is stale: it stops before the op takes the disk.
+    /// A write is about to run, so a running copy is stale. It stops, and the write waits until
+    /// the copy holds no snapshot of the live store, which would keep the write's pages in the
+    /// WAL for a later commit to checkpoint. The rest of the copy's work goes on off this thread.
     fn op_arriving(&self) {
-        if let Some(Job::Copy { stop, .. }) = &self.job {
-            stop.store(true, Ordering::Relaxed);
+        if let Some(Job::Copy { cancel, .. }) = &self.job {
+            cancel.stop_and_release();
         }
     }
 
@@ -243,13 +251,17 @@ impl Purger {
             Ok(_) => return self.settle(Attempt::NoRoom, store),
             Err(error) => return self.settle(failed(&StoreError::Purge(error)), store),
         }
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
+        #[cfg(test)]
+        let cancel = (self.schedule.pauses.take()).map_or_else(Cancel::default, Cancel::pausing);
+        #[cfg(not(test))]
+        let cancel = Cancel::default();
+        let cancel = Arc::new(cancel);
+        let cancelling = Arc::clone(&cancel);
         match thread::Builder::new()
             .name("purge".to_owned())
-            .spawn(move || owed.copy(&stopping))
+            .spawn(move || owed.copy(&cancelling))
         {
-            Ok(helper) => self.job = Some(Job::Copy { stop, helper }),
+            Ok(helper) => self.job = Some(Job::Copy { cancel, helper }),
             Err(error) => {
                 tracing::error!(%error, "the purge's helper didn't start");
                 self.settle(Attempt::Failed, store);

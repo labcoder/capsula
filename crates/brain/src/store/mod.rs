@@ -21,7 +21,9 @@ use capsula_protocol::constants;
 use capsula_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
-pub use purge::{Copied, Leftovers, Owed, Swap};
+pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
+#[cfg(test)]
+pub(crate) use purge::{Pause, Pauses, Point};
 pub(crate) use scenes::cleared_body;
 pub use scenes::{SceneState, SceneTarget};
 

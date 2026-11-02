@@ -13,8 +13,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _};
 
@@ -54,6 +54,96 @@ pub enum Swap {
     Stale,
     /// A reader kept the WAL from emptying, so the old file can't be closed cleanly; still owed.
     Blocked,
+}
+
+/// Stops a copy, and lets a write wait until the copy has let go of the live store, so no
+/// snapshot of it is open while the write commits and the write's pages can be checkpointed.
+#[derive(Debug, Default)]
+pub struct Cancel {
+    stop: AtomicBool,
+    /// Held while the copy reads the live store: its drain and its snapshot.
+    source: Mutex<()>,
+    #[cfg(test)]
+    pauses: Pauses,
+}
+
+impl Cancel {
+    /// Stops the copy, then waits until it holds no connection to the live store. Its drain
+    /// can't be stopped once started, so this can wait for it.
+    pub fn stop_and_release(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        #[cfg(test)]
+        self.pauses.waiting();
+        drop(self.source.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// A copy that pauses where `pauses` say.
+    #[cfg(test)]
+    pub(crate) fn pausing(pauses: Pauses) -> Self {
+        Self {
+            pauses,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the copy was told to stop.
+    pub(crate) fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+}
+
+/// Where a test holds a copy.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Point {
+    /// Before it takes the live store.
+    Source,
+    /// In the drain, its connection open.
+    Drain,
+    /// In the snapshot, its read-only connection open.
+    Snapshot,
+    /// After it let go of the live store.
+    Clean,
+    /// Before it removes what a stopped or failed copy left.
+    Cleanup,
+}
+
+/// Holds a copy at `at`, telling `reached` and waiting on `release`.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Pause {
+    pub(crate) at: Point,
+    pub(crate) reached: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+/// A copy's pauses, each taken once, and who hears that a write waits for the copy.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Pauses {
+    pub(crate) at: Mutex<Vec<Pause>>,
+    pub(crate) waiting: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(test)]
+impl Pauses {
+    fn reach(&self, at: Point) {
+        let pause = {
+            let mut pauses = self.at.lock().unwrap_or_else(PoisonError::into_inner);
+            let found = pauses.iter().position(|pause| pause.at == at);
+            found.map(|found| pauses.remove(found))
+        };
+        if let Some(pause) = pause {
+            pause.reached.send(()).ok();
+            pause.release.recv().ok();
+        }
+    }
+
+    fn waiting(&self) {
+        if let Some(waiting) = &self.waiting {
+            waiting.send(()).ok();
+        }
+    }
 }
 
 /// The purge's files beside the store: its copies, and the old store a swap leaves.
@@ -202,26 +292,32 @@ impl Owed {
     }
 
     /// Makes the clean copy beside the store. Runs on any thread while the store keeps serving.
-    /// `None` when `stop` was set before it finished; nothing is left behind then.
+    /// `None` when `cancel` stopped it before it finished; nothing is left behind then. It reads
+    /// the live store only while holding `cancel`'s source, so a write that stops it waits for
+    /// that read alone, never for the rest of the copy or its cleanup.
     ///
     /// # Errors
     /// Fails when SQLite fails or a file can't be written; nothing is left behind.
-    pub fn copy(self, stop: &Arc<AtomicBool>) -> Result<Option<Copied>, StoreError> {
+    pub fn copy(self, cancel: &Arc<Cancel>) -> Result<Option<Copied>, StoreError> {
         let leftovers = Leftovers { db: self.db };
         let made = leftovers
             .remove()
             .map_err(StoreError::Purge)
             .and_then(|()| {
                 let db = &leftovers.db;
-                Ok(drain(db, stop)?
-                    && snapshot(db, stop)?
-                    && clean(db, stop)?
-                    && compact(db, stop)?)
+                #[cfg(test)]
+                cancel.pauses.reach(Point::Source);
+                let source = cancel.source.lock().unwrap_or_else(PoisonError::into_inner);
+                let read = drain(db, cancel)? && snapshot(db, cancel)?;
+                drop(source);
+                Ok(read && clean(db, cancel)? && compact(db, cancel)?)
             });
-        if !matches!(made, Ok(true))
-            && let Err(error) = leftovers.remove()
-        {
-            tracing::warn!(%error, "a purge's copy couldn't be removed; it's retried later");
+        if !matches!(made, Ok(true)) {
+            #[cfg(test)]
+            cancel.pauses.reach(Point::Cleanup);
+            if let Err(error) = leftovers.remove() {
+                tracing::warn!(%error, "a purge's copy couldn't be removed; it's retried later");
+            }
         }
         Ok(made?.then_some(Copied {
             writes: self.writes,
@@ -303,11 +399,13 @@ pub(super) fn old(db: &Path) -> PathBuf {
 /// writer or holds it up; it can't be stopped once started, and an op meanwhile shares the disk.
 /// False unless it copied the whole WAL: a reader still holding part of it, or another
 /// connection checkpointing, would leave that copy to the swap, so the purge waits instead.
-pub(super) fn drain(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
-    if stop.load(Ordering::Relaxed) {
+pub(super) fn drain(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+    if cancel.stopped() {
         return Ok(false);
     }
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    #[cfg(test)]
+    cancel.pauses.reach(Point::Drain);
     let (busy, frames, copied): (i64, i64, i64) =
         conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -317,28 +415,32 @@ pub(super) fn drain(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreErro
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.
-pub(super) fn snapshot(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
+pub(super) fn snapshot(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     // Checked before each step too: a short statement may never call the progress handler.
-    if stop.load(Ordering::Relaxed) {
+    if cancel.stopped() {
         return Ok(false);
     }
     let mut reader = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    stoppable(&mut reader, stop)?;
+    #[cfg(test)]
+    cancel.pauses.reach(Point::Snapshot);
+    stoppable(&mut reader, cancel)?;
     finished(reader.execute("VACUUM INTO ?1", [utf8(&sidecar(db, SNAPSHOT))?]))
 }
 
 /// Clears the owed row in the snapshot and rebuilds its FTS index from the live events, which
 /// drops the deleted rows' index keys.
-pub(super) fn clean(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
+pub(super) fn clean(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+    #[cfg(test)]
+    cancel.pauses.reach(Point::Clean);
     // Checked before each step too: a short statement may never call the progress handler.
-    if stop.load(Ordering::Relaxed) {
+    if cancel.stopped() {
         return Ok(false);
     }
     let mut conn = Connection::open(sidecar(db, SNAPSHOT))?;
     // A scratch file: a crash throws it away, so it needs no journal.
     conn.query_row("PRAGMA journal_mode = OFF", [], |_| Ok(()))?;
     conn.execute_batch("PRAGMA synchronous = OFF;")?;
-    stoppable(&mut conn, stop)?;
+    stoppable(&mut conn, cancel)?;
     finished(conn.execute_batch(
         "DELETE FROM purge_pending;
          INSERT INTO events_fts (events_fts) VALUES ('rebuild');
@@ -348,13 +450,13 @@ pub(super) fn clean(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreErro
 
 /// Writes the snapshot into fresh pages, so no gap the rebuild left survives, removes the
 /// snapshot and syncs the result.
-pub(super) fn compact(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
+pub(super) fn compact(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     // Checked before each step too: a short statement may never call the progress handler.
-    if stop.load(Ordering::Relaxed) {
+    if cancel.stopped() {
         return Ok(false);
     }
     let mut conn = Connection::open(sidecar(db, SNAPSHOT))?;
-    stoppable(&mut conn, stop)?;
+    stoppable(&mut conn, cancel)?;
     let clean = sidecar(db, CLEAN);
     if !finished(conn.execute("VACUUM INTO ?1", [utf8(&clean)?]))? {
         return Ok(false);
@@ -370,13 +472,13 @@ pub(super) fn compact(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreEr
     Ok(true)
 }
 
-/// Lets `stop` end a statement on `conn`; every 1,000 VM steps [guess].
-pub(super) fn stoppable(conn: &mut Connection, stop: &Arc<AtomicBool>) -> rusqlite::Result<()> {
-    let stop = Arc::clone(stop);
-    conn.progress_handler(1000, Some(move || stop.load(Ordering::Relaxed)))
+/// Lets `cancel` end a statement on `conn`; every 1,000 VM steps [guess].
+pub(super) fn stoppable(conn: &mut Connection, cancel: &Arc<Cancel>) -> rusqlite::Result<()> {
+    let cancel = Arc::clone(cancel);
+    conn.progress_handler(1000, Some(move || cancel.stopped()))
 }
 
-/// False when `stop` ended the statement.
+/// False when a stop ended the statement.
 pub(super) fn finished<T>(result: rusqlite::Result<T>) -> Result<bool, StoreError> {
     match result {
         Ok(_) => Ok(true),

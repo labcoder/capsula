@@ -1431,9 +1431,7 @@ async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped(
         .owed()
         .expect("owed")
         .expect("a purge is owed")
-        .copy(&std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            false,
-        )))
+        .copy(&std::sync::Arc::new(crate::store::Cancel::default()))
         .expect("copy")
         .expect("not stopped");
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
