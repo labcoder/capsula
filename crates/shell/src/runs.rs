@@ -476,8 +476,8 @@ mod tests {
     }
 
     /// Routes a brain's effects the way the runtime would, storing a `BeginTurn` only when
-    /// `stored`.
-    fn deliver(runs: &mut Runs, store: &mut Store, effects: Vec<BrainEffect>, stored: bool) {
+    /// there's a `store`.
+    fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEffect>) {
         for effect in effects {
             match effect {
                 BrainEffect::Store(StoreOp::BeginTurn {
@@ -485,9 +485,13 @@ mod tests {
                     title,
                     run,
                     text,
-                }) if stored => store
-                    .begin_turn(thread, title.as_deref(), run, &text)
-                    .expect("the turn is stored"),
+                }) => {
+                    if let Some(store) = store.as_deref_mut() {
+                        store
+                            .begin_turn(thread, title.as_deref(), run, &text)
+                            .expect("the turn is stored");
+                    }
+                }
                 BrainEffect::Control(ControlToShell::RunState { run, thread, phase }) => {
                     runs.apply_state(run, thread, phase);
                 }
@@ -531,7 +535,7 @@ mod tests {
         let mut brain = restarted(&store);
         let turn = typed(&mut runs, "a new thread");
         let effects = brain.handle(turn).expect("turn");
-        deliver(&mut runs, &mut store, effects, false);
+        deliver(&mut runs, None, effects);
 
         runs.disconnected();
         runs.met(Incarnation(2));
@@ -541,16 +545,16 @@ mod tests {
         let turn = typed(&mut runs, "again");
         assert!(matches!(turn, Input::Turn { thread: None, .. }));
         let effects = brain.handle(turn).expect("turn");
-        deliver(&mut runs, &mut store, effects, true);
+        deliver(&mut runs, Some(&mut store), effects);
         let run = RunId(1);
         let effects = brain.handle(Input::TurnStored { run }).expect("stored");
-        deliver(&mut runs, &mut store, effects, true);
+        deliver(&mut runs, Some(&mut store), effects);
         let answer = Input::Engine {
             run,
             event: EngineEvent::Text("answered".to_owned()),
         };
         let effects = brain.handle(answer).expect("text");
-        deliver(&mut runs, &mut store, effects, true);
+        deliver(&mut runs, Some(&mut store), effects);
         assert_eq!(
             runs.shown().map(|shown| shown.text.as_str()),
             Some("answered")
@@ -572,7 +576,7 @@ mod tests {
             "an answered thread is stored, so it's still continued"
         );
         let effects = brain.handle(turn).expect("turn");
-        deliver(&mut runs, &mut store, effects, true);
+        deliver(&mut runs, Some(&mut store), effects);
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }

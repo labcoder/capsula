@@ -1305,12 +1305,19 @@ async fn a_stop_read_after_the_data_pipe_ends_still_keeps_its_selection() {
     );
 }
 
+/// Which pipe the shell ends first.
+#[derive(Clone, Copy, Debug)]
+enum FirstEnd {
+    Control,
+    Data,
+}
+
 /// Runs three steps to Done, then sends the control `last` makes for the run and its scene and
-/// ends the control pipe in the same write, so the reader sees both in one poll. With
-/// `data_first` the data pipe ends before that. Returns the scene and what a reconnect names.
+/// ends the control pipe in the same write, so the reader sees both in one poll. Returns the
+/// scene and what a reconnect names.
 async fn control_then_eof(
     name: &str,
-    data_first: bool,
+    first: FirstEnd,
     last: impl Fn(RunId, SceneId) -> ControlToBrain,
 ) -> (Scratch, SceneId, Vec<SceneDescriptor>) {
     let scratch = Scratch::new(name);
@@ -1331,7 +1338,7 @@ async fn control_then_eof(
             ..
         } = shell;
         let data = (data_in, data_out);
-        if data_first {
+        if let FirstEnd::Data = first {
             drop(data);
         }
         let last = frame::encode(&last(run, scene), Pipe::Control).expect("encodes");
@@ -1349,19 +1356,19 @@ async fn control_then_eof(
 
 #[tokio::test]
 async fn a_stop_or_clear_read_with_the_control_pipe_s_end_is_still_applied() {
-    for data_first in [false, true] {
+    for first in [FirstEnd::Control, FirstEnd::Data] {
         let stop = |run, _| ControlToBrain::Stop {
             run,
             revealed: vec![0],
         };
-        let (scratch, scene, named) = control_then_eof("eof-stop", data_first, stop).await;
+        let (scratch, scene, named) = control_then_eof("eof-stop", first, stop).await;
         assert_eq!(
             named
                 .iter()
                 .find(|named| named.scene == scene)
                 .map(|named| named.committed),
             Some(1),
-            "data first: {data_first}"
+            "{first:?} ended first"
         );
         assert_eq!(
             kept_after_restart(&scratch, scene),
@@ -1370,10 +1377,10 @@ async fn a_stop_or_clear_read_with_the_control_pipe_s_end_is_still_applied() {
         let clear = |_, scene| ControlToBrain::ClearDrawing {
             scene_ids: vec![scene],
         };
-        let (scratch, scene, named) = control_then_eof("eof-clear", data_first, clear).await;
+        let (scratch, scene, named) = control_then_eof("eof-clear", first, clear).await;
         assert!(
             named.iter().all(|named| named.scene != scene),
-            "data first: {data_first}"
+            "{first:?} ended first"
         );
         assert_eq!(kept_after_restart(&scratch, scene), None);
     }
