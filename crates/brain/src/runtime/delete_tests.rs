@@ -1,5 +1,5 @@
 //! Deletes across a connection's end and the next: the drain, both orders of a resend and its
-//! answer, and an answer the shell never read.
+//! answer, an answer the shell never read, and a hide that never committed.
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, RunId, ThreadId};
@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
 
-use super::{PATIENCE, Shell, duplex, patient_brain};
+use super::{PATIENCE, Shell, duplex, outcome, outcomes, patient_brain};
 use crate::coordinator::StoreOp;
 use crate::runtime::{Brain, Ended, Quit, Seen};
 use crate::store::Store;
@@ -106,6 +106,8 @@ async fn a_delete_read_with_the_control_pipe_s_end_is_still_applied() {
                 drop(data);
                 seen(&mut observed, |seen| *seen == Seen::Grace).await;
             }
+            // The frame and the pipe's end are written without a yield between, so the reader
+            // forwards the delete and sees the end in one poll, before the core can take it.
             let last = frame::encode(&delete(1), Pipe::Control).expect("encodes");
             control_out.write_all(&last).await.expect("sent");
             control_out.shutdown().await.expect("ended");
@@ -116,6 +118,9 @@ async fn a_delete_read_with_the_control_pipe_s_end_is_still_applied() {
             .await
             .expect("the connection ends in time");
         assert_eq!(ended, Ended::Lost);
+        if !data_first {
+            seen(&mut observed, |seen| *seen == Seen::ControlDrained).await;
+        }
         seen(
             &mut observed,
             |seen| matches!(seen, Seen::StoreOpQueued(op) if is_delete(op)),
@@ -172,23 +177,40 @@ async fn a_resend_before_the_answer_gets_the_answer_on_its_connection() {
     assert_eq!(listed(&scratch), 0);
 }
 
-#[tokio::test]
-async fn an_answer_before_the_resend_consumes_it_and_a_lost_answer_is_asked_again() {
+const NO_HIDE: &str = "CREATE TRIGGER no_hide BEFORE UPDATE OF state ON threads BEGIN SELECT RAISE(ABORT, 'kept'); END;";
+
+fn trap(scratch: &Scratch, sql: &str) {
+    rusqlite::Connection::open(scratch.db())
+        .expect("open")
+        .execute_batch(sql)
+        .expect("trap");
+}
+
+/// The store answers a delete held past its connection with `outcome` before the next
+/// connection's resend arrives: the resend is consumed, and a hide that failed once isn't tried
+/// again, so the thread stays as the shell was told.
+async fn answer_before_the_resend(outcome: Deleted) {
     let scratch = Scratch::new("answer-first");
-    let mut brain = patient_brain(&scratch, "0 text a\n0 text b\n0 text c");
+    let mut brain = patient_brain(&scratch, "0 text a\n0 text b");
     let mut observed = brain.observe();
+    if outcome == Deleted::NotHidden {
+        trap(&scratch, NO_HIDE);
+    }
     let (run, release) = delete_held_past_the_connection(&mut brain, &mut observed).await;
     connection!(brain, |shell| async {
         shell.scenes().await;
         release.send(()).expect("the delete waits at the gate");
+        let last_run = (outcome == Deleted::Removed).then_some(run);
         assert_eq!(
             shell.control().await,
             Some(ControlToShell::ThreadDeleted {
                 thread: T,
-                outcome: Deleted::Removed,
-                last_run: Some(run),
+                outcome,
+                last_run,
             })
         );
+        // A second hide would now succeed.
+        trap(&scratch, "DROP TRIGGER IF EXISTS no_hide;");
         shell.send(&resend()).await;
         seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
         // A second answer would come before this turn's state.
@@ -203,8 +225,37 @@ async fn an_answer_before_the_resend_consumes_it_and_a_lost_answer_is_asked_agai
         0,
         "the crossed resend asked nothing of the store"
     );
+    brain.close().await;
+    let kept = usize::from(outcome == Deleted::NotHidden);
+    assert_eq!(
+        listed(&scratch),
+        1 + kept,
+        "the next turn's thread, and T if kept"
+    );
+}
 
-    // That answer never reached the shell, so the next connection asks again.
+#[tokio::test]
+async fn an_answer_before_the_resend_consumes_it() {
+    answer_before_the_resend(Deleted::Removed).await;
+}
+
+#[tokio::test]
+async fn a_crossed_answer_that_hid_nothing_consumes_the_resend() {
+    answer_before_the_resend(Deleted::NotHidden).await;
+}
+
+#[tokio::test]
+async fn an_answer_the_shell_never_read_is_asked_again() {
+    let scratch = Scratch::new("lost-answer");
+    let mut brain = patient_brain(&scratch, "0 text a");
+    let mut observed = brain.observe();
+    let (_, release) = delete_held_past_the_connection(&mut brain, &mut observed).await;
+    connection!(brain, |shell| async {
+        shell.scenes().await;
+        release.send(()).expect("the delete waits at the gate");
+        // The answer goes out on this connection, and the shell ends without reading it.
+        seen(&mut observed, |seen| *seen == Seen::DeleteAnswered).await;
+    });
     connection!(brain, |shell| async {
         shell.scenes().await;
         shell.send(&resend()).await;
@@ -219,7 +270,57 @@ async fn an_answer_before_the_resend_consumes_it_and_a_lost_answer_is_asked_agai
         );
     });
     brain.close().await;
-    assert_eq!(listed(&scratch), 1, "only the next turn's thread");
+    let asked = std::iter::from_fn(|| observed.try_recv().ok())
+        .filter(|seen| matches!(seen, Seen::StoreOpQueued(op) if is_delete(op)));
+    assert_eq!(asked.count(), 1, "the resend asked the store again");
+    assert_eq!(listed(&scratch), 0);
+}
+
+#[tokio::test]
+async fn a_hide_that_never_committed_leaves_the_thread_for_the_next_start() {
+    let scratch = Scratch::new("hide-uncommitted");
+    let mut brain = patient_brain(&scratch, SLOW);
+    // A hide rolled back leaves the store as a crash before its commit would.
+    trap(&scratch, NO_HIDE);
+    connection!(brain, |shell| async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("t").await;
+        assert_eq!(
+            shell.control().await,
+            Some(run_state(1, T, Phase::Thinking))
+        );
+        shell.send(&delete(1)).await;
+        let interrupted = run_state(1, T, Phase::Interrupted);
+        while shell.control().await.expect("open") != interrupted {}
+        assert_eq!(
+            shell.control().await.expect("open"),
+            ControlToShell::ThreadDeleted {
+                thread: T,
+                outcome: Deleted::NotHidden,
+                last_run: None,
+            }
+        );
+    });
+    brain.close().await;
+    trap(&scratch, "DROP TRIGGER no_hide;");
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "deleted")]);
+    assert_eq!(listed(&scratch), 1);
+
+    let mut brain = patient_brain(&scratch, "");
+    connection!(brain, |shell| async {
+        assert_eq!(shell.scenes().await, []);
+        shell.send(&resend()).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::ThreadDeleted {
+                thread: T,
+                outcome: Deleted::Removed,
+                last_run: Some(RunId(1)),
+            })
+        );
+    });
+    brain.close().await;
+    assert_eq!(listed(&scratch), 0);
 }
 
 /// Serves a connection whose shell sends a delete for T and then quits; the quit's outcome.
@@ -274,6 +375,40 @@ async fn a_delete_that_hid_nothing_makes_the_quit_incomplete() {
     assert_eq!(listed(&scratch), 1, "the thread comes back");
 }
 
+#[tokio::test]
+async fn a_delete_refused_for_capacity_makes_the_quit_incomplete() {
+    let scratch = Scratch::new("quit-refused");
+    let mut brain = with_a_thread(&scratch).await;
+    let release = brain.hold_store(is_delete);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.scenes().await;
+        for absent in 11..19 {
+            shell
+                .send(&ControlToBrain::DeleteThread {
+                    thread: ThreadId(absent),
+                    after_turns: 0,
+                    resend: false,
+                })
+                .await;
+        }
+        shell.send(&delete(0)).await;
+        shell.send(&ControlToBrain::Quitting).await;
+        drop(shell);
+    };
+    let served = async { tokio::join!(brain.serve(control, data, &mut tap), client).0 };
+    let ended = timeout(PATIENCE, served).await.expect("in time");
+    let Ended::Quit { deadline } = ended else {
+        panic!("expected a quit, got {ended:?}");
+    };
+    release
+        .send(())
+        .expect("the first delete waits at the gate");
+    assert_eq!(brain.quit(deadline).await, Quit::Incomplete);
+    assert_eq!(listed(&scratch), 1, "the ninth delete, T's, didn't happen");
+}
+
 /// When a turn naming T, sent before T's delete, is read relative to the delete's answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Read {
@@ -303,16 +438,23 @@ async fn next_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
     }
 }
 
-async fn submit_to<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
-    shell: &mut Shell<S>,
-    thread: ThreadId,
-) {
+fn turn_in(thread: ThreadId) -> Vec<u8> {
     let turn = capsula_protocol::message::DataToBrain::TextSubmit {
         thread: Some(thread),
         text: "more".to_owned(),
     };
-    let frame = frame::encode(&turn, Pipe::Data).expect("encodes");
-    shell.data_out.write_all(&frame).await.expect("sent");
+    frame::encode(&turn, Pipe::Data).expect("encodes")
+}
+
+async fn submit_to<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
+    shell: &mut Shell<S>,
+    thread: ThreadId,
+) {
+    shell
+        .data_out
+        .write_all(&turn_in(thread))
+        .await
+        .expect("sent");
 }
 
 fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
@@ -349,7 +491,8 @@ async fn stop_t_then_start_u<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
 }
 
 /// T's run is stopped and U's is current when the shell sends a turn naming T and then T's
-/// delete; the brain reads the delete first, and the turn at `read`.
+/// delete, counting that turn; the data reader is held mid-frame, so the brain reads the delete
+/// first, and the turn at `read`.
 async fn cross_pipe(read: Read) {
     let scratch = Scratch::new("cross-pipe");
     let mut brain = patient_brain(&scratch, SLOW);
@@ -372,6 +515,9 @@ async fn cross_pipe(read: Read) {
     let release = (read == Read::Pending).then(|| brain.hold_store(is_delete));
     connection!(brain, |shell| async {
         stop_t_then_start_u(&mut shell).await;
+        let turn = turn_in(T);
+        let (sent, held) = turn.split_at(turn.len() - 1);
+        shell.data_out.write_all(sent).await.expect("sent");
         shell.send(&delete(3)).await;
         seen(
             &mut observed,
@@ -391,7 +537,7 @@ async fn cross_pipe(read: Read) {
             };
             assert_eq!(got, outcome);
         }
-        submit_to(&mut shell, T).await;
+        shell.data_out.write_all(held).await.expect("sent");
         if read == Read::NotHidden {
             assert_eq!(
                 next_control(&mut shell).await,

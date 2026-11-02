@@ -374,11 +374,28 @@ fn a_first_step_queued_before_the_delete_settles_with_its_eviction() {
     for outcome in OUTCOMES {
         for (before, evicted) in [(&[1, 2, 3][..], None), (&[1, 2, 3, 4][..], Some(1))] {
             let mut core = first_step_queued(before);
-            core.handle(delete(T, 0)).expect("accepted");
-            // The store answers in order: the step, the outcome, then the delete.
-            core.handle(ack(0, "a")).expect("ending");
-            core.handle(Input::RunStored { run: R }).expect("ending");
-            let effects = core.handle(answer(T, outcome, Some(R))).expect("answered");
+            assert!(
+                core.handle(delete(T, 0))
+                    .expect("accepted")
+                    .contains(&store_delete(T)),
+                "the delete is queued while the step's write is out"
+            );
+            // The outcome is queued only once the step is stored, so behind the delete: the
+            // store answers the step, the delete, then the outcome.
+            let stepped = core.handle(ack(0, "a")).expect("ending");
+            assert!(
+                stepped
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. }))),
+                "{stepped:?}"
+            );
+            let mut effects = core.handle(answer(T, outcome, Some(R))).expect("answered");
+            let stored = core.handle(Input::RunStored { run: R });
+            if outcome == Deleted::NotHidden {
+                effects.extend(stored.expect("the run is still ending"));
+            } else {
+                assert!(matches!(stored, Err(Stale)), "the delete retired the run");
+            }
             commit_writes(&mut core, effects);
             let mut left: Vec<u64> = before
                 .iter()
@@ -412,22 +429,62 @@ fn drawn_in_t() -> Coordinator {
 #[test]
 fn a_stop_held_on_the_threads_ending_run_settles_across_the_delete() {
     for outcome in OUTCOMES {
-        let mut core = first_step_queued(&[]);
-        core.handle(ack(0, "a")).expect("current");
-        core.handle(engine(R, EngineEvent::Done)).expect("current");
-        let mut writes = core
-            .handle(Input::Stop {
-                run: R,
-                revealed: Vec::new(),
-            })
-            .expect("held on the ending run");
-        writes.extend(core.handle(delete(T, 0)).expect("accepted"));
-        writes.extend(core.handle(Input::RunStored { run: R }).expect("ending"));
-        writes.extend(core.handle(answer(T, outcome, Some(R))).expect("answered"));
-        commit_writes(&mut core, writes);
-        assert_eq!(visible_ids(&core), Vec::<u64>::new(), "{outcome:?}");
-        assert_eq!(core.ending_runs(), 0);
-        assert_eq!(core.debt(), 0, "{outcome:?}");
+        for stored in [true, false] {
+            let mut core = first_step_queued(&[]);
+            // The engine fails with the first step's write out, and the shell's Stop crosses it:
+            // the selection waits on the ending run for that write.
+            core.handle(engine(R, EngineEvent::Failed))
+                .expect("current");
+            let held = core
+                .handle(Input::Stop {
+                    run: R,
+                    revealed: vec![0],
+                })
+                .expect("held on the ending run");
+            assert_eq!(held, []);
+            assert!(
+                core.handle(delete(T, 0))
+                    .expect("accepted")
+                    .contains(&store_delete(T))
+            );
+            let stepped = core.handle(ack(0, "a")).expect("ending");
+            assert!(
+                stepped.iter().any(|effect| matches!(
+                    effect,
+                    Effect::Store(StoreOp::EndRun { revealed: Some(kept), clear: None, .. })
+                        if kept == &[0]
+                )),
+                "{stepped:?}"
+            );
+            let mut writes = core.handle(answer(T, outcome, Some(R))).expect("answered");
+            // Failing, the outcome's write and then its failed(store) write leave the kept
+            // selection owed.
+            let settles = if stored { 1 } else { 2 };
+            for _ in 0..settles {
+                let settled = core.handle(if stored {
+                    Input::RunStored { run: R }
+                } else {
+                    Input::StoreFailed { run: R }
+                });
+                if outcome == Deleted::NotHidden {
+                    writes.extend(settled.expect("the run is still ending"));
+                } else {
+                    assert!(matches!(settled, Err(Stale)), "the delete retired the run");
+                }
+            }
+            let owed = usize::from(!stored && outcome == Deleted::NotHidden);
+            assert_eq!(core.debt(), owed, "{outcome:?}, stored {stored}");
+            writes.extend(core.handle(Input::Retry).expect("retried"));
+            commit_writes(&mut core, writes);
+            let left = if outcome == Deleted::NotHidden {
+                vec![S.0]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(visible_ids(&core), left, "{outcome:?}, stored {stored}");
+            assert_eq!(core.ending_runs(), 0);
+            assert_eq!(core.debt(), 0, "{outcome:?}, stored {stored}");
+        }
     }
 }
 

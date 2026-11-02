@@ -321,6 +321,8 @@ pub struct Coordinator {
     crossed: Vec<ThreadId>,
     /// The turns taken on this connection.
     turns_read: u32,
+    /// A delete on this connection was refused for capacity, so its thread wasn't hidden.
+    refused_delete: bool,
 }
 
 impl Coordinator {
@@ -342,6 +344,7 @@ impl Coordinator {
             fenced: Vec::new(),
             crossed: Vec::new(),
             turns_read: 0,
+            refused_delete: false,
         }
     }
 

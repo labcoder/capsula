@@ -97,7 +97,6 @@ pub(crate) struct Runs {
 
 impl Runs {
     /// Selects the thread the next typed turn continues; no message or store write is needed.
-    /// A thread being deleted is never selected: the next turn starts a new one.
     /// Refuses, changing nothing, a thread that holds a delete slot, so the caller leaves the
     /// open thread alone too.
     pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) -> bool {

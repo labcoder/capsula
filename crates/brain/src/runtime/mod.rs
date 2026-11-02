@@ -134,6 +134,10 @@ pub(crate) enum Seen {
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
     Grace,
+    /// A control the reader forwarded as its pipe ended is applied after the core has gone.
+    ControlDrained,
+    /// The store answered a delete, and the brain applied the answer.
+    DeleteAnswered,
 }
 
 impl Brain {
@@ -207,7 +211,7 @@ impl Brain {
         self.seen.take().expect("observed once")
     }
 
-    /// Reports a control input as it's taken. Tests run on one thread, so they hear it only
+    /// Reports a control input, or a delete's answer, as it's taken. Tests run on one thread, so they hear it only
     /// once its effects are applied and the brain waits again.
     #[cfg(test)]
     fn control_taken(&self, input: &Input) {
@@ -217,6 +221,9 @@ impl Brain {
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
+        }
+        if matches!(input, Input::Deleted { .. }) {
+            self.observer.send(Seen::DeleteAnswered).ok();
         }
     }
 
@@ -228,7 +235,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
-        let mut undeleted = false;
+        let mut undeleted = self.coordinator.refused_delete();
         let cleared = tokio::time::timeout_at(deadline, async {
             while self.coordinator.ending_runs() > 0
                 || self.coordinator.clears_in_flight()
@@ -400,6 +407,8 @@ impl Brain {
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
         while let Ok(message) = controls.try_recv() {
+            #[cfg(test)]
+            self.observer.send(Seen::ControlDrained).ok();
             self.control_offline(message, tap);
         }
         let ended = match quit.get() {
