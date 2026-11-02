@@ -1263,6 +1263,16 @@ fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() 
         [rows.after.handle(&id("b")).expect("old row")]
     );
     assert!(removed.after.handle(&id("b")).is_none());
+    assert_eq!(
+        removed
+            .after
+            .bounds(&id("t"))
+            .expect("table bounds")
+            .expect("table")
+            .size,
+        kumochi_scene::geom::Vec2::new(112.0, 65.05),
+        "a removal-only step rebuilds the surviving table height"
+    );
     assert_eq!(rows.after.items(), old_items);
     let values: Vec<_> = rows
         .after

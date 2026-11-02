@@ -50,9 +50,11 @@ pub fn prepare(
     let mut after = before.clone();
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
+    let mut tables = false;
     for (slot, op) in ticket.step.put.iter().enumerate() {
         if let Some(visual) = object::visual(op) {
             let handle = Handle::new(ticket.revision, slot)?;
+            tables |= matches!(op, Op::Table(_) | Op::Row(_));
             sources.insert(visual.id.clone(), (handle, Arc::new(op.clone())));
             order.push(visual.id.clone());
         }
@@ -67,6 +69,7 @@ pub fn prepare(
                 .ok_or(PrepareError::Stale)?;
             (previous.item.handle, Arc::clone(&previous.source))
         };
+        tables |= matches!(&*source, Op::Table(_) | Op::Row(_));
         if !sources.contains_key(&change.target) {
             order.push(change.target.clone());
         }
@@ -93,6 +96,7 @@ pub fn prepare(
     let mut removed = Vec::new();
     for id in &*ticket.step.remove {
         if let Some(old) = after.objects.remove(id) {
+            tables |= matches!(&*old.source, Op::Row(_));
             after.handles.remove(&old.item.handle);
             removed.push(old.item.handle);
         } else if let Some((handle, _)) = sources.get(id) {
@@ -172,7 +176,9 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
-    super::table::place(&sources, &before, &mut after, &removed, &mut build)?;
+    if tables {
+        super::table::place(&sources, &before, &mut after, &removed, &mut build)?;
+    }
     let mut glides = nodes::place(&sources, &order, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
         after
