@@ -2,10 +2,10 @@
 //! not yet durable. Every way a scene leaves the set writes a `scene_cleared`, so the store's
 //! recovery at start reads the set this holds.
 
-use capsula_protocol::message::{MAX_VISIBLE_SCENES, SceneId, Step};
+use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
-use super::{Coordinator, Effect, StoreOp};
-use crate::store::SceneState;
+use super::{Coordinator, Effect, Stale, StoreOp};
+use crate::store::{Interruption, RunEnd, SceneState};
 
 impl Coordinator {
     /// The visible set, oldest first.
@@ -16,12 +16,13 @@ impl Coordinator {
     /// Nothing can still move the visible set: no ended run waits on the store, so every first
     /// step and fifth-scene write is answered, and every clear is durable.
     pub fn settled(&self) -> bool {
-        self.ending.is_empty() && self.clearing.is_empty()
+        self.ending.is_empty() && self.clearing.is_empty() && self.keeping.is_empty()
     }
 
-    /// A clear's write is in the store.
+    /// A clear's or a kept selection's write is in the store.
     pub fn clears_in_flight(&self) -> bool {
         self.clearing.iter().any(|(_, writing)| *writing)
+            || self.keeping.iter().any(|(_, _, writing)| *writing)
     }
 
     /// Writes again every clear whose write failed.
@@ -43,7 +44,7 @@ impl Coordinator {
     pub(super) fn begin_scene(
         &mut self,
         scene: SceneId,
-        thread: capsula_protocol::message::ThreadId,
+        (thread, run): (capsula_protocol::message::ThreadId, RunId),
         evict: Option<SceneId>,
     ) {
         self.scenes.retain(|state| Some(state.scene) != evict);
@@ -53,6 +54,7 @@ impl Coordinator {
             SceneState {
                 scene,
                 thread,
+                run,
                 revision: 0,
                 kept: Vec::new(),
             },
@@ -103,8 +105,78 @@ impl Coordinator {
         }
     }
 
-    /// Quit: one write clears the visible set and every clear not yet durable.
+    /// A Stop for a run that already ended, which the shell could still stop while it drew the
+    /// run's last steps. Its scene keeps what stayed, as a current run's Stop would, in a write of
+    /// its own. A run still ending with steps pending, or already stopped, is stale.
+    pub(super) fn late_stop(
+        &mut self,
+        run: RunId,
+        mut revealed: Vec<u32>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let unsettled = |ended: &super::Run| {
+            ended.outstanding()
+                || ended
+                    .ending
+                    .as_ref()
+                    .is_some_and(|ending| ending.outcome == RunEnd::Interrupted(Interruption::Stop))
+        };
+        if self
+            .ending
+            .iter()
+            .any(|ended| ended.id == run && unsettled(ended))
+        {
+            return Err(Stale);
+        }
+        let state = self
+            .scenes
+            .iter()
+            .find(|state| state.run == run)
+            .ok_or(Stale)?;
+        let scene = state.scene;
+        if self.keeping.iter().any(|(kept, _, _)| *kept == scene) {
+            return Err(Stale);
+        }
+        revealed.retain(|&index| index < state.revision);
+        revealed.sort_unstable();
+        revealed.dedup();
+        if let Some(cleared) = keep(&mut self.scenes, scene, &revealed) {
+            self.clearing.push((cleared, true));
+            let scenes = vec![cleared];
+            effects.push(Effect::Store(StoreOp::ClearScenes { scenes }));
+        } else {
+            self.keeping.push((scene, revealed.clone(), true));
+            effects.push(Effect::Store(StoreOp::KeepScene { scene, revealed }));
+        }
+        Ok(())
+    }
+
+    /// A kept selection's write committed.
+    pub(super) fn kept(&mut self, scene: SceneId) {
+        self.keeping.retain(|(kept, _, _)| *kept != scene);
+    }
+
+    /// A kept selection's write failed: it waits for a retry.
+    pub(super) fn keep_failed(&mut self, scene: SceneId) {
+        if let Some(entry) = self.keeping.iter_mut().find(|(kept, _, _)| *kept == scene) {
+            entry.2 = false;
+        }
+    }
+
+    /// A run left without an outcome on record: its scene's clear, or else the selection its
+    /// Stop kept, is still owed, so it's retried on its own rather than forgotten.
+    pub(super) fn owe(&mut self, clear: Option<SceneId>, kept: Option<(SceneId, Vec<u32>)>) {
+        if let Some(scene) = clear {
+            self.clearing.push((scene, false));
+        } else if let Some((scene, revealed)) = kept {
+            self.keeping.push((scene, revealed, false));
+        }
+    }
+
+    /// Quit: one write clears the visible set and every clear not yet durable. A kept selection
+    /// not yet written goes too: its scene is cleared.
     pub(super) fn clear_visible(&mut self, effects: &mut Vec<Effect>) {
+        self.keeping.retain(|(_, _, writing)| *writing);
         let visible: Vec<SceneId> = self.scenes.drain(..).map(|state| state.scene).collect();
         self.clearing
             .extend(visible.into_iter().map(|scene| (scene, false)));
@@ -122,6 +194,20 @@ impl Coordinator {
     }
 
     fn retry(&mut self, effects: &mut Vec<Effect>) {
+        // A selection for a scene that has since left the set is moot: it's cleared.
+        let scenes = &self.scenes;
+        self.keeping.retain(|(scene, _, writing)| {
+            *writing || scenes.iter().any(|state| state.scene == *scene)
+        });
+        for (scene, revealed, writing) in &mut self.keeping {
+            if !*writing {
+                *writing = true;
+                effects.push(Effect::Store(StoreOp::KeepScene {
+                    scene: *scene,
+                    revealed: revealed.clone(),
+                }));
+            }
+        }
         let mut scenes = Vec::new();
         for (scene, writing) in &mut self.clearing {
             if !*writing {

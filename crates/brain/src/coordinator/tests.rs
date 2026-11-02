@@ -513,18 +513,19 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
                 thread: T,
                 run: R,
                 text: None,
-                revealed: None,
+                revealed: Some(Vec::new()),
                 clear: Some(S),
                 end: RunEnd::Failed(Failure::Store),
             })
         ],
-        "after Stop, and the scene it kept nothing of is still cleared"
+        "after Stop, with its selection, and the scene it kept nothing of is still cleared"
     );
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }),
         Ok(Vec::new()),
-        "the failed(store) write failing too is the last word"
+        "the failed(store) write failing too is the run's last word"
     );
+    assert!(!core.settled(), "but its scene's clear is still owed");
     assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
 
     let mut core = started();

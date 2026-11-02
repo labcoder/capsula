@@ -31,6 +31,8 @@ pub struct SceneState {
     pub scene: SceneId,
     /// Its thread.
     pub thread: ThreadId,
+    /// The run that drew it.
+    pub run: RunId,
     /// Every committed step; it never goes back.
     pub revision: u32,
     /// The steps that stayed.
@@ -42,6 +44,7 @@ impl std::fmt::Debug for SceneState {
         f.debug_struct("SceneState")
             .field("scene", &self.scene)
             .field("thread", &self.thread)
+            .field("run", &self.run)
             .field("revision", &self.revision)
             .field("kept", &self.kept.len())
             .finish()
@@ -144,6 +147,32 @@ impl Store {
         Ok(())
     }
 
+    /// Records the steps of `scene`'s run that stayed, for a Stop its run's outcome didn't
+    /// record. A scene whose thread isn't live, or whose run already has a selection, is skipped.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails; nothing is recorded then.
+    pub fn keep_scene(&mut self, scene: SceneId, revealed: &[u32]) -> Result<(), StoreError> {
+        let Ok(id) = i64::try_from(scene.0) else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "INSERT INTO events (thread, run, kind, text, body, created_ms)
+             SELECT b.thread, b.run, ?2, NULL, ?3, ?4 FROM events b
+             JOIN threads t ON t.id = b.thread AND t.state = 'live'
+             WHERE b.id = ?1 AND b.kind = 'scene_begin' AND NOT EXISTS (
+                 SELECT 1 FROM events r WHERE r.run = b.run AND r.kind = ?2
+             )",
+            params![
+                id,
+                EventKind::Revealed.as_str(),
+                serde_json::json!(revealed).to_string(),
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
     /// The visible set, oldest first: the newest [`MAX_VISIBLE_SCENES`] scenes of live threads
     /// with no `scene_cleared`, each with its committed steps and the ones its run's `revealed`
     /// kept. A step row without a `"scene"` key, or whose body doesn't decode, is skipped, and so
@@ -158,10 +187,10 @@ impl Store {
     /// Fails with a content-free error when SQLite fails.
     pub fn scenes(&self) -> Result<Vec<SceneState>, StoreError> {
         let limit = i64::try_from(MAX_VISIBLE_SCENES).map_err(|_| StoreError::Read)?;
-        let begins: Vec<(i64, i64)> = self
+        let begins: Vec<(i64, i64, i64)> = self
             .conn
             .prepare(
-                "SELECT b.id, b.thread FROM events b
+                "SELECT b.id, b.thread, b.run FROM events b
                  JOIN threads t ON t.id = b.thread AND t.state = 'live'
                  WHERE b.kind = 'scene_begin' AND NOT EXISTS (
                      SELECT 1 FROM events c
@@ -172,13 +201,17 @@ impl Store {
             )
             .and_then(|mut query| {
                 query
-                    .query_map(params![limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .query_map(params![limit], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?
                     .collect()
             })
             .map_err(|_| StoreError::Read)?;
         let mut scenes = Vec::with_capacity(begins.len());
-        for (scene, thread) in begins.into_iter().rev() {
-            let state = self.scene(scene, thread).map_err(|_| StoreError::Read)?;
+        for (scene, thread, run) in begins.into_iter().rev() {
+            let state = self
+                .scene(scene, thread, run)
+                .map_err(|_| StoreError::Read)?;
             if !state.kept.is_empty() {
                 scenes.push(state);
             }
@@ -187,7 +220,7 @@ impl Store {
     }
 
     /// One scene's steps, rebuilt the way the coordinator keeps them.
-    fn scene(&self, scene: i64, thread: i64) -> rusqlite::Result<SceneState> {
+    fn scene(&self, scene: i64, thread: i64, run: i64) -> rusqlite::Result<SceneState> {
         let rows: Vec<(i64, Option<i64>, Option<String>)> = self
             .conn
             .prepare(
@@ -233,6 +266,7 @@ impl Store {
         Ok(SceneState {
             scene: SceneId(row_id(scene)),
             thread: ThreadId(row_id(thread)),
+            run: RunId(row_id(run)),
             revision,
             kept,
         })

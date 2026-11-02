@@ -693,3 +693,186 @@ async fn measure_scene_recovery() {
         samples.len()
     );
 }
+
+/// Rejects a Stop's own outcome, so only its `failed(store)` fallback commits.
+const FAIL_STOPS: &str =
+    "CREATE TRIGGER no_stop BEFORE UPDATE ON runs WHEN NEW.state = 'interrupted' BEGIN
+     SELECT RAISE(ABORT, 'full');
+ END;";
+/// Rejects every outcome, fallback included.
+const FAIL_OUTCOMES: &str =
+    "CREATE TRIGGER no_outcome BEFORE UPDATE ON runs WHEN NEW.state <> 'active' BEGIN
+     SELECT RAISE(ABORT, 'full');
+ END;";
+/// Rejects every clear.
+const FAIL_CLEARS: &str =
+    "CREATE TRIGGER full BEFORE INSERT ON events WHEN NEW.kind = 'scene_cleared' BEGIN
+     SELECT RAISE(ABORT, 'full');
+ END;";
+
+fn sql(scratch: &Scratch, batch: &str) {
+    let sql = rusqlite::Connection::open(scratch.db()).expect("open");
+    sql.execute_batch(batch).expect("applied");
+}
+
+/// Reads data up to the `count`th step; the scene they drew.
+async fn steps<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>, count: usize) -> SceneId {
+    let mut read = 0;
+    loop {
+        match shell.data().await {
+            DataToShell::StepCommit { scene, .. } => {
+                read += 1;
+                if read == count {
+                    return scene;
+                }
+            }
+            DataToShell::AssistantText { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// The scene's kept steps as the next start rebuilds them, with its revision.
+fn kept_after_restart(scratch: &Scratch, scene: SceneId) -> Option<(u32, Vec<String>)> {
+    let store = Store::open(&scratch.db()).expect("reopen");
+    let scenes = store.scenes().expect("scenes");
+    scenes
+        .into_iter()
+        .find(|state| state.scene == scene)
+        .map(|state| {
+            let labels = state.kept.into_iter().map(|step| step.label).collect();
+            (state.revision, labels)
+        })
+}
+
+#[tokio::test]
+async fn a_stop_whose_outcome_failed_still_keeps_only_what_stayed() {
+    let scratch = Scratch::new("failed-stop");
+    let mut brain = test_support::brain(&scratch, "0 step a\n0 step b\n0 step c\n5000 text never");
+    sql(&scratch, FAIL_STOPS);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        let scene = steps(&mut shell, 3).await;
+        shell
+            .send(&ControlToBrain::Stop {
+                run,
+                revealed: vec![0],
+            })
+            .await;
+        while shell.state().await != (run, Phase::Failed) {}
+        drop(shell);
+        scene
+    };
+    let (ended, scene) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), [outcome("failed", "store")]);
+    assert_eq!(
+        kept_after_restart(&scratch, scene),
+        Some((3, vec!["a".to_owned()]))
+    );
+}
+
+/// A Stop that kept nothing, whose outcome and its fallback both failed, with clears failing
+/// too; returns once the run has left the coordinator.
+async fn stopped_with_both_outcomes_failed(scratch: &Scratch) -> (Brain, SceneId) {
+    let mut brain = test_support::brain(scratch, "0 step a\n5000 text never");
+    sql(scratch, FAIL_OUTCOMES);
+    sql(scratch, FAIL_CLEARS);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        let scene = steps(&mut shell, 1).await;
+        shell.stop(run).await;
+        while shell.state().await != (run, Phase::Failed) {}
+        drop(shell);
+        scene
+    };
+    let (ended, scene) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    let gone = async {
+        while brain.coordinator.ending_runs() > 0 {
+            let input = brain.inputs.recv().await.expect("open");
+            brain.offline(input);
+        }
+    };
+    timeout(PATIENCE, gone).await.expect("both outcomes failed");
+    (brain, scene)
+}
+
+#[tokio::test]
+async fn a_clear_two_failed_outcomes_left_keeps_a_quit_incomplete_while_it_fails() {
+    let scratch = Scratch::new("owed-clear-failing");
+    let (brain, scene) = stopped_with_both_outcomes_failed(&scratch).await;
+    assert!(!brain.coordinator.settled(), "the clear is still owed");
+    let deadline = tokio::time::Instant::now() + CLOSE_WAIT;
+    assert_eq!(brain.quit(deadline).await, Quit::Incomplete);
+    sql(&scratch, "DROP TRIGGER no_outcome; DROP TRIGGER full;");
+    assert_eq!(recovered(&scratch), [scene], "it returns, as after a crash");
+}
+
+#[tokio::test]
+async fn a_clear_two_failed_outcomes_left_commits_once_the_store_takes_it() {
+    let scratch = Scratch::new("owed-clear-commits");
+    let (mut brain, _) = stopped_with_both_outcomes_failed(&scratch).await;
+    sql(&scratch, "DROP TRIGGER full;");
+    assert_eq!(scenes_on_reconnect(&mut brain).await, []);
+    brain.close().await;
+    sql(&scratch, "DROP TRIGGER no_outcome;");
+    assert_eq!(recovered(&scratch), [], "the scene doesn't return");
+}
+
+/// Finishes a run of three steps, then stops it with `revealed` while its steps are still
+/// unread, as Esc does while a shell drains a finished run. Returns its scene and the committed
+/// count the next connection names for it.
+async fn stopped_after_done(scratch: &Scratch, revealed: Vec<u32>) -> (SceneId, Option<u32>) {
+    let mut brain = test_support::brain(scratch, "0 step a\n0 step b\n0 step c");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        while shell.state().await != (run, Phase::Done) {}
+        shell.send(&ControlToBrain::Stop { run, revealed }).await;
+        let scene = steps(&mut shell, 3).await;
+        settle(&mut shell).await;
+        drop(shell);
+        scene
+    };
+    let (ended, scene) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    let named = scenes_on_reconnect(&mut brain).await;
+    brain.close().await;
+    let committed = named
+        .iter()
+        .find(|named| named.scene == scene)
+        .map(|named| named.committed);
+    (scene, committed)
+}
+
+#[tokio::test]
+async fn a_stop_while_a_finished_runs_steps_drain_keeps_what_stayed() {
+    let scratch = Scratch::new("late-stop-kept");
+    let (scene, committed) = stopped_after_done(&scratch, vec![0]).await;
+    assert_eq!(committed, Some(1));
+    assert_eq!(
+        kept_after_restart(&scratch, scene),
+        Some((3, vec!["a".to_owned()]))
+    );
+}
+
+#[tokio::test]
+async fn a_stop_that_kept_nothing_while_a_finished_runs_steps_drain_clears_its_scene() {
+    let scratch = Scratch::new("late-stop-none");
+    let (scene, committed) = stopped_after_done(&scratch, Vec::new()).await;
+    assert_eq!(committed, None);
+    assert_eq!(kept_after_restart(&scratch, scene), None);
+}

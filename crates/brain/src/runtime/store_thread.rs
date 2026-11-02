@@ -358,6 +358,21 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, clear(store, scenes));
             purger.op_arrived(store);
         }
+        StoreOp::KeepScene { scene, revealed } => {
+            purger.op_arriving();
+            let ok = match store
+                .reconnect()
+                .and_then(|()| store.keep_scene(scene, &revealed))
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "a kept selection failed; it's retried");
+                    false
+                }
+            };
+            answer(acks, Input::SceneKept { scene, ok });
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,

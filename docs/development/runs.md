@@ -80,9 +80,11 @@ An ended run stays with the coordinator until the store answers for its outcome,
 never lost:
 
 - if the turn failed, there's no run row, and nothing more is written;
-- if a step or the outcome failed, the outcome is written as `failed(store)`, alone; if that
-  fails too, the run stays `active` and the next start's recovery marks it
-  `failed(crash)`.
+- if a step or the outcome failed, the outcome is written as `failed(store)` without its text,
+  but with the Stop's `revealed` set and its scene's clear, so the drawing keeps what the shell
+  kept; if that fails too, the run stays `active` and the next start's recovery marks it
+  `failed(crash)`. Its scene's clear, or its kept selection, is then retried on its own until
+  it commits, and a Quit is incomplete until it has.
 
 | Cause | Outcome | Shell told |
 |---|---|---|
@@ -110,8 +112,11 @@ never lost:
 - A terminal `RunState` can be followed by `RunState Failed` for the same run, when its
   writes later fail. The shell shows the failure; nothing else follows it.
 - A `Stop` that arrives after the run's outcome went to the store is stale: the run still ends
-  `done`. One that arrives while the engine has finished but its last step is still being stored
-  interrupts the run, since the shell never showed that step.
+  `done`, and its data still drains. But the shell could still stop it while it drew the run's
+  last steps, so the scene keeps only what the shell kept: while the scene is visible, the brain
+  writes the selection on its own, or the scene's clear when nothing stayed. One that arrives
+  while the engine has finished but its last step is still being stored interrupts the run,
+  since the shell never showed that step.
 
 ## Budgets
 

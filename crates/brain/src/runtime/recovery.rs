@@ -93,7 +93,7 @@ impl Recovery {
 
 #[cfg(test)]
 mod tests {
-    use capsula_protocol::message::{DataToShell, SceneId, Step, ThreadId};
+    use capsula_protocol::message::{DataToShell, RunId, SceneId, Step, ThreadId};
 
     use super::Recovery;
     use crate::store::SceneState;
@@ -102,6 +102,7 @@ mod tests {
         SceneState {
             scene: SceneId(id),
             thread: ThreadId(1),
+            run: RunId(0),
             revision: 9,
             kept: labels
                 .iter()

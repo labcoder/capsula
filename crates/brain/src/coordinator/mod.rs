@@ -125,6 +125,13 @@ pub enum Input {
     },
     /// The shell quit: every visible scene is cleared, so only a crash brings drawings back.
     ClearVisible,
+    /// A `KeepScene` write finished.
+    SceneKept {
+        /// The scene it named.
+        scene: SceneId,
+        /// Whether it committed.
+        ok: bool,
+    },
 }
 
 /// What an engine produces.
@@ -233,13 +240,20 @@ pub enum StoreOp {
         /// The scenes.
         scenes: Vec<SceneId>,
     },
+    /// The steps of a scene's run that stayed, for a Stop no outcome recorded.
+    KeepScene {
+        /// The scene.
+        scene: SceneId,
+        /// Indices of the steps that stayed.
+        revealed: Vec<u32>,
+    },
 }
 
 impl StoreOp {
     /// The run a write belongs to; page reads and clears have none.
     pub fn run(&self) -> Option<RunId> {
         match self {
-            Self::ReadPage { .. } | Self::ClearScenes { .. } => None,
+            Self::ReadPage { .. } | Self::ClearScenes { .. } | Self::KeepScene { .. } => None,
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
@@ -259,6 +273,10 @@ impl StoreOp {
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
             Self::ClearScenes { scenes } => Input::ScenesCleared {
                 scenes: scenes.clone(),
+                ok: false,
+            },
+            Self::KeepScene { scene, .. } => Input::SceneKept {
+                scene: *scene,
                 ok: false,
             },
         }
@@ -319,6 +337,8 @@ struct Ending {
     written: bool,
     /// The scene a Stop kept nothing of, cleared in the outcome's transaction.
     clear: Option<SceneId>,
+    /// The Stop's selection was applied to the visible set; it stays for every outcome write.
+    trimmed: bool,
 }
 
 impl Run {
@@ -345,6 +365,8 @@ pub struct Coordinator {
     /// Cleared scenes whose `scene_cleared` isn't committed yet, and whether a write for each
     /// is in the store; a failed one is retried with the next store operation.
     clearing: Vec<(SceneId, bool)>,
+    /// Visible scenes whose kept selection no outcome recorded, the same way.
+    keeping: Vec<(SceneId, Vec<u32>, bool)>,
 }
 
 impl Coordinator {
@@ -358,6 +380,7 @@ impl Coordinator {
             ending: Vec::new(),
             scenes,
             clearing: Vec::new(),
+            keeping: Vec::new(),
         }
     }
 
@@ -399,6 +422,9 @@ impl Coordinator {
                 if !text.trim().is_empty() {
                     self.turn(thread, text, &mut effects);
                 }
+            }
+            Input::Stop { run, revealed } if self.current_run() != Some(run) => {
+                self.late_stop(run, revealed, &mut effects)?;
             }
             Input::Stop { run, mut revealed } => {
                 let current = self.take(run)?;
@@ -466,6 +492,8 @@ impl Coordinator {
             Input::ScenesCleared { scenes, ok: true } => self.cleared(&scenes),
             Input::ScenesCleared { scenes, ok: false } => self.clear_failed(&scenes),
             Input::ClearVisible => self.clear_visible(&mut effects),
+            Input::SceneKept { scene, ok: true } => self.kept(scene),
+            Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
         }
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
@@ -716,7 +744,7 @@ impl Coordinator {
         let ending = found.ending.is_some();
         let waiting = std::mem::take(&mut found.waiting);
         if first {
-            self.begin_scene(scene, thread, evict);
+            self.begin_scene(scene, (thread, run), evict);
         }
         self.scene_stored(scene, (!stopped).then_some(&step));
         if ending {
@@ -789,8 +817,14 @@ impl Coordinator {
         }
         if ended.turn.is_some() || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
-            // a run left active is marked failed(crash) at the next start.
+            // a run left active is marked failed(crash) at the next start. Its scene's clear or
+            // kept selection is still owed, so it's retried on its own.
+            let kept = ended
+                .scene
+                .zip(ending.revealed.take().filter(|_| ending.trimmed));
+            let clear = ending.clear;
             self.ending.swap_remove(at);
+            self.owe(clear, kept);
             return Ok(());
         }
         if ending.written {
@@ -841,6 +875,7 @@ impl Coordinator {
             failed: outcome == RunEnd::Failed(Failure::Store),
             written: false,
             clear: None,
+            trimmed: false,
         });
         let id = run.id;
         self.ending.push(run);
@@ -863,8 +898,9 @@ impl Coordinator {
         };
         ending.written = true;
         if let (Some(revealed), Some(scene)) = (&ending.revealed, scene)
-            && ending.clear.is_none()
+            && !ending.trimmed
         {
+            ending.trimmed = true;
             ending.clear = scenes::keep(&mut self.scenes, scene, revealed);
         }
         let op = if ending.failed {
@@ -872,7 +908,7 @@ impl Coordinator {
                 thread,
                 run,
                 text: None,
-                revealed: None,
+                revealed: ending.revealed.clone(),
                 clear: ending.clear,
                 end: RunEnd::Failed(Failure::Store),
             }
@@ -881,7 +917,7 @@ impl Coordinator {
                 thread,
                 run,
                 text,
-                revealed: ending.revealed.take(),
+                revealed: ending.revealed.clone(),
                 clear: ending.clear,
                 end: ending.outcome,
             }
