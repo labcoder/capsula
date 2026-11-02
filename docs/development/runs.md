@@ -146,7 +146,8 @@ The store runs on its own thread, which owns the connection and keeps the store 
 operations in order, one transaction each, every one answered. The fixture engine, the store
 thread and the deadline timer report back as inputs, and the pipes' readers and writers are
 described in `ipc.md`. A shell that disconnects ends the current run as
-`interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
+`interrupted(shell_lost)`. Every Stop and Clear the control reader read before the pipe ended is
+applied first, even one read in the same poll as the end. Store replies keep reaching the coordinator while no shell is
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close. A deletion's purge (`store.md`) copies the store on a helper thread only
 while no run is active, and an op arriving, or closing, stops the copy without waiting for it.

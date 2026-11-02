@@ -350,13 +350,12 @@ impl Brain {
                 }
             }
         }
+        // The reader may have forwarded controls in the same poll that saw the pipe end.
+        while let Ok(message) = controls.try_recv() {
+            self.control_offline(message, tap);
+        }
         let ended = match quit.get() {
-            Some(deadline) => {
-                while let Ok(message) = controls.try_recv() {
-                    self.control_offline(message, tap);
-                }
-                Ended::Quit { deadline }
-            }
+            Some(deadline) => Ended::Quit { deadline },
             None => ended,
         };
         self.offline(Input::ShellLost);

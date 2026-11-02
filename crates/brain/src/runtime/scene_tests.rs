@@ -1305,6 +1305,80 @@ async fn a_stop_read_after_the_data_pipe_ends_still_keeps_its_selection() {
     );
 }
 
+/// Runs three steps to Done, then sends the control `last` makes for the run and its scene and
+/// ends the control pipe in the same write, so the reader sees both in one poll. With
+/// `data_first` the data pipe ends before that. Returns the scene and what a reconnect names.
+async fn control_then_eof(
+    name: &str,
+    data_first: bool,
+    last: impl Fn(RunId, SceneId) -> ControlToBrain,
+) -> (Scratch, SceneId, Vec<SceneDescriptor>) {
+    let scratch = Scratch::new(name);
+    let mut brain = test_support::brain(&scratch, "0 step a\n0 step b\n0 step c");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        let scene = steps(&mut shell, 3).await;
+        while shell.state().await != (run, Phase::Done) {}
+        let Shell {
+            control_in,
+            mut control_out,
+            data_in,
+            data_out,
+            ..
+        } = shell;
+        let data = (data_in, data_out);
+        if data_first {
+            drop(data);
+        }
+        let last = frame::encode(&last(run, scene), Pipe::Control).expect("encodes");
+        control_out.write_all(&last).await.expect("sent");
+        control_out.shutdown().await.expect("ended");
+        drop((control_in, control_out));
+        scene
+    };
+    let (ended, scene) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    let named = scenes_on_reconnect(&mut brain).await;
+    brain.close().await;
+    (scratch, scene, named)
+}
+
+#[tokio::test]
+async fn a_stop_or_clear_read_with_the_control_pipe_s_end_is_still_applied() {
+    for data_first in [false, true] {
+        let stop = |run, _| ControlToBrain::Stop {
+            run,
+            revealed: vec![0],
+        };
+        let (scratch, scene, named) = control_then_eof("eof-stop", data_first, stop).await;
+        assert_eq!(
+            named
+                .iter()
+                .find(|named| named.scene == scene)
+                .map(|named| named.committed),
+            Some(1),
+            "data first: {data_first}"
+        );
+        assert_eq!(
+            kept_after_restart(&scratch, scene),
+            Some((3, vec!["a".to_owned()]))
+        );
+        let clear = |_, scene| ControlToBrain::ClearDrawing {
+            scene_ids: vec![scene],
+        };
+        let (scratch, scene, named) = control_then_eof("eof-clear", data_first, clear).await;
+        assert!(
+            named.iter().all(|named| named.scene != scene),
+            "data first: {data_first}"
+        );
+        assert_eq!(kept_after_restart(&scratch, scene), None);
+    }
+}
+
 #[tokio::test]
 async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped() {
     let scratch = Scratch::new("ids-after-purge");
