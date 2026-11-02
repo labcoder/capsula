@@ -67,10 +67,17 @@ How long the store thread spends on one delete, the thread's stand-in captures i
 | 515 MiB | 25.9 / 35.2 / 36.1 ms | 86.4 / 88.0 / 97.0 ms | 36.0 MiB |
 | 984 MiB | 41.6 / 52.6 / 54.3 ms | 153.4 / 155.0 / 156.0 ms | 58.9 MiB |
 
-shortcut: a delete right after a reader held a snapshot through a big write can take past the
-~100 ms foreground bound (156 ms at 984 MiB), since its commit checkpoints the held WAL. Nothing
-in slice 2 holds such a snapshot; OSC-152 adds the first long-lived reader and the checkpoint
-lifecycle that bounds it.
+The purge's copy is the one reader of the live store besides the store thread, so a write never
+commits under its snapshot: before any write the store thread stops the copy and waits until it
+has closed its connections to the live store, its drain and its snapshot, and nothing more of the
+copy. At 984 MiB (`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a
+delete from enqueue to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during
+the snapshot, against 9.9 ms with nothing running, and the write right behind it 1.1 ms.
+
+shortcut: a reader outside the store thread that held a snapshot through a big write makes the
+next commit checkpoint that WAL, past the ~100 ms foreground bound (the right-hand column above,
+156 ms at 984 MiB). Only the purge reads that way today, and it lets go first; OSC-152 brings
+long-lived readers and the checkpoint lifecycle that bounds them.
 
 ```mermaid
 sequenceDiagram
