@@ -44,7 +44,26 @@ impl Pages<'_> {
                 }
             }
             PageOf::Events { thread, before } => {
-                let (events, before) = self.events_page(thread, before, MAX_PAGE_ROWS)?;
+                let (mut events, mut before) = self.events_page(thread, before, MAX_PAGE_ROWS)?;
+                // Each row's own encoded size, so the rows past the budget go in one pass rather
+                // than one re-encoding each. Dropping a row moves `before` to a higher id, which
+                // never encodes shorter, so this never drops a row that would have fit.
+                let full = encoded_len(&DataToShell::Page {
+                    request,
+                    thread,
+                    events: Vec::new(),
+                    before,
+                })?;
+                let sizes = events
+                    .iter()
+                    .map(encoded_len)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut over = (full + sizes.iter().sum::<usize>()).saturating_sub(MAX_PAGE_BYTES);
+                while over > 0 && events.len() > 1 {
+                    over = over.saturating_sub(sizes[events.len() - 1]);
+                    events.pop();
+                    before = events.last().map(|event| event.id);
+                }
                 DataToShell::Page {
                     request,
                     thread,
@@ -236,7 +255,7 @@ impl Pages<'_> {
         let mut query = self
             .0
             .prepare(
-                "SELECT e.id, e.run, e.kind, coalesce(e.text, '') FROM events e
+                "SELECT e.id, e.run, e.kind, substr(CAST(e.text AS BLOB), 1, ?4) FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
              AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'revealed')
@@ -248,10 +267,21 @@ impl Pages<'_> {
                 params![
                     thread,
                     before.map(|id| bounded_id(id.0)),
-                    i64::try_from(limit + 1).map_err(|_| StoreError::Read)?
+                    i64::try_from(limit + 1).map_err(|_| StoreError::Read)?,
+                    i64::try_from(MAX_PAGE_BYTES).map_err(|_| StoreError::Read)?
                 ],
                 |row| {
                     let kind: String = row.get(2)?;
+                    // No text reaches the page budget, so SQL stops there, in bytes, since its
+                    // character functions stop at a NUL; such a row is cut later, or dropped.
+                    let mut text = row
+                        .get_ref(3)?
+                        .as_bytes_or_null()?
+                        .unwrap_or_default()
+                        .to_vec();
+                    if let Err(error) = std::str::from_utf8(&text) {
+                        text.truncate(error.valid_up_to());
+                    }
                     let kind = match kind.as_str() {
                         "user" => PageEventKind::User,
                         "assistant_text" => PageEventKind::AssistantText,
@@ -262,7 +292,7 @@ impl Pages<'_> {
                         id: EventId(row_id(row.get(0)?)),
                         run: row.get::<_, Option<i64>>(1)?.map(|id| RunId(row_id(id))),
                         kind,
-                        text: row.get(3)?,
+                        text: String::from_utf8(text).map_err(|_| rusqlite::Error::InvalidQuery)?,
                         cut: false,
                     })
                 },
@@ -312,6 +342,15 @@ impl Pages<'_> {
     pub(crate) fn search_ids(&self, words: &str) -> Result<Vec<ThreadId>, StoreError> {
         let (rows, _) = self.search_page(words, MAX_PAGE_ROWS)?;
         Ok(rows.iter().map(|row| row.id).collect())
+    }
+}
+
+/// `value`'s postcard encoding, the frame payload's, in bytes.
+fn encoded_len(value: &impl serde::Serialize) -> Result<usize, StoreError> {
+    match frame::encode(value, Pipe::Data) {
+        Ok(frame) => Ok(frame.len() - frame::HEADER_LEN),
+        Err(FrameError::TooLarge { len, .. }) => Ok(len),
+        Err(_) => Err(StoreError::Read),
     }
 }
 
