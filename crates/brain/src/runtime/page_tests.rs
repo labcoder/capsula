@@ -2,6 +2,7 @@ use capsula_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf};
 
 use super::*;
 use crate::coordinator::{Coordinator, Effect, StoreOp};
+use crate::runtime::DATA_CAP;
 
 fn threads() -> PageOf {
     PageOf::Threads {
@@ -61,7 +62,7 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
         coordinator.handle(Input::PageRead {
             epoch: 1,
             request: 3,
-            reply: Some(reply.clone())
+            reply: reply.clone()
         }),
         Ok(vec![Effect::Data(reply)])
     );
@@ -175,13 +176,10 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         })
         .await
         .expect("reply queued");
-        assert!(
-            timeout(
-                Duration::from_millis(30),
-                ipc::read::<DataToShell>(&mut client, Pipe::Data)
-            )
-            .await
-            .is_err()
+        assert_eq!(
+            queue.borrow().frames_for_tests(),
+            1,
+            "without credit the reply stays queued"
         );
         turns_tx.send((None, "go".to_owned())).await.expect("turn");
         let mut bytes = Vec::new();
@@ -417,7 +415,9 @@ async fn read_pages_and_text(
                 assert_eq!(run, RunId(2));
                 break;
             }
-            other @ (DataToShell::StepCommit { .. } | DataToShell::SceneSnapshot { .. }) => {
+            other @ (DataToShell::StepCommit { .. }
+            | DataToShell::PageFailed { .. }
+            | DataToShell::SceneSnapshot { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }
@@ -435,13 +435,13 @@ async fn old_connection_page_success_and_failure_cannot_reach_a_new_connection()
     let mut tap = Tap::from_env();
     assert_eq!(brain.serve(control, data, &mut tap).await, Ended::Lost);
     for reply in [
-        Some(DataToShell::Page {
+        DataToShell::Page {
             request: 7,
             thread: ThreadId(999),
             events: Vec::new(),
             before: None,
-        }),
-        None,
+        },
+        DataToShell::PageFailed { request: 7 },
     ] {
         brain
             .inputs_tx
@@ -471,7 +471,7 @@ async fn old_connection_page_success_and_failure_cannot_reach_a_new_connection()
 }
 
 #[tokio::test]
-async fn a_page_read_failure_ends_the_connection_without_an_empty_reply() {
+async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
     let scratch = Scratch::new("page-failed");
     let store = Store::open(&scratch.db()).expect("store");
     store
@@ -488,17 +488,80 @@ async fn a_page_read_failure_ends_the_connection_without_an_empty_reply() {
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        request(&mut shell, 7, threads()).await;
-        let reply = timeout(
-            PATIENCE,
-            ipc::read::<DataToShell>(&mut shell.data_in, Pipe::Data),
-        )
-        .await
-        .expect("connection ends")
-        .expect("read");
-        assert_eq!(reply, None);
+        for id in [7, 8] {
+            request(&mut shell, id, threads()).await;
+            let reply = timeout(
+                PATIENCE,
+                ipc::read::<DataToShell>(&mut shell.data_in, Pipe::Data),
+            )
+            .await
+            .expect("answered")
+            .expect("read");
+            assert_eq!(reply, Some(DataToShell::PageFailed { request: id }));
+        }
+        drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
-    assert_eq!(ended, Ended::Lost);
+    assert_eq!(ended, Ended::Lost, "only the shell leaving ends it");
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
+    let scratch = Scratch::new("page-held");
+    let mut brain = test_support::brain(&scratch, "");
+    let queue = RefCell::new(DataQueue::new(window()));
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Run(RunId(99)), vec![0; DATA_CAP]);
+    let (ready, room) = (Notify::new(), Notify::new());
+    let (out, _control) = mpsc::channel(64);
+    let (_controls_tx, mut controls) = mpsc::channel(64);
+    let (_turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
+    let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
+    let mut tap = Tap::from_env();
+    let link = Link {
+        out: &out,
+        queue: &queue,
+        ready: &ready,
+        tap: &mut tap,
+    };
+    let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
+    let client = async {
+        assert!(queue.borrow_mut().admit_page());
+        pages_tx
+            .send(Input::ReadPage {
+                epoch: 0,
+                request: 7,
+                page: threads(),
+            })
+            .await
+            .expect("request");
+        // shortcut: nothing signals the held reply, so this gives an empty store's read time to land.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(queue.borrow().frames_for_tests(), 1, "the reply is held");
+        queue.borrow_mut().revoke(RunId(99));
+        room.notify_one();
+        timeout(PATIENCE, async {
+            while queue.borrow().frames_for_tests() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the held reply is queued once there's room");
+        let frame = queue
+            .borrow_mut()
+            .pop(std::time::Instant::now())
+            .expect("credit for the reply");
+        assert_eq!(
+            frame::decode::<DataToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
+            DataToShell::ThreadList {
+                request: 7,
+                threads: Vec::new(),
+                next: None,
+            }
+        );
+    };
+    tokio::select! { ended = core => panic!("core ended {ended:?}"), () = client => {} }
     brain.close().await;
 }

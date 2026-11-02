@@ -254,6 +254,11 @@ pub enum DataToShell {
         /// Continue before this id, or stop when absent.
         before: Option<EventId>,
     },
+    /// The read for `request` failed; the brain logged why.
+    PageFailed {
+        /// The request this answers.
+        request: u32,
+    },
     /// Part of a visible scene's kept steps, in order, after [`ControlToShell::Scenes`] named it.
     SceneSnapshot {
         /// The scene.

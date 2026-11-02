@@ -4,6 +4,7 @@ use capsula_protocol::message::{PageEventKind, RunId};
 #[test]
 fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early() {
     let mut state = Threads::default();
+    state.show();
     state.connected();
     let first = request_id(&state.requests()[0]);
     let old = state.defer_search("old");
@@ -58,6 +59,7 @@ fn reply(request: u32, ids: &[u64], next: Option<u64>) -> DataToShell {
 
 fn loaded() -> Threads {
     let mut state = Threads::default();
+    state.show();
     state.connected();
     let requests = state.requests();
     state.apply(reply(request_id(&requests[0]), &[3, 2], Some(2)));
@@ -67,6 +69,7 @@ fn loaded() -> Threads {
 #[test]
 fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     let mut state = Threads::default();
+    state.show();
     state.connected();
     let first = request_id(&state.requests()[0]);
     state.search("new query");
@@ -102,6 +105,7 @@ fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
 #[test]
 fn returning_to_the_same_query_still_drops_its_superseded_reply() {
     let mut state = Threads::default();
+    state.show();
     state.connected();
     state.search("a");
     let first = request_id(&state.requests()[0]);
@@ -180,6 +184,7 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
 #[test]
 fn empty_list_and_empty_search_finish_loading_and_have_no_more_pages() {
     let mut state = Threads::default();
+    state.show();
     state.connected();
     let first = request_id(&state.requests()[0]);
     state.apply(reply(first, &[], None));
@@ -215,10 +220,18 @@ fn a_run_on_a_nonfirst_thread_repairs_once_and_keeps_the_older_cursor() {
         }
     ));
     state.run_state(ThreadId(2));
-    assert!(state.requests().is_empty());
+    assert!(state.requests().is_empty(), "one read in flight");
     state.apply(reply(request_id(&requests[0]), &[2, 3], None));
     assert_eq!(state.rows, vec![row(2), row(3), row(1)]);
     assert_eq!(state.next, cursor);
+    let followup = state.requests();
+    assert_eq!(
+        followup.len(),
+        1,
+        "the RunState during the read earns one more"
+    );
+    state.apply(reply(request_id(&followup[0]), &[2, 3], None));
+    assert_eq!(state.rows, vec![row(2), row(3), row(1)]);
     state.run_state(ThreadId(2));
     assert!(state.requests().is_empty(), "already first");
 }
@@ -239,6 +252,77 @@ fn an_unlisted_run_repairs_after_a_pending_older_page_but_search_is_not_repaired
     state.apply(reply(search, &[2], None));
     state.run_state(ThreadId(3));
     assert!(state.requests().is_empty());
+}
+
+#[test]
+fn runs_on_either_side_of_a_repair_s_snapshot_both_reach_the_list() {
+    let mut state = loaded();
+    state.run_state(ThreadId(4));
+    let repair = request_id(&state.requests()[0]);
+    // Thread 5 is created after the store read thread 4's repair, but before its reply lands.
+    state.run_state(ThreadId(5));
+    assert!(state.requests().is_empty(), "one read in flight");
+    state.apply(reply(repair, &[4, 3], Some(3)));
+    assert_eq!(state.rows, vec![row(4), row(3), row(2)]);
+    let followup = request_id(&state.requests()[0]);
+    state.apply(reply(followup, &[5, 4, 3], Some(3)));
+    assert_eq!(state.rows, vec![row(5), row(4), row(3), row(2)]);
+    assert!(state.requests().is_empty());
+}
+
+#[test]
+fn a_repair_that_misses_the_shown_events_keeps_the_gap_reachable() {
+    let mut state = loaded();
+    state.select(Some(ThreadId(3)));
+    let first = request_id(&state.requests()[0]);
+    state.apply(DataToShell::Page {
+        request: first,
+        thread: ThreadId(3),
+        events: vec![event(5), event(4)],
+        before: Some(EventId(4)),
+    });
+    state.run_state(ThreadId(3));
+    let repair = state
+        .requests()
+        .into_iter()
+        .find(|request| {
+            matches!(
+                request,
+                DataToBrain::PageRequest {
+                    page: PageOf::Events { .. },
+                    ..
+                }
+            )
+        })
+        .expect("an event read");
+    // The byte budget cut the page at 8, above everything shown.
+    state.apply(DataToShell::Page {
+        request: request_id(&repair),
+        thread: ThreadId(3),
+        events: vec![event(9), event(8)],
+        before: Some(EventId(8)),
+    });
+    state.older_events();
+    let older = state.requests();
+    assert_eq!(
+        older[0],
+        DataToBrain::PageRequest {
+            request: request_id(&older[0]),
+            page: PageOf::Events {
+                thread: ThreadId(3),
+                before: Some(EventId(8))
+            }
+        }
+    );
+    state.apply(DataToShell::Page {
+        request: request_id(&older[0]),
+        thread: ThreadId(3),
+        events: vec![event(7), event(6), event(5), event(4)],
+        before: None,
+    });
+    let ids: Vec<u64> = state.events.iter().map(|event| event.id.0).collect();
+    assert_eq!(ids, [9, 8, 7, 6, 5, 4]);
+    assert_eq!(state.before, None);
 }
 
 #[test]
@@ -391,4 +475,83 @@ fn thread_state_debug_never_includes_user_content() {
     for content in ["private title", "private search", "private event"] {
         assert!(!debug.contains(content));
     }
+}
+
+fn list_request(request: u32) -> DataToBrain {
+    DataToBrain::PageRequest {
+        request,
+        page: PageOf::Threads {
+            search: None,
+            after: None,
+        },
+    }
+}
+
+#[test]
+fn nothing_is_read_while_the_panel_is_closed() {
+    let mut state = Threads::default();
+    state.connected();
+    state.run_state(ThreadId(4));
+    assert_eq!(state.requests(), Vec::new());
+    state.show();
+    assert_eq!(state.requests(), vec![list_request(1)]);
+    state.apply(reply(1, &[4], None));
+    state.select(Some(ThreadId(4)));
+    state.hide();
+    state.run_state(ThreadId(5));
+    assert_eq!(state.requests(), Vec::new());
+    assert_eq!(state.open, None);
+}
+
+#[test]
+fn a_failed_read_frees_its_slot_and_shows_until_a_page_lands() {
+    let mut state = loaded();
+    state.select(Some(ThreadId(3)));
+    let events = request_id(&state.requests()[0]);
+    state.apply(DataToShell::PageFailed { request: events });
+    assert!(state.failed);
+    assert!(!state.reading());
+    assert_eq!(
+        state.requests(),
+        Vec::new(),
+        "a failure doesn't retry by itself"
+    );
+    state.refresh();
+    let list = request_id(&state.requests()[0]);
+    state.apply(DataToShell::PageFailed {
+        request: list.wrapping_add(1),
+    });
+    assert!(state.listing(), "another request's failure frees nothing");
+    state.apply(DataToShell::PageFailed { request: list });
+    assert!(!state.listing());
+    assert_eq!(
+        state.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [ThreadId(3), ThreadId(2)]
+    );
+    state.refresh();
+    let list = request_id(&state.requests()[0]);
+    state.apply(reply(list, &[7], None));
+    assert!(!state.failed);
+    assert_eq!(
+        state.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [ThreadId(7)]
+    );
+}
+
+#[test]
+fn a_dropped_page_still_earns_its_whole_credit() {
+    let mut state = loaded();
+    let unsolicited = DataToShell::Page {
+        request: 99,
+        thread: ThreadId(3),
+        events: vec![event(4)],
+        before: None,
+    };
+    assert_eq!(state.receive(unsolicited, 321), 321);
+    assert!(state.events.is_empty());
+    assert_eq!(
+        state.receive(DataToShell::PageFailed { request: 98 }, 17),
+        17
+    );
+    assert!(!state.failed);
 }

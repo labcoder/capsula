@@ -481,12 +481,12 @@ fn every_operation_gets_one_reply_in_order() {
             Input::PageRead {
                 epoch: 4,
                 request: 9,
-                reply: Some(DataToShell::Page {
+                reply: DataToShell::Page {
                     request: 9,
                     thread: ThreadId(999),
                     events: Vec::new(),
                     before: None
-                }),
+                },
             },
         ]
     );
@@ -519,11 +519,11 @@ fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
     let expected = Input::PageRead {
         epoch: 1,
         request: 3,
-        reply: Some(DataToShell::ThreadList {
+        reply: DataToShell::ThreadList {
             request: 3,
             threads: Vec::new(),
             next: None,
-        }),
+        },
     };
     serve_op(&mut store, &mut purger, &acks, read());
     assert_eq!(replies.try_recv().expect("reply"), expected);
@@ -595,7 +595,10 @@ fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
     );
     assert!(matches!(
         replies.try_recv(),
-        Ok(Input::PageRead { reply: Some(_), .. })
+        Ok(Input::PageRead {
+            reply: DataToShell::ThreadList { .. },
+            ..
+        })
     ));
     let copy = purger
         .job
@@ -607,4 +610,147 @@ fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
     purger.finish(&mut store, remove);
     done_after(&attempts, &[]);
     assert_eq!(owed(&scratch), 0);
+}
+
+/// Rez measurement for the pull request, not a check: how long the store's thread takes to answer
+/// a page read, and a write queued right behind it, on the large measured stores with a purge
+/// owed. Pages are a thread's 50 newest events at near the frame budget each, and a search for a
+/// phrase every event holds. The write alone, with no read ahead of it, is the before. Run it
+/// with `cargo test --release -p capsula-brain -- --ignored --nocapture measure_page_reads`;
+/// set `MEASURE_ONLY` to one store's name to run just that one.
+#[test]
+#[ignore = "a measurement, run by hand on Rez"]
+#[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
+fn measure_page_reads() {
+    use crate::store::tests::{MEASURED_STORES, measured_store};
+    use crate::store::{EventKind, NewEvent};
+    const ROUNDS: u64 = 30;
+    let only = std::env::var("MEASURE_ONLY").ok();
+    let summary = |mut took: Vec<Duration>| {
+        took.sort_unstable();
+        format!(
+            "median {:.1?}, worst {:.1?}",
+            took[took.len() / 2],
+            took[took.len() - 1]
+        )
+    };
+    for (name, shape) in MEASURED_STORES {
+        if only.as_deref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let scratch = Scratch::new("measure-pages");
+        let mut store = measured_store(&scratch, shape);
+        let size = std::fs::metadata(scratch.db()).expect("size").len() >> 20;
+        let history = ThreadId(1_000_000);
+        // Just under a turn's 256 KiB cap, so an events page reads about 12.8 MB.
+        let long = "near the frame budget ".repeat(11_900);
+        for turn in 0..50_u64 {
+            let run = RunId(1_000_000 + turn);
+            let title = (turn == 0).then_some("t");
+            store.begin_turn(history, title, run, &long).expect("turn");
+            store
+                .append(
+                    history,
+                    run,
+                    &[NewEvent {
+                        kind: EventKind::AssistantText,
+                        text: Some("a short answer"),
+                        body: None,
+                    }],
+                )
+                .expect("answer");
+            store
+                .end_run(history, run, &[], RunEnd::Done)
+                .expect("ended");
+        }
+        store.begin_delete(ThreadId(2)).expect("begin");
+        store.finish_delete(ThreadId(2)).expect("finish");
+        let (acks, mut replies) = mpsc::unbounded_channel();
+        let thread = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+        let write = |thread: &StoreThread, at: u64| {
+            assert!(thread.send(StoreOp::BeginTurn {
+                thread: history,
+                title: None,
+                run: RunId(2_000_000 + at),
+                text: "a measured turn".to_owned(),
+            }));
+        };
+        let mut alone = Vec::new();
+        for at in 0..ROUNDS {
+            let started = Instant::now();
+            write(&thread, at);
+            assert!(matches!(
+                replies.blocking_recv(),
+                Some(Input::TurnStored { .. })
+            ));
+            alone.push(started.elapsed());
+        }
+        let common = |after| PageOf::Threads {
+            search: Some("lorem".to_owned()),
+            after,
+        };
+        assert!(thread.send(StoreOp::ReadPage {
+            epoch: 1,
+            request: 0,
+            page: common(None),
+        }));
+        let Some(Input::PageRead {
+            reply: DataToShell::ThreadList { threads, next, .. },
+            ..
+        }) = replies.blocking_recv()
+        else {
+            panic!("a search page")
+        };
+        assert_eq!(threads.len(), 50, "every thread matches");
+        let pages = [
+            (
+                "events page, 50 turns near 256 KiB",
+                PageOf::Events {
+                    thread: history,
+                    before: None,
+                },
+            ),
+            ("search for a common word", common(None)),
+            (
+                "its continuation",
+                common(Some(next.expect("more matches"))),
+            ),
+        ];
+        let mut lines = vec![format!(
+            "{name} ({size} MiB): a BeginTurn alone {}",
+            summary(alone)
+        )];
+        for (round, (what, page)) in (1..).zip(pages) {
+            let (mut reads, mut behind) = (Vec::new(), Vec::new());
+            for at in 0..ROUNDS {
+                let started = Instant::now();
+                assert!(thread.send(StoreOp::ReadPage {
+                    epoch: 1,
+                    request: 0,
+                    page: page.clone(),
+                }));
+                write(&thread, round * ROUNDS + at);
+                assert!(matches!(
+                    replies.blocking_recv(),
+                    Some(Input::PageRead {
+                        reply: DataToShell::ThreadList { .. } | DataToShell::Page { .. },
+                        ..
+                    })
+                ));
+                reads.push(started.elapsed());
+                assert!(matches!(
+                    replies.blocking_recv(),
+                    Some(Input::TurnStored { .. })
+                ));
+                behind.push(started.elapsed());
+            }
+            lines.push(format!(
+                "{what}: read {}; the BeginTurn behind it {}",
+                summary(reads),
+                summary(behind)
+            ));
+        }
+        thread.close().blocking_recv().expect("closed");
+        eprintln!("{}", lines.join("\n  "));
+    }
 }

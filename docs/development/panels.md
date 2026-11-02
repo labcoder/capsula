@@ -31,7 +31,7 @@ sequenceDiagram
   UI->>Core: PageRequest(request, page)
   Core->>Store: ReadPage(epoch, request, page)
   Store-->>Core: PageRead(epoch, request, reply)
-  Core-->>UI: ThreadList or Page, under data credit
+  Core-->>UI: ThreadList, Page or PageFailed, under data credit
   UI->>UI: apply or drop by request id and current selection
   UI->>Core: Credit for the frame taken
 ```
@@ -46,7 +46,12 @@ Disconnect clears in-flight flags. Connected asks for both first pages again, wh
 open, through the new Session. Frames from another generation are dropped, and sends through
 an ended Session fail. The brain also fences store completions by connection epoch, so neither
 an old page nor an old read failure reaches the replacement connection. A current read failure
-ends the connection rather than falsely reporting that the thread is gone.
+answers `PageFailed` rather than an empty page that would read as a missing thread: the store
+thread logs the error's kind, the request's slot frees, and the panel says the read failed until
+a later page lands. The connection and typing stay up.
+
+Pages are read only while the panel is shown. Opening it reads the first list page; closing it
+clears the open thread, and requests needed meanwhile wait until it opens again.
 
 ## Ordering and repair
 
@@ -56,10 +61,14 @@ skipped by later pages, never repeated. It appears again when the first page is 
 
 A RunState for a thread that isn't first, including an unlisted thread, requests that refresh
 once. Rows from the fresh first page replace the same ids anywhere in the loaded list and move
-to the top. The older-page cursor stays where it was. Ranked search results aren't repaired.
+to the top. The older-page cursor stays where it was. Ranked search results aren't repaired. A RunState that
+arrives while a list read is in flight earns one more read once that reply lands, since the
+reply may predate it.
 
 A RunState for the open thread rereads its newest events and puts the ones newer than what's
-shown on top, keeping older pages and their cursor. A Stop or failure is told before its
+shown on top, keeping older pages and their cursor. When that page doesn't reach the
+newest event shown, it replaces the list with its own cursor, so the events between stay
+reachable by scrolling. A Stop or failure is told before its
 outcome is written, so that read can miss the last text until the thread's next RunState.
 
 shortcut: more than 50 threads updated between first-page reads can leave one out of order

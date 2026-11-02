@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use capsula_protocol::message::{DataToShell, PageOf, RunId, SceneId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -343,62 +344,30 @@ impl StoreThread {
 }
 
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
-    let write = !matches!(op, StoreOp::ReadPage { .. });
-    if write {
-        purger.op_arriving();
-    }
-    if acks.send(apply(store, op)).is_err() {
-        tracing::debug!("an acknowledgement had no listener");
-    }
-    if write {
-        purger.op_arrived(store);
-    } else {
-        purger.tick(store);
-    }
-}
-
-/// Runs one operation in one transaction and answers it. Errors are logged by kind, run id and
-/// count only, never content.
-fn apply(store: &mut Store, op: StoreOp) -> Input {
-    if let StoreOp::ReadPage {
-        epoch,
-        request,
-        page,
-    } = op
-    {
-        let reply = store
-            .reconnect()
-            .and_then(|()| store.read_page(request, page));
-        return Input::PageRead {
+    match op {
+        StoreOp::ReadPage {
             epoch,
             request,
-            reply: reply.ok(),
-        };
-    }
-    if let StoreOp::ClearScenes { scenes } = op {
-        return clear(store, scenes);
-    }
-    let run = op.run().expect("a write belongs to a run");
-    // After a swap's reopen failed: fails closed until the file opens again.
-    if let Err(error) = store.reconnect() {
-        tracing::warn!(%error, run = run.0, "the store is unavailable");
-        return Input::StoreFailed { run };
-    }
-    let (result, what) = match op {
-        StoreOp::ReadPage { .. } | StoreOp::ClearScenes { .. } => {
-            unreachable!("reads and clears were handled above")
+            page,
+        } => {
+            answer(acks, read(store, epoch, request, page));
+            purger.tick(store);
+        }
+        StoreOp::ClearScenes { scenes } => {
+            purger.op_arriving();
+            answer(acks, clear(store, scenes));
+            purger.op_arrived(store);
         }
         StoreOp::BeginTurn {
             thread,
             title,
             run,
             text,
-        } => (
+        } => write(store, purger, acks, run, "turn", |store| {
             store
                 .begin_turn(thread, title.as_deref(), run, &text)
-                .map(|()| Input::TurnStored { run }),
-            "turn",
-        ),
+                .map(|()| Input::TurnStored { run })
+        }),
         StoreOp::CommitStep {
             thread,
             run,
@@ -406,7 +375,7 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             scene,
             index,
             step,
-        } => (
+        } => write(store, purger, acks, run, "step", |store| {
             store
                 .commit_step((thread, run), text.as_deref(), scene, index, &step.label)
                 .map(|scene| Input::StepStored {
@@ -414,9 +383,8 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
                     index,
                     step,
                     scene,
-                }),
-            "step",
-        ),
+                })
+        }),
         StoreOp::EndRun {
             thread,
             run,
@@ -424,7 +392,7 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             revealed,
             clear,
             end,
-        } => {
+        } => write(store, purger, acks, run, "outcome", |store| {
             let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
             let clear = clear.map(cleared_body);
             let mut events = Vec::with_capacity(3);
@@ -449,22 +417,30 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
                     body: Some(clear.as_str()),
                 });
             }
-            (
-                store
-                    .end_run(thread, run, &events, end)
-                    .map(|()| Input::RunStored { run }),
-                "outcome",
-            )
-        }
-    };
-    result.unwrap_or_else(|error| {
-        tracing::warn!(%error, run = run.0, what, "a store operation failed");
-        Input::StoreFailed { run }
-    })
+            store
+                .end_run(thread, run, &events, end)
+                .map(|()| Input::RunStored { run })
+        }),
+    }
+}
+
+/// Reads one page, never holding off the purge. A failure is logged by kind only.
+fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
+    let reply = store
+        .reconnect()
+        .and_then(|()| store.read_page(request, page));
+    if let Err(error) = &reply {
+        tracing::warn!(%error, "a page read failed");
+    }
+    Input::PageRead {
+        epoch,
+        request,
+        reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+    }
 }
 
 /// Writes a clear. A failed one is retried, so it's only logged, by how many scenes it names.
-fn clear(store: &mut Store, scenes: Vec<capsula_protocol::message::SceneId>) -> Input {
+fn clear(store: &mut Store, scenes: Vec<SceneId>) -> Input {
     let ok = match store.reconnect().and_then(|()| store.clear_scenes(&scenes)) {
         Ok(()) => true,
         Err(error) => {
@@ -473,6 +449,39 @@ fn clear(store: &mut Store, scenes: Vec<capsula_protocol::message::SceneId>) -> 
         }
     };
     Input::ScenesCleared { scenes, ok }
+}
+
+/// Runs one write in one transaction and answers it, holding off the purge meanwhile. Errors are
+/// logged by kind and run id only, never content.
+fn write(
+    store: &mut Store,
+    purger: &mut Purger,
+    acks: &UnboundedSender<Input>,
+    run: RunId,
+    what: &'static str,
+    op: impl FnOnce(&mut Store) -> Result<Input, StoreError>,
+) {
+    purger.op_arriving();
+    // After a swap's reopen failed: fails closed until the file opens again.
+    let reply = match store.reconnect().map(|()| op(store)) {
+        Err(error) => {
+            tracing::warn!(%error, run = run.0, "the store is unavailable");
+            Input::StoreFailed { run }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, run = run.0, what, "a store operation failed");
+            Input::StoreFailed { run }
+        }
+        Ok(Ok(stored)) => stored,
+    };
+    answer(acks, reply);
+    purger.op_arrived(store);
+}
+
+fn answer(acks: &UnboundedSender<Input>, reply: Input) {
+    if acks.send(reply).is_err() {
+        tracing::debug!("an acknowledgement had no listener");
+    }
 }
 
 #[cfg(test)]

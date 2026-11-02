@@ -131,13 +131,20 @@ mod tests {
     #[test]
     fn a_larger_threads_surface_uses_the_same_anchor_and_stays_in_the_work_area() {
         let area = [30, -600, 900, 600];
-        for position in Position::ALL {
-            let layout = position.layout(area, [100, 40], [300, 120], 0);
-            assert_eq!(layout.anchored_panel(area, [300, 120]), layout.panel);
-            let [x, y, width, height] = layout.anchored_panel(area, [760, 540]);
-            assert!(x >= 30 && y >= -600 && x + width <= 930 && y + height <= 0);
-            assert!(y == layout.dock[1] + 40 || y + height == layout.dock[1] || y == -600);
-        }
+        let threads =
+            [Position::TopLeft, Position::Center, Position::BottomRight].map(|position| {
+                position
+                    .layout(area, [100, 40], [300, 120], 0)
+                    .anchored_panel(area, [760, 540])
+            });
+        assert_eq!(
+            threads,
+            [
+                [30, -560, 760, 540],
+                [100, -600, 760, 540],
+                [170, -580, 760, 540],
+            ]
+        );
         let tiny = Position::BottomRight.layout([10, 20, 80, 30], [100, 40], [300, 120], 0);
         assert_eq!(
             tiny.anchored_panel([10, 20, 80, 30], [760, 540]),

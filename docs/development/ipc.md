@@ -61,13 +61,14 @@ flowchart LR
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
 | Control | `RunState`, `Ping`, `Scenes` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
-| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `SceneSnapshot` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
 |---|---|---|
 | `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }` or `PageOf::Events { thread, before }` |
 | `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`), `next` |
 | `Page` | Brain to shell, data | `request`, `thread`, events (`id`, optional `run`, `kind`, `text`, `cut`), `before` |
+| `PageFailed` | Brain to shell, data | `request`; the read failed and the brain logged its kind |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too

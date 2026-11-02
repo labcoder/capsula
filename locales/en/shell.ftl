@@ -43,3 +43,4 @@ thread-step = Drawing step
 thread-revealed = Visible drawing steps
 threads-offline = Reconnect to load threads.
 threads-search-too-long = That search is too long to send.
+threads-failed = Couldn't load threads. Close this panel and open it again to retry.

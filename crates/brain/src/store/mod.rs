@@ -11,7 +11,7 @@ mod purge;
 mod scenes;
 mod schema;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::io;
 use std::path::{Path, PathBuf};

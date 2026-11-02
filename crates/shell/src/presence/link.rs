@@ -47,13 +47,14 @@ impl Presence {
                     {
                         let credit = match message {
                             message @ (DataToShell::ThreadList { .. }
-                            | DataToShell::Page { .. }) => {
-                                self.threads.update(cx, |state, cx| {
-                                    state.apply(message);
+                            | DataToShell::Page { .. }
+                            | DataToShell::PageFailed { .. }) => {
+                                let credit = self.threads.update(cx, |state, cx| {
                                     cx.notify();
+                                    state.receive(message, bytes)
                                 });
                                 self.request_pages(cx);
-                                bytes
+                                credit
                             }
                             DataToShell::SceneSnapshot {
                                 scene,
