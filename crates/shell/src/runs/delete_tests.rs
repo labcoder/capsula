@@ -2,10 +2,11 @@
 
 use capsula_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES, Phase,
-    RunId, SceneId, Step, ThreadId,
+    RunId, SceneDescriptor, SceneId, Step, ThreadId,
 };
 
 use super::Runs;
+use crate::drawing::Chunk;
 
 const BYTES: u32 = 10;
 
@@ -266,4 +267,104 @@ fn deletes_and_threads_waiting_on_turns_share_the_slots() {
         MAX_PENDING_DELETES,
         "unanswered deletes outlive the connection"
     );
+}
+
+#[test]
+fn an_answer_for_the_shown_thread_drops_its_view_and_a_newer_run_s_stays() {
+    let mut runs = connected();
+    submit(&mut runs);
+    state(&mut runs, 1, 9, Phase::Answering);
+    runs.apply_data(text(1), BYTES);
+    submit(&mut runs);
+    state(&mut runs, 1, 9, Phase::Done);
+    runs.apply_data(DataToShell::RunEnd { run: RunId(1) }, BYTES);
+    state(&mut runs, 2, 4, Phase::Answering);
+    assert_eq!(runs.shown().map(|shown| shown.run), Some(RunId(1)));
+    assert!(runs.confirm_delete(ThreadId(9)));
+    runs.deleted(ThreadId(9), Deleted::Removed, Some(RunId(1)));
+    assert_eq!(runs.shown(), None, "T's answer goes with the result");
+    runs.apply_data(text(1), BYTES);
+    assert_eq!(runs.shown(), None, "T's late text shows nothing");
+    runs.apply_data(text(2), BYTES);
+    assert_eq!(
+        runs.shown().map(|shown| (shown.run, shown.text.as_str())),
+        Some((RunId(2), "t"))
+    );
+    assert!(runs.working(), "U is still live");
+}
+
+#[test]
+fn an_answer_for_another_thread_keeps_the_view() {
+    let mut runs = connected();
+    submit(&mut runs);
+    state(&mut runs, 2, 4, Phase::Answering);
+    runs.apply_data(text(2), BYTES);
+    assert!(runs.confirm_delete(ThreadId(9)));
+    runs.deleted(ThreadId(9), Deleted::Removed, Some(RunId(1)));
+    runs.apply_data(text(2), BYTES);
+    assert_eq!(
+        runs.shown().map(|shown| (shown.run, shown.text.as_str())),
+        Some((RunId(2), "tt"))
+    );
+}
+
+fn restored(scene: u64) -> SceneDescriptor {
+    SceneDescriptor {
+        scene: SceneId(scene),
+        revision: 1,
+        committed: 1,
+    }
+}
+
+fn chunk(scene: u64) -> Chunk {
+    Chunk {
+        scene: SceneId(scene),
+        revision: 1,
+        steps: vec![Step {
+            label: "s".to_owned(),
+        }],
+        last: true,
+        bytes: BYTES,
+    }
+}
+
+#[test]
+fn a_chunk_held_across_the_answer_installs_and_leaves_at_the_marker() {
+    let mut runs = Runs::default();
+    runs.met(Incarnation(1));
+    runs.connected(1);
+    runs.apply_scenes(&[restored(5)]).expect("valid");
+    assert!(runs.confirm_delete(ThreadId(9)));
+    assert_eq!(runs.deleted(ThreadId(9), Deleted::Removed, None), 0);
+    assert_eq!(runs.apply_snapshot(1, chunk(5)), Ok(BYTES));
+    assert_eq!(runs.scenes().count(), 1, "installed until the marker");
+    assert_eq!(
+        runs.remove_scenes(&[SceneId(5)]),
+        0,
+        "its credit was granted"
+    );
+    assert_eq!(runs.scenes().count(), 0);
+}
+
+#[test]
+fn a_chunk_held_for_scenes_is_dropped_by_the_marker_with_its_credit_once() {
+    let mut runs = Runs::default();
+    runs.met(Incarnation(1));
+    runs.connected(1);
+    assert_eq!(runs.apply_snapshot(1, chunk(5)), Ok(0), "held for Scenes");
+    assert_eq!(runs.remove_scenes(&[SceneId(5)]), BYTES);
+    assert_eq!(runs.remove_scenes(&[SceneId(5)]), 0);
+    runs.apply_scenes(&[]).expect("valid");
+    assert_eq!(runs.scenes().count(), 0);
+}
+
+#[test]
+fn a_removed_scene_s_late_chunk_never_installs() {
+    let mut runs = Runs::default();
+    runs.met(Incarnation(1));
+    runs.connected(1);
+    runs.apply_scenes(&[restored(5)]).expect("valid");
+    assert_eq!(runs.remove_scenes(&[SceneId(5)]), 0);
+    assert_eq!(runs.apply_snapshot(1, chunk(5)), Ok(BYTES));
+    assert_eq!(runs.scenes().count(), 0);
 }
