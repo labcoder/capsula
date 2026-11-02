@@ -250,8 +250,8 @@ fn a_delete_that_hid_nothing_frees_its_slot_and_fences_nothing() {
 fn deletes_and_threads_waiting_on_turns_share_the_slots() {
     let mut runs = connected();
     submit(&mut runs);
-    for thread in 1..=MAX_PENDING_DELETES {
-        assert!(runs.confirm_delete(ThreadId(thread as u64)));
+    for thread in (1..).take(MAX_PENDING_DELETES) {
+        assert!(runs.confirm_delete(ThreadId(thread)));
     }
     assert!(!runs.can_delete());
     assert!(!runs.confirm_delete(ThreadId(99)));
