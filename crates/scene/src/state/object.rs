@@ -2,7 +2,7 @@ use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -28,6 +28,7 @@ impl Kind {
 
 #[derive(Debug, Clone)]
 pub(super) struct Object {
+    pub work: super::work::Work,
     pub handle: Handle,
     pub kind: Kind,
     pub parent: Option<WireId>,
@@ -140,13 +141,20 @@ fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
     refs
 }
 
-pub(super) fn object(v: &Visual<'_>, op: &Op, handle: Handle) -> Object {
-    Object {
+pub(super) fn object(
+    v: &Visual<'_>,
+    op: &Op,
+    handle: Handle,
+    index: usize,
+    step: &Step,
+) -> Result<Object, StepError> {
+    Ok(Object {
+        work: super::work::make(op, index, step)?,
         handle,
         kind: v.kind,
         parent: v.parent.cloned(),
         references: references(op).into_iter().map(|r| r.id.clone()).collect(),
-    }
+    })
 }
 
 pub(super) fn path(index: usize, name: &'static str) -> FieldPath {
@@ -332,6 +340,9 @@ fn validate_anim(
 ) -> Result<(), StepError> {
     let prefix = path(index, "anim");
     let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
+    if step.remove.contains(&anim.target) {
+        return Err(fail("target", ErrorCode::UnknownRef));
+    }
     let Some(target) = objects.get(&anim.target) else {
         return Err(fail("target", ErrorCode::UnknownRef));
     };
@@ -432,7 +443,7 @@ pub(super) fn removals(
     step: &Step,
     objects: &mut BTreeMap<WireId, Object>,
 ) -> Result<Vec<(WireId, Object)>, StepError> {
-    let mut removed = BTreeSet::new();
+    let mut removed = HashSet::with_capacity(step.remove.len());
     for (index, id) in step.remove.iter().enumerate() {
         let field = FieldPath::default().field("remove").index(index);
         if !removed.insert(id) {
@@ -442,11 +453,14 @@ pub(super) fn removals(
             return Err(StepError::in_step(&step.id, field, ErrorCode::UnknownRef));
         }
     }
+    let mut needed = HashSet::new();
+    for (owner, object) in &*objects {
+        if !removed.contains(owner) {
+            needed.extend(object.references.iter());
+        }
+    }
     for (index, id) in step.remove.iter().enumerate() {
-        if objects
-            .iter()
-            .any(|(owner, object)| !removed.contains(owner) && object.references.contains(id))
-        {
+        if needed.contains(id) {
             return Err(StepError::in_step(
                 &step.id,
                 FieldPath::default().field("remove").index(index),
