@@ -500,7 +500,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
 fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
     let reply = store
         .reconnect()
-        .and_then(|()| store.read_page(request, page));
+        .and_then(|()| store.pages().read_page(request, page));
     if let Err(error) = &reply {
         tracing::warn!(%error, "a page read failed");
     }

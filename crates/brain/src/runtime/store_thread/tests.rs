@@ -326,15 +326,15 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
 
     let store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
-        store.search_ids("stored").expect("search"),
+        store.pages().search_ids("stored").expect("search"),
         vec![ThreadId(3)]
     );
     assert_eq!(
-        store.search_ids("kept").expect("search"),
+        store.pages().search_ids("kept").expect("search"),
         vec![kept],
         "the same file, not an empty one"
     );
-    assert_eq!(store.search_ids("refused").expect("search"), Vec::new());
+    assert_eq!(store.pages().search_ids("refused").expect("search"), Vec::new());
 }
 
 #[test]
@@ -827,7 +827,7 @@ fn a_delete_in_session_purges_its_thread() {
     let store = Store::open(&scratch.db()).expect("reopen");
     assert!(!store.leftovers().exist(), "no copy is left");
     let threads: Vec<ThreadId> = store
-        .thread_page(None, 50)
+        .pages().thread_page(None, 50)
         .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
         .expect("threads");
     assert_eq!(threads, [ThreadId(2)]);

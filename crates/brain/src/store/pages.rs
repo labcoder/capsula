@@ -3,20 +3,30 @@ use kumochi_protocol::message::{
     DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
     ThreadCursor, ThreadId, ThreadRow,
 };
-use rusqlite::{Row, params};
+use rusqlite::{Connection, Row, params};
 
 use super::{Store, StoreError, row_id};
 
 #[cfg(test)]
 mod tests;
 
+/// The page queries, on the store's own connection or on the page reader's.
+pub(crate) struct Pages<'a>(pub(crate) &'a Connection);
+
 impl Store {
+    /// The page queries on the store's connection.
+    pub(crate) fn pages(&self) -> Pages<'_> {
+        Pages(&self.conn)
+    }
+}
+
+impl Pages<'_> {
     /// Reads one page, including its continuation, within the full encoded-frame budget.
     /// A single oversized title or event is shortened at a character boundary to make progress.
     ///
     /// # Errors
     /// Fails with a content-free error when reading or encoding fails.
-    pub fn read_page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+    pub(crate) fn read_page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
         let mut cursors = Vec::new();
         let mut reply = match page {
             PageOf::Threads { search, after } => {
@@ -67,7 +77,8 @@ impl Store {
     ///
     /// # Errors
     /// Fails with a content-free error when SQLite fails.
-    pub fn thread_page(
+    #[cfg(test)]
+    pub(crate) fn thread_page(
         &self,
         after: Option<ThreadCursor>,
         limit: usize,
@@ -83,8 +94,7 @@ impl Store {
         after: Option<ThreadCursor>,
         limit: usize,
     ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
-        let mut query = self
-            .conn
+        let mut query = self.0
             .prepare(
                 "SELECT id, title, updated_ms FROM threads
              WHERE state = 'live' AND (?1 IS NULL OR (updated_ms, id) < (?1, ?2))
@@ -117,7 +127,8 @@ impl Store {
     ///
     /// # Errors
     /// Fails with a content-free error when SQLite fails.
-    pub fn search_page(
+    #[cfg(test)]
+    pub(crate) fn search_page(
         &self,
         words: &str,
         limit: usize,
@@ -125,6 +136,7 @@ impl Store {
         self.search_page_after(words, None, limit)
     }
 
+    #[cfg(test)]
     fn search_page_after(
         &self,
         words: &str,
@@ -160,8 +172,7 @@ impl Store {
         // next write: about 65 ms at 20k matching events and 335 ms at 100k on Rez; OSC-152 moves
         // page reads to their own read-only connection.
         let phrase = format!("\"{}\"", words.replace('"', "\"\""));
-        let mut query = self
-            .conn
+        let mut query = self.0
             .prepare(
                 "WITH matches AS MATERIALIZED (
                  SELECT t.id, t.title, t.updated_ms, t.state = 'live' AS live,
@@ -209,7 +220,7 @@ impl Store {
     ///
     /// # Errors
     /// Fails with a content-free error when SQLite fails or a stored event kind is unknown.
-    pub fn events_page(
+    pub(crate) fn events_page(
         &self,
         thread: ThreadId,
         before: Option<EventId>,
@@ -219,8 +230,7 @@ impl Store {
             return Ok((Vec::new(), None));
         };
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
-        let mut query = self
-            .conn
+        let mut query = self.0
             .prepare(
                 "SELECT e.id, e.run, e.kind, coalesce(e.text, '') FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
@@ -293,7 +303,7 @@ fn paged(
 }
 
 #[cfg(test)]
-impl Store {
+impl Pages<'_> {
     /// The ids of the first page of live threads matching `words`.
     pub(crate) fn search_ids(&self, words: &str) -> Result<Vec<ThreadId>, StoreError> {
         let (rows, _) = self.search_page(words, MAX_PAGE_ROWS)?;
