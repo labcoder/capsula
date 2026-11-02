@@ -36,6 +36,7 @@ pub(crate) enum Escape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Panel {
     Open,
+    Threads,
     Closed,
 }
 
@@ -45,7 +46,7 @@ pub(crate) fn decide(activity: Activity, panel: Panel) -> Escape {
         Escape::Stop
     } else if activity.drawing {
         Escape::Clear
-    } else if panel == Panel::Open {
+    } else if panel != Panel::Closed {
         Escape::Dismiss
     } else {
         Escape::Ignore
@@ -105,6 +106,32 @@ impl<H> EscapeHold<H> {
 #[cfg(test)]
 mod tests {
     use super::{Activity, Escape, EscapeHold, Panel, decide};
+
+    #[test]
+    fn a_focused_threads_panel_dismisses_only_after_stop_and_clear() {
+        assert_eq!(
+            decide(
+                Activity {
+                    working: true,
+                    ..Activity::default()
+                },
+                Panel::Threads
+            ),
+            Escape::Stop
+        );
+        assert_eq!(
+            decide(
+                Activity {
+                    drawing: true,
+                    ..Activity::default()
+                },
+                Panel::Threads
+            ),
+            Escape::Clear
+        );
+        assert_eq!(decide(Activity::default(), Panel::Threads), Escape::Dismiss);
+        assert_eq!(decide(Activity::default(), Panel::Closed), Escape::Ignore);
+    }
 
     #[test]
     fn work_stops_before_a_drawing_clears_before_a_panel_dismisses() {

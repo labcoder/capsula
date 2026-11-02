@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::Secret;
 
+mod pages;
+pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
+
+/// The most rows one page carries [guess].
+pub const MAX_PAGE_ROWS: usize = 50;
+/// The largest encoded page frame, header included [guess].
+pub const MAX_PAGE_BYTES: usize = 32 * 1024;
+/// Unanswered page requests before the brain ends the connection [guess].
+pub const MAX_PENDING_PAGES: usize = 4;
+
 /// Length of the instance capability, in bytes.
 pub const CAPABILITY_LEN: usize = 32;
 
@@ -164,6 +174,13 @@ pub enum DataToBrain {
         /// How many bytes.
         bytes: u32,
     },
+    /// Read one bounded page, without changing any run.
+    PageRequest {
+        /// Echoed in the reply so a superseded request can be dropped.
+        request: u32,
+        /// The list and its continuation.
+        page: PageOf,
+    },
 }
 
 /// Brain to shell, on the data pipe.
@@ -190,6 +207,31 @@ pub enum DataToShell {
     RunEnd {
         /// The run that ended.
         run: RunId,
+    },
+    /// A bounded page of live threads.
+    ThreadList {
+        /// The request this answers.
+        request: u32,
+        /// Rows in list order.
+        threads: Vec<ThreadRow>,
+        /// Continue after this key, or stop when absent.
+        next: Option<ThreadCursor>,
+    },
+    /// A bounded page of a thread's stored events, newest first.
+    Page {
+        /// The request this answers.
+        request: u32,
+        /// The thread read.
+        thread: ThreadId,
+        /// Stored events; empty for a missing or deleting thread.
+        events: Vec<PageEvent>,
+        /// Continue before this id, or stop when absent.
+        before: Option<EventId>,
+    },
+    /// The read for `request` failed; the brain logged why.
+    PageFailed {
+        /// The request this answers.
+        request: u32,
     },
 }
 

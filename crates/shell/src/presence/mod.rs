@@ -5,12 +5,15 @@ pub(crate) mod diagnostics;
 mod geometry;
 mod gesture;
 mod launch;
+mod link;
 pub(crate) mod observer;
 mod outline;
 mod paint;
 mod panels;
 mod stretch;
 mod text;
+mod thread_view;
+mod threads;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -18,12 +21,11 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use capsula_protocol::constants;
-use capsula_protocol::message::ControlToBrain;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Task, Window,
+    ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, point, px,
     size,
 };
@@ -37,6 +39,7 @@ use crate::platform::{
 };
 use crate::runs::{Refused, Runs};
 use crate::strings::{Strings, Text};
+use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use geometry::{Layout, PanelVisibility, Position};
@@ -47,6 +50,7 @@ use outline::Outline;
 use paint::{OutlinePaint, PanelStamp, Target};
 use stretch::Stretch;
 use text::TextPanel;
+use threads::ThreadsPanel;
 
 /// Keeps the app owner alive even when its panel is hidden.
 struct PresenceApp {
@@ -62,6 +66,8 @@ struct Presence {
     panel: Entity<Panel>,
     /// Created on the first double tap, then hidden and reused so its draft survives.
     text: Option<TextPanel>,
+    thread_panel: Option<ThreadsPanel>,
+    threads: Entity<Threads>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
@@ -116,6 +122,7 @@ impl Presence {
         }
         self.native.show(index)?;
         self.dismiss_text(cx)?;
+        self.dismiss_threads(cx)?;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         if let Err(error) = self.pointer_changed(cx) {
             tracing::debug!(%error, "can't recheck the pointer after moving the dock");
@@ -158,7 +165,7 @@ impl Presence {
         if visibility != self.panel_visibility {
             self.set_panel(visibility, cx)?;
         }
-        if self.text_open() || self.escape_hold.shows_stop() {
+        if self.text_open() || self.threads_open() || self.escape_hold.shows_stop() {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -269,7 +276,11 @@ impl Presence {
             all = false;
         }
         let text = self.text.as_ref().map(|text| text.window);
-        for window in [Some(self.panel_window), text].into_iter().flatten() {
+        let threads = self.thread_panel.as_ref().map(|panel| panel.window);
+        for window in [Some(self.panel_window), text, threads]
+            .into_iter()
+            .flatten()
+        {
             match window.update(cx, |_, window, _| platform::set_capture(window, capture)) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -294,7 +305,9 @@ impl Presence {
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let panel = if self.text_open() {
+        let panel = if self.threads_focused() {
+            EscapePanel::Threads
+        } else if self.text_open() {
             EscapePanel::Open
         } else {
             EscapePanel::Closed
@@ -304,7 +317,11 @@ impl Presence {
             Escape::Stop => self.runs.stop(),
             Escape::Clear => self.runs.clear(),
             Escape::Dismiss => {
-                self.dismiss_text(cx)?;
+                if panel == EscapePanel::Threads {
+                    self.dismiss_threads(cx)?;
+                } else {
+                    self.dismiss_text(cx)?;
+                }
                 None
             }
             Escape::Ignore => None,
@@ -381,88 +398,6 @@ impl Presence {
         self.runs_changed(cx)
     }
 
-    /// Applies what the link reported, in order, then follows the runs once.
-    fn link_events(
-        &mut self,
-        events: Vec<LinkEvent>,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
-        for event in events {
-            match event {
-                LinkEvent::State(state) => {
-                    self.session = None;
-                    self.link_state(state, cx);
-                }
-                LinkEvent::Connected(session) => {
-                    self.session = Some(session);
-                    self.link_state(LinkState::Connected, cx);
-                }
-                LinkEvent::RunState { run, thread, phase } => {
-                    let applied = self.runs.apply_state(run, thread, phase);
-                    diagnostics::record(cx, format_args!("run phase={phase:?}"));
-                    if let Some(stop) = applied.stop {
-                        self.tell(stop);
-                    }
-                    self.grant(applied.credit);
-                }
-                LinkEvent::Data {
-                    generation,
-                    message,
-                    bytes,
-                } => {
-                    if self
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.generation() == generation)
-                    {
-                        let credit = self.runs.apply_data(message, bytes);
-                        self.grant(credit);
-                    }
-                }
-            }
-        }
-        self.runs_changed(cx)
-    }
-
-    /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
-    fn tell(&self, message: ControlToBrain) {
-        let sent = self
-            .session
-            .as_ref()
-            .is_some_and(|session| self.link.send_control(session, message));
-        if !sent {
-            tracing::warn!("the brain isn't connected or isn't reading; nothing to tell");
-        }
-    }
-
-    /// Grants the connection credit for data frames the UI has taken.
-    fn grant(&self, credit: u32) {
-        if let Some(session) = self.session.as_ref().filter(|_| credit > 0) {
-            session.grant(credit);
-        }
-    }
-
-    fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
-        if state == LinkState::Failed {
-            self.native.enable_retry();
-        } else {
-            self.native.disable_retry();
-        }
-        if state == LinkState::Connected {
-            self.runs.connected();
-        } else {
-            self.runs.disconnected();
-        }
-        diagnostics::record(cx, format_args!("link state={state:?}"));
-        self.state = state;
-        // Listening keeps its label until the gesture ends.
-        self.refresh_dock(cx);
-        self.panel.update(cx, |panel, cx| {
-            panel.state = state;
-            cx.notify();
-        });
-    }
-
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
     /// refuses, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -485,6 +420,12 @@ impl Presence {
         });
         if let Some(text) = &self.text {
             text.view.update(cx, |view, cx| {
+                view.stop = stop;
+                cx.notify();
+            });
+        }
+        if let Some(panel) = &self.thread_panel {
+            panel.view.update(cx, |view, cx| {
                 view.stop = stop;
                 cx.notify();
             });
@@ -640,12 +581,14 @@ struct Panel {
     /// Shown only when Esc is wanted globally but Windows refused it.
     stop: bool,
     events: Sender<PresenceEvent>,
+    threads: Option<WeakEntity<Presence>>,
 }
 
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let quit_events = self.events.clone();
+        let threads_owner = self.threads.clone();
         let retry = (self.state == LinkState::Failed).then(|| {
             let events = self.events.clone();
             Button::new("retry")
@@ -680,13 +623,31 @@ impl Render for Panel {
             .child(constants::DISPLAY_NAME)
             .child(strings.get(status_text(self.state)))
             .child(
-                div().flex().gap_2().children(stop).children(retry).child(
-                    Button::new("quit")
-                        .label(strings.get(Text::Quit))
-                        .on_click(move |_, _, _| {
+                div()
+                    .flex()
+                    .gap_2()
+                    .children(stop)
+                    .children(retry)
+                    .child(
+                        Button::new("threads")
+                            .label(strings.get(Text::OpenThreads))
+                            .on_click(move |_, _, cx| {
+                                if let Some(owner) = threads_owner.clone() {
+                                    cx.defer(move |cx| {
+                                        if let Ok(Err(error)) =
+                                            owner.update(cx, Presence::open_threads)
+                                        {
+                                            tracing::error!(%error, "can't open the threads panel");
+                                        }
+                                    });
+                                }
+                            }),
+                    )
+                    .child(Button::new("quit").label(strings.get(Text::Quit)).on_click(
+                        move |_, _, _| {
                             send(&quit_events, PresenceEvent::Quit);
-                        }),
-                ),
+                        },
+                    )),
             )
     }
 }
@@ -768,6 +729,17 @@ fn configure_surface(
     Ok(())
 }
 
+fn presence_labels(cx: &App) -> PresenceLabels {
+    let strings = cx.global::<Strings>();
+    PresenceLabels {
+        tooltip: constants::DISPLAY_NAME.to_owned(),
+        position_menu: strings.get(Text::DockPosition),
+        positions: Text::POSITIONS.map(|text| strings.get(text)),
+        retry: strings.get(Text::Retry),
+        quit: strings.get(Text::Quit),
+    }
+}
+
 /// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
 /// from the first frame. The caller starts the brain link afterwards.
 pub(crate) fn open(
@@ -785,14 +757,7 @@ pub(crate) fn open(
         cx.set_global(observer);
     }
     let (events, event_changes) = async_channel::unbounded();
-    let strings = cx.global::<Strings>();
-    let labels = PresenceLabels {
-        tooltip: constants::DISPLAY_NAME.to_owned(),
-        position_menu: strings.get(Text::DockPosition),
-        positions: Text::POSITIONS.map(|text| strings.get(text)),
-        retry: strings.get(Text::Retry),
-        quit: strings.get(Text::Quit),
-    };
+    let labels = presence_labels(cx);
     let dock_events = events.clone();
     let initial_label = dock_label(LinkState::Connecting, cx);
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
@@ -828,6 +793,7 @@ pub(crate) fn open(
             state: LinkState::Connecting,
             stop: false,
             events: panel_events,
+            threads: None,
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -839,6 +805,7 @@ pub(crate) fn open(
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let owner_gesture = Rc::clone(&gesture);
+    let threads = cx.new(|_| Threads::default());
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -848,6 +815,8 @@ pub(crate) fn open(
             dock,
             panel,
             text: None,
+            thread_panel: None,
+            threads,
             events,
             link,
             session: None,
@@ -868,6 +837,8 @@ pub(crate) fn open(
             stretch,
         }
     });
+    let status_panel = owner.read(cx).panel.clone();
+    status_panel.update(cx, |panel, _| panel.threads = Some(owner.downgrade()));
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
@@ -941,6 +912,9 @@ fn listen(
                         if this.state == LinkState::Failed {
                             this.link.retry();
                         }
+                    }
+                    PresenceEvent::DismissPanel if this.threads_open() => {
+                        this.dismiss_threads(cx)?;
                     }
                     PresenceEvent::DismissPanel if this.text_open() => this.dismiss_text(cx)?,
                     PresenceEvent::DismissPanel => this.set_panel(PanelVisibility::Hidden, cx)?,

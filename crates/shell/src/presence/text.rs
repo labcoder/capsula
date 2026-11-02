@@ -16,7 +16,7 @@ use super::{
 use crate::strings::{Strings, Text};
 
 #[derive(Clone, Copy)]
-enum Hide {
+pub(super) enum Hide {
     Dismiss,
     Deactivated,
 }
@@ -28,20 +28,20 @@ pub(super) struct Typing {
 }
 
 impl Typing {
-    fn open(&mut self) {
+    pub(super) fn open(&mut self) {
         if !self.visible {
             self.active_seen = false;
         }
         self.visible = true;
     }
 
-    fn activated(&mut self) {
+    pub(super) fn activated(&mut self) {
         if self.visible {
             self.active_seen = true;
         }
     }
 
-    fn close(&mut self, reason: Hide) -> bool {
+    pub(super) fn close(&mut self, reason: Hide) -> bool {
         if !self.visible || matches!(reason, Hide::Deactivated) && !self.active_seen {
             return false;
         }
@@ -68,6 +68,7 @@ pub(super) struct TextPanel {
 
 impl Presence {
     pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.dismiss_threads(cx)?;
         if self.text.is_none() {
             self.text = Some(self.create_text(cx)?);
         }
@@ -143,9 +144,15 @@ impl Presence {
         })
         .map_err(|error| OpenError::Gpui(error.into()))?;
         let events = self.events.clone();
+        let capture = if self.gesture.get().holding() {
+            super::Capture::Excluded
+        } else {
+            super::Capture::Allowed
+        };
         window
             .update(cx, |_, window, cx| {
-                configure_surface(window, PresenceSurface::Text, events, cx)
+                configure_surface(window, PresenceSurface::Text, events, cx)?;
+                platform::set_capture(window, capture)
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         let owner = cx.weak_entity();
@@ -265,7 +272,7 @@ impl Presence {
 }
 
 /// The anchored typing surface: the newest run's placeholder steps and the end of its answer,
-/// one focused input, and why a turn wasn't sent. shortcut: stands in for the threads panel.
+/// one focused input, and why a turn wasn't sent.
 pub(super) struct TextView {
     pub(super) input: Entity<InputState>,
     /// The Stop fallback, here too because this panel covers the status panel's.

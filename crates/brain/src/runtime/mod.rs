@@ -12,6 +12,7 @@ mod store_thread;
 mod tests;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,6 +79,8 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     engine: Option<(RunId, oneshot::Sender<()>)>,
     deadline: Option<(RunId, Instant)>,
+    /// Page completions belong only to the connection that requested them.
+    epoch: u64,
 }
 
 impl Brain {
@@ -106,6 +109,7 @@ impl Brain {
             engine_events,
             engine: None,
             deadline: None,
+            epoch: 0,
         })
     }
 
@@ -163,17 +167,29 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .expect("connection epochs never wrap");
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
         let (turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
+        let (pages_tx, mut pages) = mpsc::channel(capsula_protocol::message::MAX_PENDING_PAGES);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
         let room = Notify::new();
 
         let control_reader = read_control(&mut control_in, &controls_tx);
-        let data_reader = read_data(&mut data_in, &turns_tx, &queue, &ready);
+        let data_reader = read_data(
+            &mut data_in,
+            &turns_tx,
+            &pages_tx,
+            &queue,
+            &ready,
+            self.epoch,
+        );
         let control_writer = write_control(&mut control_out, &mut out);
         let data_writer = write_data(&mut data_out, &queue, &ready, &room);
         let link = Link {
@@ -182,7 +198,7 @@ impl Brain {
             ready: &ready,
             tap: &mut *tap,
         };
-        let core = self.core(&mut controls, &mut turns, &room, link);
+        let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
         let ended = tokio::select! {
             ended = control_reader => ended,
             ended = data_reader => ended,
@@ -206,12 +222,14 @@ impl Brain {
         &mut self,
         controls: &mut mpsc::Receiver<ControlToBrain>,
         turns: &mut mpsc::Receiver<Turn>,
+        pages: &mut mpsc::Receiver<Input>,
         room: &Notify,
         mut link: Link<'_, '_>,
     ) -> Ended {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
+        let mut held_pages = VecDeque::new();
         loop {
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
@@ -234,7 +252,11 @@ impl Brain {
                         | ControlToBrain::ClearDrawing { .. } => continue,
                     }
                 }
+                () = std::future::ready(()), if take_engine && !held_pages.is_empty() => {
+                    held_pages.pop_front().expect("a held page is ready")
+                }
                 Some(input) = self.inputs.recv() => input,
+                Some(input) = pages.recv() => input,
                 Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
@@ -263,6 +285,15 @@ impl Brain {
                     }
                 }
             };
+            if let Input::PageRead { epoch, .. } = &input {
+                if *epoch != self.epoch {
+                    continue;
+                }
+                if !take_engine {
+                    held_pages.push_back(input);
+                    continue;
+                }
+            }
             let Ok(effects) = self.coordinator.handle(input) else {
                 continue;
             };
@@ -271,7 +302,7 @@ impl Brain {
                 self.deadline = None;
             }
             if self.apply(effects, Some(&mut link)).is_err() {
-                tracing::warn!("the shell's control queue is full; ending the connection");
+                tracing::warn!("a shell frame couldn't be queued; ending the connection");
                 return Ended::Lost;
             }
         }
@@ -289,10 +320,10 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
-                    let run = op.run();
+                    let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
-                        let failed = self.inputs_tx.send(Input::StoreFailed { run });
+                        let failed = self.inputs_tx.send(failure);
                         debug_assert!(failed.is_ok(), "the brain holds its own receiver");
                     }
                 }
@@ -305,8 +336,11 @@ impl Brain {
                     }
                 }
                 Effect::Data(message) => {
-                    if let Some(link) = link.as_deref_mut() {
-                        link.data(&message);
+                    if let Some(shell) = link.as_deref_mut()
+                        && shell.data(&message).is_err()
+                    {
+                        full = true;
+                        link = None;
                     }
                 }
                 Effect::StartEngine { run, text: _ } => {
@@ -368,8 +402,10 @@ type Turn = (Option<ThreadId>, String);
 async fn read_data(
     pipe: &mut (impl AsyncRead + Unpin),
     turns: &mpsc::Sender<Turn>,
+    pages: &mpsc::Sender<Input>,
     queue: &RefCell<DataQueue>,
     ready: &Notify,
+    epoch: u64,
 ) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
@@ -377,6 +413,22 @@ async fn read_data(
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
+            }
+            Ok(Some(DataToBrain::PageRequest { request, page })) => {
+                if !queue.borrow_mut().admit_page() {
+                    return Ended::Broken("too many unanswered page requests");
+                }
+                match pages.try_send(Input::ReadPage {
+                    epoch,
+                    request,
+                    page,
+                }) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        return Ended::Broken("too many unanswered page requests");
+                    }
+                    Err(TrySendError::Closed(_)) => return Ended::Lost,
+                }
             }
             // Never waits for the core, so credit behind a turn is always read.
             Ok(Some(DataToBrain::TextSubmit { thread, text })) => match turns
@@ -430,7 +482,7 @@ async fn write_data(
     }
 }
 
-/// The shell's control queue is full.
+/// A shell frame couldn't be encoded or queued.
 #[derive(Debug)]
 struct Full;
 
@@ -455,19 +507,22 @@ impl Link<'_, '_> {
     }
 
     /// Data frames carry content, so the tap never records them.
-    fn data(&mut self, message: &DataToShell) {
+    fn data(&mut self, message: &DataToShell) -> Result<(), Full> {
         let run = match message {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
-            | DataToShell::RunEnd { run } => *run,
+            | DataToShell::RunEnd { run } => Some(*run),
+            DataToShell::ThreadList { .. }
+            | DataToShell::Page { .. }
+            | DataToShell::PageFailed { .. } => None,
         };
-        match frame::encode(message, Pipe::Data) {
-            Ok(frame) => {
-                self.queue.borrow_mut().push(run, frame);
-                self.ready.notify_one();
-            }
-            Err(error) => tracing::error!(%error, "a data message didn't encode"),
-        }
+        let Ok(frame) = frame::encode(message, Pipe::Data) else {
+            tracing::error!("a data message didn't encode");
+            return Err(Full);
+        };
+        self.queue.borrow_mut().push(run, frame);
+        self.ready.notify_one();
+        Ok(())
     }
 }
 
