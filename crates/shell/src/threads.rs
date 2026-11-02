@@ -360,23 +360,25 @@ impl Threads {
         }
     }
 
-    /// Frees the failed request's slot. No retry here: the next refresh, selection or
-    /// `RunState` reads again.
+    /// Frees the failed request's slot, and shows the failure only when the request was still
+    /// current. No retry here: the next refresh, selection or `RunState` reads again.
     fn read_failed(&mut self, request: u32) {
-        if self
+        let current = if let Some(pending) = self
             .list_pending
-            .is_some_and(|pending| pending.request == request)
+            .filter(|pending| pending.request == request)
         {
             self.list_pending = None;
-        } else if self
+            pending.revision == self.list_revision
+        } else if let Some(pending) = self
             .event_pending
-            .is_some_and(|pending| pending.request == request)
+            .filter(|pending| pending.request == request)
         {
             self.event_pending = None;
+            pending.revision == self.event_revision
         } else {
             return;
-        }
-        self.failed = true;
+        };
+        self.failed |= current;
     }
 
     fn number(&mut self) -> u32 {

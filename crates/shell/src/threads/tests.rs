@@ -555,3 +555,44 @@ fn a_dropped_page_still_earns_its_whole_credit() {
     );
     assert!(!state.failed);
 }
+
+#[test]
+fn a_superseded_event_read_that_fails_frees_its_slot_without_the_error() {
+    let mut state = loaded();
+    state.select(Some(ThreadId(3)));
+    let old = request_id(&state.requests()[0]);
+    state.select(Some(ThreadId(2)));
+    state.apply(DataToShell::PageFailed { request: old });
+    assert!(!state.failed);
+    assert_eq!(
+        state.requests(),
+        vec![DataToBrain::PageRequest {
+            request: old + 1,
+            page: PageOf::Events {
+                thread: ThreadId(2),
+                before: None,
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_replaced_search_that_fails_frees_its_slot_without_the_error() {
+    let mut state = Threads::default();
+    state.show();
+    state.connected();
+    assert_eq!(state.requests(), vec![list_request(1)]);
+    state.search("new query");
+    state.apply(DataToShell::PageFailed { request: 1 });
+    assert!(!state.failed);
+    assert_eq!(
+        state.requests(),
+        vec![DataToBrain::PageRequest {
+            request: 2,
+            page: PageOf::Threads {
+                search: Some("new query".to_owned()),
+                after: None,
+            },
+        }]
+    );
+}
