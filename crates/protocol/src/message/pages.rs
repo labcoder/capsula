@@ -10,13 +10,16 @@ use super::{RunId, ThreadId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EventId(pub u64);
 
-/// The last thread sent, in descending updated-time and id order.
+/// The last thread sent: in descending updated-time and id order, or for a search, in rank
+/// and descending id order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadCursor {
     /// Unix milliseconds when the thread last changed.
     pub updated_ms: i64,
-    /// Breaks timestamp ties.
+    /// Breaks timestamp and rank ties.
     pub id: ThreadId,
+    /// A search's rank for the thread, as `f64` bits compared exactly; 0 for the plain list.
+    pub rank_bits: u64,
 }
 
 /// Which list to read and where to continue it.
@@ -83,8 +86,6 @@ pub enum PageEventKind {
     AssistantText,
     /// A committed drawing step.
     SceneStep,
-    /// The steps that remained when stopped.
-    Revealed,
 }
 
 /// An event as the thread panel reads it.

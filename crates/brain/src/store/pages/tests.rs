@@ -23,6 +23,14 @@ fn add(store: &mut Store, title: &str, text: &str) -> ThreadId {
     thread
 }
 
+fn cursor(row: &ThreadRow) -> ThreadCursor {
+    ThreadCursor {
+        updated_ms: row.updated_ms,
+        id: row.id,
+        rank_bits: 0,
+    }
+}
+
 fn ids(rows: &[ThreadRow]) -> Vec<u64> {
     rows.iter().map(|row| row.id.0).collect()
 }
@@ -158,7 +166,70 @@ fn phrase_search_pages_follow_rank_and_deduplicate_threads() {
 }
 
 #[test]
-fn newest_events_continue_exactly_before_the_last_returned_id() {
+fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finite_rank() {
+    let scratch = Scratch::new("pages-search-deleted");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    add(&mut store, "best", &"red fox fence ".repeat(15));
+    let weak = format!("red fox {}", "filler ".repeat(100));
+    add(&mut store, "weak", &weak);
+    add(&mut store, "weak tie", &weak);
+    let (rows, next) = store.search_page("red fox", 2).expect("first");
+    assert_eq!(ids(&rows), vec![1, 3]);
+    store
+        .begin_delete(ThreadId(3))
+        .expect("hide the cursor's thread");
+    let (rows, next) = store
+        .search_page_after("red fox", next, 2)
+        .expect("continued");
+    assert_eq!(ids(&rows), vec![2]);
+    assert_eq!(next, None);
+    for (search, rank) in [
+        ("red fox", f64::NAN),
+        ("red fox", f64::INFINITY),
+        ("red fox", f64::NEG_INFINITY),
+        ("\0", f64::NAN),
+    ] {
+        let page = PageOf::Threads {
+            search: Some(search.to_owned()),
+            after: Some(ThreadCursor {
+                updated_ms: 0,
+                id: ThreadId(1),
+                rank_bits: rank.to_bits(),
+            }),
+        };
+        assert!(matches!(store.read_page(1, page), Err(StoreError::Read)));
+    }
+}
+
+#[test]
+fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
+    let scratch = Scratch::new("pages-search-rescored");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for _ in 0..54 {
+        add(&mut store, "needle", "needle");
+    }
+    let (thread, run) = (ThreadId(55), RunId(55));
+    store
+        .begin_turn(thread, Some("active"), run, "needle")
+        .expect("an active run");
+    let (rows, next) = store.search_page("needle", 50).expect("first");
+    assert_eq!(ids(&rows), (6..=55).rev().collect::<Vec<_>>());
+    let other = "other ".repeat(57);
+    let answer = NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some(&other),
+        body: None,
+    };
+    store.append(thread, run, &[answer]).expect("an answer");
+    let (rows, next) = store
+        .search_page_after("needle", next, 50)
+        .expect("continued");
+    assert_eq!(ids(&rows), vec![5, 4, 3, 2, 1]);
+    assert_eq!(next, None);
+}
+
+#[test]
+fn newest_events_continue_exactly_before_the_last_returned_id_and_skip_revealed_sets() {
     let scratch = Scratch::new("pages-events");
     let mut store = Store::open(&scratch.db()).expect("store");
     let thread = add(&mut store, "title", "oldest");
@@ -186,25 +257,21 @@ fn newest_events_continue_exactly_before_the_last_returned_id() {
     let (rows, before) = store.events_page(thread, None, 2).expect("newest");
     assert_eq!(
         rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
-        vec![5, 4]
+        vec![4, 3]
     );
-    assert_eq!(rows[0].kind, PageEventKind::Revealed);
-    assert_eq!(rows[1].kind, PageEventKind::SceneStep);
+    assert_eq!(rows[0].kind, PageEventKind::SceneStep);
+    assert_eq!(rows[1].kind, PageEventKind::AssistantText);
     assert_eq!(rows[0].text, "");
     assert_eq!(rows[0].run, Some(RunId(2)));
-    assert_eq!(before, Some(EventId(4)));
+    assert_eq!(before, Some(EventId(3)));
     let (rows, before) = store.events_page(thread, before, 2).expect("older");
     assert_eq!(
         rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
-        vec![3, 2]
+        vec![2, 1]
     );
-    assert_eq!(rows[0].kind, PageEventKind::AssistantText);
-    assert_eq!(rows[1].kind, PageEventKind::User);
-    assert_eq!(rows[1].text, "second");
-    let (rows, before) = store.events_page(thread, before, 2).expect("oldest");
-    assert_eq!(rows[0].id, EventId(1));
-    assert_eq!(rows[0].text, "oldest");
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, PageEventKind::User);
+    assert_eq!(rows[0].text, "second");
+    assert_eq!(rows[1].text, "oldest");
     assert_eq!(before, None);
 }
 
@@ -276,7 +343,11 @@ fn list_and_search_budget_cursors_resume_at_the_exact_unsent_row() {
         };
         assert_eq!(request, u32::MAX);
         assert!(threads.len() > 1 && threads.len() < MAX_PAGE_ROWS);
-        assert_eq!(next, threads.last().map(cursor));
+        assert_eq!(
+            next.map(|key| key.id),
+            threads.last().map(|row| row.id),
+            "the cut page continues after its own last row"
+        );
         let last = threads.last().expect("rows").id.0;
         let DataToShell::ThreadList { threads: more, .. } = list(&store, search, next) else {
             panic!("list")
@@ -354,7 +425,7 @@ fn an_impossible_title_is_shortened_without_stalling_pagination() {
         assert_eq!(ids(&threads), vec![2]);
         assert!(!threads[0].title.is_empty());
         assert!(title.starts_with(&threads[0].title));
-        assert_eq!(next, Some(cursor(&threads[0])));
+        assert_eq!(next.map(|key| key.id), Some(threads[0].id));
         let DataToShell::ThreadList { threads, next, .. } = list(&store, search, next) else {
             panic!("list")
         };

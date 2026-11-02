@@ -128,6 +128,8 @@ pub(crate) enum Seen {
     StoreOpStarted(crate::coordinator::StoreOp),
     /// The brain handled a control input and applied its effects.
     ControlApplied,
+    /// A page reply landed while the data queue was full and waits for room.
+    PageHeld,
 }
 
 impl Brain {
@@ -474,6 +476,8 @@ impl Brain {
                 }
                 if !take_engine {
                     link.held_pages.push_back(input);
+                    #[cfg(test)]
+                    self.observer.send(Seen::PageHeld).ok();
                     continue;
                 }
             }

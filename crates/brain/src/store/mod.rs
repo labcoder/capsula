@@ -183,27 +183,6 @@ impl RunEnd {
     }
 }
 
-/// A live thread, as the threads panel lists it. Its `Debug` leaves the title out, so a log
-/// line can't carry it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Thread {
-    /// Its id.
-    pub id: ThreadId,
-    /// Its title.
-    pub title: String,
-    /// When it last changed, in Unix milliseconds.
-    pub updated_ms: i64,
-}
-
-impl std::fmt::Debug for Thread {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Thread")
-            .field("id", &self.id)
-            .field("updated_ms", &self.updated_ms)
-            .finish_non_exhaustive()
-    }
-}
-
 /// A thread's deletion generation. Work stamped with an older one is stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub i64);
@@ -439,25 +418,6 @@ impl Store {
         Ok(())
     }
 
-    /// Live threads, most recently changed first. A thread being deleted is already gone here.
-    ///
-    /// # Errors
-    /// Fails when SQLite fails.
-    pub fn threads(&self) -> Result<Vec<Thread>, StoreError> {
-        let mut query = self.conn.prepare(
-            "SELECT id, title, updated_ms FROM threads WHERE state = 'live'
-             ORDER BY updated_ms DESC, id DESC",
-        )?;
-        let rows = query.query_map([], |row| {
-            Ok(Thread {
-                id: ThreadId(row_id(row.get(0)?)),
-                title: row.get(1)?,
-                updated_ms: row.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
     /// Appends events to an active run of a live thread, in one transaction.
     ///
     /// # Errors
@@ -477,31 +437,6 @@ impl Store {
         insert_events(&tx, thread, run, events, now_ms())?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// Live threads whose event text matches `words`, as a phrase, best first.
-    ///
-    /// # Errors
-    /// Fails when SQLite fails.
-    pub fn search(&self, words: &str, limit: usize) -> Result<Vec<ThreadId>, StoreError> {
-        // FTS5 reads the phrase as a C string, so a NUL would cut it short and fail to parse.
-        if words.contains('\0') {
-            return Ok(Vec::new());
-        }
-        // A quoted phrase, so the user's text is never parsed as FTS5 query syntax.
-        let phrase = format!("\"{}\"", words.replace('"', "\"\""));
-        let mut query = self.conn.prepare(
-            "SELECT e.thread FROM events_fts f
-             JOIN events e ON e.id = f.rowid
-             JOIN threads t ON t.id = e.thread AND t.state = 'live'
-             WHERE events_fts MATCH ?1
-             GROUP BY e.thread ORDER BY min(f.rank) LIMIT ?2",
-        )?;
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = query.query_map(params![phrase, limit], |row| {
-            Ok(ThreadId(row_id(row.get(0)?)))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Deletion's first transaction: from here the thread is hidden, can't be sent as context,
