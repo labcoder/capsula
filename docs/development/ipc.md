@@ -220,8 +220,8 @@ sequenceDiagram
   resend it hasn't queued yet. A brain that restarted knows nothing of a delete and runs it
   again, and a thread that's already gone answers `Removed` with no `last_run`.
 - **Quit.** The shell queues every held delete before `Quitting`, and the brain's quit waits
-  for deletes in flight as it does for ending runs. A delete that hid nothing makes the quit
-  incomplete. A delete read with the control pipe's end is still applied.
+  for deletes in flight as it does for ending runs. A delete that hid nothing, or a ninth
+  refused on that connection, makes the quit incomplete. A delete read with the control pipe's end is still applied.
 
 ## The shell's side
 

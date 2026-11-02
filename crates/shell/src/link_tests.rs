@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use async_channel::Receiver;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Incarnation, Phase, RunId, ThreadId,
+    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Incarnation, Phase, RunId,
+    ThreadId,
 };
 
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
 use crate::platform::{PipeClient, test_pair};
-use crate::runs::{Refused, Runs};
+use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
     EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow,
@@ -371,6 +372,253 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     );
     drop(b_control);
     assert!(link.join().expect("joined"));
+}
+
+/// Applies a link event to `runs` as the presence does, settling a delete's answer with the
+/// link too; the credit it earns.
+fn apply(runs: &mut Runs, handle: &LinkHandle, event: LinkEvent) -> u32 {
+    match event {
+        LinkEvent::RunState { run, thread, phase } => runs.apply_state(run, thread, phase).credit,
+        LinkEvent::Data { message, bytes, .. } => runs.apply_data(message, bytes),
+        LinkEvent::ThreadDeleted {
+            thread,
+            outcome,
+            last_run,
+        } => {
+            let credit = runs.deleted(thread, outcome, last_run);
+            handle.settle_delete(thread);
+            credit
+        }
+        LinkEvent::TurnRefused => {
+            runs.refused();
+            0
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn delete_of(thread: ThreadId, after_turns: u32) -> ControlToBrain {
+    ControlToBrain::DeleteThread {
+        thread,
+        after_turns,
+        resend: false,
+    }
+}
+
+#[test]
+fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answers() {
+    let (t, u, v) = (ThreadId(9), ThreadId(3), ThreadId(5));
+    let link = attended("delete-history");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let handle = &link.handle;
+    let send = |turn| handle.send_data(&session, turn);
+    let mut runs = Runs::default();
+    runs.met(session.incarnation());
+    runs.connected(session.generation());
+    runs.apply_scenes(&[]).expect("valid");
+    assert!(runs.select_thread(Some(u)));
+    runs.submit("u", send).expect("queued");
+    assert!(runs.select_thread(Some(t)));
+    runs.submit("t", send).expect("queued");
+    assert!(runs.confirm_delete(t));
+    handle.delete(t);
+    assert!(handle.send_deletes(&session));
+    for (thread, typed) in [(u, "u"), (t, "t")] {
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+            Some(DataToBrain::TextSubmit {
+                thread: Some(thread),
+                text: typed.to_owned(),
+            })
+        );
+    }
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(delete_of(t, 2)),
+        "the delete counts both turns queued before it"
+    );
+
+    // The brain read the delete before T's turn: U's run streams, T is hidden, and the fence
+    // refuses T's turn. Each frame is taken before the next is written.
+    frame::write(&mut &*link.data, &text(1, "a"), Pipe::Data).expect("written");
+    let held = next(&events);
+    let LinkEvent::Data { bytes, .. } = &held else {
+        panic!("U's text, got {held:?}");
+    };
+    let bytes = *bytes;
+    assert_eq!(
+        apply(&mut runs, handle, held),
+        0,
+        "held for its run's state"
+    );
+    let answers = [
+        run_state(1, u, Phase::Thinking),
+        ControlToShell::ThreadDeleted {
+            thread: t,
+            outcome: Deleted::Hidden,
+            last_run: None,
+        },
+        ControlToShell::TurnRefused { thread: Some(t) },
+    ];
+    let mut credit = Vec::new();
+    for answer in answers {
+        frame::write(&mut &link.control, &answer, Pipe::Control).expect("written");
+        credit.push(apply(&mut runs, handle, next(&events)));
+        if matches!(answer, ControlToShell::ThreadDeleted { .. }) {
+            assert!(runs.holds(t), "T waits on the turn sent before its delete");
+            assert!(!runs.select_thread(Some(t)));
+        }
+    }
+    assert_eq!(credit, [bytes, 0, 0], "the held text's credit, once");
+    assert!(!runs.holds(t));
+    assert!(runs.working(), "U's run is live");
+    assert_eq!(
+        runs.shown(),
+        Some(&Shown {
+            run: RunId(1),
+            thread: Some(u),
+            text: "a".to_owned(),
+        })
+    );
+    session.grant(bytes);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::Credit { bytes })
+    );
+
+    runs.submit("next", send).expect("queued");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::TextSubmit {
+            thread: None,
+            text: "next".to_owned(),
+        }),
+        "confirming T's delete untargeted it"
+    );
+    assert!(runs.confirm_delete(v));
+    handle.delete(v);
+    assert!(handle.send_deletes(&session));
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(delete_of(v, 3)),
+        "T's answered delete isn't sent again"
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
+    let (t, u) = (ThreadId(9), ThreadId(3));
+    let (a_control, a_shell_control) = pair("reset-a-control");
+    let (a_data, a_shell_data) = pair("reset-a-data");
+    let (b_control, b_shell_control) = pair("reset-b-control");
+    let (b_data, b_shell_data) = pair("reset-b-data");
+    for pipe in [&a_control, &a_data, &b_control, &b_data] {
+        pipe.set_timeout(Some(PATIENCE));
+    }
+    let (sender, events) = async_channel::unbounded();
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        shared: Arc::new(Shared::default()),
+    };
+    let (handle, start) = start(link, sender);
+    let link = thread::spawn(move || {
+        [
+            (a_shell_control, a_shell_data, Incarnation(1)),
+            (b_shell_control, b_shell_data, Incarnation(2)),
+        ]
+        .into_iter()
+        .all(|(control, data, incarnation)| {
+            let connection = Connection {
+                control: Arc::new(control),
+                data: Arc::new(data),
+                incarnation,
+            };
+            start.link.attend(connection, &start.events)
+        })
+    });
+    let events = patient(events);
+    let a = connected(next(&events));
+    let mut runs = Runs::default();
+    runs.met(a.incarnation());
+    runs.connected(a.generation());
+    runs.apply_scenes(&[]).expect("valid");
+    assert!(runs.confirm_delete(t));
+    handle.delete(t);
+    assert!(handle.send_deletes(&a));
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &a_control, Pipe::Control).expect("read"),
+        Some(delete_of(t, 0))
+    );
+    let answer = ControlToShell::ThreadDeleted {
+        thread: t,
+        outcome: Deleted::Removed,
+        last_run: Some(RunId(4)),
+    };
+    frame::write(&mut &a_control, &answer, Pipe::Control).expect("written");
+    // A ends right after answering, and a restarted brain is reached next.
+    drop(a_control);
+    // Applying B's Connected here would panic: A's answer comes first.
+    assert_eq!(apply(&mut runs, &handle, next(&events)), 0);
+    assert!(!runs.holds(t));
+    let b = connected(next(&events));
+    assert_eq!(b.incarnation(), Incarnation(2));
+    runs.disconnected();
+    runs.met(b.incarnation());
+    runs.connected(b.generation());
+    runs.apply_scenes(&[]).expect("valid");
+    assert!(handle.send_deletes(&b));
+    assert!(handle.send_control(&b, ControlToBrain::Pong));
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &b_control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong),
+        "the answered delete isn't resent"
+    );
+
+    // The new brain numbers its runs afresh, so its run 4 isn't the deleted thread's.
+    runs.submit("next", |turn| handle.send_data(&b, turn))
+        .expect("queued");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
+        Some(DataToBrain::TextSubmit {
+            thread: None,
+            text: "next".to_owned(),
+        })
+    );
+    frame::write(
+        &mut &b_control,
+        &run_state(4, u, Phase::Answering),
+        Pipe::Control,
+    )
+    .expect("written");
+    assert_eq!(apply(&mut runs, &handle, next(&events)), 0);
+    frame::write(&mut &b_data, &text(4, "b"), Pipe::Data).expect("written");
+    let size = frame::encode(&text(4, "b"), Pipe::Data)
+        .expect("encodes")
+        .len();
+    let credit = apply(&mut runs, &handle, next(&events));
+    assert_eq!(usize::try_from(credit).expect("small"), size, "not fenced");
+    assert_eq!(
+        runs.shown(),
+        Some(&Shown {
+            run: RunId(4),
+            thread: Some(u),
+            text: "b".to_owned(),
+        })
+    );
+    drop(b_control);
+    assert!(link.join().expect("joined"));
+}
+
+fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
+    ControlToShell::RunState {
+        run: RunId(run),
+        thread,
+        phase,
+    }
 }
 
 /// Plays the brain's control side: answers each Stop with `Interrupted`.

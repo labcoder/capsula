@@ -29,6 +29,12 @@ impl Coordinator {
         !self.deleting.is_empty()
     }
 
+    /// A delete on this connection was refused for capacity. Its answer may never reach a shell
+    /// that's quitting, so the quit counts it as a delete that didn't happen.
+    pub fn refused_delete(&self) -> bool {
+        self.refused_delete
+    }
+
     /// A new connection: the old one's counts and fences mean nothing to it.
     pub(super) fn begin_deletes(&mut self) {
         for entry in &mut self.deleting {
@@ -37,6 +43,7 @@ impl Coordinator {
         self.fenced.clear();
         self.crossed.clear();
         self.turns_read = 0;
+        self.refused_delete = false;
     }
 
     /// A typed turn, counted before it's classified: one naming a thread being deleted, or one
@@ -122,6 +129,7 @@ impl Coordinator {
                 last_run: None,
             };
             effects.push(Effect::Control(refused));
+            self.refused_delete = true;
             return;
         }
         if let Some(current) = self.current.take_if(|current| current.thread == thread) {
