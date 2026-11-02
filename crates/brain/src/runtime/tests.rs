@@ -5,7 +5,9 @@ use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Phase, RunId, Step, ThreadId,
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf};
+use tokio::io::{
+    AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf,
+};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
@@ -14,6 +16,7 @@ use super::fixture::Fixture;
 use super::{Brain, Ended, Link, MAX_ENDING, TURN_QUEUE, window};
 use crate::coordinator::Input;
 use crate::ipc;
+#[cfg(windows)]
 use crate::platform::{self, PipeClient, PipeServer};
 use crate::store::Store;
 use crate::tap::Tap;
@@ -21,6 +24,8 @@ use crate::test_support::{self, Scratch};
 
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
+/// What a duplex pipe holds before its writer blocks.
+const DUPLEX_BUFFER: usize = 4096;
 
 /// The test's side of a shell: it reads control, and data only when asked.
 struct Shell<S> {
@@ -102,6 +107,15 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             .expect("open")
     }
 
+    /// Reads only the next data frame's header, so its writer can't finish the frame once it's
+    /// larger than the pipe holds; the payload's length.
+    async fn start_frame(&mut self) -> usize {
+        let mut header = [0; frame::HEADER_LEN];
+        let read = timeout(PATIENCE, self.data_in.read_exact(&mut header)).await;
+        read.expect("data arrives").expect("readable");
+        frame::payload_len(header, Pipe::Data).expect("under the cap")
+    }
+
     /// Reads `run`'s text up to its `RunEnd`, granting credit as a shell would; the text's
     /// length.
     async fn read_to_end(&mut self, run: RunId) -> usize {
@@ -121,12 +135,13 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
 
 /// Pipes with small buffers, so a writer the shell doesn't drain blocks at once.
 fn duplex() -> ((DuplexStream, DuplexStream), Shell<DuplexStream>) {
-    let (control, control_client) = tokio::io::duplex(4096);
-    let (data, data_client) = tokio::io::duplex(4096);
+    let (control, control_client) = tokio::io::duplex(DUPLEX_BUFFER);
+    let (data, data_client) = tokio::io::duplex(DUPLEX_BUFFER);
     ((control, data), Shell::new(control_client, data_client))
 }
 
 /// The real named pipes.
+#[cfg(windows)]
 async fn pipes(name: &str) -> ((PipeServer, PipeServer), Shell<PipeClient>) {
     let (control, control_client) = platform::test_pair(&format!("{name}-control"))
         .await
@@ -170,8 +185,36 @@ fn outcome(state: &str, reason: &str) -> (String, Option<String>) {
     (state.to_owned(), Some(reason.to_owned()))
 }
 
-/// The smoke test over real pipes: Stop is answered while the data writer has more than the
-/// pipe holds and nothing reads it.
+#[tokio::test]
+async fn stop_is_answered_while_a_data_write_is_blocked() {
+    let scratch = Scratch::new("blocked-write");
+    let mut brain = test_support::brain(&scratch, "0 fill 240000\n5000 step late");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        // The writer has started a frame many times what the duplex holds, and nothing reads
+        // the rest, so that write can't finish before the Stop is answered.
+        let len = shell.start_frame().await;
+        assert!(len > 4 * DUPLEX_BUFFER, "{len} bytes");
+        shell.stop(run).await;
+        let interrupted = timeout(PATIENCE, shell.state()).await;
+        assert_eq!(
+            interrupted.expect("Stop is answered while the data write is blocked"),
+            (run, Phase::Interrupted)
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
+
+/// Proves Stop works over real pipes while the shell reads no data; the blocked write itself is
+/// established over the duplex above.
+#[cfg(windows)]
 #[tokio::test]
 async fn stop_is_served_over_real_pipes_while_the_shell_reads_no_data() {
     let scratch = Scratch::new("saturated");
@@ -405,6 +448,7 @@ async fn a_full_control_queue_still_applies_store_effects() {
     // The outcome after the refused Interrupted still went to the store.
     let reply = timeout(PATIENCE, brain.inputs.recv()).await;
     assert_eq!(reply.expect("answered"), Some(Input::RunStored { run }));
+    brain.offline(Input::RunStored { run });
     brain.close().await;
     assert_eq!(outcomes(&scratch), [outcome("interrupted", "stop")]);
 }
@@ -531,6 +575,7 @@ async fn a_shell_that_stops_reading_data_ends_the_run_as_stalled() {
 
 /// Rez measurement for the pull request, not a check: run it with
 /// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_`.
+#[cfg(windows)]
 #[tokio::test]
 #[ignore = "a measurement, run by hand on Rez"]
 async fn measure_stop_under_a_saturated_writer_and_throughput() {
@@ -583,7 +628,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
             samples.len()
         );
     };
-    report("Stop -> Interrupted, data writer blocked", &mut stops);
+    report("Stop -> Interrupted, shell reading no data", &mut stops);
     report(
         "960 kB of text from its first frame to its last",
         &mut streams,

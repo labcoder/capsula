@@ -87,7 +87,8 @@ flowchart LR
   `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
   as broken.
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
-  `RunState`; the brain sends only `RunState` and `Ping`, so it can't fill short of a hung shell.
+  `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
+  both come with the first urgent brain-to-shell message.
 
 ## Starting and reconnecting
 
@@ -99,5 +100,5 @@ restarting.
 ## Debugging
 
 A debug brain records the control frames it sends and receives, and the handshake with
-capabilities zeroed, when `CAPSULA_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>` decodes the recording with the same
-message types.
+capabilities zeroed, when `CAPSULA_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
+decodes the recording with the same message types.

@@ -140,7 +140,8 @@ described in `ipc.md`. A shell that disconnects ends the current run as
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close.
 
-shortcut: a store that never answers leaves a finished run unconfirmed until the next start
-marks it `failed(crash)`; fine while the store is local SQLite.
+shortcut: a store that never answers leaves a finished run unconfirmed. At the next start, runs
+still active in the store become `failed(crash)`; outcomes already committed stay, and work not
+yet committed may be lost. Fine while the store is local SQLite.
 
 The step is a labelled placeholder until slice 4's scene format.

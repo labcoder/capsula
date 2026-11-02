@@ -110,8 +110,8 @@ impl Brain {
     }
 
     /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
-    /// bounded, so a hung store can't hold the brain open; a run it never confirms is marked
-    /// `failed(crash)` at the next start.
+    /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
+    /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
         let settled = tokio::time::timeout(CLOSE_WAIT, async {
             while self.coordinator.ending_runs() > 0 {
