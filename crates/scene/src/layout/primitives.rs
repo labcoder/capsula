@@ -325,7 +325,7 @@ impl Build<'_> {
         cached: Option<&Placed>,
     ) -> Result<Geometry, PrepareError> {
         let mut anchors = [Vec2::default(); 2];
-        let mut output = Vec::new();
+        let mut output;
         let bounds = {
             let rect = if let Some(bounds) = shape.bounds {
                 rect(bounds)
@@ -357,7 +357,7 @@ impl Build<'_> {
                 rect
             };
             let (mut bounds, outline) = self.shape_outline(shape, rect)?;
-            output.extend(outline);
+            output = outline;
             if let Some(label) = &shape.label {
                 let style = TextStyle {
                     size: self.theme.font_size,
@@ -446,7 +446,7 @@ impl Build<'_> {
                     border: Some((color, 2.0)),
                 }),
                 crate::record::HighlightStyle::Spotlight => {
-                    output.extend(self.spotlight(bounds));
+                    output = self.spotlight(bounds);
                     output.push(Prim::Rect {
                         rect: bounds,
                         radius: 8.0,

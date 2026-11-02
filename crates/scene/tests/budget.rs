@@ -597,7 +597,6 @@ fn diagram_caps_accept_their_exact_limits_without_charging_failed_additions() {
         ErrorCode::OverBudget(Budget::DiagramEdges),
     );
 }
-
 #[test]
 fn a_parent_scale_replacement_keeps_old_descendant_path_charges_until_activation() {
     let mut state = scene("scales");

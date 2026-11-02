@@ -197,7 +197,6 @@ Quadratic and cubic second differences determine power-of-two subdivision counts
 the same walker and subdivision function when producing vertices. Procedural curves,
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
 segment reservations in `path.rs`; generated output must stay within them.
-
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
 Composed scales must be normal positive floats and at most 64, even when layout has
