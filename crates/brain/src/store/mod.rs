@@ -2,21 +2,24 @@
 //!
 //! One file in WAL mode. Every commit is durable (`synchronous=FULL`), so "saved" means the
 //! transaction committed. Deleting a thread is two transactions: the first hides it and bumps its
-//! deletion generation, the second removes every row, and a checkpoint then truncates the WAL
-//! (architecture v1 §6.4). That zeroes the deleted rows, but until the purge step lands, stale
-//! copies can survive in page gaps and FTS index keys (see [`Store::finish_delete`]).
+//! deletion generation, the second removes every row and records a purge as owed. The purge
+//! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
+//! FTS index keys (architecture v1 §6.4).
 
+mod purge;
 mod schema;
 #[cfg(test)]
 mod tests;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
+
+pub use purge::{Copied, Leftovers, Owed, Swap};
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +50,15 @@ pub enum StoreError {
     /// A new thread or run id isn't above the highest ever issued.
     #[error("the id was issued before")]
     StaleId,
+    /// The store's file is gone but the old store a purge replaced is still beside it, so
+    /// something went wrong mid-swap; nothing is opened or removed until a person looks.
+    /// shortcut: the brain only logs this and doesn't start; tell the user what to do with
+    /// `capsula.db.purge-old` once the shell can show brain errors.
+    #[error("the store's file is missing, but a purge's old copy of it remains")]
+    Retired,
+    /// A purge's copy of the store couldn't be written, moved or removed.
+    #[error("a purge file couldn't be written, moved or removed")]
+    Purge(#[source] io::Error),
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
@@ -176,17 +188,6 @@ impl std::fmt::Debug for Thread {
     }
 }
 
-/// How far a deletion got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum Deletion {
-    /// The rows are gone and the WAL was checkpointed and truncated.
-    Finished,
-    /// The rows are gone, but a reader blocked the checkpoint, so the WAL and the main file
-    /// still hold the old pages until a later checkpoint.
-    Pending,
-}
-
 /// A thread's deletion generation. Work stamped with an older one is stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub i64);
@@ -198,8 +199,8 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
-    /// Deletions whose rows are now gone but whose checkpoint a reader blocked.
-    pub pending_deletions: usize,
+    /// A deletion's purge is owed; the store's thread runs it once no run is active.
+    pub purge_pending: bool,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
 }
@@ -208,6 +209,11 @@ pub struct Recovered {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    path: PathBuf,
+    /// Mirrors the `purge_pending` row, read only from an open file.
+    purge_pending: bool,
+    /// False after a swap's reopen failed, until [`Store::reconnect`] opens the file again.
+    serving: bool,
 }
 
 /// The store's file, in the data folder.
@@ -230,24 +236,48 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
-        let mut conn = Connection::open(path)?;
-        // journal_mode answers with a row, so it's read rather than set.
-        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-        if mode != "wal" {
-            return Err(StoreError::NoWal(mode));
+        // Files a purge left are removed by the store's thread, not here on the way to the first
+        // turn. Only a store missing beside its old copy stops the start: creating an empty
+        // store there would hide the old one.
+        if purge::missing(path) && !purge::missing(&purge::old(path)) {
+            return Err(StoreError::Retired);
         }
-        conn.execute_batch(
-            "PRAGMA synchronous = FULL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA secure_delete = ON;
-             PRAGMA temp_store = MEMORY;",
-        )?;
+        let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
         schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+        let purge_pending = owes(&conn)?;
+        Ok(Self {
+            conn,
+            path: path.to_owned(),
+            purge_pending,
+            serving: true,
+        })
+    }
+
+    /// Opens the file again after a swap's reopen failed; does nothing while it's open. It never
+    /// creates a file, so a missing store stays unavailable rather than coming back empty.
+    ///
+    /// # Errors
+    /// Fails while the file still can't be opened; the store stays unavailable.
+    pub fn reconnect(&mut self) -> Result<(), StoreError> {
+        if self.serving {
+            return Ok(());
+        }
+        let conn = connect(&self.path, OpenFlags::empty())?;
+        self.purge_pending = owes(&conn)?;
+        self.conn = conn;
+        self.serving = true;
+        Ok(())
+    }
+
+    /// Whether a deletion's purge is still owed.
+    pub fn purge_pending(&self) -> bool {
+        self.purge_pending
     }
 
     /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
-    /// deletions left pending finish. Run it once at start, before any new run.
+    /// deletions left pending finish. An owed purge is only reported: the store's thread runs
+    /// it once no run is active, so a slow or failing purge can't hold up the start. Run it
+    /// once at start, before any new run.
     ///
     /// shortcut: two sessions of the same user run two brains on one store, and the second's
     /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
@@ -279,10 +309,7 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
-        // A checkpoint a reader blocked last time gets another chance here.
-        if self.checkpoint()? == Deletion::Pending {
-            recovered.pending_deletions = std::mem::take(&mut recovered.finished_deletions);
-        }
+        recovered.purge_pending = self.purge_pending;
         Ok(recovered)
     }
 
@@ -487,16 +514,12 @@ impl Store {
     }
 
     /// Deletion's second transaction: removes every row of a thread [`Store::begin_delete`]
-    /// fenced, then truncates the WAL. Returns [`Deletion::Pending`] when a reader blocked the
-    /// checkpoint.
-    ///
-    /// shortcut: the rows are zeroed, but stale cell copies in b-tree page gaps and whole tokens
-    /// in FTS5's `events_fts_idx` keys can survive; the purge PR (slice 2, before PR 7, which
-    /// makes deletion reachable) adds the FTS rebuild, VACUUM and checkpoint that remove them.
+    /// fenced and records the purge as owed. The store's thread runs the purge once no run is
+    /// active; until then old copies of the rows may remain in the files.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't being deleted.
-    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<Deletion, StoreError> {
+    pub fn finish_delete(&mut self, thread: ThreadId) -> Result<(), StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
         let deleting: Option<i64> = self
             .conn
@@ -509,36 +532,66 @@ impl Store {
         if deleting.is_none() {
             return Err(StoreError::NoThread);
         }
-        self.remove(thread)?;
-        self.checkpoint()
+        self.remove(thread)
     }
 
-    /// Deletes a thread's rows in one transaction. The foreign keys have no cascade, so a table
-    /// this misses makes the last delete fail rather than leave rows behind.
+    /// Deletes a thread's rows and records the purge as owed, in one transaction. The foreign
+    /// keys have no cascade, so a table this misses makes the last delete fail rather than leave
+    /// rows behind.
     fn remove(&mut self, thread: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;
+        tx.execute("INSERT OR IGNORE INTO purge_pending (id) VALUES (1)", [])?;
         tx.commit()?;
+        self.purge_pending = true;
         Ok(())
     }
+}
 
-    /// Copies the WAL into the main file and truncates it to zero bytes, so the zeroed pages
-    /// replace the old ones in both. A reader holding an older snapshot blocks it.
-    ///
-    /// shortcut: a blocked checkpoint is retried only by `recover()` at the next start; the
-    /// purge PR retries it in-session.
-    fn checkpoint(&self) -> Result<Deletion, StoreError> {
-        let busy: i64 = self
-            .conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-        if busy == 0 {
-            return Ok(Deletion::Finished);
-        }
-        tracing::warn!("a reader blocked the checkpoint; the next start retries it");
-        Ok(Deletion::Pending)
+/// Opens the store's file in WAL mode with its settings; `create` is
+/// `OpenFlags::SQLITE_OPEN_CREATE` where a missing file may be created.
+fn connect(path: &Path, create: OpenFlags) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | create,
+    )?;
+    // journal_mode answers with a row, so it's read rather than set.
+    let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    if mode != "wal" {
+        return Err(StoreError::NoWal(mode));
     }
+    conn.execute_batch(
+        "PRAGMA synchronous = FULL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA secure_delete = ON;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok(conn)
+}
+
+/// Whether the file records an owed purge.
+fn owes(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(conn
+        .query_row("SELECT 1 FROM purge_pending", [], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// Copies the WAL into the main file and truncates it to zero bytes; false when a reader holding
+/// an older snapshot blocked it. It never waits on that reader.
+fn checkpoint_now(conn: &Connection) -> rusqlite::Result<bool> {
+    let wait: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+    conn.busy_timeout(Duration::ZERO)?;
+    let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    conn.busy_timeout(Duration::from_millis(u64::try_from(wait).unwrap_or(0)))?;
+    Ok(busy? == 0)
 }
 
 /// Inserts events for an active run of a live thread, marking the thread changed.
