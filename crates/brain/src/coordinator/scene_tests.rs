@@ -124,10 +124,9 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
             text: "hi".to_owned(),
         })
         .expect("turn");
-    assert_eq!(
-        turn.last(),
-        Some(&clear_scenes(&[1])),
-        "retried with the next store operation"
+    assert!(
+        turn.ends_with(&[clear_scenes(&[1]), Effect::CancelRetry]),
+        "retried with the next store operation, so its timer goes"
     );
     assert_eq!(
         core.handle(Input::ScenesCleared {
@@ -161,7 +160,7 @@ fn a_failed_clear_is_retried_at_the_barrier_and_quit_clears_it_with_the_visible_
     .expect("never stale");
     assert_eq!(
         core.handle(Input::ClearVisible),
-        Ok(vec![clear_scenes(&[3, 1, 2])]),
+        Ok(vec![clear_scenes(&[3, 1, 2]), Effect::CancelRetry]),
         "one write for the visible set and what's still clearing"
     );
     assert!(core.visible().is_empty());
@@ -421,6 +420,85 @@ fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
         Ok(Vec::new()),
         "one timer at a time"
     );
+}
+
+#[test]
+fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay() {
+    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2, 3]));
+    let failed = |id: u64| Input::ScenesCleared {
+        scenes: vec![SceneId(id)],
+        ok: false,
+    };
+    let committed = |id: u64| Input::ScenesCleared {
+        scenes: vec![SceneId(id)],
+        ok: true,
+    };
+    let clear = |id: u64| Input::Clear {
+        scenes: vec![SceneId(id)],
+    };
+    let revoke = |id: u64| Effect::RevokeScenes {
+        scenes: vec![SceneId(id)],
+    };
+    core.handle(clear(1)).expect("a clear is never stale");
+    for millis in [500, 1000, 2000] {
+        assert_eq!(core.handle(failed(1)), Ok(vec![arm(millis)]));
+        assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1])]));
+    }
+    assert_eq!(core.handle(failed(1)), Ok(vec![arm(4000)]));
+    assert_eq!(
+        core.handle(clear(2)),
+        Ok(vec![
+            revoke(2),
+            clear_scenes(&[2]),
+            clear_scenes(&[1]),
+            Effect::CancelRetry
+        ]),
+        "the 4 s deadline goes once the owed write rides another op"
+    );
+    assert_eq!(core.handle(committed(1)), Ok(Vec::new()));
+    assert_eq!(core.handle(committed(2)), Ok(Vec::new()));
+    assert_eq!(
+        core.handle(clear(3)),
+        Ok(vec![revoke(3), clear_scenes(&[3])])
+    );
+    assert_eq!(
+        core.handle(failed(3)),
+        Ok(vec![arm(500)]),
+        "a new failure waits the first delay at once"
+    );
+}
+
+#[test]
+fn a_partial_commit_resets_the_wait_and_replaces_a_longer_deadline() {
+    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
+    let failed = |ids: &[u64]| Input::ScenesCleared {
+        scenes: ids.iter().copied().map(SceneId).collect(),
+        ok: false,
+    };
+    core.handle(Input::Clear {
+        scenes: vec![SceneId(1)],
+    })
+    .expect("a clear is never stale");
+    core.handle(Input::Clear {
+        scenes: vec![SceneId(2)],
+    })
+    .expect("a clear is never stale");
+    assert_eq!(core.handle(failed(&[1])), Ok(vec![arm(500)]));
+    assert_eq!(core.handle(failed(&[2])), Ok(Vec::new()));
+    assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1, 2])]));
+    assert_eq!(core.handle(failed(&[1, 2])), Ok(vec![arm(1000)]));
+    assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1, 2])]));
+    assert_eq!(core.handle(failed(&[1, 2])), Ok(vec![arm(2000)]));
+    let partly = Input::ScenesCleared {
+        scenes: vec![SceneId(1)],
+        ok: true,
+    };
+    assert_eq!(
+        core.handle(partly),
+        Ok(vec![arm(500)]),
+        "a commit resets the wait, and the 2 s deadline is replaced"
+    );
+    assert_eq!(core.debt(), 1);
 }
 
 #[test]

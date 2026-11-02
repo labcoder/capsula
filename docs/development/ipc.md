@@ -126,9 +126,11 @@ four scenes are visible; [processes](processes.md) has the rule that keeps that 
 - **Clears.** A cleared scene leaves the visible set at once, so no later `Scenes` lists it, and
   counts as cleared once its write commits. A failed write, a clear's or a late Stop's kept
   selection, is retried with the next store operation, at the next connect barrier, and on a
-  timer that waits 0.5 s and doubles up to 30 s while the writes keep failing [guess]. So a
-  store that recovers lets typing go on without the user doing anything, and one that keeps
-  failing is tried rarely, not constantly. An id that isn't visible changes nothing.
+  timer that waits 0.5 s and doubles up to 30 s while the writes keep failing [guess]. The
+  timer is armed only while an owed write has none in flight, doubles only when it fires, and
+  goes back to 0.5 s when any owed write commits, replacing a longer deadline. So a store that
+  recovers lets typing go on without the user doing anything, and one that keeps failing is
+  tried rarely, not constantly. An id that isn't visible changes nothing.
 - **Owed writes hold back turns.** While eight scenes [guess] have a clear or a kept selection
   owed, new turns wait; Stop, `ClearDrawing` and `Pong` are still served, and nothing owed is
   ever dropped. A scene counts once even when both are owed, as when it's cleared while its

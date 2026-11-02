@@ -574,6 +574,7 @@ impl Brain {
                 Effect::ArmRetry { after } => {
                     self.retry_at = Some(Instant::now() + after);
                 }
+                Effect::CancelRetry => self.retry_at = None,
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }

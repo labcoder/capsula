@@ -35,7 +35,7 @@ impl Coordinator {
     /// Writes again every clear whose write failed. A timer armed before is forgotten: the
     /// connection that would have heard it is gone.
     pub fn retry_clears(&mut self) -> Vec<Effect> {
-        self.retry_armed = false;
+        self.retry_armed = None;
         let mut effects = Vec::new();
         self.retry(&mut effects);
         self.arm_retry(&mut effects);
@@ -55,22 +55,31 @@ impl Coordinator {
     /// The retry timer fired: owed writes go out again, and if they fail the next wait is
     /// longer.
     pub(super) fn retry_now(&mut self, effects: &mut Vec<Effect>) {
-        self.retry_armed = false;
+        self.retry_armed = None;
         self.retry_after = (self.retry_after * 2).min(LAST_RETRY);
         self.retry(effects);
     }
 
-    /// Arms the retry timer when an owed write has none in flight, so a failure is tried again
-    /// even when nothing else reaches the store, such as while turns wait on the debt.
+    /// Keeps the retry timer armed exactly while an owed write has none in flight, so a failure
+    /// is tried again even when nothing else reaches the store, such as while turns wait on the
+    /// debt. A deadline longer than the current wait, armed before a commit reset it, is replaced.
     pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
         if self.clearing.is_empty() && self.keeping.is_empty() {
             self.retry_after = FIRST_RETRY;
-            return;
         }
         let unwritten = self.clearing.iter().any(|(_, writing)| !writing)
             || self.keeping.iter().any(|(_, _, writing)| !writing);
-        if unwritten && !self.retry_armed {
-            self.retry_armed = true;
+        if !unwritten {
+            if self.retry_armed.take().is_some() {
+                effects.push(Effect::CancelRetry);
+            }
+            return;
+        }
+        if self
+            .retry_armed
+            .is_none_or(|armed| armed > self.retry_after)
+        {
+            self.retry_armed = Some(self.retry_after);
             effects.push(Effect::ArmRetry {
                 after: self.retry_after,
             });
@@ -144,6 +153,7 @@ impl Coordinator {
     /// A clear's write committed: those scenes' clears are durable.
     pub(super) fn cleared(&mut self, scenes: &[SceneId]) {
         self.clearing.retain(|(scene, _)| !scenes.contains(scene));
+        self.retry_after = FIRST_RETRY;
     }
 
     /// A clear's write failed: those scenes wait for a retry.
@@ -212,6 +222,7 @@ impl Coordinator {
     /// A kept selection's write committed.
     pub(super) fn kept(&mut self, scene: SceneId) {
         self.keeping.retain(|(kept, _, _)| *kept != scene);
+        self.retry_after = FIRST_RETRY;
     }
 
     /// A kept selection's write failed: it waits for a retry.

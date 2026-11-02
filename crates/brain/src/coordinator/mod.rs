@@ -183,11 +183,13 @@ pub enum Effect {
         /// The scenes.
         scenes: Vec<SceneId>,
     },
-    /// Report `Retry` after `after`.
+    /// Report `Retry` after `after`, replacing any earlier `ArmRetry`.
     ArmRetry {
         /// How long from now.
         after: Duration,
     },
+    /// Forget the armed `ArmRetry`: nothing owed is left unwritten.
+    CancelRetry,
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.
@@ -286,8 +288,8 @@ pub struct Coordinator {
     session_start: RunId,
     /// The wait before owed writes are tried again, doubling while they keep failing.
     retry_after: Duration,
-    /// An `ArmRetry` is out and hasn't come back as `Retry`.
-    retry_armed: bool,
+    /// The wait of the `ArmRetry` that's out and hasn't come back as `Retry`.
+    retry_armed: Option<Duration>,
 }
 
 impl Coordinator {
@@ -304,7 +306,7 @@ impl Coordinator {
             keeping: Vec::new(),
             session_start: RunId(last_run.0 + 1),
             retry_after: scenes::FIRST_RETRY,
-            retry_armed: false,
+            retry_armed: None,
         }
     }
 
