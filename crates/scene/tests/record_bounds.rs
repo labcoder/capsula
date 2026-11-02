@@ -2,10 +2,19 @@
 use capsula_scene::{
     ErrorCode, Finite, Ms, Op, Record, Source, Step, StepError, WireId, parse_record,
     record::{Change, Start},
-    text::Bounded,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+
+#[test]
+fn programmatically_built_lists_reject_excess_values() {
+    let at_cap = capsula_scene::text::Bounded::<u8, 2>::new(vec![1, 2]).expect("exact cap");
+    assert_eq!(&*at_cap, &[1, 2]);
+    assert_eq!(
+        capsula_scene::text::Bounded::<u8, 2>::new(vec![1, 2, 3]).err(),
+        Some(ErrorCode::TooLong)
+    );
+}
 
 fn parse(value: &Value) -> Result<Record, StepError> {
     parse_record(&serde_json::to_vec(value).expect("test fixture encodes"))
@@ -281,14 +290,4 @@ fn binary_step_lists_cannot_expand_before_admission() {
             }
         }
     }
-    assert_eq!(
-        Bounded::<u8, 0>::new(Vec::new())
-            .expect("zero capacity list")
-            .len(),
-        0
-    );
-    assert_eq!(
-        Bounded::<u8, 0>::new(vec![1]).err(),
-        Some(ErrorCode::TooLong)
-    );
 }
