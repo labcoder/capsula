@@ -4,7 +4,9 @@ use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
 use rusqlite::Connection;
 
-use super::{Deletion, EventKind, Recovered, Store, StoreError};
+use super::{
+    Deletion, EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, Store, StoreError,
+};
 
 /// A store file in its own temp folder, removed afterwards.
 struct Scratch(PathBuf);
@@ -60,40 +62,50 @@ fn contains_marker(db: &Path) -> bool {
         .any(|window| window == MARKER.as_bytes())
 }
 
-/// A thread with the marker in its title, a user turn, assistant text and a step label.
-fn plant(store: &mut Store) -> ThreadId {
-    let thread = store
-        .create_thread(&format!("Title {MARKER}"))
-        .expect("thread");
-    let run = store.start_run(thread).expect("run");
+/// Starts a turn with the next ids, in a new thread titled `title` or in `thread`.
+fn turn(store: &mut Store, thread: Result<ThreadId, &str>, text: &str) -> (ThreadId, RunId) {
+    let (high_thread, high_run) = store.high_water().expect("high water");
+    let run = RunId(high_run.0 + 1);
+    let (thread, title) = match thread {
+        Ok(thread) => (thread, None),
+        Err(title) => (ThreadId(high_thread.0 + 1), Some(title)),
+    };
+    store.begin_turn(thread, title, run, text).expect("turn");
+    (thread, run)
+}
+
+/// A thread with the marker in its title, a user turn, assistant text and a step body.
+fn plant(store: &mut Store) -> (ThreadId, RunId) {
+    let (thread, run) = turn(
+        store,
+        Err(&format!("Title {MARKER}")),
+        &format!("ask {MARKER}"),
+    );
+    let answer = format!("ANSWER {}", MARKER.to_uppercase());
     store
         .append(
             thread,
-            Some(run),
-            EventKind::User,
-            Some(&format!("ask {MARKER}")),
-            None,
-        )
-        .expect("user");
-    store
-        .append(
-            thread,
-            Some(run),
-            EventKind::AssistantText,
-            Some(&format!("ANSWER {}", MARKER.to_uppercase())),
-            None,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some(&answer),
+                body: None,
+            }],
         )
         .expect("text");
+    let body = format!(r#"{{"label":"{MARKER}"}}"#);
     store
         .append(
             thread,
-            Some(run),
-            EventKind::SceneStep,
-            Some("label"),
-            Some(&format!(r#"{{"label":"{MARKER}"}}"#)),
+            run,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("label"),
+                body: Some(&body),
+            }],
         )
         .expect("step");
-    thread
+    (thread, run)
 }
 
 /// Whether the WAL holds frames that weren't checkpointed, as after a crash.
@@ -108,6 +120,17 @@ fn rows(conn: &Connection, table: &str) -> i64 {
         row.get(0)
     })
     .expect("count")
+}
+
+fn run_row(store: &Store, run: RunId) -> (String, Option<String>) {
+    store
+        .conn
+        .query_row(
+            "SELECT state, reason FROM runs WHERE id = ?1",
+            [super::sql_id(run.0, StoreError::NoRun).expect("id")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("run row")
 }
 
 #[test]
@@ -130,7 +153,7 @@ fn a_newer_schema_is_refused() {
 fn reopening_keeps_threads_and_events() {
     let scratch = Scratch::new("reopen");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = plant(&mut store);
+    let (thread, _) = plant(&mut store);
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopen");
     let threads = store.threads().expect("threads");
@@ -145,14 +168,40 @@ fn reopening_keeps_threads_and_events() {
 }
 
 #[test]
+fn a_turn_needs_new_ids_and_a_live_thread() {
+    let scratch = Scratch::new("ids");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    assert_eq!(store.high_water().expect("empty"), (ThreadId(0), RunId(0)));
+    let (thread, run) = turn(&mut store, Err("t"), "first");
+    assert_eq!((thread, run), (ThreadId(1), RunId(1)));
+    assert!(matches!(
+        store.begin_turn(ThreadId(1), Some("again"), RunId(2), "x"),
+        Err(StoreError::StaleId)
+    ));
+    assert!(matches!(
+        store.begin_turn(thread, None, run, "x"),
+        Err(StoreError::StaleId)
+    ));
+    assert!(matches!(
+        store.begin_turn(ThreadId(9), None, RunId(9), "x"),
+        Err(StoreError::NoThread)
+    ));
+    assert!(matches!(
+        store.begin_turn(ThreadId(u64::MAX), None, RunId(9), "x"),
+        Err(StoreError::NoThread)
+    ));
+    assert_eq!(
+        store.high_water().expect("refusals issue nothing"),
+        (ThreadId(1), RunId(1))
+    );
+}
+
+#[test]
 fn search_takes_any_text_and_skips_threads_being_deleted() {
     let scratch = Scratch::new("search");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let kept = store.create_thread("kept").expect("thread");
-    store
-        .append(kept, None, EventKind::User, Some("the red fox"), None)
-        .expect("event");
-    let doomed = plant(&mut store);
+    let (kept, _) = turn(&mut store, Err("kept"), "the red fox");
+    let (doomed, _) = plant(&mut store);
     assert_eq!(store.search("RED fox", 10).expect("search"), vec![kept]);
     assert!(
         store.search("fox the", 10).expect("search").is_empty(),
@@ -176,20 +225,27 @@ fn search_takes_any_text_and_skips_threads_being_deleted() {
 fn a_thread_being_deleted_takes_no_new_work() {
     let scratch = Scratch::new("fenced");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = store.create_thread("t").expect("thread");
+    let (thread, run) = turn(&mut store, Err("t"), "hi");
     let generation = store.begin_delete(thread).expect("begin");
     assert_eq!(generation.0, 1);
-    assert!(matches!(store.start_run(thread), Err(StoreError::NoThread)));
     assert!(matches!(
-        store.append(thread, None, EventKind::User, Some("late"), None),
+        store.begin_turn(thread, None, RunId(run.0 + 1), "late"),
+        Err(StoreError::NoThread)
+    ));
+    assert!(matches!(
+        store.append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("late"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoThread)
     ));
     assert!(matches!(
         store.begin_delete(thread),
-        Err(StoreError::NoThread)
-    ));
-    assert!(matches!(
-        store.start_run(ThreadId(u64::MAX)),
         Err(StoreError::NoThread)
     ));
 }
@@ -198,31 +254,56 @@ fn a_thread_being_deleted_takes_no_new_work() {
 fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
     let scratch = Scratch::new("runs");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let a = store.create_thread("a").expect("thread");
-    let b = store.create_thread("b").expect("thread");
-    let run_b = store.start_run(b).expect("run");
+    let (a, _) = turn(&mut store, Err("a"), "x");
+    let (b, run_b) = turn(&mut store, Err("b"), "y");
     assert!(matches!(
-        store.append(a, Some(run_b), EventKind::User, Some("x"), None),
+        store.append(
+            a,
+            run_b,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("x"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoRun)
     ));
     assert!(matches!(
-        store.append(b, Some(RunId(u64::MAX)), EventKind::User, Some("x"), None),
+        store.append(
+            b,
+            RunId(u64::MAX),
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("x"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoRun)
     ));
     store
-        .conn
-        .execute(
-            "UPDATE runs SET state = 'interrupted' WHERE id = ?1",
-            [super::sql_id(run_b.0, StoreError::NoRun).expect("id")],
-        )
+        .end_run(b, run_b, &[], RunEnd::Interrupted(Interruption::Stop))
         .expect("end");
     assert!(matches!(
-        store.append(b, Some(run_b), EventKind::SceneStep, Some("late"), None),
+        store.append(
+            b,
+            run_b,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("late"),
+                body: None
+            }]
+        ),
         Err(StoreError::NoRun)
     ));
-    store
-        .append(b, None, EventKind::User, Some("kept"), None)
-        .expect("event");
+    assert!(matches!(
+        store.end_run(b, run_b, &[], RunEnd::Done),
+        Err(StoreError::NoRun)
+    ));
+    assert_eq!(
+        run_row(&store, run_b),
+        ("interrupted".to_owned(), Some("stop".to_owned())),
+        "the first outcome stays"
+    );
     assert!(
         store
             .conn
@@ -241,23 +322,20 @@ fn events_go_only_to_an_active_run_of_their_thread_and_never_change() {
 fn recovery_fails_active_runs_and_keeps_ended_ones() {
     let scratch = Scratch::new("recover");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = store.create_thread("t").expect("thread");
-    let ended = store.start_run(thread).expect("run");
+    let (thread, ended) = turn(&mut store, Err("t"), "one");
     store
-        .conn
-        .execute(
-            "UPDATE runs SET state = 'done' WHERE id = ?1",
-            [super::sql_id(ended.0, StoreError::NoRun).expect("id")],
-        )
+        .end_run(thread, ended, &[], RunEnd::Failed(Failure::Budget))
         .expect("end");
-    let active = store.start_run(thread).expect("run");
+    let (_, active) = turn(&mut store, Ok(thread), "two");
     store
         .append(
             thread,
-            Some(active),
-            EventKind::AssistantText,
-            Some("partial"),
-            None,
+            active,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("partial"),
+                body: None,
+            }],
         )
         .expect("committed text");
     // The brain dies: its connection never closes, so nothing is checkpointed.
@@ -272,19 +350,12 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
             ..Recovered::default()
         }
     );
-    let state = |run: RunId| -> (String, Option<String>) {
-        store
-            .conn
-            .query_row(
-                "SELECT state, reason FROM runs WHERE id = ?1",
-                [super::sql_id(run.0, StoreError::NoRun).expect("id")],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("run row")
-    };
-    assert_eq!(state(ended), ("done".to_owned(), None));
     assert_eq!(
-        state(active),
+        run_row(&store, ended),
+        ("failed".to_owned(), Some("budget".to_owned()))
+    );
+    assert_eq!(
+        run_row(&store, active),
         ("failed".to_owned(), Some("crash".to_owned()))
     );
     assert_eq!(store.search("partial", 10).expect("search"), vec![thread]);
@@ -293,14 +364,10 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
 }
 
 #[test]
-fn run_ids_are_never_reused_after_a_deletion() {
+fn ids_are_never_reused_after_a_deletion() {
     let scratch = Scratch::new("runids");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = store.create_thread("t").expect("thread");
-    let highest = store.start_run(thread).expect("run");
-    store
-        .append(thread, Some(highest), EventKind::User, Some("x"), None)
-        .expect("event");
+    let (thread, run) = turn(&mut store, Err("t"), "x");
     let newest_event = |store: &Store| -> i64 {
         store
             .conn
@@ -315,12 +382,16 @@ fn run_ids_are_never_reused_after_a_deletion() {
     );
     drop(store);
     let mut store = Store::open(&scratch.db()).expect("reopen");
-    let next = store.create_thread("u").expect("thread");
-    assert!(next > thread, "thread ids aren't reused either");
-    assert!(store.start_run(next).expect("run") > highest);
-    store
-        .append(next, None, EventKind::User, Some("y"), None)
-        .expect("event");
+    assert_eq!(store.high_water().expect("high water"), (thread, run));
+    assert!(matches!(
+        store.begin_turn(thread, Some("reused"), RunId(run.0 + 1), "x"),
+        Err(StoreError::StaleId)
+    ));
+    assert!(matches!(
+        store.begin_turn(ThreadId(thread.0 + 1), Some("u"), run, "x"),
+        Err(StoreError::StaleId)
+    ));
+    turn(&mut store, Err("u"), "y");
     assert!(
         newest_event(&store) > deleted_event,
         "event ids aren't reused either"
@@ -331,7 +402,7 @@ fn run_ids_are_never_reused_after_a_deletion() {
 fn a_deletion_that_fails_at_commit_leaves_the_thread_live() {
     let scratch = Scratch::new("commitfail");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = store.create_thread("t").expect("thread");
+    let (thread, _) = turn(&mut store, Err("t"), "x");
     // The deletion's own update breaks a foreign key that is only checked at commit.
     store
         .conn
@@ -351,14 +422,14 @@ fn a_deletion_that_fails_at_commit_leaves_the_thread_live() {
     let threads = store.threads().expect("threads");
     assert_eq!(threads.len(), 1, "the thread is still live");
     assert_eq!(threads[0].id, thread);
-    store.start_run(thread).expect("still takes work");
+    turn(&mut store, Ok(thread), "still takes work");
 }
 
 #[test]
 fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
     let scratch = Scratch::new("stuck");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = plant(&mut store);
+    let (thread, _) = plant(&mut store);
     store.begin_delete(thread).expect("begin");
     store
         .conn
@@ -387,18 +458,8 @@ fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
 fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     let scratch = Scratch::new("delete");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let kept = store.create_thread("kept").expect("thread");
-    let kept_run = store.start_run(kept).expect("run");
-    store
-        .append(
-            kept,
-            Some(kept_run),
-            EventKind::User,
-            Some("unrelated"),
-            None,
-        )
-        .expect("event");
-    let thread = plant(&mut store);
+    let (kept, _) = turn(&mut store, Err("kept"), "unrelated");
+    let (thread, _) = plant(&mut store);
     assert!(
         contains_marker(&scratch.db()),
         "the marker is on disk before the delete"
@@ -429,7 +490,7 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
 fn a_deletion_cut_short_by_a_crash_finishes_at_start() {
     let scratch = Scratch::new("cutshort");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = plant(&mut store);
+    let (thread, _) = plant(&mut store);
     store.begin_delete(thread).expect("begin");
     // The brain dies here, between the two transactions, without closing its connection.
     let crashed = store;
@@ -461,9 +522,9 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
         .conn
         .busy_timeout(std::time::Duration::ZERO)
         .expect("timeout");
-    let first = plant(&mut store);
+    let (first, _) = plant(&mut store);
     // Without the marker, so the raw scan below can only find the first thread's residue.
-    let second = store.create_thread("plain").expect("thread");
+    let (second, _) = turn(&mut store, Err("plain"), "plain");
     store.begin_delete(first).expect("begin");
     store.begin_delete(second).expect("begin");
     let reader = Connection::open(scratch.db()).expect("reader");
@@ -490,4 +551,96 @@ fn a_checkpoint_a_reader_blocks_leaves_the_deletion_pending() {
     reader.execute_batch("COMMIT").expect("end snapshot");
     assert_eq!(store.recover().expect("retry"), Recovered::default());
     assert!(!contains_marker(&scratch.db()));
+}
+
+#[test]
+fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
+    let scratch = Scratch::new("ending");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = turn(&mut store, Err("t"), "hi");
+    let (other, other_run) = turn(&mut store, Err("u"), "hey");
+    let tail = [NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some("tail"),
+        body: None,
+    }];
+    let other_updated = |store: &Store| -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT updated_ms FROM threads WHERE id = ?1",
+                [super::sql_id(other.0, StoreError::NoThread).expect("id")],
+                |row| row.get(0),
+            )
+            .expect("updated_ms")
+    };
+    store
+        .conn
+        .execute("UPDATE threads SET updated_ms = 0", [])
+        .expect("reset");
+    assert!(matches!(
+        store.end_run(other, run, &tail, RunEnd::Done),
+        Err(StoreError::NoRun)
+    ));
+    assert_eq!(
+        other_updated(&store),
+        0,
+        "the touch rolled back with the rest"
+    );
+    // A failure after the tail is inserted takes the tail back with it.
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_outcome BEFORE UPDATE ON runs BEGIN
+                 SELECT RAISE(ABORT, 'refused');
+             END;",
+        )
+        .expect("trigger");
+    assert!(matches!(
+        store.end_run(thread, run, &tail, RunEnd::Done),
+        Err(StoreError::Sql(_))
+    ));
+    assert_eq!(rows(&store.conn, "events"), 2, "only the two turns");
+    assert_eq!(run_row(&store, run), ("active".to_owned(), None));
+    store
+        .conn
+        .execute_batch("DROP TRIGGER refuse_outcome")
+        .expect("drop");
+    store
+        .end_run(other, other_run, &tail, RunEnd::Done)
+        .expect("a live thread's ending");
+    assert_eq!(run_row(&store, other_run), ("done".to_owned(), None));
+    let stored: Vec<(i64, Option<String>)> = store
+        .conn
+        .prepare("SELECT run, text FROM events WHERE kind != 'user' ORDER BY id")
+        .expect("query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    assert_eq!(
+        stored,
+        [(
+            super::sql_id(other_run.0, StoreError::NoRun).expect("id"),
+            Some("tail".to_owned())
+        )]
+    );
+    store.begin_delete(thread).expect("begin");
+    assert!(matches!(
+        store.end_run(thread, run, &tail, RunEnd::Done),
+        Err(StoreError::NoThread)
+    ));
+    assert_eq!(run_row(&store, run), ("active".to_owned(), None));
+    assert_eq!(
+        rows(&store.conn, "events"),
+        3,
+        "the two turns and the other's tail"
+    );
+    store
+        .end_run(thread, run, &[], RunEnd::Failed(Failure::Store))
+        .expect("an outcome alone needs no live thread");
+    assert_eq!(
+        run_row(&store, run),
+        ("failed".to_owned(), Some("store".to_owned()))
+    );
 }

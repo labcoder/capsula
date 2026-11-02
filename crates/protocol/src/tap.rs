@@ -1,11 +1,14 @@
 //! The pipe tap: a dev-only recording of every frame the brain sends and receives, which
 //! `cargo xtask pipe-dump` decodes with the same message types. Each record is the pipe, the
 //! direction, a `u32` little-endian length and the payload.
+//!
+//! A recording holds the user's turns and the assistant's text, so it's a transcript: keep it
+//! local and delete it like one.
 
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, payload_len};
-use crate::message::{ControlToBrain, ControlToShell, DataToBrain};
+use crate::message::{ControlToBrain, ControlToShell, DataToBrain, DataToShell};
 
 /// Which way a frame travelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,10 +43,9 @@ impl Record {
             (Pipe::Data, Direction::ToBrain) => {
                 decode::<DataToBrain>(&self.payload).map(|m| format!("{m:?}"))
             }
-            (Pipe::Data, Direction::ToShell) => Ok(format!(
-                "{} bytes (no data messages to the shell yet)",
-                self.payload.len()
-            )),
+            (Pipe::Data, Direction::ToShell) => {
+                decode::<DataToShell>(&self.payload).map(|m| format!("{m:?}"))
+            }
         };
         decoded.unwrap_or_else(|error| format!("undecodable {} bytes: {error}", self.payload.len()))
     }

@@ -44,6 +44,9 @@ pub enum StoreError {
     /// The run isn't an active run of that thread, so its late work is refused.
     #[error("no such active run in the thread")]
     NoRun,
+    /// A new thread or run id isn't above the highest ever issued.
+    #[error("the id was issued before")]
+    StaleId,
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
@@ -58,6 +61,8 @@ pub enum EventKind {
     AssistantText,
     /// One committed drawing step.
     SceneStep,
+    /// The steps that stayed on screen when the user stopped the run, as a JSON list.
+    Revealed,
 }
 
 impl EventKind {
@@ -66,6 +71,86 @@ impl EventKind {
             Self::User => "user",
             Self::AssistantText => "assistant_text",
             Self::SceneStep => "scene_step",
+            Self::Revealed => "revealed",
+        }
+    }
+}
+
+/// An event to append. Its `Debug` shows only the kind, so a log line can't carry content.
+#[derive(Clone, Copy)]
+pub struct NewEvent<'a> {
+    /// What it records.
+    pub kind: EventKind,
+    /// What search finds.
+    pub text: Option<&'a str>,
+    /// The typed record as JSON.
+    pub body: Option<&'a str>,
+}
+
+impl std::fmt::Debug for NewEvent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewEvent")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How a run ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEnd {
+    /// The engine finished.
+    Done,
+    /// Stopped before it finished.
+    Interrupted(Interruption),
+    /// Ended by an error.
+    Failed(Failure),
+}
+
+/// Why a run was interrupted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interruption {
+    /// The user pressed Esc or Stop.
+    Stop,
+    /// A new turn began.
+    Replaced,
+    /// The shell went away.
+    ShellLost,
+    /// The shell stopped taking data.
+    ViewStalled,
+}
+
+/// Why a run failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// A run budget was exceeded.
+    Budget,
+    /// The engine failed.
+    Engine,
+    /// The store refused a write.
+    Store,
+}
+
+impl RunEnd {
+    fn columns(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Self::Done => ("done", None),
+            Self::Interrupted(why) => (
+                "interrupted",
+                Some(match why {
+                    Interruption::Stop => "stop",
+                    Interruption::Replaced => "replaced",
+                    Interruption::ShellLost => "shell_lost",
+                    Interruption::ViewStalled => "view_stalled",
+                }),
+            ),
+            Self::Failed(why) => (
+                "failed",
+                Some(match why {
+                    Failure::Budget => "budget",
+                    Failure::Engine => "engine",
+                    Failure::Store => "store",
+                }),
+            ),
         }
     }
 }
@@ -201,17 +286,114 @@ impl Store {
         Ok(recovered)
     }
 
-    /// Creates a thread.
+    /// The highest thread and run ids ever issued, deleted ones included. New ids must be above
+    /// them.
     ///
     /// # Errors
     /// Fails when SQLite fails.
-    pub fn create_thread(&mut self, title: &str) -> Result<ThreadId, StoreError> {
+    pub fn high_water(&self) -> Result<(ThreadId, RunId), StoreError> {
+        let seq = |table: &str| -> Result<u64, StoreError> {
+            let seq: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(seq.map_or(0, row_id))
+        };
+        Ok((ThreadId(seq("threads")?), RunId(seq("runs")?)))
+    }
+
+    /// Stores a user turn in one transaction: the thread when `title` names a new one, the run,
+    /// and the user's text. Ids come from the caller and must be above [`Store::high_water`].
+    ///
+    /// # Errors
+    /// Fails with [`StoreError::NoThread`] when an existing thread isn't live, and with
+    /// [`StoreError::StaleId`] when an id isn't new.
+    pub fn begin_turn(
+        &mut self,
+        thread: ThreadId,
+        title: Option<&str>,
+        run: RunId,
+        text: &str,
+    ) -> Result<(), StoreError> {
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
         let now = now_ms();
-        self.conn.execute(
-            "INSERT INTO threads (title, created_ms, updated_ms) VALUES (?1, ?2, ?2)",
-            params![title, now],
+        let tx = self.conn.transaction()?;
+        if let Some(title) = title {
+            let inserted = tx.execute(
+                "INSERT INTO threads (id, title, created_ms, updated_ms)
+                 SELECT ?1, ?2, ?3, ?3
+                 WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'threads'), 0)",
+                params![thread, title, now],
+            )?;
+            if inserted == 0 {
+                return Err(StoreError::StaleId);
+            }
+        }
+        if !touch(&tx, thread, now)? {
+            return Err(StoreError::NoThread);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO runs (id, thread, state, started_ms)
+             SELECT ?1, ?2, 'active', ?3
+             WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'runs'), 0)",
+            params![run, thread, now],
         )?;
-        Ok(ThreadId(row_id(self.conn.last_insert_rowid())))
+        if inserted == 0 {
+            return Err(StoreError::StaleId);
+        }
+        insert_event(
+            &tx,
+            thread,
+            Some(run),
+            EventKind::User,
+            Some(text),
+            None,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Appends a run's last `events` and ends it, in one transaction, so its outcome is never
+    /// stored without them. A run that already ended keeps its first outcome.
+    ///
+    /// # Errors
+    /// Fails with [`StoreError::NoRun`] when the run isn't an active run of the thread, and
+    /// with [`StoreError::NoThread`] when there are events and the thread isn't live.
+    pub fn end_run(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        events: &[NewEvent<'_>],
+        end: RunEnd,
+    ) -> Result<(), StoreError> {
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        if !events.is_empty() {
+            insert_events(&tx, thread, run, events, now)?;
+        }
+        let (state, reason) = end.columns();
+        let ended = tx.execute(
+            "UPDATE runs SET state = ?3, reason = ?4, ended_ms = ?5
+             WHERE id = ?1 AND thread = ?2 AND state = 'active'",
+            params![run, thread, state, reason, now],
+        )?;
+        if ended == 0 {
+            return Err(StoreError::NoRun);
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Live threads, most recently changed first. A thread being deleted is already gone here.
@@ -233,24 +415,7 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Starts a run in a live thread. Run ids only grow, even across restarts and deletions.
-    ///
-    /// # Errors
-    /// Fails with [`StoreError::NoThread`] when the thread isn't live.
-    pub fn start_run(&mut self, thread: ThreadId) -> Result<RunId, StoreError> {
-        let inserted = self.conn.execute(
-            "INSERT INTO runs (thread, state, started_ms)
-             SELECT id, 'active', ?2 FROM threads WHERE id = ?1 AND state = 'live'",
-            params![sql_id(thread.0, StoreError::NoThread)?, now_ms()],
-        )?;
-        if inserted == 0 {
-            return Err(StoreError::NoThread);
-        }
-        Ok(RunId(row_id(self.conn.last_insert_rowid())))
-    }
-
-    /// Appends an event to a live thread, and to one of its active runs when `run` is given.
-    /// `text` is what search finds; `body` is the typed record as JSON.
+    /// Appends events to an active run of a live thread, in one transaction.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't live, and with
@@ -258,42 +423,15 @@ impl Store {
     pub fn append(
         &mut self,
         thread: ThreadId,
-        run: Option<RunId>,
-        kind: EventKind,
-        text: Option<&str>,
-        body: Option<&str>,
+        run: RunId,
+        events: &[NewEvent<'_>],
     ) -> Result<(), StoreError> {
-        let thread = sql_id(thread.0, StoreError::NoThread)?;
-        let run = run
-            .map(|run| sql_id(run.0, StoreError::NoRun))
-            .transpose()?;
-        let now = now_ms();
+        let (thread, run) = (
+            sql_id(thread.0, StoreError::NoThread)?,
+            sql_id(run.0, StoreError::NoRun)?,
+        );
         let tx = self.conn.transaction()?;
-        let touched = tx.execute(
-            "UPDATE threads SET updated_ms = ?2 WHERE id = ?1 AND state = 'live'",
-            params![thread, now],
-        )?;
-        if touched == 0 {
-            return Err(StoreError::NoThread);
-        }
-        if let Some(run) = run {
-            let active: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM runs WHERE id = ?1 AND thread = ?2 AND state = 'active'",
-                    params![run, thread],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if active.is_none() {
-                return Err(StoreError::NoRun);
-            }
-        }
-        // Only a plain INSERT may write events: OR REPLACE would skip the FTS delete trigger.
-        tx.execute(
-            "INSERT INTO events (thread, run, kind, text, body, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![thread, run, kind.as_str(), text, body, now],
-        )?;
+        insert_events(&tx, thread, run, events, now_ms())?;
         tx.commit()?;
         Ok(())
     }
@@ -401,6 +539,67 @@ impl Store {
         tracing::warn!("a reader blocked the checkpoint; the next start retries it");
         Ok(Deletion::Pending)
     }
+}
+
+/// Inserts events for an active run of a live thread, marking the thread changed.
+fn insert_events(
+    conn: &Connection,
+    thread: i64,
+    run: i64,
+    events: &[NewEvent<'_>],
+    now: i64,
+) -> Result<(), StoreError> {
+    if !touch(conn, thread, now)? {
+        return Err(StoreError::NoThread);
+    }
+    let active: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM runs WHERE id = ?1 AND thread = ?2 AND state = 'active'",
+            params![run, thread],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if active.is_none() {
+        return Err(StoreError::NoRun);
+    }
+    for event in events {
+        insert_event(
+            conn,
+            thread,
+            Some(run),
+            event.kind,
+            event.text,
+            event.body,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Marks a live thread changed; false when it isn't live.
+fn touch(conn: &Connection, thread: i64, now: i64) -> Result<bool, StoreError> {
+    Ok(conn.execute(
+        "UPDATE threads SET updated_ms = ?2 WHERE id = ?1 AND state = 'live'",
+        params![thread, now],
+    )? == 1)
+}
+
+fn insert_event(
+    conn: &Connection,
+    thread: i64,
+    run: Option<i64>,
+    kind: EventKind,
+    text: Option<&str>,
+    body: Option<&str>,
+    now: i64,
+) -> Result<(), StoreError> {
+    // Only a plain INSERT may write events: OR REPLACE would skip the FTS delete trigger.
+    conn.execute(
+        "INSERT INTO events (thread, run, kind, text, body, created_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![thread, run, kind.as_str(), text, body, now],
+    )?;
+    Ok(())
 }
 
 fn now_ms() -> i64 {

@@ -20,8 +20,12 @@ brain opens it. The code is `crates/brain/src/store/`.
 |---|---|
 | `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
-| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key (see below) |
+
+The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
+`sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
+user turn (a new thread when there is one, the run, and the user's text) is one transaction.
 
 Later slices add assets, sends, the tool ledger, actions, summaries and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one

@@ -325,7 +325,7 @@ impl Link {
             Pipe::Control,
         )?;
         let incarnation = match frame::read::<ControlToShell>(&mut &control, Pipe::Control)? {
-            None => return Err(LinkError::Rejected),
+            None | Some(ControlToShell::RunState { .. }) => return Err(LinkError::Rejected),
             Some(ControlToShell::BuildMismatch { brain_build }) => {
                 tracing::warn!(
                     brain_build,
