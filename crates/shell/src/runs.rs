@@ -146,7 +146,8 @@ impl Runs {
         self.unanswered = 0;
     }
 
-    /// A `RunState`. A run newer than any before answers a turn, even when it's fenced.
+    /// A `RunState`. A run newer than any before answers a turn. Only runs already named are
+    /// fenced, so a fenced run never answers one.
     pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) {
         if run > self.answered {
             self.answered = run;
