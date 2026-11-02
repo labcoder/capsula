@@ -113,3 +113,62 @@ reference, motion and residency checks are added by subsequent scene layers.
 24,000 triangles per scene/globally, 48 curved segments, and BSP limits of
 4,000,000 classifications, depth 64 and twice the input triangle count in
 fragments. No 3D vocabulary or geometry is implemented here.
+
+## Incremental drawing input
+
+`Tokenizer::next(&mut rest)` consumes a delta through at most one closed record
+and leaves the exact unconsumed suffix in `rest`. Parse its borrowed bytes into
+an owned `Record` before awaiting persistence; the next call clears and reuses
+the same buffer. There is no callback, record queue or accumulated-text reparse.
+Drain each supplied delta until `None`, then provide the next delta. At EOF call
+`finish`: a missing record close or envelope tail is `Truncated`.
+
+The outer object must contain exactly one `records` key and an array of record
+objects. Escaped spellings of that key work; repeated keys and additional keys
+fail. Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
+escapes and paired UTF-16 surrogate escapes are handled incrementally. Duplicate
+fields inside a record remain the typed parser's responsibility.
+
+The tokenizer counts bytes before buffering: at most 512 KiB for the whole
+envelope and 32 KiB from each record's opening brace through its closing brace.
+Surrounding array whitespace is charged only to the drawing. Container depth is
+at most 16, including the envelope object and records array. One 32 KiB buffer is
+allocated at construction; scanning and record delivery allocate nothing further.
+Every syntax, size, depth or truncation error is terminal. There is no newline
+resynchronization, and trailing non-whitespace after the envelope fails. Earlier
+records may already have been emitted, so callers retain their committed prefix.
+Tokenizer and closed-record Debug formatting never prints buffered bytes.
+
+### Tokenizer measurement method
+
+The ignored `measure_tokenizer` test uses a 512 KiB drawing with 21 typed-valid
+records: a begin, a step creating 64 text objects, 18 steps updating their
+400-character text, and an end. Trailing whitespace fills the exact drawing cap.
+It runs five warm-ups and 64 timed drawings for each of 40-byte and 4 KiB deltas.
+Reported MB/s uses decimal megabytes; ns/delta includes draining emitted records.
+Fixture construction and initial buffer allocation are outside the timed region.
+A separate thread-local counter checks allocation, zeroed allocation and
+reallocation, including an instrumentation sanity test; it observes only the
+calling test thread. Main had no drawing tokenizer, so the before baseline is
+“none,” not an invented speedup.
+
+Build the release tests below normal priority before acquiring the shared
+measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal
+priority with the lock held:
+
+```text
+cargo test -p capsula-scene --release -- --ignored --nocapture --test-threads=1
+```
+
+Rez result, 2026-11-02 at 01:34 PST (Windows 11, i9-10900K):
+
+| Input delta | Throughput (MB/s) | Cost per delta (ns) | Allocations after construction |
+|---|---:|---:|---:|
+| 40 bytes | 271.489 | 147.326 | 0 |
+| 4 KiB | 305.390 | 13,412.341 | 0 |
+
+The lock was held from 01:33:20 until 01:34:38; existing builds finished before
+the 30-second quiet interval completed at 01:34:35. No compilation occurred in
+the timed run. Capy, Edge and Node processes remained open; their CPU usage was
+not measured. These are tokenizer-only absolute figures, not end-to-end drawing
+latencies or a speedup over a prior implementation.
