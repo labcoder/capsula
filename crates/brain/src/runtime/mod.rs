@@ -117,13 +117,13 @@ impl Brain {
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
-        let (datas_tx, mut datas) = mpsc::channel(64);
+        let (turns_tx, mut turns) = mpsc::channel(64);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
 
         let control_reader = read_control(&mut control_in, &controls_tx);
-        let data_reader = read_data(&mut data_in, &datas_tx);
+        let data_reader = read_data(&mut data_in, &turns_tx, &queue, &ready);
         let control_writer = write_control(&mut control_out, &mut out);
         let data_writer = write_data(&mut data_out, &queue, &ready);
         let link = Link {
@@ -132,7 +132,7 @@ impl Brain {
             ready: &ready,
             tap: &mut *tap,
         };
-        let core = self.core(&mut controls, &mut datas, link);
+        let core = self.core(&mut controls, &mut turns, link);
         let ended = tokio::select! {
             ended = control_reader => ended,
             ended = data_reader => ended,
@@ -157,7 +157,7 @@ impl Brain {
     async fn core(
         &mut self,
         controls: &mut mpsc::Receiver<ControlToBrain>,
-        datas: &mut mpsc::Receiver<DataToBrain>,
+        turns: &mut mpsc::Receiver<Turn>,
         mut link: Link<'_, '_>,
     ) -> Ended {
         let mut ticks = tokio::time::interval(PING_EVERY);
@@ -166,7 +166,6 @@ impl Brain {
         loop {
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
-            // Credit shares the data pipe, so it waits too, but the store drains on its own.
             let take_turns = self.coordinator.ending_runs() < MAX_ENDING;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let input = tokio::select! {
@@ -174,10 +173,7 @@ impl Brain {
                 Some(message) = controls.recv() => {
                     link.tap.record(Pipe::Control, Direction::ToBrain, &message);
                     match message {
-                        ControlToBrain::Stop { run, revealed } => {
-                            link.queue.borrow_mut().revoke(run);
-                            Input::Stop { run, revealed }
-                        }
+                        ControlToBrain::Stop { run, revealed } => Input::Stop { run, revealed },
                         ControlToBrain::Pong => {
                             ping_sent = None;
                             continue;
@@ -187,20 +183,7 @@ impl Brain {
                     }
                 }
                 Some(input) = self.inputs.recv() => input,
-                Some(message) = datas.recv(), if take_turns => match message {
-                    DataToBrain::TextSubmit { thread, text } => {
-                        if let Some(replaced) = running {
-                            link.queue.borrow_mut().revoke(replaced);
-                        }
-                        Input::Turn { thread, text }
-                    }
-                    DataToBrain::Credit { bytes } => {
-                        link.queue.borrow_mut().grant(bytes);
-                        link.ready.notify_one();
-                        continue;
-                    }
-                    DataToBrain::Hello(_) => continue,
-                },
+                Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = sleep_until(deadline) => {
                     self.deadline = None;
@@ -273,6 +256,11 @@ impl Brain {
                         fixture::start(Arc::clone(&self.fixture), run, self.engine_tx.clone());
                     self.engine = Some((run, cancel));
                 }
+                Effect::Revoke { run } => {
+                    if let Some(link) = link.as_deref_mut() {
+                        link.queue.borrow_mut().revoke(run);
+                    }
+                }
                 Effect::CancelEngine { run } => {
                     if let Some((engine_run, cancel)) = self.engine.take() {
                         if engine_run == run {
@@ -314,15 +302,26 @@ async fn read_control(
     }
 }
 
+/// A typed turn: the thread to continue, or `None` for a new one, and the text.
+type Turn = (Option<ThreadId>, String);
+
+/// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
+/// isn't taking yet.
 async fn read_data(
     pipe: &mut (impl AsyncRead + Unpin),
-    frames: &mpsc::Sender<DataToBrain>,
+    turns: &mpsc::Sender<Turn>,
+    queue: &RefCell<DataQueue>,
+    ready: &Notify,
 ) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some(message)) => {
-                if frames.send(message).await.is_err() {
+            Ok(Some(DataToBrain::Credit { bytes })) => {
+                queue.borrow_mut().grant(bytes);
+                ready.notify_one();
+            }
+            Ok(Some(DataToBrain::TextSubmit { thread, text })) => {
+                if turns.send((thread, text)).await.is_err() {
                     return Ended::Lost;
                 }
             }

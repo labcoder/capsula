@@ -22,6 +22,9 @@ impl StoreThread {
             .name("store".to_owned())
             .spawn(move || {
                 // Every queued op runs, even with nobody left to hear the acknowledgement.
+                // shortcut: a panic here leaves queued ops unanswered, so their runs never leave
+                // the coordinator and new turns stop once 16 pile up; restart the brain on a store
+                // panic when it has a supervisor.
                 for op in queue {
                     if acks.send(apply(&mut store, op)).is_err() {
                         tracing::debug!("an acknowledgement had no listener");

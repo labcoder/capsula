@@ -158,7 +158,8 @@ async fn emit(
         _ = cancelled => {
             if let Some(label) = late {
                 let step = EngineEvent::Step(Step { label: label.to_owned() });
-                let _unheard = inputs.send(Input::Engine { run, event: step }).await;
+                // Never waits: a cancelled run's leftovers aren't worth holding a task for.
+                let _dropped = inputs.try_send(Input::Engine { run, event: step });
             }
             false
         }

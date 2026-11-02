@@ -201,6 +201,7 @@ fn text_waits_behind_a_pending_step() {
         .expect("Stop is handled while a step is pending"),
         vec![
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
             run_end(R)
         ]
@@ -237,6 +238,7 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
         .expect("current"),
         vec![
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
             run_end(R)
         ],
@@ -284,7 +286,11 @@ fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_
             revealed: vec![0],
         })
         .expect("current"),
-        vec![state(R, ThreadId(2), Phase::Interrupted), run_end(R)],
+        vec![
+            Effect::Revoke { run: R },
+            state(R, ThreadId(2), Phase::Interrupted),
+            run_end(R)
+        ],
         "nothing to cancel"
     );
     assert_eq!(
@@ -309,9 +315,10 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         })
         .expect("turn");
     assert_eq!(
-        next[..5],
+        next[..6],
         [
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
             run_end(R),
             end_run(None, None, RunEnd::Interrupted(Interruption::Replaced)),
@@ -670,6 +677,7 @@ fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
         .expect("still current"),
         vec![
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
             run_end(R)
         ]
@@ -757,6 +765,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         .expect("turn"),
         vec![
             Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
             state(R, T, Phase::Interrupted),
             run_end(R),
             state(b, T, Phase::Thinking),
@@ -773,7 +782,11 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             revealed: Vec::new(),
         })
         .expect("current"),
-        vec![state(b, T, Phase::Interrupted), run_end(b)]
+        vec![
+            Effect::Revoke { run: b },
+            state(b, T, Phase::Interrupted),
+            run_end(b)
+        ]
     );
     assert_eq!(core.handle(Input::TurnStored { run: b }), Err(Stale));
     assert_eq!(

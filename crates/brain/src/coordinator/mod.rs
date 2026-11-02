@@ -126,6 +126,11 @@ pub enum Effect {
         /// The run.
         run: RunId,
     },
+    /// Drop `run`'s data not yet sent to the shell, which no longer shows it.
+    Revoke {
+        /// The run.
+        run: RunId,
+    },
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.
@@ -633,6 +638,12 @@ impl Coordinator {
     ) {
         if run.turn.is_none() && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
+        }
+        if matches!(
+            outcome,
+            RunEnd::Interrupted(Interruption::Stop | Interruption::Replaced)
+        ) {
+            effects.push(Effect::Revoke { run: run.id });
         }
         run.held.clear();
         if notify == Notify::Shell && outcome != RunEnd::Done {

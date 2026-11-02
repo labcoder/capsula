@@ -67,19 +67,21 @@ flowchart LR
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
   big to send, and several 64 KiB text frames. Grants never raise the credit past the window.
 - **Stop drops the stopped run's unsent data**, and so does a new turn that replaces a run, so
-  the replacement's first frame isn't stuck behind text nobody will show. The run's `RunEnd` is
-  queued after the drop, so it still arrives.
+  the replacement's first frame isn't stuck behind text nobody will show. Only a `Stop` or turn
+  the coordinator accepts drops anything, and the run's `RunEnd` is queued after the drop, so it
+  still arrives.
 - **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
   connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
-  control frames and store replies, so `Stop` is never queued behind data. While the data queue
-  holds 1 MiB, frames and their bookkeeping counted, engine events wait in a 16-event channel
-  and the engine waits on it. While 16 ended runs wait on the store, the data pipe isn't read,
-  so new turns (and credit with them) wait until the store catches up [guess]. Memory stays
-  bounded however slow the store or the shell is.
+  control frames, credit and store replies, so `Stop` is never queued behind data. While the
+  data queue holds 1 MiB, frames and their bookkeeping counted, engine events wait in a 16-event
+  channel and the engine waits on it. While 16 ended runs wait on the store, new turns wait until
+  it catches up [guess]. Memory stays bounded however slow the store or the shell is: the cap is
+  checked before each event, so the queue can reach about 3 MiB at worst (1 MiB, one event, and
+  text held behind a step).
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`; the brain sends only `RunState` and `Ping`, so it can't fill short of a hung shell.
 

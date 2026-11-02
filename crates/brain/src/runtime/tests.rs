@@ -209,7 +209,9 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
         assert_eq!(shell.state().await, (run, Phase::Done));
         let mut frames = Vec::new();
         loop {
-            let frame = shell.data().await;
+            let frame = timeout(Duration::from_secs(2), shell.data())
+                .await
+                .expect("the run's data ends with its RunEnd");
             let last = frame == DataToShell::RunEnd { run };
             frames.push(frame);
             if last {
@@ -288,7 +290,7 @@ async fn new_turns_wait_while_too_many_runs_wait_on_the_store() {
 }
 
 #[tokio::test]
-async fn the_engine_waits_while_the_shell_is_behind_on_data() {
+async fn engine_events_wait_while_the_shell_is_behind_on_data() {
     let scratch = Scratch::new("behind");
     let fill = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000";
     let mut brain = test_support::brain(&scratch, fill);
@@ -305,6 +307,46 @@ async fn the_engine_waits_while_the_shell_is_behind_on_data() {
         let (second, _) = shell.state().await;
         assert_eq!(shell.state().await, (second, Phase::Answering));
         assert_eq!(shell.state().await, (second, Phase::Interrupted));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close();
+}
+
+#[tokio::test]
+async fn a_stale_stop_never_drops_a_finished_runs_data() {
+    let scratch = Scratch::new("stale-stop");
+    let fill = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000";
+    let mut brain = test_support::brain(&scratch, fill);
+    let ((control, data), mut shell) = connect("stale-stop").await;
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        // Esc after Done: stale, so the text still queued behind credit stays.
+        shell.stop(run).await;
+        let mut bytes = 0;
+        loop {
+            let frame = timeout(Duration::from_secs(2), shell.data())
+                .await
+                .expect("the run's data ends with its RunEnd");
+            match frame {
+                DataToShell::AssistantText { delta, .. } => {
+                    bytes += delta.len();
+                    let credit = DataToBrain::Credit {
+                        bytes: u32::try_from(delta.len() + 64).expect("small"),
+                    };
+                    let frame = frame::encode(&credit, Pipe::Data).expect("encodes");
+                    shell.data_out.write_all(&frame).await.expect("sent");
+                }
+                DataToShell::RunEnd { run: ended } if ended == run => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(bytes, 960_000);
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
