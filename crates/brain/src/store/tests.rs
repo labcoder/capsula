@@ -166,7 +166,8 @@ fn reopening_keeps_threads_and_events() {
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopen");
     let threads = store
-        .pages().thread_page(None, 50)
+        .pages()
+        .thread_page(None, 50)
         .map(|(rows, _)| rows)
         .expect("threads");
     assert_eq!(threads.len(), 1);
@@ -176,7 +177,10 @@ fn reopening_keeps_threads_and_events() {
         !format!("{threads:?}").contains(MARKER),
         "Debug leaves titles out"
     );
-    assert_eq!(store.pages().search_ids(MARKER).expect("search"), vec![thread]);
+    assert_eq!(
+        store.pages().search_ids(MARKER).expect("search"),
+        vec![thread]
+    );
 }
 
 #[test]
@@ -214,25 +218,40 @@ fn search_takes_any_text_and_skips_threads_being_deleted() {
     let mut store = Store::open(&scratch.db()).expect("store");
     let (kept, _) = turn(&mut store, Err("kept"), "the red fox");
     let (doomed, _) = plant(&mut store);
-    assert_eq!(store.pages().search_ids("RED fox").expect("search"), vec![kept]);
+    assert_eq!(
+        store.pages().search_ids("RED fox").expect("search"),
+        vec![kept]
+    );
     assert!(
-        store.pages().search_ids("fox the").expect("search").is_empty(),
+        store
+            .pages()
+            .search_ids("fox the")
+            .expect("search")
+            .is_empty(),
         "a phrase, in order"
     );
     assert!(
         store
-            .pages().search_ids(r#"" OR * NEAR("#)
+            .pages()
+            .search_ids(r#"" OR * NEAR("#)
             .expect("syntax is text")
             .is_empty(),
         "FTS5 syntax in the words is matched literally"
     );
     assert!(store.pages().search_ids("").expect("empty").is_empty());
-    assert!(store.pages().search_ids("red\0fox").expect("NUL").is_empty());
+    assert!(
+        store
+            .pages()
+            .search_ids("red\0fox")
+            .expect("NUL")
+            .is_empty()
+    );
     store.begin_delete(doomed).expect("begin");
     assert!(store.pages().search_ids(MARKER).expect("search").is_empty());
     assert_eq!(
         store
-            .pages().thread_page(None, 50)
+            .pages()
+            .thread_page(None, 50)
             .map(|(rows, _)| rows)
             .expect("threads")
             .len(),
@@ -374,7 +393,10 @@ fn recovery_fails_active_runs_and_keeps_ended_ones() {
         run_row(&store, active),
         ("failed".to_owned(), Some("crash".to_owned()))
     );
-    assert_eq!(store.pages().search_ids("partial").expect("search"), vec![thread]);
+    assert_eq!(
+        store.pages().search_ids("partial").expect("search"),
+        vec![thread]
+    );
     assert_eq!(store.recover().expect("again"), Recovered::default());
     drop(crashed);
 }
@@ -433,7 +455,8 @@ fn a_deletion_that_fails_at_commit_leaves_the_thread_live() {
         Err(StoreError::Sql(_))
     ));
     let threads = store
-        .pages().thread_page(None, 50)
+        .pages()
+        .thread_page(None, 50)
         .map(|(rows, _)| rows)
         .expect("threads");
     assert_eq!(threads.len(), 1, "the thread is still live");
@@ -465,7 +488,8 @@ fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
     );
     assert!(
         store
-            .pages().thread_page(None, 50)
+            .pages()
+            .thread_page(None, 50)
             .map(|(rows, _)| rows)
             .expect("threads")
             .is_empty()
@@ -512,7 +536,10 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
 
     let mut store = Store::open(&scratch.db()).expect("reopen");
     assert!(store.pages().search_ids(MARKER).expect("search").is_empty());
-    assert_eq!(store.pages().search_ids("unrelated").expect("search"), vec![kept]);
+    assert_eq!(
+        store.pages().search_ids("unrelated").expect("search"),
+        vec![kept]
+    );
     let next = turn(&mut store, Err("next"), "x");
     let scene = store
         .commit_step(next, None, SceneTarget::New { evict: None }, 0, "next")
@@ -616,7 +643,10 @@ fn a_copy_that_cant_replace_the_file_keeps_the_old_store_serving() {
 
     drop(holder);
     assert_eq!(purge(&mut store), Swap::Done);
-    assert_eq!(store.pages().search_ids("served").expect("search"), vec![thread]);
+    assert_eq!(
+        store.pages().search_ids("served").expect("search"),
+        vec![thread]
+    );
 }
 
 #[test]
@@ -752,7 +782,10 @@ fn a_write_after_the_snapshot_keeps_the_old_file_and_the_purge_owed() {
     store.end_run(late, run, &[], RunEnd::Done).expect("ended");
     assert_eq!(purge(&mut store), Swap::Done);
     assert!(!contains_marker(&scratch.db()));
-    assert_eq!(store.pages().search_ids("snapshot").expect("search"), vec![late]);
+    assert_eq!(
+        store.pages().search_ids("snapshot").expect("search"),
+        vec![late]
+    );
 }
 
 #[test]
@@ -896,7 +929,10 @@ fn a_store_whose_reopen_failed_serves_again_once_its_file_opens() {
         .expect("ended");
     store.leftovers().remove().expect("removed");
     assert!(!contains_marker(&scratch.db()));
-    assert_eq!(store.pages().search_ids("served").expect("search"), vec![thread]);
+    assert_eq!(
+        store.pages().search_ids("served").expect("search"),
+        vec![thread]
+    );
 }
 
 #[test]
@@ -1013,7 +1049,10 @@ fn a_move_that_fails_after_the_link_keeps_the_old_store_under_one_name() {
         .expect("ended");
     drop(holder);
     assert_eq!(purge(&mut store), Swap::Done);
-    assert_eq!(store.pages().search_ids("served").expect("search"), vec![thread]);
+    assert_eq!(
+        store.pages().search_ids("served").expect("search"),
+        vec![thread]
+    );
 }
 
 #[test]
@@ -1395,7 +1434,8 @@ fn deleted_threads_leave_nothing_in_the_files_or_the_index_at_scale() {
     let store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
         store
-            .pages().search_ids(&format!("mark{kept:04}q"))
+            .pages()
+            .search_ids(&format!("mark{kept:04}q"))
             .expect("search"),
         vec![kept_id],
         "the kept threads are still found"
@@ -1888,7 +1928,8 @@ fn a_delete_reports_how_far_it_got_and_the_threads_newest_run() {
     assert!(hidden.error.is_some());
     assert!(
         store
-            .pages().thread_page(None, 50)
+            .pages()
+            .thread_page(None, 50)
             .map(|(rows, _)| rows)
             .expect("threads")
             .is_empty(),
@@ -1926,7 +1967,8 @@ fn a_delete_that_cant_hide_the_thread_leaves_it_live() {
     );
     assert!(deletion.error.is_some());
     let threads = store
-        .pages().thread_page(None, 50)
+        .pages()
+        .thread_page(None, 50)
         .map(|(rows, _)| rows)
         .expect("threads");
     assert_eq!(threads.len(), 1, "still live");
