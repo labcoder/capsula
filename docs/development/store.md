@@ -57,6 +57,21 @@ commits answers `NotHidden` and leaves the thread live. A failure after it answe
 the next start finishes the deletion. A thread that's already gone answers `Removed`. Only the
 error's kind is logged.
 
+How long the store thread spends on one delete, the thread's stand-in captures included
+(`measure_big_delete`, release build on Rez, 20 samples a store, then 5 after a reader let go):
+
+| Store | p50 / p95 / worst | After a reader held the WAL | WAL held |
+|---|---|---|---|
+| 46 MiB | 7.4 / 9.8 / 10.2 ms | 21.9 / 22.2 / 24.3 ms | 13.4 MiB |
+| 232 MiB | 18.0 / 23.3 / 26.2 ms | 75.0 / 83.8 / 88.8 ms | 41.7 MiB |
+| 515 MiB | 25.9 / 35.2 / 36.1 ms | 86.4 / 88.0 / 97.0 ms | 36.0 MiB |
+| 984 MiB | 41.6 / 52.6 / 54.3 ms | 153.4 / 155.0 / 156.0 ms | 58.9 MiB |
+
+shortcut: a delete right after a reader held a snapshot through a big write can take past the
+~100 ms foreground bound (156 ms at 984 MiB), since its commit checkpoints the held WAL. Nothing
+in slice 2 holds such a snapshot; OSC-152 adds the first long-lived reader and the checkpoint
+lifecycle that bounds it.
+
 ```mermaid
 sequenceDiagram
   participant S as Store thread
