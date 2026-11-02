@@ -1,6 +1,6 @@
 //! Serial scene preparation and pure layout, independent of painting and clocks.
 mod callout;
-pub mod diagram;
+mod diagram;
 mod nodes;
 mod path;
 mod prepare;
