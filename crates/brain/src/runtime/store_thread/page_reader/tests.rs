@@ -355,11 +355,13 @@ fn the_helper_keeps_a_raise_made_while_it_ran_and_retries_what_a_reader_held() {
     };
     assert!(running.thread.send(big(1)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
+    running.saw(|seen| *seen == Seen::CheckpointOwed);
     assert_eq!(done.recv_timeout(PATIENCE), Ok(true));
     // Raised while that checkpoint is held, after its result.
     let before = on_disk();
     assert!(running.thread.send(big(2)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(2) });
+    running.saw(|seen| *seen == Seen::CheckpointOwed);
     release.send(()).expect("held");
     assert_eq!(done.recv_timeout(PATIENCE), Ok(true), "the raise was kept");
     assert!(on_disk() > before + 64 * 1024, "turn 2 reached the file");
@@ -370,6 +372,7 @@ fn the_helper_keeps_a_raise_made_while_it_ran_and_retries_what_a_reader_held() {
         .expect("snapshot");
     assert!(running.thread.send(big(3)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(3) });
+    running.saw(|seen| *seen == Seen::CheckpointOwed);
     release.send(()).expect("held");
     assert_eq!(
         done.recv_timeout(PATIENCE),
