@@ -49,6 +49,10 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const PONG_WITHIN: Duration = Duration::from_secs(2);
 /// Ended runs waiting on the store before new turns wait too [guess].
 const MAX_ENDING: usize = 16;
+/// Scenes with a clear or a kept selection owed before new turns wait too [guess]. A
+/// watermark, not a cap: an admitted run's scene and a Clear of the visible set can still add
+/// debt, so it stays below this plus `MAX_VISIBLE_SCENES` plus `MAX_ENDING + 1`.
+const DEBT_WATERMARK: usize = MAX_VISIBLE_SCENES + 4;
 /// Data queued for the shell before new turns and the engine wait, one credit window [guess].
 const DATA_CAP: usize = 512 * 1024;
 /// Engine events queued before the engine waits [guess].
@@ -101,6 +105,8 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     engine: Option<(RunId, oneshot::Sender<()>)>,
     deadline: Option<(RunId, Instant)>,
+    /// When owed writes are tried again.
+    retry_at: Option<Instant>,
     /// Page completions belong only to the connection that requested them.
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
@@ -157,6 +163,7 @@ impl Brain {
             engine_events,
             engine: None,
             deadline: None,
+            retry_at: None,
             epoch: 0,
             chunk_target: recovery::CHUNK_TARGET,
             #[cfg(test)]
@@ -393,6 +400,7 @@ impl Brain {
         let mut ping_sent: Option<Instant> = None;
         let barrier = Instant::now() + SCENES_WAIT;
         // A clear whose write failed while no shell was connected is retried now at the latest.
+        self.retry_at = None;
         let retried = self.coordinator.retry_clears();
         if self.apply(retried, Some(&mut link)).is_err() {
             return Ended::Lost;
@@ -408,8 +416,7 @@ impl Brain {
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns =
-                described && take_engine && self.coordinator.ending_runs() < MAX_ENDING;
+            let take_turns = described && take_engine && self.room_for_turns();
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
@@ -439,7 +446,11 @@ impl Brain {
                 Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
-                () = sleep_until(deadline) => {
+                () = sleep_until(self.retry_at) => {
+                    self.retry_at = None;
+                    Input::Retry
+                }
+                () = sleep_until(deadline.map(|(_, at)| at)) => {
                     self.deadline = None;
                     match deadline {
                         Some((run, _)) => Input::Deadline { run },
@@ -481,6 +492,11 @@ impl Brain {
                 return Ended::Lost;
             }
         }
+    }
+
+    /// New turns wait while too many runs are ending or too many writes are owed.
+    fn room_for_turns(&self) -> bool {
+        self.coordinator.ending_runs() < MAX_ENDING && self.coordinator.debt() < DEBT_WATERMARK
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
@@ -555,6 +571,9 @@ impl Brain {
                             self.engine = Some((engine_run, cancel));
                         }
                     }
+                }
+                Effect::ArmRetry { after } => {
+                    self.retry_at = Some(Instant::now() + after);
                 }
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
@@ -797,9 +816,9 @@ fn window() -> usize {
     usize::try_from(DATA_WINDOW).expect("the window fits in usize")
 }
 
-async fn sleep_until(deadline: Option<(RunId, Instant)>) {
-    match deadline {
-        Some((_, at)) => tokio::time::sleep_until(at).await,
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

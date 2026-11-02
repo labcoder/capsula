@@ -132,6 +132,8 @@ pub enum Input {
         /// Whether it committed.
         ok: bool,
     },
+    /// The timer for owed clears and selections fired.
+    Retry,
 }
 
 /// What an engine produces.
@@ -177,6 +179,11 @@ pub enum Effect {
     RevokeScenes {
         /// The scenes.
         scenes: Vec<SceneId>,
+    },
+    /// Report `Retry` after `after`.
+    ArmRetry {
+        /// How long from now.
+        after: Duration,
     },
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
@@ -375,6 +382,10 @@ pub struct Coordinator {
     /// The first run the connection being served could start; older runs were drawn by a
     /// shell that's gone, so this one's Stop can't name them.
     session_start: RunId,
+    /// The wait before owed writes are tried again, doubling while they keep failing.
+    retry_after: Duration,
+    /// An `ArmRetry` is out and hasn't come back as `Retry`.
+    retry_armed: bool,
 }
 
 impl Coordinator {
@@ -390,6 +401,8 @@ impl Coordinator {
             clearing: Vec::new(),
             keeping: Vec::new(),
             session_start: RunId(last_run.0 + 1),
+            retry_after: scenes::FIRST_RETRY,
+            retry_armed: false,
         }
     }
 
@@ -432,6 +445,7 @@ impl Coordinator {
                     self.turn(thread, text, &mut effects);
                 }
             }
+            Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
             }
@@ -503,9 +517,11 @@ impl Coordinator {
             Input::ClearVisible => self.clear_visible(&mut effects),
             Input::SceneKept { scene, ok: true } => self.kept(scene),
             Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
+            Input::Retry => self.retry_now(&mut effects),
         }
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
+        self.arm_retry(&mut effects);
         Ok(effects)
     }
 

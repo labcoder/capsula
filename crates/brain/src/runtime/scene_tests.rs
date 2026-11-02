@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, DataToShell, Phase, RunId, SceneDescriptor, SceneId, Step, ThreadId,
+    ControlToBrain, ControlToShell, DataToShell, Phase, RunId, SceneDescriptor, SceneId, Step,
+    ThreadId,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::timeout;
@@ -1336,6 +1337,13 @@ async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped(
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
     store.leftovers().remove().expect("removed");
     drop(store);
+    let reopened = Store::open(&scratch.db()).expect("reopen");
+    let (_, high_water) = reopened.high_water().expect("high water");
+    assert_eq!(
+        high_water, deleted,
+        "delete, purge and reopen keep the run high-water mark"
+    );
+    drop(reopened);
     let mut brain = test_support::brain(&scratch, "0 text a\n5000 text never");
     let ((control, data), mut shell) = duplex();
     let client = async {
@@ -1355,4 +1363,66 @@ async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped(
         "a deleted run's id is never handed out again"
     );
     assert_eq!(outcomes(&scratch), [outcome("interrupted", "stop")]);
+}
+
+#[tokio::test]
+async fn turns_wait_while_eight_writes_are_owed_and_resume_once_the_store_takes_them() {
+    let scratch = Scratch::new("owed-watermark");
+    let four = drawn(&scratch, &[&["a"], &["b"], &["c"], &["d"]]);
+    let mut brain = test_support::brain(&scratch, "0 step s");
+    sql(&scratch, FAIL_CLEARS);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(ids(&shell.scenes().await), four);
+        shell.send(&clear(&four)).await;
+        for _ in 0..4 {
+            shell.submit("draw").await;
+            let (run, _) = shell.state().await;
+            let scene = loop {
+                match shell.data().await {
+                    DataToShell::StepCommit { run: of, scene, .. } if of == run => break scene,
+                    DataToShell::RunEnd { .. } | DataToShell::SceneSnapshot { .. } => {}
+                    other => panic!("unexpected {other:?}"),
+                }
+            };
+            while shell.state().await != (run, Phase::Done) {}
+            shell.send(&clear(&[scene])).await;
+        }
+        shell.submit("waits").await;
+        let taken = timeout(Duration::from_millis(500), shell.state()).await;
+        assert!(
+            taken.is_err(),
+            "no turn is taken while eight writes are owed"
+        );
+        sql(&scratch, "DROP TRIGGER full;");
+        let (run, _) = shell.state().await;
+        while shell.state().await != (run, Phase::Done) {}
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(recovered(&scratch).len(), 1, "only the last turn's scene");
+}
+
+#[tokio::test]
+async fn an_idle_connection_with_nothing_owed_pings_and_writes_nothing() {
+    let scratch = Scratch::new("idle");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut observed = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        // A deadline to outlast: two ping intervals and the first retry wait.
+        let read = crate::ipc::read::<ControlToShell>(&mut shell.control_in, Pipe::Control);
+        let read = timeout(Duration::from_millis(1200), read).await;
+        assert!(read.is_err(), "nothing on control");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(observed.try_recv().ok(), None, "no store op");
 }

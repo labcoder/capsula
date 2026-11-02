@@ -2,10 +2,17 @@
 //! not yet durable. Every way a scene leaves the set writes a `scene_cleared`, so the store's
 //! recovery at start reads the set this holds.
 
+use std::time::Duration;
+
 use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
 use super::{Coordinator, Effect, Stale, StoreOp};
 use crate::store::SceneState;
+
+/// The first wait before owed writes that failed are tried again [guess].
+pub(super) const FIRST_RETRY: Duration = Duration::from_millis(500);
+/// The longest, so a store that keeps failing is tried rarely instead of constantly [guess].
+const LAST_RETRY: Duration = Duration::from_secs(30);
 
 impl Coordinator {
     /// The visible set, oldest first.
@@ -25,11 +32,49 @@ impl Coordinator {
             || self.keeping.iter().any(|(_, _, writing)| *writing)
     }
 
-    /// Writes again every clear whose write failed.
+    /// Writes again every clear whose write failed. A timer armed before is forgotten: the
+    /// connection that would have heard it is gone.
     pub fn retry_clears(&mut self) -> Vec<Effect> {
+        self.retry_armed = false;
         let mut effects = Vec::new();
         self.retry(&mut effects);
+        self.arm_retry(&mut effects);
         effects
+    }
+
+    /// How many scenes have a clear or a kept selection owed. A scene whose late Stop's
+    /// selection is still being written can be cleared too; it counts once.
+    pub fn debt(&self) -> usize {
+        let kept_only = self
+            .keeping
+            .iter()
+            .filter(|(scene, _, _)| !self.clearing.iter().any(|(cleared, _)| cleared == scene));
+        self.clearing.len() + kept_only.count()
+    }
+
+    /// The retry timer fired: owed writes go out again, and if they fail the next wait is
+    /// longer.
+    pub(super) fn retry_now(&mut self, effects: &mut Vec<Effect>) {
+        self.retry_armed = false;
+        self.retry_after = (self.retry_after * 2).min(LAST_RETRY);
+        self.retry(effects);
+    }
+
+    /// Arms the retry timer when an owed write has none in flight, so a failure is tried again
+    /// even when nothing else reaches the store, such as while turns wait on the debt.
+    pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
+        if self.clearing.is_empty() && self.keeping.is_empty() {
+            self.retry_after = FIRST_RETRY;
+            return;
+        }
+        let unwritten = self.clearing.iter().any(|(_, writing)| !writing)
+            || self.keeping.iter().any(|(_, _, writing)| !writing);
+        if unwritten && !self.retry_armed {
+            self.retry_armed = true;
+            effects.push(Effect::ArmRetry {
+                after: self.retry_after,
+            });
+        }
     }
 
     /// The scene a run's first step evicts: the oldest, when four are visible. Only one first
@@ -125,9 +170,6 @@ impl Coordinator {
         mut revealed: Vec<u32>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        if run < self.session_start {
-            return Err(Stale);
-        }
         if let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) {
             let (outstanding, steps) = (ended.outstanding(), ended.steps);
             let ending = ended.ending.as_mut().expect("an ending run has an Ending");

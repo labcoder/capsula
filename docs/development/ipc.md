@@ -121,12 +121,20 @@ four scenes are visible; [processes](processes.md) has the rule that keeps that 
 - **Snapshots.** After `Scenes`, each scene's kept steps go out in chunks of whole steps packed up
   to 32 KiB [guess], one at a time whenever the data queue has room, ahead of engine events. A
   step bigger than the target goes alone. Turns are taken only after `Scenes`, so no live step
-  belongs to a scene in recovery. A `ClearDrawing` stops the cleared scenes' chunks not yet
-  queued. Snapshot frames are data, so the tap never records them.
+  belongs to a scene in recovery. A `ClearDrawing` stops the cleared scenes' chunks that haven't
+  started writing, queued ones included. Snapshot frames are data, so the tap never records them.
 - **Clears.** A cleared scene leaves the visible set at once, so no later `Scenes` lists it, and
-  counts as cleared once its write commits. A failed write is retried with the next store
-  operation, and at the latest at the next connect barrier. An id that isn't visible changes
-  nothing.
+  counts as cleared once its write commits. A failed write, a clear's or a late Stop's kept
+  selection, is retried with the next store operation, at the next connect barrier, and on a
+  timer that waits 0.5 s and doubles up to 30 s while the writes keep failing [guess]. So a
+  store that recovers lets typing go on without the user doing anything, and one that keeps
+  failing is tried rarely, not constantly. An id that isn't visible changes nothing.
+- **Owed writes hold back turns.** While eight scenes [guess] have a clear or a kept selection
+  owed, new turns wait; Stop, `ClearDrawing` and `Pong` are still served, and nothing owed is
+  ever dropped. A scene counts once even when both are owed, as when it's cleared while its
+  selection is being written. Eight is a watermark, not a cap: after turns stop, debt can come
+  only from scenes that already exist, the four visible ones and one for each admitted run, the
+  current one and up to 16 ending. So at most 7 + 4 + 17 scenes are owed, each at most twice.
 
 The shell's [`Drawing`](presence.md#the-drawing) follows each connection's recovery:
 

@@ -1,6 +1,8 @@
 //! The visible set in the core loop: eviction, kept steps, clears and steps waiting for their
 //! scene's id.
 
+use std::time::Duration;
+
 use capsula_protocol::message::{Phase, RunId, SceneId, Step, ThreadId};
 
 use super::{
@@ -50,6 +52,12 @@ fn first_write(evict: Option<u64>, label: &str) -> Effect {
         index: 0,
         step: step(label),
     })
+}
+
+fn arm(millis: u64) -> Effect {
+    Effect::ArmRetry {
+        after: Duration::from_millis(millis),
+    }
 }
 
 fn clear_scenes(ids: &[u64]) -> Effect {
@@ -107,7 +115,7 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
         scenes: vec![SceneId(1)],
         ok: false,
     };
-    assert_eq!(core.handle(failed), Ok(Vec::new()));
+    assert_eq!(core.handle(failed), Ok(vec![arm(500)]));
     assert!(!core.settled(), "a failed clear never turns into a no-op");
     assert!(!core.clears_in_flight());
     let turn = core
@@ -372,4 +380,90 @@ fn a_scene_state_s_debug_leaves_its_labels_out() {
     let debug = format!("{state:?}");
     assert!(!debug.contains("zqxsentinel"), "{debug}");
     assert!(debug.contains("revision: 3"), "{debug}");
+}
+
+#[test]
+fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
+    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
+    let failed = |id: u64| Input::ScenesCleared {
+        scenes: vec![SceneId(id)],
+        ok: false,
+    };
+    core.handle(Input::Clear {
+        scenes: vec![SceneId(1)],
+    })
+    .expect("a clear is never stale");
+    for millis in [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000] {
+        assert_eq!(core.handle(failed(1)), Ok(vec![arm(millis)]));
+        assert_eq!(
+            core.handle(Input::Retry),
+            Ok(vec![clear_scenes(&[1])]),
+            "written again when the timer fires"
+        );
+    }
+    let committed = Input::ScenesCleared {
+        scenes: vec![SceneId(1)],
+        ok: true,
+    };
+    assert_eq!(core.handle(committed), Ok(Vec::new()));
+    assert!(core.settled());
+    core.handle(Input::Clear {
+        scenes: vec![SceneId(2)],
+    })
+    .expect("a clear is never stale");
+    assert_eq!(
+        core.handle(failed(2)),
+        Ok(vec![arm(500)]),
+        "a commit resets the wait"
+    );
+    assert_eq!(
+        core.handle(failed(2)),
+        Ok(Vec::new()),
+        "one timer at a time"
+    );
+}
+
+#[test]
+fn a_scene_both_kept_and_cleared_counts_once_and_both_writes_retire() {
+    let mut core = started_over(&[]);
+    for (index, label) in [(0, "a"), (1, "b")] {
+        core.handle(engine(R, EngineEvent::Step(step(label))))
+            .expect("current");
+        core.handle(ack(index, label)).expect("current");
+    }
+    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(Input::RunStored { run: R }).expect("ending");
+    let stop = Input::Stop {
+        run: R,
+        revealed: vec![0],
+    };
+    assert_eq!(
+        core.handle(stop),
+        Ok(vec![Effect::Store(StoreOp::KeepScene {
+            scene: S,
+            revealed: vec![0],
+        })])
+    );
+    let clear = Input::Clear { scenes: vec![S] };
+    assert_eq!(
+        core.handle(clear),
+        Ok(vec![
+            Effect::RevokeScenes { scenes: vec![S] },
+            clear_scenes(&[S.0])
+        ]),
+        "cleared while its selection is still being written"
+    );
+    assert_eq!(core.debt(), 1, "one scene, owed twice");
+    assert!(core.clears_in_flight());
+    let kept = Input::SceneKept { scene: S, ok: true };
+    assert_eq!(core.handle(kept), Ok(Vec::new()));
+    assert_eq!(core.debt(), 1, "its clear is still owed");
+    assert!(!core.settled());
+    let cleared = Input::ScenesCleared {
+        scenes: vec![S],
+        ok: true,
+    };
+    assert_eq!(core.handle(cleared), Ok(Vec::new()));
+    assert_eq!(core.debt(), 0);
+    assert!(core.settled());
 }
