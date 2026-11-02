@@ -353,11 +353,11 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     let store = Store::open(&scratch.db()).expect("reopen");
-    assert!(store.search("closed", 10).expect("search").is_empty());
+    assert!(store.search_ids("closed").expect("search").is_empty());
     // The replacement run may or may not commit its own step before the shell hangs up.
     assert!(
         store
-            .search("one", 10)
+            .search_ids("one")
             .expect("search")
             .contains(&first_thread)
     );
@@ -493,12 +493,7 @@ async fn a_full_control_queue_still_applies_store_effects() {
     out.try_send(Vec::new()).expect("room for one");
     let queue = RefCell::new(DataQueue::new(window()));
     let (ready, mut tap) = (Notify::new(), Tap::from_env());
-    let mut link = Link {
-        out: &out,
-        queue: &queue,
-        ready: &ready,
-        tap: &mut tap,
-    };
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
     let stop = Input::Stop {
         run,
         revealed: Vec::new(),

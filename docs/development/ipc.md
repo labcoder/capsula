@@ -121,12 +121,22 @@ four scenes are visible; [processes](processes.md) has the rule that keeps that 
 - **Snapshots.** After `Scenes`, each scene's kept steps go out in chunks of whole steps packed up
   to 32 KiB [guess], one at a time whenever the data queue has room, ahead of engine events. A
   step bigger than the target goes alone. Turns are taken only after `Scenes`, so no live step
-  belongs to a scene in recovery. A `ClearDrawing` stops the cleared scenes' chunks not yet
-  queued. Snapshot frames are data, so the tap never records them.
+  belongs to a scene in recovery. A `ClearDrawing` stops the cleared scenes' chunks that haven't
+  started writing, queued ones included. Snapshot frames are data, so the tap never records them.
 - **Clears.** A cleared scene leaves the visible set at once, so no later `Scenes` lists it, and
-  counts as cleared once its write commits. A failed write is retried with the next store
-  operation, and at the latest at the next connect barrier. An id that isn't visible changes
-  nothing.
+  counts as cleared once its write commits. A failed write, a clear's or a late Stop's kept
+  selection, is retried with the next store operation, at the next connect barrier, and on a
+  timer that waits 0.5 s and doubles up to 30 s while the writes keep failing [guess]. The
+  timer is armed only while an owed write has none in flight, doubles only when it fires, and
+  goes back to 0.5 s when any owed write commits, replacing a longer deadline. So a store that
+  recovers lets typing go on without the user doing anything, and one that keeps failing is
+  tried rarely, not constantly. An id that isn't visible changes nothing.
+- **Owed writes hold back turns.** While eight scenes [guess] have a clear or a kept selection
+  owed, new turns wait; Stop, `ClearDrawing` and `Pong` are still served, and nothing owed is
+  ever dropped. A scene counts once even when both are owed, as when it's cleared while its
+  selection is being written. Eight is a watermark, not a cap: after turns stop, debt can come
+  only from scenes that already exist, the four visible ones and one for each admitted run, the
+  current one and up to 16 ending. So at most 7 + 4 + 17 scenes are owed, each at most twice.
 
 The shell's [`Drawing`](presence.md#the-drawing) follows each connection's recovery:
 
@@ -144,7 +154,8 @@ stateDiagram-v2
 - **`Scenes` is authoritative.** A shown scene it doesn't name goes at once. A named one stays
   until its snapshot installs and then is replaced, even at the same revision.
 - **Install.** A scene's `last` chunk installs it only on the connection that described it, with
-  no clear since, the descriptor's revision, and exactly `committed` steps. Installed steps show
+  no clear since, the descriptor's revision on every chunk, and exactly `committed` steps. A
+  chunk at any other revision spoils its scene's snapshot, so none of it installs. Installed steps show
   as already activated, and installing sends nothing.
 - **Esc during recovery.** While awaiting, Esc drops the held chunks, granting their credit, and
   keeps a clear intent through disconnects and Retry: the next complete `Scenes` clears every id
@@ -189,8 +200,12 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   that would end the connection. It refuses blank turns, which the brain ignores, and turns too
   long for a data frame.
 - **Broken input.** A malformed frame on either pipe, a repeated `Welcome`, or scenes or
-  chunks that break the rules above end the connection, and the link reconnects as after any loss. A lost brain fences every run it knew
-  and forgets the unanswered turns.
+  chunks that break the rules above end the connection, and the link reconnects as after any
+  loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
+  a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
+  id out again, and the answer and scenes still shown belong to none of the new brain's runs.
+  The next turn goes to a new thread unless the shell knows its thread is stored: picked from
+  the threads list, or answered by a run, which starts only after its turn is stored.
 
 ## Starting and reconnecting
 

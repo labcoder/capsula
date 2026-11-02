@@ -49,6 +49,10 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const PONG_WITHIN: Duration = Duration::from_secs(2);
 /// Ended runs waiting on the store before new turns wait too [guess].
 const MAX_ENDING: usize = 16;
+/// Scenes with a clear or a kept selection owed before new turns wait too [guess]. A
+/// watermark, not a cap: an admitted run's scene and a Clear of the visible set can still add
+/// debt, so it stays below this plus `MAX_VISIBLE_SCENES` plus `MAX_ENDING + 1`.
+const DEBT_WATERMARK: usize = MAX_VISIBLE_SCENES + 4;
 /// Data queued for the shell before new turns and the engine wait, one credit window [guess].
 const DATA_CAP: usize = 512 * 1024;
 /// Engine events queued before the engine waits [guess].
@@ -101,10 +105,31 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     engine: Option<(RunId, oneshot::Sender<()>)>,
     deadline: Option<(RunId, Instant)>,
+    /// When owed writes are tried again.
+    retry_at: Option<Instant>,
     /// Page completions belong only to the connection that requested them.
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
     chunk_target: usize,
+    /// Hears what tests wait on instead of sleeping.
+    #[cfg(test)]
+    observer: mpsc::UnboundedSender<Seen>,
+    #[cfg(test)]
+    seen: Option<mpsc::UnboundedReceiver<Seen>>,
+}
+
+/// What a test can wait for instead of sleeping.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Seen {
+    /// The core queued this op for the store thread.
+    StoreOpQueued(crate::coordinator::StoreOp),
+    /// The store thread began this op; a write may then wait on a lock.
+    StoreOpStarted(crate::coordinator::StoreOp),
+    /// The brain handled a control input and applied its effects.
+    ControlApplied,
+    /// A page reply landed while the data queue was full and waits for room.
+    PageHeld,
 }
 
 impl Brain {
@@ -121,8 +146,14 @@ impl Brain {
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
-        let store =
-            StoreThread::spawn(store, inputs_tx.clone(), store_thread::Schedule::default())?;
+        #[cfg(test)]
+        let (observer, seen) = mpsc::unbounded_channel();
+        let schedule = store_thread::Schedule {
+            #[cfg(test)]
+            observed: Some(observer.clone()),
+            ..store_thread::Schedule::default()
+        };
+        let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
             coordinator: Coordinator::new(last_thread, last_run, scenes),
@@ -134,9 +165,30 @@ impl Brain {
             engine_events,
             engine: None,
             deadline: None,
+            retry_at: None,
             epoch: 0,
             chunk_target: recovery::CHUNK_TARGET,
+            #[cfg(test)]
+            observer,
+            #[cfg(test)]
+            seen: Some(seen),
         })
+    }
+
+    /// What the brain reports to a test, from here on.
+    #[cfg(test)]
+    pub(crate) fn observe(&mut self) -> mpsc::UnboundedReceiver<Seen> {
+        self.seen.take().expect("observed once")
+    }
+
+    /// Reports a control input as it's taken. Tests run on one thread, so they hear it only
+    /// once its effects are applied and the brain waits again.
+    #[cfg(test)]
+    fn control_taken(&self, input: &Input) {
+        if matches!(input, Input::Stop { .. } | Input::Clear { .. }) {
+            // A test that stopped listening doesn't matter.
+            self.observer.send(Seen::ControlApplied).ok();
+        }
     }
 
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
@@ -249,6 +301,7 @@ impl Brain {
             .epoch
             .checked_add(1)
             .expect("connection epochs never wrap");
+        self.coordinator.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
@@ -274,12 +327,7 @@ impl Brain {
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
-            let link = Link {
-                out: &out_tx,
-                queue: &queue,
-                ready: &ready,
-                tap: &mut *tap,
-            };
+            let link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -304,13 +352,12 @@ impl Brain {
                 }
             }
         }
+        // The reader may have forwarded controls in the same poll that saw the pipe end.
+        while let Ok(message) = controls.try_recv() {
+            self.control_offline(message, tap);
+        }
         let ended = match quit.get() {
-            Some(deadline) => {
-                while let Ok(message) = controls.try_recv() {
-                    self.control_offline(message, tap);
-                }
-                Ended::Quit { deadline }
-            }
+            Some(deadline) => Ended::Quit { deadline },
             None => ended,
         };
         self.offline(Input::ShellLost);
@@ -322,6 +369,8 @@ impl Brain {
     fn control_offline(&mut self, message: ControlToBrain, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message);
         if let Ok(Some(input)) = control_input(message) {
+            #[cfg(test)]
+            self.control_taken(&input);
             self.offline(input);
         }
     }
@@ -350,28 +399,26 @@ impl Brain {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
-        let mut held_pages = VecDeque::new();
-        let mut recovery: Option<Recovery> = None;
         let barrier = Instant::now() + SCENES_WAIT;
         // A clear whose write failed while no shell was connected is retried now at the latest.
+        self.retry_at = None;
         let retried = self.coordinator.retry_clears();
         if self.apply(retried, Some(&mut link)).is_err() {
             return Ended::Lost;
         }
         loop {
-            if recovery.is_none() && self.coordinator.settled() {
+            if link.recovery.is_none() && self.coordinator.settled() {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
                 };
-                recovery = Some(described);
+                link.recovery = Some(described);
             }
-            let described = recovery.is_some();
+            let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns =
-                described && take_engine && self.coordinator.ending_runs() < MAX_ENDING;
-            let feed = take_engine && recovery.as_ref().is_some_and(Recovery::pending);
+            let take_turns = described && take_engine && self.room_for_turns();
+            let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
                 Some(message) = controls.recv() => {
@@ -385,11 +432,11 @@ impl Brain {
                         Err(ended) => return ended,
                     }
                 }
-                () = std::future::ready(()), if take_engine && !held_pages.is_empty() => {
-                    held_pages.pop_front().expect("a held page is ready")
+                () = std::future::ready(()), if take_engine && !link.held_pages.is_empty() => {
+                    link.held_pages.pop_front().expect("a held page is ready")
                 }
                 () = std::future::ready(()), if feed => {
-                    let chunk = recovery.as_mut().and_then(Recovery::next_chunk);
+                    let chunk = link.recovery.as_mut().and_then(Recovery::next_chunk);
                     if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
                         return Ended::Lost;
                     }
@@ -400,7 +447,11 @@ impl Brain {
                 Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
-                () = sleep_until(deadline) => {
+                () = sleep_until(self.retry_at) => {
+                    self.retry_at = None;
+                    Input::Retry
+                }
+                () = sleep_until(deadline.map(|(_, at)| at)) => {
                     self.deadline = None;
                     match deadline {
                         Some((run, _)) => Input::Deadline { run },
@@ -419,18 +470,19 @@ impl Brain {
                     }
                 }
             };
-            if let (Input::Clear { scenes }, Some(recovery)) = (&input, &mut recovery) {
-                recovery.drop_scenes(scenes);
-            }
             if let Input::PageRead { epoch, .. } = &input {
                 if *epoch != self.epoch {
                     continue;
                 }
                 if !take_engine {
-                    held_pages.push_back(input);
+                    link.held_pages.push_back(input);
+                    #[cfg(test)]
+                    self.observer.send(Seen::PageHeld).ok();
                     continue;
                 }
             }
+            #[cfg(test)]
+            self.control_taken(&input);
             let Ok(effects) = self.coordinator.handle(input) else {
                 continue;
             };
@@ -443,6 +495,11 @@ impl Brain {
                 return Ended::Lost;
             }
         }
+    }
+
+    /// New turns wait while too many runs are ending or too many writes are owed.
+    fn room_for_turns(&self) -> bool {
+        self.coordinator.ending_runs() < MAX_ENDING && self.coordinator.debt() < DEBT_WATERMARK
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
@@ -465,6 +522,8 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
+                    #[cfg(test)]
+                    self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
@@ -498,6 +557,14 @@ impl Brain {
                         link.queue.borrow_mut().revoke(run);
                     }
                 }
+                Effect::RevokeScenes { scenes } => {
+                    if let Some(link) = link.as_deref_mut() {
+                        if let Some(recovery) = &mut link.recovery {
+                            recovery.drop_scenes(&scenes);
+                        }
+                        link.queue.borrow_mut().revoke_scenes(&scenes);
+                    }
+                }
                 Effect::CancelEngine { run } => {
                     if let Some((engine_run, cancel)) = self.engine.take() {
                         if engine_run == run {
@@ -508,6 +575,10 @@ impl Brain {
                         }
                     }
                 }
+                Effect::ArmRetry { after } => {
+                    self.retry_at = Some(Instant::now() + after);
+                }
+                Effect::CancelRetry => self.retry_at = None,
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }
@@ -690,9 +761,29 @@ struct Link<'a, 't> {
     queue: &'a RefCell<DataQueue>,
     ready: &'a Notify,
     tap: &'t mut Tap,
+    /// The snapshots still to send, once `Scenes` has gone.
+    recovery: Option<Recovery>,
+    /// Page replies waiting for room in the data queue.
+    held_pages: VecDeque<Input>,
 }
 
-impl Link<'_, '_> {
+impl<'a, 't> Link<'a, 't> {
+    fn new(
+        out: &'a mpsc::Sender<Vec<u8>>,
+        queue: &'a RefCell<DataQueue>,
+        ready: &'a Notify,
+        tap: &'t mut Tap,
+    ) -> Self {
+        Self {
+            out,
+            queue,
+            ready,
+            tap,
+            recovery: None,
+            held_pages: VecDeque::new(),
+        }
+    }
+
     fn control(&mut self, message: &ControlToShell) -> Result<(), Full> {
         self.tap.record(Pipe::Control, Direction::ToShell, message);
         match frame::encode(message, Pipe::Control) {
@@ -713,7 +804,7 @@ impl Link<'_, '_> {
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::SceneSnapshot { .. } => Owner::Scene,
+            DataToShell::SceneSnapshot { scene, .. } => Owner::Scene(*scene),
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");
@@ -729,9 +820,9 @@ fn window() -> usize {
     usize::try_from(DATA_WINDOW).expect("the window fits in usize")
 }
 
-async fn sleep_until(deadline: Option<(RunId, Instant)>) {
-    match deadline {
-        Some((_, at)) => tokio::time::sleep_until(at).await,
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

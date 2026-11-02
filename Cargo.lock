@@ -780,6 +780,7 @@ name = "capsula-shell"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "capsula-brain",
  "capsula-protocol",
  "fluent-bundle",
  "gpui-kit",

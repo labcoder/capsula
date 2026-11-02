@@ -43,6 +43,7 @@ fn spawn_with_room(
         last_retry: Duration::from_millis(20),
         free_space,
         attempts: Some(heard),
+        observed: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
     (thread, attempts)
@@ -291,6 +292,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         first_retry: Duration::from_secs(600),
         last_retry: Duration::from_secs(600),
         attempts: Some(heard),
+        observed: None,
         ..Schedule::default()
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
@@ -322,15 +324,15 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
 
     let store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
-        store.search("stored", 10).expect("search"),
+        store.search_ids("stored").expect("search"),
         vec![ThreadId(3)]
     );
     assert_eq!(
-        store.search("kept", 10).expect("search"),
+        store.search_ids("kept").expect("search"),
         vec![kept],
         "the same file, not an empty one"
     );
-    assert_eq!(store.search("refused", 10).expect("search"), Vec::new());
+    assert_eq!(store.search_ids("refused").expect("search"), Vec::new());
 }
 
 #[test]
@@ -502,6 +504,7 @@ fn page_reads_neither_postpone_a_purge_nor_stop_its_copy() {
         Schedule {
             quiet: Duration::from_secs(600),
             attempts: Some(heard),
+            observed: None,
             ..Schedule::default()
         },
         &store,
@@ -576,6 +579,7 @@ fn a_page_read_starts_an_already_due_purge_without_waiting_for_quiet() {
             quiet: Duration::from_secs(600),
             free_space: |_| Ok(u64::MAX),
             attempts: Some(heard),
+            observed: None,
             ..Schedule::default()
         },
         &store,

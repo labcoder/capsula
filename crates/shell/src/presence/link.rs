@@ -136,6 +136,7 @@ impl Presence {
             .as_ref()
             .filter(|_| state == LinkState::Connected)
         {
+            self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.threads.update(cx, |state, cx| {
                 state.connected();

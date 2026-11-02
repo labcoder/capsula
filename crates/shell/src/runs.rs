@@ -9,8 +9,8 @@
 
 use capsula_protocol::frame::Pipe;
 use capsula_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
-    ThreadId,
+    ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
+    SceneDescriptor, ThreadId,
 };
 
 use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
@@ -76,16 +76,22 @@ pub(crate) struct Runs {
     held: Vec<(DataToShell, u32)>,
     /// The thread the next turn continues.
     thread: Option<ThreadId>,
+    /// `thread` is known to be stored: picked from the store's list, or answered by a run, which
+    /// starts only once its turn is stored.
+    durable: bool,
     /// Turns sent before the latest explicit selection must not replace that choice.
     selection_pending: usize,
     shown: Option<Shown>,
     drawing: Drawing,
+    /// The brain the last connection reached.
+    incarnation: Option<Incarnation>,
 }
 
 impl Runs {
     /// Selects the thread the next typed turn continues; no message or store write is needed.
     pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) {
         self.thread = thread;
+        self.durable = thread.is_some();
         self.selection_pending = self.pending;
     }
 
@@ -182,6 +188,27 @@ impl Runs {
         Ok(())
     }
 
+    /// The brain this connection reached. A new one can reuse the run id of a turn the last
+    /// one never stored, so nothing the last one numbered may fence or match its runs.
+    pub(crate) fn met(&mut self, incarnation: Incarnation) {
+        if self.incarnation.replace(incarnation) == Some(incarnation) {
+            return;
+        }
+        self.answered = RunId(0);
+        self.fence = RunId(0);
+        // A new thread whose first turn the last brain never stored doesn't exist for this one.
+        // shortcut: a new thread stopped or failed before answering loses its target here even
+        // when its turn was stored; a stored-turn ack in RunState would keep it.
+        if !self.durable {
+            self.thread = None;
+        }
+        // The answer stays on screen, but run 0 is none of the new brain's runs.
+        if let Some(shown) = &mut self.shown {
+            shown.run = RunId(0);
+        }
+        self.drawing.forget_runs();
+    }
+
     /// The link connected, as connection `generation`.
     pub(crate) fn connected(&mut self, generation: u64) {
         self.connected = true;
@@ -209,6 +236,7 @@ impl Runs {
         if run > self.answered {
             self.answered = run;
             if self.selection_pending == 0 {
+                self.durable &= self.thread == Some(thread);
                 self.thread = Some(thread);
             } else {
                 self.selection_pending -= 1;
@@ -231,6 +259,9 @@ impl Runs {
                     data_ended: false,
                 });
             }
+        }
+        if matches!(phase, Phase::Answering | Phase::Done) && self.thread == Some(thread) {
+            self.durable = true;
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
@@ -345,9 +376,15 @@ fn keep_end(text: &mut String, max: usize) {
 mod tests {
     use capsula_protocol::frame::Pipe;
     use capsula_protocol::message::{
-        ControlToBrain, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor,
-        SceneId, Step, ThreadId,
+        ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
+        SceneDescriptor, SceneId, Step, ThreadId,
     };
+
+    use capsula_brain::coordinator::{
+        Coordinator, Effect as BrainEffect, EngineEvent, Input, StoreOp,
+    };
+    use capsula_brain::store::Store;
+    use capsula_protocol::message::ControlToShell;
 
     use super::{Applied, Refused, Runs, TEXT_KEPT};
     use crate::drawing::{Chunk, Effect};
@@ -401,6 +438,147 @@ mod tests {
         assert_eq!(runs.apply_data(page, BYTES), BYTES);
         assert!(runs.held.is_empty());
         assert!(runs.shown().is_none());
+    }
+
+    #[test]
+    fn a_new_brain_reusing_a_run_id_is_shown_afresh_and_the_same_brain_keeps_its_fence() {
+        let mut runs = Runs::default();
+        runs.met(Incarnation(1));
+        runs.connected(1);
+        submit(&mut runs, "first");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, step(5, 0));
+        data(&mut runs, text(5, "old"));
+        state(&mut runs, 5, Phase::Done);
+        data(&mut runs, end(5));
+        runs.disconnected();
+        runs.met(Incarnation(2));
+        runs.connected(2);
+        submit(&mut runs, "after a crash before the turn was stored");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, text(5, "new"));
+        assert_eq!(runs.shown().map(|shown| shown.text.as_str()), Some("new"));
+        assert!(
+            runs.drawing.revealed(RunId(5)).is_empty(),
+            "the last brain's scene isn't this run's to stop"
+        );
+        runs.disconnected();
+        runs.met(Incarnation(2));
+        runs.connected(3);
+        submit(&mut runs, "same brain");
+        state(&mut runs, 5, Phase::Thinking);
+        data(&mut runs, text(5, " stale"));
+        assert_eq!(
+            runs.shown().map(|shown| shown.text.as_str()),
+            Some("new"),
+            "the same brain's old run stays fenced"
+        );
+    }
+
+    /// Routes a brain's effects the way the runtime would, storing a `BeginTurn` only when
+    /// there's a `store`.
+    fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEffect>) {
+        for effect in effects {
+            match effect {
+                BrainEffect::Store(StoreOp::BeginTurn {
+                    thread,
+                    title,
+                    run,
+                    text,
+                }) => {
+                    if let Some(store) = store.as_deref_mut() {
+                        store
+                            .begin_turn(thread, title.as_deref(), run, &text)
+                            .expect("the turn is stored");
+                    }
+                }
+                BrainEffect::Control(ControlToShell::RunState { run, thread, phase }) => {
+                    runs.apply_state(run, thread, phase);
+                }
+                BrainEffect::Data(message) => {
+                    runs.apply_data(message, BYTES);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The turn `runs` sends for `typed`, as the brain takes it.
+    fn typed(runs: &mut Runs, typed: &str) -> Input {
+        let mut sent = None;
+        runs.submit(typed, |turn| {
+            sent = Some(turn);
+            true
+        })
+        .expect("sent");
+        let Some(DataToBrain::TextSubmit { thread, text }) = sent else {
+            panic!("a turn was sent")
+        };
+        Input::Turn { thread, text }
+    }
+
+    /// A brain started on `store`, as after a restart.
+    fn restarted(store: &Store) -> Coordinator {
+        let (thread, run) = store.high_water().expect("ids");
+        Coordinator::new(thread, run, store.scenes().expect("scenes"))
+    }
+
+    #[test]
+    fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() {
+        let dir = std::env::temp_dir().join(format!("capsula-shell-runs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch folder");
+        let mut store = Store::open(&dir.join("store.db")).expect("store");
+        let mut runs = Runs::default();
+        runs.met(Incarnation(1));
+        runs.connected(1);
+        runs.apply_scenes(&[]).expect("valid");
+        let mut brain = restarted(&store);
+        let turn = typed(&mut runs, "a new thread");
+        let effects = brain.handle(turn).expect("turn");
+        deliver(&mut runs, None, effects);
+
+        runs.disconnected();
+        runs.met(Incarnation(2));
+        runs.connected(2);
+        runs.apply_scenes(&[]).expect("valid");
+        let mut brain = restarted(&store);
+        let turn = typed(&mut runs, "again");
+        assert!(matches!(turn, Input::Turn { thread: None, .. }));
+        let effects = brain.handle(turn).expect("turn");
+        deliver(&mut runs, Some(&mut store), effects);
+        let run = RunId(1);
+        let effects = brain.handle(Input::TurnStored { run }).expect("stored");
+        deliver(&mut runs, Some(&mut store), effects);
+        let answer = Input::Engine {
+            run,
+            event: EngineEvent::Text("answered".to_owned()),
+        };
+        let effects = brain.handle(answer).expect("text");
+        deliver(&mut runs, Some(&mut store), effects);
+        assert_eq!(
+            runs.shown().map(|shown| shown.text.as_str()),
+            Some("answered")
+        );
+
+        runs.disconnected();
+        runs.met(Incarnation(3));
+        runs.connected(3);
+        let mut brain = restarted(&store);
+        let turn = typed(&mut runs, "continue");
+        assert!(
+            matches!(
+                turn,
+                Input::Turn {
+                    thread: Some(ThreadId(1)),
+                    ..
+                }
+            ),
+            "an answered thread is stored, so it's still continued"
+        );
+        let effects = brain.handle(turn).expect("turn");
+        deliver(&mut runs, Some(&mut store), effects);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

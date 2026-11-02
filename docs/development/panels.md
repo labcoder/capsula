@@ -13,13 +13,19 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
 - GPUI's variable-height `list()` supplies the messages, displayed oldest first. Older pages
   are inserted at the top, preserving the visible scroll anchor. Page Up and Page Down scroll
   the focused message region; its scrollbar and Older messages command are also available.
+  The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
+  of which steps stayed isn't listed, since the steps themselves are.
 
 Search uses the store's literal FTS phrase matching, not query syntax, and settles for 150 ms
 [guess]. Results are ranked by the best matching event, with descending thread id breaking
 ties. Clearing the search restores updated-time ordering. Overlong searches are refused before
 they can leave an unanswered, unencodable request.
-Search continuations recover the cursor thread's current rank, not a snapshot; reopen after
-matching events change to refresh the ranked list.
+A search continuation compares with the last thread's rank as the store scores it now, so it
+continues after a write moves every rank. Ranks are live, not a snapshot: any change to indexed
+text, a match or not, can move them, so reopen to refresh the ranked list. The cursor also
+carries the rank as exact float bits, used only once the thread's events are gone; a deletion
+moves the other ranks too, so that continuation can skip or repeat rows. A cursor whose rank
+isn't finite fails the page.
 
 ## Requests and staleness
 
@@ -103,6 +109,8 @@ Search words, titles, and page text never enter tracing, diagnostics, error Disp
 loggable Debug. The pipe tap records control only; pages always travel on data.
 
 Esc stops work first, clears a drawing second, and only then dismisses the threads panel while
-it is focused. Blur hides it without restoring the old foreground; ordinary dismissal restores
+it is focused. The panel counts as focused only once its window reports activation, as the
+typing panel does, so a deactivation that arrives before then can't hide a panel that just
+opened. Blur hides it without restoring the old foreground; ordinary dismissal restores
 the previous foreground when Capsula still owns it. Newly created panels inherit an active
 hold's capture exclusion. The initial panel size, 48 by 34 interface rems, is a [guess].

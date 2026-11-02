@@ -9,6 +9,7 @@
 //! store until its outcome is written, so a failed write is still reported.
 
 mod scenes;
+mod store_op;
 #[cfg(test)]
 mod tests;
 
@@ -21,6 +22,8 @@ use capsula_protocol::message::{
 };
 
 use crate::store::{Failure, Interruption, RunEnd, SceneState, SceneTarget};
+
+pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
@@ -132,6 +135,8 @@ pub enum Input {
         /// Whether it committed.
         ok: bool,
     },
+    /// The timer for owed clears and selections fired.
+    Retry,
 }
 
 /// What an engine produces.
@@ -173,6 +178,18 @@ pub enum Effect {
         /// The run.
         run: RunId,
     },
+    /// Drop the snapshots of `scenes` not yet sent to the shell, which cleared them.
+    RevokeScenes {
+        /// The scenes.
+        scenes: Vec<SceneId>,
+    },
+    /// Report `Retry` after `after`, replacing any earlier `ArmRetry`.
+    ArmRetry {
+        /// How long from now.
+        after: Duration,
+    },
+    /// Forget the armed `ArmRetry`: nothing owed is left unwritten.
+    CancelRetry,
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.
@@ -180,107 +197,6 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
-}
-
-/// A store operation: an autocommit read, or a write in one transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StoreOp {
-    /// An autocommit read that neither stops nor postpones a purge.
-    ReadPage {
-        /// The connection that requested the page.
-        epoch: u64,
-        /// The shell's request counter.
-        request: u32,
-        /// The page to read.
-        page: PageOf,
-    },
-    /// The turn, its run, and the thread when `title` names a new one.
-    BeginTurn {
-        /// The thread.
-        thread: ThreadId,
-        /// The new thread's title, or `None` for an existing thread.
-        title: Option<String>,
-        /// The run.
-        run: RunId,
-        /// The user's text.
-        text: String,
-    },
-    /// The text streamed since the last write, then one step.
-    CommitStep {
-        /// The thread.
-        thread: ThreadId,
-        /// The run.
-        run: RunId,
-        /// Text streamed before the step, if any.
-        text: Option<String>,
-        /// A new scene for a run's first step, or the run's scene.
-        scene: SceneTarget,
-        /// Its index.
-        index: u32,
-        /// The step.
-        step: Step,
-    },
-    /// The text streamed since the last write, the revealed set, then the run's outcome.
-    EndRun {
-        /// The thread.
-        thread: ThreadId,
-        /// The run.
-        run: RunId,
-        /// Text streamed since the last step, if any.
-        text: Option<String>,
-        /// The steps that stayed on screen, when the user stopped the run.
-        revealed: Option<Vec<u32>>,
-        /// The run's scene, when a Stop kept none of its steps.
-        clear: Option<SceneId>,
-        /// How it ended.
-        end: RunEnd,
-    },
-    /// The scenes that left the visible set, in one transaction.
-    ClearScenes {
-        /// The scenes.
-        scenes: Vec<SceneId>,
-    },
-    /// The steps of a scene's run that stayed, for a Stop no outcome recorded.
-    KeepScene {
-        /// The scene.
-        scene: SceneId,
-        /// Indices of the steps that stayed.
-        revealed: Vec<u32>,
-    },
-}
-
-impl StoreOp {
-    /// The run a write belongs to; page reads and clears have none.
-    pub fn run(&self) -> Option<RunId> {
-        match self {
-            Self::ReadPage { .. } | Self::ClearScenes { .. } | Self::KeepScene { .. } => None,
-            Self::BeginTurn { run, .. }
-            | Self::CommitStep { run, .. }
-            | Self::EndRun { run, .. } => Some(*run),
-        }
-    }
-
-    /// Answers an operation that couldn't reach the store.
-    pub fn failed(&self) -> Input {
-        match self {
-            Self::ReadPage { epoch, request, .. } => Input::PageRead {
-                epoch: *epoch,
-                request: *request,
-                reply: DataToShell::PageFailed { request: *request },
-            },
-            Self::BeginTurn { run, .. }
-            | Self::CommitStep { run, .. }
-            | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
-            Self::ClearScenes { scenes } => Input::ScenesCleared {
-                scenes: scenes.clone(),
-                ok: false,
-            },
-            Self::KeepScene { scene, .. } => Input::SceneKept {
-                scene: *scene,
-                ok: false,
-            },
-        }
-    }
 }
 
 /// The input named a run that isn't current, or an acknowledgement nothing is waiting for, so
@@ -367,6 +283,13 @@ pub struct Coordinator {
     clearing: Vec<(SceneId, bool)>,
     /// Visible scenes whose kept selection no outcome recorded, the same way.
     keeping: Vec<(SceneId, Vec<u32>, bool)>,
+    /// The first run the connection being served could start; older runs were drawn by a
+    /// shell that's gone, so this one's Stop can't name them.
+    session_start: RunId,
+    /// The wait before owed writes are tried again, doubling while they keep failing.
+    retry_after: Duration,
+    /// The wait of the `ArmRetry` that's out and hasn't come back as `Retry`.
+    retry_armed: Option<Duration>,
 }
 
 impl Coordinator {
@@ -381,6 +304,9 @@ impl Coordinator {
             scenes,
             clearing: Vec::new(),
             keeping: Vec::new(),
+            session_start: RunId(last_run.0 + 1),
+            retry_after: scenes::FIRST_RETRY,
+            retry_armed: None,
         }
     }
 
@@ -423,6 +349,7 @@ impl Coordinator {
                     self.turn(thread, text, &mut effects);
                 }
             }
+            Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
             }
@@ -494,9 +421,11 @@ impl Coordinator {
             Input::ClearVisible => self.clear_visible(&mut effects),
             Input::SceneKept { scene, ok: true } => self.kept(scene),
             Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
+            Input::Retry => self.retry_now(&mut effects),
         }
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
+        self.arm_retry(&mut effects);
         Ok(effects)
     }
 
