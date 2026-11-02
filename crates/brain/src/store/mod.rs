@@ -17,9 +17,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
-pub use purge::{Copied, Owed, Swap};
+pub use purge::{Copied, Leftovers, Owed, Swap};
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +50,10 @@ pub enum StoreError {
     /// A new thread or run id isn't above the highest ever issued.
     #[error("the id was issued before")]
     StaleId,
+    /// The store's file is gone but the old store a purge replaced is still beside it, so
+    /// something went wrong mid-swap; nothing is opened or removed until a person looks.
+    #[error("the store's file is missing, but a purge's old copy of it remains")]
+    Retired,
     /// A purge's copy of the store couldn't be written, moved or removed.
     #[error("a purge file couldn't be written, moved or removed")]
     Purge(#[source] io::Error),
@@ -204,8 +208,10 @@ pub struct Recovered {
 pub struct Store {
     conn: Connection,
     path: PathBuf,
-    /// Mirrors the `purge_pending` row.
+    /// Mirrors the `purge_pending` row, read only from an open file.
     purge_pending: bool,
+    /// False after a swap's reopen failed, until [`Store::reconnect`] opens the file again.
+    serving: bool,
 }
 
 /// The store's file, in the data folder.
@@ -228,19 +234,41 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
-        // A copy a purge left behind when the brain died; the purge is still owed. One that can't
-        // go yet mustn't stop the start: every copy clears leftovers first.
-        if let Err(error) = purge::discard(path) {
-            tracing::warn!(%error, "a purge's leftover copy couldn't be removed");
+        // Files a purge left are removed by the store's thread, not here on the way to the first
+        // turn. Only a store missing beside its old copy stops the start: creating an empty
+        // store there would hide the old one.
+        let missing = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        };
+        if missing(path) && !missing(&purge::old(path)) {
+            return Err(StoreError::Retired);
         }
-        let mut conn = connect(path)?;
+        let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
         schema::migrate(&mut conn)?;
         let purge_pending = owes(&conn)?;
         Ok(Self {
             conn,
             path: path.to_owned(),
             purge_pending,
+            serving: true,
         })
+    }
+
+    /// Opens the file again after a swap's reopen failed; does nothing while it's open. It never
+    /// creates a file, so a missing store stays unavailable rather than coming back empty.
+    ///
+    /// # Errors
+    /// Fails while the file still can't be opened; the store stays unavailable.
+    pub fn reconnect(&mut self) -> Result<(), StoreError> {
+        if self.serving {
+            return Ok(());
+        }
+        let conn = connect(&self.path, OpenFlags::empty())?;
+        self.purge_pending = owes(&conn)?;
+        self.conn = conn;
+        self.serving = true;
+        Ok(())
     }
 
     /// Whether a deletion's purge is still owed.
@@ -524,9 +552,16 @@ impl Store {
     }
 }
 
-/// Opens the store's file in WAL mode with its settings.
-fn connect(path: &Path) -> Result<Connection, StoreError> {
-    let conn = Connection::open(path)?;
+/// Opens the store's file in WAL mode with its settings; `create` is
+/// `OpenFlags::SQLITE_OPEN_CREATE` where a missing file may be created.
+fn connect(path: &Path, create: OpenFlags) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | create,
+    )?;
     // journal_mode answers with a row, so it's read rather than set.
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     if mode != "wal" {
