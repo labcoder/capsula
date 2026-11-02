@@ -61,6 +61,10 @@ pub(crate) struct Gesture {
 }
 
 impl Gesture {
+    pub(crate) fn holding(&self) -> bool {
+        matches!(self.phase, Phase::Active { holding: true, .. })
+    }
+
     pub(crate) fn listening(&self) -> bool {
         matches!(self.phase, Phase::Active { .. })
     }
@@ -208,6 +212,25 @@ mod tests {
             [Some(Effect::Listening), None, None],
             "chord activates"
         );
+    }
+
+    #[test]
+    fn new_panels_can_inherit_capture_exclusion_only_during_a_recognized_hold() {
+        let now = Instant::now();
+        let mut gesture = Gesture::default();
+        assert!(!gesture.holding());
+        chord(&mut gesture, now);
+        assert!(
+            !gesture.holding(),
+            "a short tap doesn't exclude a new panel"
+        );
+        assert_eq!(
+            gesture.handle(Event::Deadline, now + WINDOW),
+            [Some(Effect::HoldStarted), None, None]
+        );
+        assert!(gesture.holding());
+        key(&mut gesture, Key::LeftAlt, Edge::Up, now + WINDOW);
+        assert!(!gesture.holding(), "release restores future panels too");
     }
 
     fn tap(gesture: &mut Gesture, now: Instant) {

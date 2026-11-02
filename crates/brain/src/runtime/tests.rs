@@ -23,6 +23,9 @@ use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
+#[path = "page_tests.rs"]
+mod pages;
+
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
 /// What a duplex pipe holds before its writer blocks.

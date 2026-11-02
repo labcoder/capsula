@@ -57,22 +57,14 @@ impl Position {
         let dock_height = dock[1].min(height);
         let x = left + (width - dock_width) * column / 2;
         let y = top + (height - dock_height) * row / 2;
-        let panel_width = panel[0].min(width);
-        let panel_height = panel[1].min(height);
-        let panel_x = (x + (dock_width - panel_width) / 2).clamp(left, left + width - panel_width);
-        let below = y + dock_height;
-        let panel_y = if below + panel_height <= top + height {
-            below
-        } else {
-            (y - panel_height).max(top)
-        };
+        let panel = anchored_panel([x, y, dock_width, dock_height], area, panel);
         let overlay_x = (x - extent).max(left);
         let overlay_y = (y - extent).max(top);
         let overlay_right = (x + dock_width + extent).min(left + width);
         let overlay_bottom = (y + dock_height + extent).min(top + height);
         Layout {
             dock: [x, y, dock_width, dock_height],
-            panel: [panel_x, panel_y, panel_width, panel_height],
+            panel,
             overlay: [
                 overlay_x,
                 overlay_y,
@@ -100,10 +92,32 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
+    /// Places another interactive surface against the dock, clamped to the work area.
+    pub(crate) fn anchored_panel(self, area: [i32; 4], panel: [i32; 2]) -> [i32; 4] {
+        anchored_panel(self.dock, area, panel)
+    }
+
     /// Whether the pointer is over the panel. Over the dock is the outline's question.
     pub(crate) fn panel_contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
         panel == PanelVisibility::Visible && contains(self.panel, point)
     }
+}
+
+fn anchored_panel(
+    [x, y, dock_width, dock_height]: [i32; 4],
+    [left, top, width, height]: [i32; 4],
+    panel: [i32; 2],
+) -> [i32; 4] {
+    let panel_width = panel[0].min(width);
+    let panel_height = panel[1].min(height);
+    let panel_x = (x + (dock_width - panel_width) / 2).clamp(left, left + width - panel_width);
+    let below = y + dock_height;
+    let panel_y = if below + panel_height <= top + height {
+        below
+    } else {
+        (y - panel_height).max(top)
+    };
+    [panel_x, panel_y, panel_width, panel_height]
 }
 
 fn contains([x, y, width, height]: [i32; 4], [px, py]: [i32; 2]) -> bool {
@@ -113,6 +127,30 @@ fn contains([x, y, width, height]: [i32; 4], [px, py]: [i32; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{PanelVisibility, Position};
+
+    #[test]
+    fn a_larger_threads_surface_uses_the_same_anchor_and_stays_in_the_work_area() {
+        let area = [30, -600, 900, 600];
+        let threads =
+            [Position::TopLeft, Position::Center, Position::BottomRight].map(|position| {
+                position
+                    .layout(area, [100, 40], [300, 120], 0)
+                    .anchored_panel(area, [760, 540])
+            });
+        assert_eq!(
+            threads,
+            [
+                [30, -560, 760, 540],
+                [100, -600, 760, 540],
+                [170, -580, 760, 540],
+            ]
+        );
+        let tiny = Position::BottomRight.layout([10, 20, 80, 30], [100, 40], [300, 120], 0);
+        assert_eq!(
+            tiny.anchored_panel([10, 20, 80, 30], [760, 540]),
+            [10, 20, 80, 30]
+        );
+    }
 
     #[test]
     fn nine_anchors_use_work_area_edges_and_center() {

@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use capsula_protocol::message::{DataToShell, PageOf, RunId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -157,6 +158,10 @@ impl Purger {
             }
             return;
         };
+        self.finish(store, job);
+    }
+
+    fn finish(&mut self, store: &mut Store, job: Job) {
         match job {
             Job::Copy { helper, .. } => match helper.join() {
                 Ok(Ok(Some(copied))) => {
@@ -304,11 +309,7 @@ impl StoreThread {
                     };
                     match op {
                         Ok(op) => {
-                            purger.op_arriving();
-                            if acks.send(apply(&mut store, op)).is_err() {
-                                tracing::debug!("an acknowledgement had no listener");
-                            }
-                            purger.op_arrived(&store);
+                            serve_op(&mut store, &mut purger, &acks, op);
                         }
                         Err(RecvTimeoutError::Timeout) => purger.tick(&mut store),
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -342,25 +343,29 @@ impl StoreThread {
     }
 }
 
-/// Runs one operation in one transaction and answers it. Errors are logged by kind and run id
-/// only, never content.
-fn apply(store: &mut Store, op: StoreOp) -> Input {
-    let run = op.run();
-    // After a swap's reopen failed: fails closed until the file opens again.
-    if let Err(error) = store.reconnect() {
-        tracing::warn!(%error, run = run.0, "the store is unavailable");
-        return Input::StoreFailed { run };
-    }
-    let (result, stored, what) = match op {
+fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
+    match op {
+        StoreOp::ReadPage {
+            epoch,
+            request,
+            page,
+        } => {
+            answer(acks, read(store, epoch, request, page));
+            purger.tick(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,
             run,
             text,
-        } => (
-            store.begin_turn(thread, title.as_deref(), run, &text),
-            Input::TurnStored { run },
+        } => write(
+            store,
+            purger,
+            acks,
+            run,
             "turn",
+            Input::TurnStored { run },
+            |store| store.begin_turn(thread, title.as_deref(), run, &text),
         ),
         StoreOp::CommitStep {
             thread,
@@ -370,24 +375,31 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             step,
         } => {
             let body = serde_json::json!({ "index": index, "label": step.label }).to_string();
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
-            events.push(NewEvent {
-                kind: EventKind::SceneStep,
-                text: Some(step.label.as_str()),
-                body: Some(body.as_str()),
-            });
-            (
-                store.append(thread, run, &events),
-                Input::StepStored { run, index, step },
+            let label = step.label.clone();
+            write(
+                store,
+                purger,
+                acks,
+                run,
                 "step",
-            )
+                Input::StepStored { run, index, step },
+                |store| {
+                    let mut events = Vec::with_capacity(2);
+                    if let Some(text) = &text {
+                        events.push(NewEvent {
+                            kind: EventKind::AssistantText,
+                            text: Some(text.as_str()),
+                            body: None,
+                        });
+                    }
+                    events.push(NewEvent {
+                        kind: EventKind::SceneStep,
+                        text: Some(label.as_str()),
+                        body: Some(body.as_str()),
+                    });
+                    store.append(thread, run, &events)
+                },
+            );
         }
         StoreOp::EndRun {
             thread,
@@ -395,511 +407,82 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
             text,
             revealed,
             end,
-        } => {
-            let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
-            if let Some(revealed) = &revealed {
-                events.push(NewEvent {
-                    kind: EventKind::Revealed,
-                    text: None,
-                    body: Some(revealed.as_str()),
-                });
-            }
-            (
-                store.end_run(thread, run, &events, end),
-                Input::RunStored { run },
-                "outcome",
-            )
-        }
+        } => write(
+            store,
+            purger,
+            acks,
+            run,
+            "outcome",
+            Input::RunStored { run },
+            |store| {
+                let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
+                let mut events = Vec::with_capacity(2);
+                if let Some(text) = &text {
+                    events.push(NewEvent {
+                        kind: EventKind::AssistantText,
+                        text: Some(text.as_str()),
+                        body: None,
+                    });
+                }
+                if let Some(revealed) = &revealed {
+                    events.push(NewEvent {
+                        kind: EventKind::Revealed,
+                        text: None,
+                        body: Some(revealed.as_str()),
+                    });
+                }
+                store.end_run(thread, run, &events, end)
+            },
+        ),
+    }
+}
+
+/// Reads one page, never holding off the purge. A failure is logged by kind only.
+fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
+    let reply = store
+        .reconnect()
+        .and_then(|()| store.read_page(request, page));
+    if let Err(error) = &reply {
+        tracing::warn!(%error, "a page read failed");
+    }
+    Input::PageRead {
+        epoch,
+        request,
+        reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+    }
+}
+
+/// Runs one write in one transaction and answers it, holding off the purge meanwhile. Errors are
+/// logged by kind and run id only, never content.
+fn write(
+    store: &mut Store,
+    purger: &mut Purger,
+    acks: &UnboundedSender<Input>,
+    run: RunId,
+    what: &'static str,
+    stored: Input,
+    op: impl FnOnce(&mut Store) -> Result<(), StoreError>,
+) {
+    purger.op_arriving();
+    // After a swap's reopen failed: fails closed until the file opens again.
+    let reply = if let Err(error) = store.reconnect() {
+        tracing::warn!(%error, run = run.0, "the store is unavailable");
+        Input::StoreFailed { run }
+    } else if let Err(error) = op(store) {
+        tracing::warn!(%error, run = run.0, what, "a store operation failed");
+        Input::StoreFailed { run }
+    } else {
+        stored
     };
-    match result {
-        Ok(()) => stored,
-        Err(error) => {
-            tracing::warn!(%error, run = run.0, what, "a store operation failed");
-            Input::StoreFailed { run }
-        }
+    answer(acks, reply);
+    purger.op_arrived(store);
+}
+
+fn answer(acks: &UnboundedSender<Input>, reply: Input) {
+    if acks.send(reply).is_err() {
+        tracing::debug!("an acknowledgement had no listener");
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs::{File, OpenOptions};
-    use std::os::windows::fs::OpenOptionsExt as _;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::mpsc as std_mpsc;
-    use std::time::{Duration, Instant};
-
-    use capsula_protocol::message::{RunId, Step, ThreadId};
-    use rusqlite::Connection;
-    use tokio::sync::mpsc;
-
-    use super::{Attempt, Purger, Schedule, StoreThread};
-    use crate::coordinator::{Input, StoreOp};
-    use crate::store::{RunEnd, Store, Swap};
-    use crate::test_support::Scratch;
-
-    /// A store owing the purge of its deleted thread 1.
-    fn owing(scratch: &Scratch) -> Store {
-        let mut store = Store::open(&scratch.db()).expect("store");
-        store
-            .begin_turn(ThreadId(1), Some("t"), RunId(1), "doomed")
-            .expect("turn");
-        store.begin_delete(ThreadId(1)).expect("begin");
-        store.finish_delete(ThreadId(1)).expect("finish");
-        store
-    }
-
-    /// The store's thread with short waits, and every purge attempt it makes.
-    fn spawn(store: Store) -> (StoreThread, std_mpsc::Receiver<Attempt>) {
-        spawn_with_room(store, |_| Ok(u64::MAX))
-    }
-
-    fn spawn_with_room(
-        store: Store,
-        free_space: fn(&Path) -> std::io::Result<u64>,
-    ) -> (StoreThread, std_mpsc::Receiver<Attempt>) {
-        let (acks, _replies) = mpsc::unbounded_channel();
-        let (heard, attempts) = std_mpsc::channel();
-        let schedule = Schedule {
-            quiet: Duration::from_millis(1),
-            first_retry: Duration::from_millis(20),
-            last_retry: Duration::from_millis(20),
-            free_space,
-            attempts: Some(heard),
-        };
-        let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
-        (thread, attempts)
-    }
-
-    fn next(attempts: &std_mpsc::Receiver<Attempt>) -> Attempt {
-        attempts
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the store's thread tried the purge")
-    }
-
-    /// Waits out repeats a retry already under way can add, then expects the purge to finish.
-    fn done_after(attempts: &std_mpsc::Receiver<Attempt>, repeats: &[Attempt]) {
-        let mut next_one = next(attempts);
-        while repeats.contains(&next_one) {
-            next_one = next(attempts);
-        }
-        assert_eq!(next_one, Attempt::Done);
-    }
-
-    fn owed(scratch: &Scratch) -> i64 {
-        Connection::open(scratch.db())
-            .expect("watcher")
-            .query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))
-            .expect("count")
-    }
-
-    #[test]
-    fn an_owed_purge_waits_for_the_active_run_and_then_runs_in_session() {
-        let scratch = Scratch::new("idle-purge");
-        let mut store = owing(&scratch);
-        store
-            .begin_turn(ThreadId(2), Some("kept"), RunId(2), "busy")
-            .expect("an active run");
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Busy);
-        assert_eq!(owed(&scratch), 1);
-        assert!(thread.send(StoreOp::EndRun {
-            thread: ThreadId(2),
-            run: RunId(2),
-            text: None,
-            revealed: None,
-            end: RunEnd::Done,
-        }));
-        assert_eq!(next(&attempts), Attempt::Done);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(owed(&scratch), 0);
-    }
-
-    #[test]
-    fn a_purge_a_reader_held_off_is_retried_in_session() {
-        let scratch = Scratch::new("held-off-purge");
-        let mut store = owing(&scratch);
-        let reader = Connection::open(scratch.db()).expect("reader");
-        reader
-            .execute_batch("BEGIN; SELECT count(*) FROM events;")
-            .expect("snapshot");
-        // A write past the reader's snapshot, so the WAL can't be emptied under it.
-        store
-            .begin_turn(ThreadId(2), Some("later"), RunId(2), "later")
-            .expect("turn");
-        store
-            .end_run(ThreadId(2), RunId(2), &[], RunEnd::Done)
-            .expect("ended");
-        let (thread, attempts) = spawn(store);
-        // The drain can't copy the WAL past the reader, so the copy stops.
-        assert_eq!(next(&attempts), Attempt::Stale);
-        drop(reader);
-        // A retry racing the reader's close can find its file still held.
-        done_after(&attempts, &[Attempt::Stale, Attempt::Failed]);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(owed(&scratch), 0);
-    }
-
-    #[test]
-    fn a_failed_purge_is_retried_in_session() {
-        let scratch = Scratch::new("failed-purge");
-        let store = owing(&scratch);
-        // The copy carries the trigger, so clearing its owed row fails.
-        store
-            .conn_for_tests()
-            .execute_batch(
-                "CREATE TRIGGER keep_owed BEFORE DELETE ON purge_pending BEGIN
-                     SELECT RAISE(ABORT, 'kept');
-                 END;",
-            )
-            .expect("trigger");
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Failed);
-        Connection::open(scratch.db())
-            .expect("fixer")
-            .execute_batch("DROP TRIGGER keep_owed")
-            .expect("drop");
-        done_after(&attempts, &[Attempt::Failed]);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(owed(&scratch), 0);
-    }
-
-    /// `db` with `suffix` appended.
-    fn beside(db: &Path, suffix: &str) -> PathBuf {
-        let mut path = db.as_os_str().to_owned();
-        path.push(suffix);
-        PathBuf::from(path)
-    }
-
-    /// The purge's files left in the store's folder.
-    fn purge_files(scratch: &Scratch) -> Vec<PathBuf> {
-        std::fs::read_dir(scratch.db().parent().expect("a folder"))
-            .expect("folder")
-            .map(|entry| entry.expect("entry").path())
-            .filter(|path| path.to_string_lossy().contains(".purge-"))
-            .collect()
-    }
-
-    /// A store whose swap finished, with the old store still beside it, as a crash right after
-    /// the swap leaves it.
-    fn swapped_with_old_left(scratch: &Scratch) -> Store {
-        let mut store = owing(scratch);
-        let copied = store
-            .owed()
-            .expect("owed")
-            .expect("idle")
-            .copy(&Arc::new(AtomicBool::new(false)))
-            .expect("copy")
-            .expect("not stopped");
-        assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
-        assert_eq!(
-            purge_files(scratch),
-            vec![beside(&scratch.db(), ".purge-old")]
-        );
-        store
-    }
-
-    /// Opens `path` so it can't be deleted until the handle drops.
-    fn hold(path: &Path) -> File {
-        const FILE_SHARE_READ: u32 = 1;
-        OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(path)
-            .expect("held")
-    }
-
-    #[test]
-    fn an_old_store_left_by_a_crash_is_removed_at_start() {
-        let scratch = Scratch::new("old-left");
-        drop(swapped_with_old_left(&scratch));
-        let store = Store::open(&scratch.db()).expect("reopen");
-        assert!(
-            !store.purge_pending(),
-            "the swap finished; only the file is owed"
-        );
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Done);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
-    }
-
-    #[test]
-    fn an_old_store_that_cant_be_removed_is_retried_in_session_and_at_the_next_start() {
-        let scratch = Scratch::new("old-held");
-        let store = swapped_with_old_left(&scratch);
-        let holder = hold(&beside(&scratch.db(), ".purge-old"));
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Failed);
-        assert_eq!(next(&attempts), Attempt::Failed, "retried in session");
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(
-            purge_files(&scratch),
-            vec![beside(&scratch.db(), ".purge-old")]
-        );
-
-        // The next start owes the removal even though no purge row is left.
-        let store = Store::open(&scratch.db()).expect("reopen");
-        assert!(!store.purge_pending());
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Failed);
-        drop(holder);
-        done_after(&attempts, &[Attempt::Failed]);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
-    }
-
-    #[test]
-    fn an_old_store_held_with_delete_sharing_is_finished_only_once_its_name_is_gone() {
-        const FILE_SHARE_READ_WRITE_DELETE: u32 = 1 | 2 | 4;
-        let scratch = Scratch::new("old-shared");
-        let store = swapped_with_old_left(&scratch);
-        let mut holder = Some(
-            OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ_WRITE_DELETE)
-                .open(beside(&scratch.db(), ".purge-old"))
-                .expect("held"),
-        );
-        let (thread, attempts) = spawn(store);
-        match next(&attempts) {
-            // NTFS with POSIX deletion drops the name at once, while the file is still open.
-            Attempt::Done => eprintln!("the old store's name went while it was held"),
-            attempt => {
-                eprintln!("the old store's name stayed while it was held");
-                assert_eq!(attempt, Attempt::Failed);
-                assert_eq!(
-                    purge_files(&scratch),
-                    vec![beside(&scratch.db(), ".purge-old")]
-                );
-                drop(holder.take());
-                done_after(&attempts, &[Attempt::Failed]);
-            }
-        }
-        assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
-        drop(holder);
-        thread.close().blocking_recv().expect("closed");
-    }
-
-    async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
-        tokio::time::timeout(Duration::from_secs(10), replies.recv())
-            .await
-            .expect("a reply in time")
-            .expect("the thread is alive")
-    }
-
-    #[tokio::test]
-    async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_can() {
-        let scratch = Scratch::new("unavailable");
-        let mut store = owing(&scratch);
-        let (kept, run) = (ThreadId(2), RunId(2));
-        store
-            .begin_turn(kept, Some("kept"), run, "kept words")
-            .expect("turn");
-        store.end_run(kept, run, &[], RunEnd::Done).expect("ended");
-        let copied = store
-            .owed()
-            .expect("owed")
-            .expect("idle")
-            .copy(&Arc::new(AtomicBool::new(false)))
-            .expect("copy")
-            .expect("not stopped");
-        let wal = store.swap_failing_reopen(&copied);
-
-        let (acks, mut replies) = mpsc::unbounded_channel();
-        let (heard, attempts) = std_mpsc::channel();
-        // The purge's retry is far off, so only an op can open the store again.
-        let schedule = Schedule {
-            first_retry: Duration::from_secs(600),
-            last_retry: Duration::from_secs(600),
-            attempts: Some(heard),
-            ..Schedule::default()
-        };
-        let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
-        assert_eq!(
-            next(&attempts),
-            Attempt::Failed,
-            "the purge can't reopen it"
-        );
-        let turn = |run, text: &str| StoreOp::BeginTurn {
-            thread: ThreadId(3),
-            title: Some("new".to_owned()),
-            run,
-            text: text.to_owned(),
-        };
-        assert!(thread.send(turn(RunId(3), "refused words")));
-        assert_eq!(
-            reply(&mut replies).await,
-            Input::StoreFailed { run: RunId(3) }
-        );
-        assert!(wal.is_dir(), "nothing took the obstruction's place");
-
-        std::fs::remove_dir(&wal).expect("out of the way");
-        assert!(thread.send(turn(RunId(4), "stored words")));
-        assert_eq!(
-            reply(&mut replies).await,
-            Input::TurnStored { run: RunId(4) }
-        );
-        thread.close().await.expect("closed");
-
-        let store = Store::open(&scratch.db()).expect("reopen");
-        assert_eq!(
-            store.search("stored", 10).expect("search"),
-            vec![ThreadId(3)]
-        );
-        assert_eq!(
-            store.search("kept", 10).expect("search"),
-            vec![kept],
-            "the same file, not an empty one"
-        );
-        assert_eq!(store.search("refused", 10).expect("search"), Vec::new());
-    }
-
-    #[test]
-    fn a_crash_right_after_the_link_keeps_the_store_and_the_purge_finishes() {
-        let scratch = Scratch::new("crash-linked");
-        let store = owing(&scratch);
-        let copied = store
-            .owed()
-            .expect("owed")
-            .expect("idle")
-            .copy(&Arc::new(AtomicBool::new(false)))
-            .expect("copy")
-            .expect("not stopped");
-        drop((copied, store));
-        // The brain dies between the link and the move: two names for the old store.
-        std::fs::hard_link(scratch.db(), beside(&scratch.db(), ".purge-old")).expect("linked");
-
-        let store = Store::open(&scratch.db()).expect("reopen");
-        assert!(store.purge_pending());
-        let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Done);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
-        assert_eq!(owed(&scratch), 0);
-    }
-
-    static ROOM: AtomicU64 = AtomicU64::new(0);
-
-    #[test]
-    fn a_copy_waits_until_the_volume_has_room_for_it_and_the_foreground() {
-        let scratch = Scratch::new("no-room");
-        let store = owing(&scratch);
-        let bytes: i64 = store
-            .conn_for_tests()
-            .query_row(
-                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
-                [],
-                |row| row.get(0),
-            )
-            .expect("size");
-        let needs = 2 * u64::try_from(bytes).expect("a size") + super::RESERVE;
-        ROOM.store(needs - 1, Ordering::SeqCst);
-        let (thread, attempts) = spawn_with_room(store, |_| Ok(ROOM.load(Ordering::SeqCst)));
-        assert_eq!(next(&attempts), Attempt::NoRoom);
-        assert_eq!(
-            purge_files(&scratch),
-            Vec::<PathBuf>::new(),
-            "nothing was written"
-        );
-        assert_eq!(owed(&scratch), 1);
-        ROOM.store(needs, Ordering::SeqCst);
-        done_after(&attempts, &[Attempt::NoRoom]);
-        thread.close().blocking_recv().expect("closed");
-        assert_eq!(owed(&scratch), 0);
-    }
-
-    #[test]
-    fn a_purge_found_finished_resets_the_backoff() {
-        let scratch = Scratch::new("found-done");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let schedule = Schedule {
-            first_retry: Duration::from_secs(60),
-            last_retry: Duration::from_secs(240),
-            ..Schedule::default()
-        };
-        let mut purger = Purger::new(schedule, &store);
-        purger.retry = Duration::from_secs(240);
-        purger.start(&mut store);
-        assert_eq!(purger.retry, Duration::from_secs(60));
-        assert!(purger.next.is_none());
-    }
-
-    #[test]
-    fn copies_made_stale_back_off_until_one_finishes() {
-        let scratch = Scratch::new("stale-backoff");
-        let store = owing(&scratch);
-        let schedule = Schedule {
-            first_retry: Duration::from_secs(60),
-            last_retry: Duration::from_secs(240),
-            ..Schedule::default()
-        };
-        let mut purger = Purger::new(schedule, &store);
-        for wait in [60, 120, 240, 240] {
-            let before = Instant::now();
-            purger.settle(Attempt::Stale, &store);
-            let at = purger.next.expect("a retry");
-            let wait = Duration::from_secs(wait);
-            assert!(at >= before + wait && at <= Instant::now() + wait);
-        }
-        purger.settle(Attempt::Done, &store);
-        assert_eq!(purger.retry, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn every_operation_gets_one_reply_in_order() {
-        let scratch = Scratch::new("replies");
-        let store = Store::open(&scratch.db()).expect("store");
-        let (thread, run) = (ThreadId(1), RunId(1));
-        let (acks, mut replies) = mpsc::unbounded_channel();
-        let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
-        for op in [
-            StoreOp::BeginTurn {
-                thread,
-                title: Some("t".to_owned()),
-                run,
-                text: "hi".to_owned(),
-            },
-            StoreOp::CommitStep {
-                thread: ThreadId(2),
-                run,
-                text: None,
-                index: 0,
-                step: Step {
-                    label: "s".to_owned(),
-                },
-            },
-            StoreOp::EndRun {
-                thread,
-                run,
-                text: None,
-                revealed: None,
-                end: RunEnd::Done,
-            },
-        ] {
-            assert!(store.send(op));
-        }
-        store.close().blocking_recv().expect("closed");
-        let mut got = Vec::new();
-        while let Ok(reply) = replies.try_recv() {
-            got.push(reply);
-        }
-        assert_eq!(
-            got,
-            [
-                Input::TurnStored { run },
-                Input::StoreFailed { run },
-                Input::RunStored { run },
-            ]
-        );
-    }
-}
+mod tests;

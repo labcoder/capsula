@@ -11,7 +11,7 @@ pub(super) enum Owner {
 
 impl Presence {
     pub(super) fn panel_owner(&self) -> Owner {
-        if self.text_open() {
+        if self.text_open() || self.threads_open() {
             Owner::Typing
         } else if self.escape_hold.shows_stop() {
             Owner::Stop
