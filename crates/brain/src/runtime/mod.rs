@@ -21,6 +21,7 @@ use capsula_protocol::message::{
 };
 use capsula_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -32,10 +33,11 @@ use data::DataQueue;
 use fixture::Fixture;
 use store_thread::StoreThread;
 
-/// Control frames queued for the shell before it counts as hung (architecture v1 §3.2) [guess].
-/// shortcut: no slots reserved for urgent frames and no coalescing of `RunState`; the brain sends
-/// only `RunState` and `Ping` today, so the queue can't fill short of a hung shell. Add both
-/// with the first urgent brain-to-shell message.
+/// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
+/// connection: a deliberate overload policy, not proof that the shell hung.
+/// shortcut: no slots reserved for urgent frames and no coalescing of `RunState`, so a burst a
+/// slow but healthy shell would survive can still end it; add both with the first urgent
+/// brain-to-shell message.
 const CONTROL_QUEUE: usize = 256;
 /// The watchdog's ping interval while a run is active [guess].
 const PING_EVERY: Duration = Duration::from_millis(500);
@@ -43,10 +45,14 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const PONG_WITHIN: Duration = Duration::from_secs(2);
 /// Ended runs waiting on the store before new turns wait too [guess].
 const MAX_ENDING: usize = 16;
-/// Data queued for the shell before the engine waits, twice the credit window [guess].
-const DATA_CAP: usize = 1024 * 1024;
+/// Data queued for the shell before new turns and the engine wait, one credit window [guess].
+const DATA_CAP: usize = 512 * 1024;
 /// Engine events queued before the engine waits [guess].
 const ENGINE_QUEUE: usize = 16;
+/// Typed turns read ahead of the core; one more ends the connection [guess].
+const TURN_QUEUE: usize = 64;
+/// How long closing waits for ended runs to reach the store, then for the store to close [guess].
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +84,9 @@ pub(crate) struct Brain {
 impl Brain {
     /// Starts the store thread. The store must already be recovered, and `high_water` is its
     /// highest thread and run ids.
+    ///
+    /// # Errors
+    /// Fails when the store's thread can't be started.
     pub(crate) fn new(
         store: Store,
         high_water: (ThreadId, RunId),
@@ -100,10 +109,50 @@ impl Brain {
         })
     }
 
-    /// Lets queued store writes finish.
-    pub(crate) fn close(mut self) {
+    /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
+    /// bounded, so a hung store can't hold the brain open; a run it never confirms is marked
+    /// `failed(crash)` at the next start.
+    pub(crate) async fn close(mut self) {
+        let settled = tokio::time::timeout(CLOSE_WAIT, async {
+            while self.coordinator.ending_runs() > 0 {
+                let Some(input) = self.inputs.recv().await else {
+                    break;
+                };
+                self.offline(input);
+            }
+        })
+        .await;
+        if settled.is_err() {
+            let ending = self.coordinator.ending_runs();
+            tracing::warn!(ending, "closing before the store confirmed every run");
+        }
         if let Some(store) = self.store.take() {
-            store.close();
+            match tokio::time::timeout(CLOSE_WAIT, store.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => tracing::error!("the store thread panicked"),
+                Err(_) => tracing::warn!("the store thread didn't finish in time"),
+            }
+        }
+    }
+
+    /// Keeps runs that ended moving through the store while no shell is connected. Never
+    /// returns; drop it when a shell connects.
+    pub(crate) async fn idle(&mut self) {
+        loop {
+            let input = tokio::select! {
+                Some(input) = self.inputs.recv() => input,
+                // Engines run only for a current run, and nothing is current without a shell.
+                Some(input) = self.engine_events.recv() => input,
+            };
+            self.offline(input);
+        }
+    }
+
+    /// Acts on one input with no shell to tell: only the store and the engine act.
+    fn offline(&mut self, input: Input) {
+        if let Ok(effects) = self.coordinator.handle(input) {
+            let applied = self.apply(effects, None);
+            debug_assert!(applied.is_ok(), "applying without a shell can't fail");
         }
     }
 
@@ -117,22 +166,23 @@ impl Brain {
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
-        let (turns_tx, mut turns) = mpsc::channel(64);
+        let (turns_tx, mut turns) = mpsc::channel(TURN_QUEUE);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
+        let room = Notify::new();
 
         let control_reader = read_control(&mut control_in, &controls_tx);
         let data_reader = read_data(&mut data_in, &turns_tx, &queue, &ready);
         let control_writer = write_control(&mut control_out, &mut out);
-        let data_writer = write_data(&mut data_out, &queue, &ready);
+        let data_writer = write_data(&mut data_out, &queue, &ready, &room);
         let link = Link {
             out: &out_tx,
             queue: &queue,
             ready: &ready,
             tap: &mut *tap,
         };
-        let core = self.core(&mut controls, &mut turns, link);
+        let core = self.core(&mut controls, &mut turns, &room, link);
         let ended = tokio::select! {
             ended = control_reader => ended,
             ended = data_reader => ended,
@@ -140,24 +190,23 @@ impl Brain {
             ended = data_writer => ended,
             ended = core => ended,
         };
-        if let Ok(effects) = self.coordinator.handle(Input::ShellLost) {
-            // No shell to hear about it: only the store and the engine act, and nothing is full.
-            let offline = self.apply(effects, None);
-            debug_assert!(offline.is_ok(), "applying without a shell can't fail");
-        }
+        self.offline(Input::ShellLost);
         self.deadline = None;
         ended
     }
 
     /// The core loop: frames from the shell, completions from the systems, the deadline and
     /// the watchdog, each turned into coordinator inputs and their effects applied. Nothing in
-    /// it awaits a pipe, the store or an engine. Control and store replies are always taken;
-    /// new turns wait while too many runs are ending, and engine events while the data queue
-    /// is full, so memory stays bounded however slow the store or the shell is.
+    /// it awaits a pipe, the store or an engine. Control and store replies are always taken.
+    /// New turns wait while too many runs are ending or the data queue is full, and engine
+    /// events while the data queue is full, so memory stays bounded however slow the store or
+    /// the shell is. A turn is the only way to add a run, and so a `RunEnd`, so the frames
+    /// queued past the cap are bounded too. `room` wakes the loop when the queue drains.
     async fn core(
         &mut self,
         controls: &mut mpsc::Receiver<ControlToBrain>,
         turns: &mut mpsc::Receiver<Turn>,
+        room: &Notify,
         mut link: Link<'_, '_>,
     ) -> Ended {
         let mut ticks = tokio::time::interval(PING_EVERY);
@@ -166,8 +215,8 @@ impl Brain {
         loop {
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
-            let take_turns = self.coordinator.ending_runs() < MAX_ENDING;
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
+            let take_turns = take_engine && self.coordinator.ending_runs() < MAX_ENDING;
             let input = tokio::select! {
                 biased;
                 Some(message) = controls.recv() => {
@@ -185,6 +234,7 @@ impl Brain {
                 Some(input) = self.inputs.recv() => input,
                 Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
+                () = room.notified(), if !take_engine => continue,
                 () = sleep_until(deadline) => {
                     self.deadline = None;
                     match deadline {
@@ -218,19 +268,21 @@ impl Brain {
                 self.deadline = None;
             }
             if self.apply(effects, Some(&mut link)).is_err() {
-                tracing::warn!("the shell's control queue is full");
+                tracing::warn!("the shell's control queue is full; ending the connection");
                 return Ended::Lost;
             }
         }
     }
 
-    /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Fails when
-    /// the shell's control queue is full.
+    /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
+    /// shell's control queue is full nothing more goes to the shell, but every store, engine and
+    /// timer effect still applies, since the coordinator counts them as done; then it fails.
     fn apply(
         &mut self,
         effects: Vec<Effect>,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        let mut full = false;
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
@@ -242,8 +294,11 @@ impl Brain {
                     }
                 }
                 Effect::Control(message) => {
-                    if let Some(link) = link.as_deref_mut() {
-                        link.control(&message)?;
+                    if let Some(shell) = link.as_deref_mut()
+                        && shell.control(&message).is_err()
+                    {
+                        full = true;
+                        link = None;
                     }
                 }
                 Effect::Data(message) => {
@@ -276,7 +331,7 @@ impl Brain {
                 }
             }
         }
-        Ok(())
+        if full { Err(Full) } else { Ok(()) }
     }
 }
 
@@ -320,11 +375,14 @@ async fn read_data(
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
             }
-            Ok(Some(DataToBrain::TextSubmit { thread, text })) => {
-                if turns.send((thread, text)).await.is_err() {
-                    return Ended::Lost;
-                }
-            }
+            // Never waits for the core, so credit behind a turn is always read.
+            Ok(Some(DataToBrain::TextSubmit { thread, text })) => match turns
+                .try_send((thread, text))
+            {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),
+                Err(TrySendError::Closed(_)) => return Ended::Lost,
+            },
             Ok(None) => return Ended::Lost,
             Err(error) => {
                 tracing::warn!(%error, "data pipe failed");
@@ -347,10 +405,12 @@ async fn write_control(
     Ended::Lost
 }
 
+/// Writes queued data as credit allows, waking the core through `room` as the queue drains.
 async fn write_data(
     pipe: &mut (impl AsyncWrite + Unpin),
     queue: &RefCell<DataQueue>,
     ready: &Notify,
+    room: &Notify,
 ) -> Ended {
     loop {
         let next = queue.borrow_mut().pop(Instant::now().into_std());
@@ -358,6 +418,7 @@ async fn write_data(
             ready.notified().await;
             continue;
         };
+        room.notify_one();
         if let Err(error) = pipe.write_all(&frame).await {
             tracing::warn!(%error, "data pipe failed");
             return Ended::Lost;
@@ -366,7 +427,7 @@ async fn write_data(
     }
 }
 
-/// The shell's control queue is full, so the shell counts as hung.
+/// The shell's control queue is full.
 #[derive(Debug)]
 struct Full;
 

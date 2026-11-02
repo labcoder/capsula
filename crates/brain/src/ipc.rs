@@ -164,6 +164,7 @@ impl Pipes {
             let idle = launched.is_none();
             tokio::select! {
                 accepted = self.control.connect() => accepted?,
+                () = brain.idle() => {}
                 () = exited(launched) => return Ok(Session::ShellLost),
                 () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
             }

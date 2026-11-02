@@ -2,9 +2,10 @@
 //! operations in order, answering with acknowledgements.
 
 use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
 use crate::store::{EventKind, NewEvent, Store};
@@ -12,26 +13,32 @@ use crate::store::{EventKind, NewEvent, Store};
 #[derive(Debug)]
 pub(crate) struct StoreThread {
     ops: mpsc::Sender<StoreOp>,
-    handle: JoinHandle<()>,
+    /// Fires when the thread has run every queued op and closed the store.
+    done: oneshot::Receiver<()>,
 }
 
 impl StoreThread {
     pub(crate) fn spawn(mut store: Store, acks: UnboundedSender<Input>) -> std::io::Result<Self> {
         let (ops, queue) = mpsc::channel();
-        let handle = thread::Builder::new()
+        let (finished, done) = oneshot::channel();
+        thread::Builder::new()
             .name("store".to_owned())
             .spawn(move || {
                 // Every queued op runs, even with nobody left to hear the acknowledgement.
-                // shortcut: a panic here leaves queued ops unanswered, so their runs never leave
-                // the coordinator and new turns stop once 16 pile up; restart the brain on a store
-                // panic when it has a supervisor.
+                // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
+                // never leave the coordinator and new turns stop once 16 pile up; release builds
+                // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
                 for op in queue {
                     if acks.send(apply(&mut store, op)).is_err() {
                         tracing::debug!("an acknowledgement had no listener");
                     }
                 }
+                drop(store);
+                if finished.send(()).is_err() {
+                    tracing::debug!("nobody waited for the store to close");
+                }
             })?;
-        Ok(Self { ops, handle })
+        Ok(Self { ops, done })
     }
 
     /// Queues an operation. False when the thread has gone, which only a panic there causes.
@@ -39,12 +46,11 @@ impl StoreThread {
         self.ops.send(op).is_ok()
     }
 
-    /// Lets the queued operations finish, then closes the store.
-    pub(crate) fn close(self) {
+    /// Lets the queued operations finish, then closes the store. The receiver fires when it has,
+    /// and fails if the thread panicked; nothing blocks on the thread itself.
+    pub(crate) fn close(self) -> oneshot::Receiver<()> {
         drop(self.ops);
-        if self.handle.join().is_err() {
-            tracing::error!("the store thread panicked");
-        }
+        self.done
     }
 }
 
@@ -172,7 +178,7 @@ mod tests {
         ] {
             assert!(store.send(op));
         }
-        store.close();
+        store.close().blocking_recv().expect("closed");
         let mut got = Vec::new();
         while let Ok(reply) = replies.try_recv() {
             got.push(reply);

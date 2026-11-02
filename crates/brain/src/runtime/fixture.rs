@@ -236,7 +236,15 @@ mod tests {
         let fixture = Arc::new(Fixture::parse("1 step s").expect("parses"));
         let (inputs, mut events) = mpsc::channel(4);
         let _cancel = start(fixture, RunId(1), inputs);
-        events.recv().await.expect("step");
+        assert_eq!(
+            events.recv().await,
+            Some(Input::Engine {
+                run: RunId(1),
+                event: EngineEvent::Step(Step {
+                    label: "s".to_owned()
+                })
+            })
+        );
         assert_eq!(
             events.recv().await,
             Some(Input::Engine {

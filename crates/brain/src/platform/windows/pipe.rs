@@ -27,6 +27,28 @@ use windows_sys::Win32::System::Threading::{
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
+/// A test's client end of a pipe.
+#[cfg(test)]
+pub(crate) type PipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
+
+/// A connected owner-only pipe and its client, under a name no running brain uses, for tests
+/// over a real pipe.
+///
+/// # Errors
+/// Fails when the OS refuses the pipe or the connection.
+#[cfg(test)]
+pub(crate) async fn test_pair(name: &str) -> io::Result<(NamedPipeServer, PipeClient)> {
+    let name = format!(
+        r"\\.\pipe\{}-test-{}-{name}",
+        capsula_protocol::constants::OBJECT_PREFIX,
+        std::process::id()
+    );
+    let server = create_owner_only(&name, Instance::First)?;
+    let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
+    server.connect().await?;
+    Ok((server, client))
+}
+
 /// Whether a pipe instance is the first with its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Instance {

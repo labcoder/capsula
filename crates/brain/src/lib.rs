@@ -61,6 +61,9 @@ pub enum BrainError {
     /// The fixture script a dev build was pointed at doesn't load or parse.
     #[error("can't load the fixture script")]
     Fixture(#[source] io::Error),
+    /// The store's thread couldn't be started.
+    #[error("can't start the store's thread")]
+    StoreThread(#[source] io::Error),
     /// The helpers' Job Object or a helper couldn't be created.
     #[error("can't start the helpers")]
     Helpers(#[source] io::Error),
@@ -88,7 +91,7 @@ pub async fn run() -> Result<(), BrainError> {
         "store recovered"
     );
     let high_water = store.high_water()?;
-    let mut brain = Brain::new(store, high_water, fixture()?).map_err(BrainError::Helpers)?;
+    let mut brain = Brain::new(store, high_water, fixture()?).map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
@@ -102,7 +105,7 @@ pub async fn run() -> Result<(), BrainError> {
     credential::store(session, &identity.capability)?;
     tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let ended = serve(&mut pipes, &identity, &mut brain).await;
-    brain.close();
+    brain.close().await;
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.terminate()).await {
         Ok(Ok(())) => {}

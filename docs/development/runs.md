@@ -133,8 +133,14 @@ that late step as stale, and the store would refuse it too.
 ## Around the coordinator
 
 The store runs on its own thread, which owns the connection and keeps the store contract above:
-operations in order, one transaction each, every one answered. The fixture engine, the store thread and the deadline timer report back as inputs, and
-the pipes' readers and writers are described in `ipc.md`. A shell that disconnects ends the
-current run as `interrupted(shell_lost)`.
+operations in order, one transaction each, every one answered. The fixture engine, the store
+thread and the deadline timer report back as inputs, and the pipes' readers and writers are
+described in `ipc.md`. A shell that disconnects ends the current run as
+`interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
+connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
+the store to close.
+
+shortcut: a store that never answers leaves a finished run unconfirmed until the next start
+marks it `failed(crash)`; fine while the store is local SQLite.
 
 The step is a labelled placeholder until slice 4's scene format.

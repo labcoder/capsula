@@ -60,8 +60,8 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping` | 256 queued frames [guess] | The shell counts as hung and the connection ends |
-| Data | `AssistantText`, `StepCommit`, `RunEnd` | 1 MiB queued pauses the engine [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Control | `RunState`, `Ping` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Data | `AssistantText`, `StepCommit`, `RunEnd` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
@@ -69,19 +69,23 @@ flowchart LR
 - **Stop drops the stopped run's unsent data**, and so does a new turn that replaces a run, so
   the replacement's first frame isn't stuck behind text nobody will show. Only a `Stop` or turn
   the coordinator accepts drops anything, and the run's `RunEnd` is queued after the drop, so it
-  still arrives.
+  still arrives, as long as the shell keeps reading data.
 - **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
   connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
-  control frames, credit and store replies, so `Stop` is never queued behind data. While the
-  data queue holds 1 MiB, frames and their bookkeeping counted, engine events wait in a 16-event
-  channel and the engine waits on it. While 16 ended runs wait on the store, new turns wait until
-  it catches up [guess]. Memory stays bounded however slow the store or the shell is: the cap is
-  checked before each event, so the queue can reach about 3 MiB at worst (1 MiB, one event, and
-  text held behind a step).
+  control frames and store replies, so `Stop` is never queued behind data. The data reader never
+  waits on the core either, so credit is always read. While the data queue holds 512 KiB,
+  frames and their bookkeeping counted, engine events wait in a 16-event channel and the engine
+  waits on it, and new turns wait too. While 16 ended runs wait on the store, new turns wait
+  until it catches up [guess]. Memory stays bounded however slow the store or the shell is: the
+  cap is checked before each event and each turn, and only a turn adds a run and so a `RunEnd`,
+  so the queue can reach the cap plus one event, the text held behind a step, and one small
+  `RunEnd` per run still ending. That bound excludes typed turns not yet taken: up to 64
+  `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
+  as broken.
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`; the brain sends only `RunState` and `Ping`, so it can't fill short of a hung shell.
 
@@ -94,6 +98,6 @@ restarting.
 
 ## Debugging
 
-A debug brain records every frame it sends and receives when `CAPSULA_PIPE_TAP` names a file,
-with capabilities zeroed. `cargo xtask pipe-dump <file>` decodes the recording with the same
+A debug brain records the control frames it sends and receives, and the handshake with
+capabilities zeroed, when `CAPSULA_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>` decodes the recording with the same
 message types.

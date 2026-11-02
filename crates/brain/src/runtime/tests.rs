@@ -1,45 +1,62 @@
+use std::cell::RefCell;
 use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Phase, RunId, Step, ThreadId,
 };
-use tokio::io::{AsyncWriteExt as _, ReadHalf, WriteHalf};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
+use super::data::DataQueue;
 use super::fixture::Fixture;
-use super::{Brain, Ended, MAX_ENDING};
+use super::{Brain, Ended, Link, MAX_ENDING, TURN_QUEUE, window};
+use crate::coordinator::Input;
 use crate::ipc;
-use crate::platform::{self, Instance};
+use crate::platform::{self, PipeClient, PipeServer};
 use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
-/// A connected server and client for one pipe, under a name no running brain uses.
-async fn pair(name: &str) -> (NamedPipeServer, NamedPipeClient) {
-    let name = format!(r"\\.\pipe\capsula-test-{}-{name}", std::process::id());
-    let server = platform::create_owner_only(&name, Instance::First).expect("server");
-    let client = ClientOptions::new().open(&name).expect("client");
-    server.connect().await.expect("connected");
-    (server, client)
-}
+/// How long a test waits for something that should happen at once before failing.
+const PATIENCE: Duration = Duration::from_secs(10);
 
 /// The test's side of a shell: it reads control, and data only when asked.
-struct Shell {
-    control_in: ReadHalf<NamedPipeClient>,
-    control_out: WriteHalf<NamedPipeClient>,
-    data_in: ReadHalf<NamedPipeClient>,
-    data_out: WriteHalf<NamedPipeClient>,
+struct Shell<S> {
+    control_in: ReadHalf<S>,
+    control_out: WriteHalf<S>,
+    data_in: ReadHalf<S>,
+    data_out: WriteHalf<S>,
     /// The thread of the last run state read.
     thread: Option<ThreadId>,
 }
 
-impl Shell {
+impl<S: AsyncRead + AsyncWrite> Shell<S> {
+    fn new(control: S, data: S) -> Self {
+        let (control_in, control_out) = tokio::io::split(control);
+        let (data_in, data_out) = tokio::io::split(data);
+        Self {
+            control_in,
+            control_out,
+            data_in,
+            data_out,
+            thread: None,
+        }
+    }
+
     async fn submit(&mut self, text: &str) {
         let message = DataToBrain::TextSubmit {
             thread: None,
             text: text.to_owned(),
+        };
+        let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+        self.data_out.write_all(&frame).await.expect("sent");
+    }
+
+    async fn credit(&mut self, bytes: usize) {
+        let message = DataToBrain::Credit {
+            bytes: u32::try_from(bytes).expect("small"),
         };
         let frame = frame::encode(&message, Pipe::Data).expect("encodes");
         self.data_out.write_all(&frame).await.expect("sent");
@@ -77,57 +94,107 @@ impl Shell {
     }
 
     async fn data(&mut self) -> DataToShell {
-        ipc::read::<DataToShell>(&mut self.data_in, Pipe::Data)
+        let next = ipc::read::<DataToShell>(&mut self.data_in, Pipe::Data);
+        timeout(PATIENCE, next)
             .await
+            .expect("data arrives")
             .expect("readable")
             .expect("open")
     }
+
+    /// Reads `run`'s text up to its `RunEnd`, granting credit as a shell would; the text's
+    /// length.
+    async fn read_to_end(&mut self, run: RunId) -> usize {
+        let mut bytes = 0;
+        loop {
+            match self.data().await {
+                DataToShell::AssistantText { run: of, delta } if of == run => {
+                    bytes += delta.len();
+                    self.credit(delta.len() + 64).await;
+                }
+                DataToShell::RunEnd { run: ended } if ended == run => return bytes,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
 }
 
-async fn connect(name: &str) -> ((NamedPipeServer, NamedPipeServer), Shell) {
-    let (control, control_client) = pair(&format!("{name}-control")).await;
-    let (data, data_client) = pair(&format!("{name}-data")).await;
-    let (control_in, control_out) = tokio::io::split(control_client);
-    let (data_in, data_out) = tokio::io::split(data_client);
-    (
-        (control, data),
-        Shell {
-            control_in,
-            control_out,
-            data_in,
-            data_out,
-            thread: None,
-        },
-    )
+/// Pipes with small buffers, so a writer the shell doesn't drain blocks at once.
+fn duplex() -> ((DuplexStream, DuplexStream), Shell<DuplexStream>) {
+    let (control, control_client) = tokio::io::duplex(4096);
+    let (data, data_client) = tokio::io::duplex(4096);
+    ((control, data), Shell::new(control_client, data_client))
 }
 
+/// The real named pipes.
+async fn pipes(name: &str) -> ((PipeServer, PipeServer), Shell<PipeClient>) {
+    let (control, control_client) = platform::test_pair(&format!("{name}-control"))
+        .await
+        .expect("control pipe");
+    let (data, data_client) = platform::test_pair(&format!("{name}-data"))
+        .await
+        .expect("data pipe");
+    ((control, data), Shell::new(control_client, data_client))
+}
+
+/// A brain whose store waits up to 10 s on a lock, and the connection holding that lock.
+fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection) {
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recover");
+    let high_water = store.high_water().expect("high water");
+    store
+        .conn_for_tests()
+        .busy_timeout(Duration::from_secs(10))
+        .expect("busy timeout");
+    let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
+    lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
+    let fixture = Fixture::parse(script).expect("script");
+    (Brain::new(store, high_water, fixture).expect("brain"), lock)
+}
+
+/// Every run's state and reason, oldest first.
+fn outcomes(scratch: &Scratch) -> Vec<(String, Option<String>)> {
+    let store = Store::open(&scratch.db()).expect("reopen");
+    let mut query = store
+        .conn_for_tests()
+        .prepare("SELECT state, reason FROM runs ORDER BY id")
+        .expect("query");
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("read")
+}
+
+fn outcome(state: &str, reason: &str) -> (String, Option<String>) {
+    (state.to_owned(), Some(reason.to_owned()))
+}
+
+/// The smoke test over real pipes: Stop is answered while the data writer has more than the
+/// pipe holds and nothing reads it.
 #[tokio::test]
-async fn stop_is_served_while_the_shell_reads_no_data() {
+async fn stop_is_served_over_real_pipes_while_the_shell_reads_no_data() {
     let scratch = Scratch::new("saturated");
-    // Far more text than the pipe buffer and the credit window hold, so the data writer is
-    // blocked when Stop arrives.
-    let script = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000\n5000 step late";
+    let script = "0 fill 240000\n0 fill 240000\n5000 step late";
     let mut brain = test_support::brain(&scratch, script);
-    let ((control, data), mut shell) = connect("saturated").await;
+    let ((control, data), mut shell) = pipes("saturated").await;
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("go").await;
         let (run, thinking) = shell.state().await;
         assert_eq!(thinking, Phase::Thinking);
         assert_eq!(shell.state().await, (run, Phase::Answering));
-        // Let the writer fill the pipe while nothing reads it.
-        tokio::time::sleep(Duration::from_millis(200)).await;
         shell.stop(run).await;
-        let interrupted = timeout(Duration::from_millis(500), shell.state()).await;
+        let interrupted = timeout(PATIENCE, shell.state()).await;
         assert_eq!(
-            interrupted.expect("served promptly"),
+            interrupted.expect("Stop is answered"),
             (run, Phase::Interrupted)
         );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -137,7 +204,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
         &scratch,
         "0 text a\n0 step one\n3000 step never\nlate closed",
     );
-    let ((control, data), mut shell) = connect("late").await;
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("go").await;
@@ -170,9 +237,8 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
         assert!(next > run, "{next:?} after {run:?}");
         assert_eq!(phase, Phase::Thinking);
         assert_eq!(shell.data().await, DataToShell::RunEnd { run });
-        let first = timeout(Duration::from_millis(500), shell.data()).await;
         assert_eq!(
-            first.expect("the new run streams"),
+            shell.data().await,
             DataToShell::AssistantText {
                 run: next,
                 delta: "a".to_owned()
@@ -183,7 +249,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
     };
     let (ended, first_thread) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
     let store = Store::open(&scratch.db()).expect("reopen");
     assert!(store.search("closed", 10).expect("search").is_empty());
     // The replacement run may or may not commit its own step before the shell hangs up.
@@ -199,7 +265,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
 async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
     let scratch = Scratch::new("runend");
     let mut brain = test_support::brain(&scratch, "0 text a\n0 step one\n0 text b");
-    let ((control, data), mut shell) = connect("runend").await;
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("go").await;
@@ -209,9 +275,7 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
         assert_eq!(shell.state().await, (run, Phase::Done));
         let mut frames = Vec::new();
         loop {
-            let frame = timeout(Duration::from_secs(2), shell.data())
-                .await
-                .expect("the run's data ends with its RunEnd");
+            let frame = shell.data().await;
             let last = frame == DataToShell::RunEnd { run };
             frames.push(frame);
             if last {
@@ -241,52 +305,162 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
 }
 
 #[tokio::test]
-async fn new_turns_wait_while_too_many_runs_wait_on_the_store() {
-    let scratch = Scratch::new("backlog");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    store.recover().expect("recover");
-    let high_water = store.high_water().expect("high water");
-    // Another connection holds the write lock, so every store write waits on it.
-    store
-        .conn_for_tests()
-        .busy_timeout(Duration::from_secs(10))
-        .expect("busy timeout");
-    let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
-    lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
-    let fixture = Fixture::parse("0 text a").expect("script");
-    let mut brain = Brain::new(store, high_water, fixture).expect("brain");
-    let ((control, data), mut shell) = connect("backlog").await;
+async fn new_turns_wait_while_the_shell_is_behind_on_data() {
+    let scratch = Scratch::new("turn-gate");
+    let mut brain = test_support::brain(&scratch, "0 fill 960000");
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
-    let turns = MAX_ENDING + 4;
     let client = async {
-        for _ in 0..turns {
-            shell.submit("go").await;
-        }
-        let mut thinking = 0;
-        while let Ok((_, phase)) = timeout(Duration::from_millis(300), shell.state()).await {
-            thinking += usize::from(phase == Phase::Thinking);
-        }
-        assert_eq!(
-            thinking,
-            MAX_ENDING + 1,
-            "the current run and the ending ones"
-        );
-        lock.execute_batch("ROLLBACK").expect("unlocked");
-        while thinking < turns {
-            let (_, phase) = timeout(Duration::from_secs(5), shell.state())
-                .await
-                .expect("the rest are taken once the store answers");
-            thinking += usize::from(phase == Phase::Thinking);
-        }
+        shell.submit("one").await;
+        let (first, _) = shell.state().await;
+        // Answering comes with the text, which leaves far more queued than the cap.
+        assert_eq!(shell.state().await, (first, Phase::Answering));
+        shell.submit("two").await;
+        // The replacement waits until reading drains the queue under the cap, so a good part
+        // of the first run arrives before its RunEnd; taken at once, at most the frame already
+        // being written would.
+        let read = shell.read_to_end(first).await;
+        assert!((300_000..960_000).contains(&read), "{read} bytes");
+        assert_eq!(shell.state().await, (first, Phase::Interrupted));
+        assert_eq!(shell.state().await.1, Phase::Thinking);
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn turns_beyond_the_queue_while_the_store_is_behind_end_the_connection() {
+    let scratch = Scratch::new("turn-flood");
+    let (mut brain, lock) = locked_brain(&scratch, "0 text a");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        // Each turn replaces the last, whose writes wait on the lock, until MAX_ENDING runs
+        // wait on the store and turns stop being taken.
+        for _ in 0..=MAX_ENDING {
+            shell.submit("go").await;
+            while shell.state().await.1 != Phase::Thinking {}
+        }
+        // The reader never waits for the core: a full turn queue ends the connection rather
+        // than leaving credit unread behind it.
+        for _ in 0..=TURN_QUEUE {
+            shell.submit("more").await;
+        }
+        shell
+    };
+    let (ended, shell) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("the connection ends");
+    assert_eq!(ended, Ended::Broken("turns sent faster than taken"));
+    drop(shell);
+    lock.execute_batch("ROLLBACK").expect("unlocked");
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_full_control_queue_still_applies_store_effects() {
+    let scratch = Scratch::new("full-control");
+    let mut brain = test_support::brain(&scratch, "");
+    let offline = |brain: &mut Brain, input| {
+        let effects = brain.coordinator.handle(input).expect("accepted");
+        brain.apply(effects, None).expect("no shell to fill");
+    };
+    offline(
+        &mut brain,
+        Input::Turn {
+            thread: None,
+            text: "go".to_owned(),
+        },
+    );
+    let stored = brain.inputs.recv().await.expect("a reply");
+    let Input::TurnStored { run } = stored else {
+        panic!("unexpected {stored:?}");
+    };
+    offline(&mut brain, stored);
+    // A shell whose control queue is already full.
+    let (out, _unread) = mpsc::channel(1);
+    out.try_send(Vec::new()).expect("room for one");
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link {
+        out: &out,
+        queue: &queue,
+        ready: &ready,
+        tap: &mut tap,
+    };
+    let stop = Input::Stop {
+        run,
+        revealed: Vec::new(),
+    };
+    let effects = brain.coordinator.handle(stop).expect("current");
+    assert!(brain.apply(effects, Some(&mut link)).is_err(), "full");
+    // The outcome after the refused Interrupted still went to the store.
+    let reply = timeout(PATIENCE, brain.inputs.recv()).await;
+    assert_eq!(reply.expect("answered"), Some(Input::RunStored { run }));
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "stop")]);
+}
+
+/// A lost shell leaves a replaced run whose turn is still being written, and a held turn behind
+/// it; the store is locked until the shell has gone.
+async fn lose_the_shell_mid_write(scratch: &Scratch) -> Brain {
+    let (mut brain, lock) = locked_brain(scratch, "0 text a");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("one").await;
+        let (first, _) = shell.state().await;
+        shell.submit("two").await;
+        assert_eq!(shell.state().await, (first, Phase::Interrupted));
+        assert_eq!(shell.state().await.1, Phase::Thinking);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    lock.execute_batch("ROLLBACK").expect("unlocked");
+    brain
+}
+
+#[tokio::test]
+async fn runs_a_lost_shell_left_reach_the_store_before_another_connects() {
+    let scratch = Scratch::new("idle");
+    let mut brain = lose_the_shell_mid_write(&scratch).await;
+    let expected = [
+        outcome("interrupted", "replaced"),
+        outcome("interrupted", "shell_lost"),
+    ];
+    let stored = async {
+        while outcomes(&scratch) != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        () = brain.idle() => unreachable!("idle never returns"),
+        stored = timeout(PATIENCE, stored) => stored.expect("stored with no shell connected"),
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn closing_stores_what_a_lost_shell_left() {
+    let scratch = Scratch::new("close");
+    let brain = lose_the_shell_mid_write(&scratch).await;
+    brain.close().await;
+    assert_eq!(
+        outcomes(&scratch),
+        [
+            outcome("interrupted", "replaced"),
+            outcome("interrupted", "shell_lost"),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -294,64 +468,42 @@ async fn engine_events_wait_while_the_shell_is_behind_on_data() {
     let scratch = Scratch::new("behind");
     let fill = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000";
     let mut brain = test_support::brain(&scratch, fill);
-    let ((control, data), mut shell) = connect("behind").await;
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("one").await;
-        let (first, _) = shell.state().await;
-        assert_eq!(shell.state().await, (first, Phase::Answering));
-        assert_eq!(shell.state().await, (first, Phase::Done));
-        // The first run's text is still queued, so the second run's engine waits and the
-        // unread data stalls it instead of finishing it.
-        shell.submit("two").await;
-        let (second, _) = shell.state().await;
-        assert_eq!(shell.state().await, (second, Phase::Answering));
-        assert_eq!(shell.state().await, (second, Phase::Interrupted));
+        let (run, _) = shell.state().await;
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        // Past the cap the engine's last text and its Done wait, so the unread data stalls the
+        // run instead of finishing it.
+        assert_eq!(shell.state().await, (run, Phase::Interrupted));
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "view_stalled")]);
 }
 
 #[tokio::test]
 async fn a_stale_stop_never_drops_a_finished_runs_data() {
     let scratch = Scratch::new("stale-stop");
-    let fill = "0 fill 240000\n0 fill 240000\n0 fill 240000\n0 fill 240000";
-    let mut brain = test_support::brain(&scratch, fill);
-    let ((control, data), mut shell) = connect("stale-stop").await;
+    let mut brain = test_support::brain(&scratch, "0 fill 240000\n0 fill 240000");
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("go").await;
         let (run, _) = shell.state().await;
         assert_eq!(shell.state().await, (run, Phase::Answering));
         assert_eq!(shell.state().await, (run, Phase::Done));
-        // Esc after Done: stale, so the text still queued behind credit stays.
+        // Esc after Done: stale, so the text still queued behind the unread pipe stays.
         shell.stop(run).await;
-        let mut bytes = 0;
-        loop {
-            let frame = timeout(Duration::from_secs(2), shell.data())
-                .await
-                .expect("the run's data ends with its RunEnd");
-            match frame {
-                DataToShell::AssistantText { delta, .. } => {
-                    bytes += delta.len();
-                    let credit = DataToBrain::Credit {
-                        bytes: u32::try_from(delta.len() + 64).expect("small"),
-                    };
-                    let frame = frame::encode(&credit, Pipe::Data).expect("encodes");
-                    shell.data_out.write_all(&frame).await.expect("sent");
-                }
-                DataToShell::RunEnd { run: ended } if ended == run => break,
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-        assert_eq!(bytes, 960_000);
+        assert_eq!(shell.read_to_end(run).await, 480_000);
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
+    brain.close().await;
 }
 
 // Real time: paused time would jump ahead whenever the runtime waits on the store's own thread.
@@ -359,64 +511,22 @@ async fn a_stale_stop_never_drops_a_finished_runs_data() {
 async fn a_shell_that_stops_reading_data_ends_the_run_as_stalled() {
     let scratch = Scratch::new("stalled");
     let mut brain = test_support::brain(&scratch, "0 fill 240000\n0 fill 240000\n5000 step late");
-    // Small buffers, so the data writer blocks inside a write long before credit runs out.
-    let (control, control_client) = tokio::io::duplex(4096);
-    let (data, data_client) = tokio::io::duplex(4096);
-    let (mut control_in, mut control_out) = tokio::io::split(control_client);
-    let (_data_in, mut data_out) = tokio::io::split(data_client);
+    let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        let submit = DataToBrain::TextSubmit {
-            thread: None,
-            text: "go".to_owned(),
-        };
-        data_out
-            .write_all(&frame::encode(&submit, Pipe::Data).expect("encodes"))
-            .await
-            .expect("sent");
+        shell.submit("go").await;
         let started = tokio::time::Instant::now();
-        let mut phases = Vec::new();
-        // Answer every ping, read nothing on data, until the run ends.
-        loop {
-            match ipc::read::<ControlToShell>(&mut control_in, Pipe::Control)
-                .await
-                .expect("readable")
-                .expect("open")
-            {
-                ControlToShell::Ping => {
-                    let pong =
-                        frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
-                    control_out.write_all(&pong).await.expect("sent");
-                }
-                ControlToShell::RunState { phase, .. } => {
-                    phases.push(phase);
-                    if phase == Phase::Interrupted {
-                        break;
-                    }
-                }
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-        assert_eq!(
-            phases,
-            [Phase::Thinking, Phase::Answering, Phase::Interrupted]
-        );
+        let (run, _) = shell.state().await;
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Interrupted));
         let after = started.elapsed();
-        assert!(
-            (Duration::from_secs(2)..Duration::from_secs(3)).contains(&after),
-            "stalled after {after:?}"
-        );
-        drop((control_in, control_out, data_out));
+        assert!(after >= super::data::STALL, "stalled after {after:?}");
+        drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close();
-    let store = Store::open(&scratch.db()).expect("reopen");
-    let reason: String = store
-        .conn_for_tests()
-        .query_row("SELECT reason FROM runs", [], |row| row.get(0))
-        .expect("one run");
-    assert_eq!(reason, "view_stalled");
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "view_stalled")]);
 }
 
 /// Rez measurement for the pull request, not a check: run it with
@@ -430,7 +540,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
     for round in 0..20 {
         let scratch = Scratch::new("measure");
         let mut brain = test_support::brain(&scratch, script);
-        let ((control, data), mut shell) = connect(&format!("measure-{round}")).await;
+        let ((control, data), mut shell) = pipes(&format!("measure-{round}")).await;
         let mut tap = Tap::from_env();
         let client = async {
             // Throughput: one run read to its last byte, granting credit as a shell would.
@@ -444,11 +554,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
                 };
                 started.get_or_insert_with(tokio::time::Instant::now);
                 bytes += delta.len();
-                let credit = DataToBrain::Credit {
-                    bytes: u32::try_from(delta.len() + 64).expect("small"),
-                };
-                let frame = frame::encode(&credit, Pipe::Data).expect("encodes");
-                shell.data_out.write_all(&frame).await.expect("sent");
+                shell.credit(delta.len() + 64).await;
             }
             streams.push(started.expect("text arrived").elapsed());
             shell.stop(run).await;
@@ -465,7 +571,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
             drop(shell);
         };
         let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
-        brain.close();
+        brain.close().await;
     }
     let report = |name: &str, samples: &mut Vec<Duration>| {
         samples.sort_unstable();

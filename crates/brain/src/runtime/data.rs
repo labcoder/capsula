@@ -140,13 +140,13 @@ mod tests {
         assert!(!queue.stalled(start + STALL * 2), "empty never stalls");
         queue.push(A, vec![0; 3]);
         queue.push(A, vec![0; 5]);
-        assert!(queue.pop(start).is_some());
+        assert_eq!(queue.pop(start), Some(vec![0; 3]));
         queue.wrote();
         assert_eq!(queue.pop(start), None, "2 bytes of credit left");
         assert!(!queue.stalled(start + Duration::from_millis(1999)));
         assert!(queue.stalled(start + STALL));
         queue.grant(3);
-        assert!(queue.pop(start + STALL).is_some());
+        assert_eq!(queue.pop(start + STALL), Some(vec![0; 5]));
         queue.wrote();
         assert!(!queue.stalled(start + STALL * 3), "progress resets it");
     }
@@ -156,7 +156,7 @@ mod tests {
         let start = Instant::now();
         let mut queue = DataQueue::new(100);
         queue.push(A, vec![0; 3]);
-        assert!(queue.pop(start).is_some(), "credit is plenty");
+        assert_eq!(queue.pop(start), Some(vec![0; 3]), "credit is plenty");
         assert!(queue.stalled(start + STALL), "but the write never finished");
     }
 }

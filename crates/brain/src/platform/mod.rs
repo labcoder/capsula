@@ -16,6 +16,8 @@ mod windows;
 pub use windows::{
     Helper, Instance, Job, PipeServer, client_image, create_owner_only, launch_detached, session_id,
 };
+#[cfg(all(test, windows))]
+pub(crate) use windows::{PipeClient, test_pair};
 
 /// The per-user folder for local data (logs, the store): `%LOCALAPPDATA%\\<product>`.
 ///
