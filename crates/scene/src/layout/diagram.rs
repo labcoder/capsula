@@ -11,13 +11,14 @@ use crate::{
 };
 
 /// Smallest gap between ranks; callers widen it to fit edge labels.
-pub const RANK_GAP: f32 = 72.0;
+// shortcut: edge labels do not widen ranks; revisit in A8's visual gate.
+pub(super) const RANK_GAP: f32 = 72.0;
 const NODE_GAP: f32 = 30.0;
 const SWEEPS: usize = 4;
 
 /// Node centers in layout space and the bounds of the whole drawing.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Placement {
+pub(super) struct Placement {
     /// Node rectangles in input order.
     pub rects: Vec<Rect>,
     /// Union of the placed node rectangles.
@@ -30,7 +31,7 @@ pub struct Placement {
 /// self-loops are ignored.
 /// # Errors
 /// Rejects excess nodes/edges, invalid dimensions or out-of-cap generated coordinates.
-pub fn layout(
+pub(super) fn layout(
     sizes: &[Vec2],
     edges: &[(usize, usize)],
     dir: Direction,

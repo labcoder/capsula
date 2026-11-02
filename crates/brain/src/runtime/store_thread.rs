@@ -57,6 +57,9 @@ pub(crate) struct Schedule {
     /// Gates that each hold one page read with a snapshot open.
     #[cfg(test)]
     pub(crate) read_gates: Option<mpsc::Receiver<Gate>>,
+    /// Holds the checkpoint helper after each checkpoint.
+    #[cfg(test)]
+    pub(crate) checkpoint_gate: Option<page_reader::HelperGate>,
     /// Where the first copy pauses.
     #[cfg(test)]
     pub(crate) pauses: Option<crate::store::Pauses>,
@@ -92,6 +95,8 @@ impl Default for Schedule {
             gates: None,
             #[cfg(test)]
             read_gates: None,
+            #[cfg(test)]
+            checkpoint_gate: None,
             #[cfg(test)]
             pauses: None,
         }
@@ -384,13 +389,16 @@ impl StoreThread {
         // Made first, so a failed start below stops whatever already started.
         let exit = Exit {
             side: store.side(),
-            barrier: Arc::new(Barrier::default()),
+            barrier: Arc::new(Barrier::new(
+                #[cfg(test)]
+                schedule.observed.clone(),
+            )),
             checkpoints: Arc::new(Checkpoints::default()),
         };
         let helper = page_reader::spawn_helper(
             &exit,
             #[cfg(test)]
-            schedule.observed.clone(),
+            schedule.checkpoint_gate.take(),
         )?;
         let reader = page_reader::spawn_reader(
             reads,

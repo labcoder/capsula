@@ -14,7 +14,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _};
 
@@ -101,6 +101,8 @@ impl Cancel {
 pub(crate) enum Point {
     /// Before it takes the live store.
     Source,
+    /// Before it takes the helper's connection for its drain.
+    Helper,
     /// In the drain, before its checkpoint.
     Drain,
     /// In the snapshot, its read-only connection open.
@@ -320,8 +322,12 @@ impl Owed {
                 let db = &leftovers.db;
                 #[cfg(test)]
                 cancel.pauses.reach(Point::Source);
+                #[cfg(test)]
+                cancel.pauses.reach(Point::Helper);
+                // Before the source, so a write waiting on the source never waits for the helper.
+                let helper = self.side.hold_helper();
                 let source = cancel.source.lock().unwrap_or_else(PoisonError::into_inner);
-                let read = drain(&self.side, cancel)? && snapshot(db, cancel)?;
+                let read = drain(&self.side, helper, cancel)? && snapshot(db, cancel)?;
                 drop(source);
                 Ok(read && clean(db, cancel)? && compact(db, cancel)?)
             });
@@ -413,13 +419,17 @@ pub(super) fn old(db: &Path) -> PathBuf {
 /// can't be stopped once started, and an op meanwhile shares the disk. False unless it copied the
 /// whole WAL: a reader still holding part of it would leave that copy to the swap, so the purge
 /// waits instead.
-pub(super) fn drain(side: &Side, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+pub(super) fn drain(
+    side: &Side,
+    helper: MutexGuard<'_, Option<Connection>>,
+    cancel: &Arc<Cancel>,
+) -> Result<bool, StoreError> {
     if cancel.stopped() {
         return Ok(false);
     }
     #[cfg(test)]
     cancel.pauses.reach(Point::Drain);
-    side.checkpoint()
+    side.checkpoint_held(helper)
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.

@@ -1,7 +1,7 @@
 use super::{
     PrepareError,
     primitives::{Build, anchor, layout_error},
-    state::{LayoutState, Placed, Rest},
+    state::{LayoutState, Placed},
 };
 use crate::{
     ErrorCode, Handle, Op,
@@ -17,7 +17,7 @@ use std::sync::Arc;
 )]
 pub(super) fn build(
     build: &mut Build<'_>,
-    op: &Op,
+    op: &Arc<Op>,
     callout: &Callout,
     handle: Handle,
     parent: Option<Handle>,
@@ -117,26 +117,20 @@ pub(super) fn build(
     if !bounds.within_canvas() {
         return Err(layout_error(ErrorCode::OutOfRange));
     }
-    Ok(Placed {
-        item: Item {
+    let mut placed = Placed::new(
+        Item {
             handle,
             parent,
             primitives: primitives.into(),
             bounds,
-            transform: cached.map_or_else(Affine::default, |old| old.item.transform),
+            transform: Affine::default(),
             opacity: callout.opacity.map_or(1.0, crate::Finite::get),
         },
-        source: Arc::new(op.clone()),
-        anchors: [tip, center],
-        rest: cached.map_or_else(Rest::default, |old| old.rest),
-        rank: None,
-        initialized: false,
-        motion: cached.map_or_else(std::collections::BTreeMap::new, |old| old.motion.clone()),
-        references: cached.map_or_else(
-            || crate::state::object::reference_ids(op),
-            |old| old.references.clone(),
-        ),
-    })
+        Arc::clone(op),
+        cached,
+    );
+    placed.anchors = [tip, center];
+    Ok(placed)
 }
 
 fn side_center(target: Rect, size: Vec2, placement: Side) -> Vec2 {

@@ -546,16 +546,16 @@ fn recovery_rejects_nonoriginal_revisions_duplicate_steps_and_redundant_cuts() {
     for log in [
         vec![SceneEvent::Step {
             revision: 2,
-            step: first.clone(),
+            step: first.clone().into(),
         }],
         vec![
             SceneEvent::Step {
                 revision: 1,
-                step: first.clone(),
+                step: first.clone().into(),
             },
             SceneEvent::Step {
                 revision: 1,
-                step: first.clone(),
+                step: first.clone().into(),
             },
         ],
     ] {
@@ -572,11 +572,11 @@ fn recovery_rejects_nonoriginal_revisions_duplicate_steps_and_redundant_cuts() {
             &[
                 SceneEvent::Step {
                     revision: 1,
-                    step: first.clone()
+                    step: first.clone().into()
                 },
                 SceneEvent::Step {
                     revision: 2,
-                    step: first.clone()
+                    step: first.clone().into()
                 },
             ]
         )
@@ -590,7 +590,7 @@ fn recovery_rejects_nonoriginal_revisions_duplicate_steps_and_redundant_cuts() {
             &[
                 SceneEvent::Step {
                     revision: 1,
-                    step: first
+                    step: first.into()
                 },
                 SceneEvent::Stop(cut(1, vec![])),
             ]

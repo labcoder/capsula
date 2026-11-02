@@ -51,7 +51,8 @@ The [threads panel](panels.md) reads bounded thread, ranked search, and newest-f
 on the page reader: a thread beside the store thread with its own read-only, query-only
 connection (`temp_store=MEMORY` too). So a long search never holds up a write queued behind
 it. Each read is one autocommit statement, finished before returning, so no snapshot outlives it.
-Reads neither stop the purge's copy nor postpone it.
+Reads neither stop the purge's copy nor postpone it: a page request never reaches the store
+thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
 
 A read waits until the store thread has finished every op queued before it, failed and empty
 ones included, so it sees the thread a turn just created. Ops queued after it may show too: a
@@ -110,10 +111,14 @@ larger than it would in the brain.
 
 The purge's copy is the one reader of the live store besides the store thread, so a write never
 commits under its snapshot: before any write the store thread stops the copy and waits until it
-has closed its connections to the live store, its drain and its snapshot, and nothing more of the
-copy. At 984 MiB (`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a
-delete from enqueue to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during
-the snapshot, against 9.9 ms with nothing running, and the write right behind it 1.1 ms.
+has let go of the live store, and nothing more of the copy. Letting go means two things: its drain
+has finished its checkpoint on the helper's connection, which stays open for the helper, and its
+snapshot's own read-only connection has closed. The copy takes the helper's connection before it
+holds off writes, so a write never waits for a checkpoint the helper is running. Measured before
+the page reader and the checkpoint helper existed, and not yet remeasured with them: at 984 MiB
+(`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a delete from enqueue
+to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during the snapshot, against
+9.9 ms with nothing running, and the write right behind it 1.1 ms.
 
 A write queued behind a page read no longer waits for it (`measure_page_reads`, release build on
 Rez, 30 rounds; medians, worst in brackets):
@@ -164,7 +169,8 @@ So the second transaction also records a **purge** as owed. The purge replaces t
 clean copy, built off the store's thread so turns and runs don't wait for it:
 
 1. **Snapshot.** A helper thread first drains the WAL: a passive checkpoint on the checkpoint
-   helper's connection, so never beside the helper's own, copies the WAL into the file without
+   helper's connection, taken before the copy holds off writes and so never beside the helper's
+   own checkpoint, copies the WAL into the file without
    waiting on the writer or holding it up, so the swap's checkpoint later finds little to copy.
    The drain must copy all of it before the copy goes on: a reader still holding part of the WAL
    makes the attempt stop and back off, so a long reader defers the purge. Then it opens the file
@@ -197,7 +203,9 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    can keep its name after its deletion succeeds, until that process closes it. Rez's NTFS
    removes the name at once.
 
-**What store work waits for.** Only the swap stops the store thread: 7–11 ms from 46 MiB to
+**What store work waits for.** These numbers were measured before the page reader and the
+checkpoint helper existed, and aren't yet remeasured with them. Only the swap stops the store
+thread: 7–11 ms from 46 MiB to
 984 MiB on Rez, flat with size (`measure_purge`, logged with the pull request). During a copy or
 a removal ops share the disk with the helper; the worst op measured during either was 22 ms,
 against 6 ms with no purge running. A deletion a reader kept in the WAL is copied into the file

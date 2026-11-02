@@ -1,7 +1,7 @@
 use super::{
     Glide, PrepareError, SurfaceGeometry, diagram,
     primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect},
-    state::{LayoutState, Placed, Rest},
+    state::{LayoutState, Placed},
 };
 use crate::{
     ErrorCode, Handle, Op,
@@ -165,6 +165,7 @@ pub(super) fn place(
                 }
             }
         }
+        // shortcut: wide initial batches stay unscaled until A8's visual gate.
         let initial = !initialized && all.iter().all(|(_, id, _)| new_ids.contains(id));
         let translate = Vec2::new(
             viewport.center().x - placement.bounds.center().x,
@@ -200,37 +201,22 @@ pub(super) fn place(
                 )?
             };
             let primitives = node_primitives(node, bounds, label, sub, build);
-            let object = Placed {
-                item: Item {
+            let mut object = Placed::new(
+                Item {
                     handle: *handle,
                     parent,
                     primitives: primitives.into(),
                     bounds,
-                    transform: previous
-                        .as_ref()
-                        .map_or_else(Affine::default, |object| object.item.transform),
+                    transform: Affine::default(),
                     opacity: node.opacity.map_or(1.0, crate::Finite::get),
                 },
-                source: Arc::clone(source),
-                anchors: [Vec2::default(); 2],
-                rest: previous
-                    .as_ref()
-                    .map_or_else(Rest::default, |object| object.rest),
-                rank: Some(
-                    previous
-                        .as_ref()
-                        .and_then(|object| object.rank)
-                        .unwrap_or(rank),
-                ),
-                initialized: false,
-                motion: previous
-                    .as_ref()
-                    .map_or_else(BTreeMap::new, |object| object.motion.clone()),
-                references: previous.as_ref().map_or_else(
-                    || crate::state::object::reference_ids(source),
-                    |old| old.references.clone(),
-                ),
-            };
+                Arc::clone(source),
+                previous.as_ref(),
+            );
+            object.anchors = [Vec2::default(); 2];
+            object.rank = Some(previous.as_ref().and_then(|old| old.rank).unwrap_or(rank));
+            object.initialized = false;
+
             state.handles.insert(*handle, id.clone());
             state.objects.insert(id, object);
             focus = Some(focus.map_or(bounds, |previous: Rect| previous.union(bounds)));
@@ -279,6 +265,7 @@ fn free_slot(
     viewport: Rect,
     fallback: Vec2,
 ) -> Result<Rect, PrepareError> {
+    // shortcut: slots ignore edge alignment and the resting glide; revisit in A8.
     let mut same_rank: Vec<_> = state
         .objects
         .values()
@@ -578,24 +565,18 @@ pub(super) fn edge(
             align: Align::Center,
         });
     }
-    Ok(Placed {
-        item: Item {
+    let mut placed = Placed::new(
+        Item {
             handle,
             parent,
             primitives: primitives.into(),
             bounds,
-            transform: cached.map_or_else(Affine::default, |old| old.item.transform),
+            transform: Affine::default(),
             opacity: edge.opacity.map_or(1.0, crate::Finite::get),
         },
-        source: Arc::clone(source),
-        anchors: [a, b],
-        rest: cached.map_or_else(Rest::default, |old| old.rest),
-        rank: None,
-        initialized: false,
-        motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
-        references: cached.map_or_else(
-            || crate::state::object::reference_ids(source),
-            |old| old.references.clone(),
-        ),
-    })
+        Arc::clone(source),
+        cached,
+    );
+    placed.anchors = [a, b];
+    Ok(placed)
 }

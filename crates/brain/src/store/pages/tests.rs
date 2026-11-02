@@ -506,7 +506,8 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
             .expect("statement");
         let mut rows = query.query([]).expect("query");
         assert!(rows.next().expect("step").is_some());
-        assert!(purge::drain(&store.side(), &stop).expect("drain"));
+        let side = store.side();
+        assert!(purge::drain(&side, side.hold_helper(), &stop).expect("drain"));
         let helper = rusqlite::Connection::open(scratch.db()).expect("helper");
         let (frames, copied): (i64, i64) = helper
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {

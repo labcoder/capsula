@@ -114,34 +114,35 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
         &mut budget,
         json!({"id":"first","put":[{"diagram":{"id":"d","box":[0,0,600,300]}},{"node":{"id":"a","in":"d","label":"A"}}]}),
     );
-    let first = picture(&scene, first, &before, &mut measure).expect("first picture");
-    let unchanged = first.after.items();
-    let bounds = first.after.bounds(&id("a")).expect("safe").expect("a");
     let second = committed(
         &mut scene,
         &mut budget,
         json!({"id":"second","put":[{"node":{"id":"b","in":"d","label":"B"}},{"edge":{"id":"e","in":"d","from":"a","to":"b"}}]}),
-    );
-    assert_eq!(first.after.items(), unchanged);
-    let second = picture(&scene, second, &first.after, &mut measure).expect("second picture");
-    assert_eq!(first.after.items(), unchanged);
-    assert_eq!(second.after.bounds(&id("a")).expect("safe"), Some(bounds));
-    assert!(
-        !bounds.intersects(second.after.bounds(&id("b")).expect("safe").expect("b")),
-        "new rank does not overlap the old one"
     );
     let removal = committed(
         &mut scene,
         &mut budget,
         json!({"id":"third","remove":["e","b"]}),
     );
+    let expected_removed = [second.handles[1].1, second.handles[0].1];
+    assert!(
+        scene.handle(&id("b")).is_none(),
+        "semantic tip already removed b"
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("first picture");
+    assert_eq!(first.after.items().len(), 2);
+    assert!(first.after.handle(&id("b")).is_none());
+    let bounds = first.after.bounds(&id("a")).expect("safe").expect("a");
+    let second = picture(&scene, second, &first.after, &mut measure).expect("second picture");
+    assert_eq!(second.after.bounds(&id("a")).expect("safe"), Some(bounds));
+    assert!(!bounds.intersects(second.after.bounds(&id("b")).expect("safe").expect("b")));
     let third = picture(&scene, removal, &second.after, &mut measure).expect("removal picture");
     assert!(
         second.after.handle(&id("b")).is_some(),
         "earlier output still has b"
     );
     assert_eq!(third.after.handle(&id("b")), None);
-    assert_eq!(third.removed.len(), 2);
+    assert_eq!(third.removed, expected_removed);
 }
 
 #[test]
@@ -319,6 +320,211 @@ fn review_reverse_put_order_places_new_predecessors_before_successors() {
 }
 
 #[test]
+fn glided_detachment_prunes_both_groups_and_parentless_updates_emit_no_glide() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let mut put = vec![
+        json!({"diagram":{"id":"d","box":[0,0,360,300],"dir":"down"}}),
+        json!({"diagram":{"id":"e","box":[0,0,360,300],"dir":"down"}}),
+    ];
+    for group in ["d", "e"] {
+        for name in ["a", "b", "c"] {
+            put.push(json!({"node":{"id":format!("{group}{name}"),"in":group,"label":"X"}}));
+        }
+    }
+    let first = committed(&mut scene, &mut budget, json!({"id":"first","put":put}));
+    let first = picture(&scene, first, &before, &mut measure).expect("two initial groups");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"next","put":[{"node":{"id":"overflow","in":"d","label":"X"}},{"node":{"id":"other","in":"e","label":"X"}}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("two overflows");
+    assert_eq!(
+        next.glides
+            .iter()
+            .map(|glide| glide.target)
+            .collect::<Vec<_>>(),
+        ["d", "e"].map(|name| next.after.handle(&id(name)).expect("group"))
+    );
+    cut(&mut scene, &mut budget, 2, &["overflow"], &next.after);
+    let tip = next.after.cut(&scene).expect("glided detachment");
+    assert_eq!(tip.items().len(), 1);
+    assert_eq!(
+        tip.items()[0].handle,
+        next.after.handle(&id("overflow")).expect("survivor")
+    );
+    assert_eq!(
+        tip.bounds(&id("overflow"))
+            .expect("bounds")
+            .expect("node")
+            .center(),
+        kumochi_scene::geom::Vec2::new(320.0, 36.0)
+    );
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"label","set":[{"target":"overflow","label":"Q"}]}),
+    );
+    let next = picture(&scene, next, &tip, &mut measure).expect("parentless node");
+    assert!(next.glides.is_empty());
+    let (_, replayed) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("replay");
+    assert_eq!(replayed.items(), next.after.items());
+}
+
+#[test]
+fn host_surface_defaults_choose_the_expected_diagram_flow_and_width() {
+    use kumochi_scene::{geom::Vec2, record::Surface};
+    for (surface, a, b) in [
+        (
+            SurfaceGeometry::default(),
+            Vec2::new(180.0, 36.0),
+            Vec2::new(180.0, 148.0),
+        ),
+        (
+            SurfaceGeometry::Overlay {
+                logical_size: [600.0, 400.0],
+            },
+            Vec2::new(224.0, 36.0),
+            Vec2::new(376.0, 36.0),
+        ),
+    ] {
+        let mut config = header();
+        config.surface = match surface {
+            SurfaceGeometry::Inline { .. } => Surface::Inline,
+            SurfaceGeometry::Overlay { .. } => Surface::Overlay,
+        };
+        let mut scene = SceneState::begin(config).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"first","put":[{"diagram":{"id":"d"}},{"node":{"id":"a","in":"d","label":"A"}},{"node":{"id":"b","in":"d","label":"B"}},{"edge":{"id":"edge","in":"d","from":"a","to":"b"}}]}),
+        );
+        let input = PrepareInput::new(
+            first.preparation,
+            before,
+            surface,
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        let result =
+            prepare(input, &mut Measure::default(), &AtomicBool::new(false)).expect("default flow");
+        assert_eq!(
+            result
+                .after
+                .bounds(&id("a"))
+                .expect("bounds")
+                .expect("a")
+                .center(),
+            a
+        );
+        assert_eq!(
+            result
+                .after
+                .bounds(&id("b"))
+                .expect("bounds")
+                .expect("b")
+                .center(),
+            b
+        );
+        assert!(result.glides.is_empty());
+    }
+}
+
+#[test]
+fn cancellation_during_host_measurement_publishes_no_layout() {
+    struct Cancelling<'a>(&'a AtomicBool);
+    impl TextMeasure for Cancelling<'_> {
+        fn measure(
+            &mut self,
+            _text: &str,
+            _style: TextStyle,
+            _width: Option<f32>,
+        ) -> Result<[f32; 2], MeasureError> {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok([8.0, 10.0])
+        }
+    }
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"cancel","put":[{"text":{"id":"t","at":[100,100],"text":"X"}}]}),
+    );
+    let input = PrepareInput::new(
+        first.preparation,
+        before.clone(),
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    )
+    .expect("input");
+    let cancel = AtomicBool::new(false);
+    assert!(matches!(
+        prepare(input, &mut Cancelling(&cancel), &cancel),
+        Err(PrepareError::Cancelled)
+    ));
+    assert_eq!(before.revision(), 0);
+    assert!(before.items().is_empty());
+}
+
+#[test]
+fn prepared_debug_summarizes_geometry_without_drawing_content() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"PRIVATE_STEP","put":[{"text":{"id":"PRIVATE_ID","at":[12345,12345],"text":"PRIVATE_TEXT"}}]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("picture");
+    for value in [
+        format!("{first:?}"),
+        format!("{:?}", first.display.items),
+        format!("{:?}", first.display.items[0].primitives),
+    ] {
+        for sentinel in ["PRIVATE_STEP", "PRIVATE_ID", "PRIVATE_TEXT", "12345"] {
+            assert!(!value.contains(sentinel));
+        }
+    }
+}
+
+#[test]
+fn shared_recovery_steps_keep_the_existing_encoding() {
+    let step = step(json!({"id":"first","put":[]}));
+    let event = kumochi_scene::SceneEvent::Step {
+        revision: 1,
+        step: Arc::new(step.clone()),
+    };
+    let mut expected = vec![0, 1];
+    expected.extend(postcard::to_allocvec(&step).expect("step bytes"));
+    let encoded = postcard::to_allocvec(&event).expect("event bytes");
+    assert_eq!(encoded, expected);
+    assert_eq!(
+        postcard::from_bytes::<kumochi_scene::SceneEvent>(&encoded).expect("decode"),
+        event
+    );
+    assert_eq!(
+        serde_json::to_value(&event).expect("JSON"),
+        json!({"step":{"revision":1,"step":step}})
+    );
+}
+
+#[test]
 fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();
@@ -330,6 +536,10 @@ fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
         json!({"id":"first","put":[{"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}]}),
     );
     let first = picture(&scene, first, &before, &mut measure).expect("path");
+    assert!(std::ptr::eq(
+        first.step(),
+        scene.step(0).expect("stored input")
+    ));
     let next = committed(
         &mut scene,
         &mut budget,
@@ -464,6 +674,11 @@ fn detached_fast_nodes_absorb_the_ancestors_resting_transform() {
     cut(&mut scene, &mut budget, 1, &["a"], &first.after);
     let live = first.after.cut(&scene).expect("detach node");
     assert_eq!(live.bounds(&id("a")).expect("frozen bounds"), expected);
+    assert_eq!(live.items().len(), 1);
+    assert_eq!(
+        live.items()[0].handle,
+        first.after.handle(&id("a")).expect("a")
+    );
     assert_eq!(live.items()[0].parent, None);
     let (_, recovered) = recover(
         header(),
@@ -707,6 +922,7 @@ fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices(
             {"node":{"id":"diamond","in":"d","label":"D","shape":"diamond"}},
             {"node":{"id":"cylinder","in":"d","label":"C","shape":"cylinder"}},
             {"node":{"id":"note","in":"d","label":"N","shape":"note"}},
+            {"edge":{"id":"edge","in":"d","from":"diamond","to":"cylinder"}},
             {"highlight":{"id":"ring","target":{"ref":"rect"},"style":"ring"}},
             {"highlight":{"id":"box","target":{"ref":"rect"},"style":"box"}},
             {"highlight":{"id":"spotlight","target":{"ref":"rect"},"style":"spotlight"}},
@@ -725,7 +941,7 @@ fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices(
     )
     .expect("input");
     let first = prepare(input, &mut measure, &AtomicBool::new(false)).expect("procedural geometry");
-    assert_eq!(scene.usage().segments, 242);
+    assert_eq!(scene.usage().segments, 261);
     for (name, expected) in [
         ("rect", 28),
         ("circle", 48),
@@ -735,6 +951,7 @@ fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices(
         ("diamond", 4),
         ("cylinder", 32),
         ("note", 7),
+        ("edge", 19),
         ("underline", 1),
         ("callout", 1),
     ] {
@@ -776,10 +993,10 @@ fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices(
         next.display.items.is_empty(),
         "unchanged shared geometry is not emitted again"
     );
-    assert!(
-        next.resident_bytes < first.resident_bytes,
-        "only the new layout index is charged"
-    );
+    let empty = committed(&mut scene, &mut budget, json!({"id":"another_empty"}));
+    let empty =
+        picture(&scene, empty, &next.after, &mut measure).expect("same index without new payload");
+    assert_eq!(next.resident_bytes, empty.resident_bytes);
 }
 
 #[test]

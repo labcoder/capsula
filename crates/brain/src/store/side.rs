@@ -94,6 +94,11 @@ impl Side {
         }
     }
 
+    /// Takes the helper's connection, waiting while a checkpoint runs on it.
+    pub(crate) fn hold_helper(&self) -> MutexGuard<'_, Option<Connection>> {
+        lock(&self.helper)
+    }
+
     /// Closes both connections for good, as the store's thread ends; a read waiting on a swap
     /// then fails.
     pub(crate) fn close(&self) {
@@ -140,7 +145,17 @@ impl Side {
     /// # Errors
     /// Fails when the store is unavailable, its file can't be opened, or SQLite fails.
     pub(crate) fn checkpoint(&self) -> Result<bool, StoreError> {
-        let mut slot = lock(&self.helper);
+        self.checkpoint_held(self.hold_helper())
+    }
+
+    /// [`Side::checkpoint`] on a helper's connection already taken with [`Side::hold_helper`].
+    ///
+    /// # Errors
+    /// As [`Side::checkpoint`].
+    pub(crate) fn checkpoint_held(
+        &self,
+        mut slot: MutexGuard<'_, Option<Connection>>,
+    ) -> Result<bool, StoreError> {
         if *lock(&self.swapping) {
             return Ok(false);
         }

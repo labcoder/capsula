@@ -4,7 +4,7 @@ use crate::{
     geom::{Affine, Rect, Vec2},
     record::{Align, Rgb},
 };
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 /// Text shaping parameters shared with painting.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,7 +54,7 @@ impl Paint {
     }
 }
 /// A resolved renderer-independent primitive.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Prim {
     /// Native rounded rectangle, without flattened path storage.
     Rect {
@@ -104,7 +104,7 @@ pub enum Prim {
     },
 }
 /// Prepared geometry belonging to one deterministic object identity.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Item {
     /// Object identity.
     pub handle: Handle,
@@ -120,28 +120,44 @@ pub struct Item {
     pub opacity: f32,
 }
 /// Prepared object replacements for one step.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq)]
 pub struct DisplayList {
     /// Items in stable paint order.
     pub items: Vec<Item>,
 }
-/// A sampled object referencing its immutable prepared geometry.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FrameItem {
-    /// Object identity.
-    pub handle: Handle,
-    /// Shared prepared primitives.
-    pub primitives: Arc<[Prim]>,
-    /// Affine coefficients `[a, b, c, d, e, f]` for `[a c e; b d f]`.
-    pub transform: [f32; 6],
-    /// Sampled opacity.
-    pub opacity: f32,
-    /// Revealed fraction of stroked geometry.
-    pub reveal: f32,
+
+impl fmt::Debug for Prim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rect { .. } => f.write_str("Rect { .. }"),
+            Self::Fill { points, .. } => f
+                .debug_struct("Fill")
+                .field("vertices", &points.len())
+                .finish_non_exhaustive(),
+            Self::Line { points, .. } => f
+                .debug_struct("Line")
+                .field("vertices", &points.len())
+                .finish_non_exhaustive(),
+            Self::Text { text, .. } => f
+                .debug_struct("Text")
+                .field("characters", &text.as_str().chars().count())
+                .finish_non_exhaustive(),
+        }
+    }
 }
-/// Reused sampling output; clearing it retains its item capacity.
-#[derive(Debug, Default)]
-pub struct Frame {
-    /// Items in stable paint order.
-    pub items: Vec<FrameItem>,
+impl fmt::Debug for DisplayList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DisplayList")
+            .field("items", &self.items.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Item {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Item")
+            .field("handle", &self.handle)
+            .field("primitives", &self.primitives.len())
+            .finish_non_exhaustive()
+    }
 }

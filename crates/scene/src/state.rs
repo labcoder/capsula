@@ -37,7 +37,11 @@ pub enum SceneEvent {
         /// Original one-based commit revision.
         revision: u32,
         /// Original typed input for idempotency and deterministic replay.
-        step: Step,
+        #[serde(
+            serialize_with = "serialize_step",
+            deserialize_with = "deserialize_step"
+        )]
+        step: Arc<Step>,
     },
     /// An effective cut, ordered between the steps it affected.
     Stop(StopCut),
@@ -50,6 +54,16 @@ pub enum StopOutcome {
     Kept,
     /// Nothing had activated.
     Cleared,
+}
+
+fn serialize_step<S: serde::Serializer>(step: &Step, serializer: S) -> Result<S::Ok, S::Error> {
+    step.serialize(serializer)
+}
+
+fn deserialize_step<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<Step>, D::Error> {
+    Step::deserialize(deserializer).map(Arc::new)
 }
 
 /// Validation either creates an owned candidate or recognizes a retransmission.
@@ -69,7 +83,7 @@ pub struct Admitted {
     generation: u64,
     mutation: u64,
     usage: Usage,
-    step: Box<Step>,
+    step: Arc<Step>,
     after: BTreeMap<WireId, Object>,
     created: Vec<(WireId, Handle)>,
     removed: Vec<(WireId, Object)>,
@@ -174,7 +188,7 @@ impl SceneState {
     }
     pub(crate) fn preparation_objects(
         &self,
-    ) -> impl Iterator<Item = (&WireId, Handle, Option<Handle>, &[WireId])> {
+    ) -> impl Iterator<Item = (&WireId, Handle, Option<Handle>)> {
         self.objects.iter().map(|(id, object)| {
             (
                 id,
@@ -183,7 +197,6 @@ impl SceneState {
                     .parent
                     .as_ref()
                     .map(|parent| self.objects[parent].handle),
-                object.references.as_slice(),
             )
         })
     }
@@ -440,7 +453,7 @@ impl SceneState {
             generation: global.generation(),
             mutation: self.mutation,
             usage,
-            step: Box::new(step.clone()),
+            step: Arc::new(step.clone()),
             after,
             created,
             removed,
@@ -490,7 +503,7 @@ impl SceneState {
             owner: Arc::clone(&self.identity),
             cut_revision: self.last_cut_revision,
             revision,
-            step: Arc::new((*admitted.step).clone()),
+            step: Arc::clone(&admitted.step),
             path_scales,
             canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
         };
@@ -509,7 +522,7 @@ impl SceneState {
         );
         self.log.push(SceneEvent::Step {
             revision,
-            step: *admitted.step,
+            step: admitted.step,
         });
         self.objects = admitted.after;
         self.revision = revision;
