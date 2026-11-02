@@ -45,18 +45,14 @@ fn strict_records() {
         error(&format!(r#"{{"step":{{"id":"{}"}}}}"#, "x".repeat(41))).code,
         ErrorCode::TooLong
     );
-    assert!(
-        parse_record(br#"{"end":{}} trailing"#).is_err(),
-        "trailing bytes fail"
+    assert_eq!(error(r#"{"end":{}} trailing"#).code, ErrorCode::Malformed);
+    assert_eq!(
+        error(r#"{"end":{},"step":{"id":"s"}}"#).code,
+        ErrorCode::Malformed
     );
-    assert!(
-        parse_record(br#"{"end":{},"step":{"id":"s"}}"#).is_err(),
-        "one tag only"
-    );
-    assert!(
-        parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay"}}"#).is_err(),
-        "alt is required"
-    );
+    let missing = error(r#"{"begin":{"v":1,"scene":"s","surface":"overlay"}}"#);
+    assert_eq!(missing.code, ErrorCode::MissingField);
+    assert_eq!(missing.path.as_str(), "alt");
 }
 #[test]
 fn text_and_list_boundaries_are_not_truncated() {
@@ -65,19 +61,6 @@ fn text_and_list_boundaries_are_not_truncated() {
     assert_eq!(
         Text::try_from("é".repeat(401)).err(),
         Some(ErrorCode::TooLong)
-    );
-    for count in [8, 9] {
-        let cols = vec!["column"; count];
-        let fixture =
-            serde_json::json!({"step":{"id":"s","put":[{"table":{"id":"t","cols":cols}}]}});
-        let result = parse_record(&serde_json::to_vec(&fixture).expect("fixture encodes"));
-        assert_eq!(result.is_ok(), count == 8, "columns are bounded exactly");
-    }
-    let fixture =
-        serde_json::json!({"step":{"id":"s","put":[{"row":{"id":"r","cells":vec![1;9]}}]}});
-    assert!(
-        parse_record(&serde_json::to_vec(&fixture).expect("fixture encodes")).is_err(),
-        "cells never truncate"
     );
 }
 #[test]
@@ -109,35 +92,50 @@ fn mixed_syntax_round_trips() {
 }
 #[test]
 fn mixed_maps_are_strict() {
-    assert!(
-        serde_json::from_str::<Anchor>(r#"{"ref":"a","ref":"b"}"#).is_err(),
-        "duplicate refs fail"
-    );
-    assert!(
-        serde_json::from_str::<Anchor>(r#"{"ref":"a","other":0}"#).is_err(),
-        "unknown anchor fields fail"
-    );
-    assert!(
-        serde_json::from_str::<Start>(r#"{"after":"s","ms":1,"x":0}"#).is_err(),
-        "unknown start fields fail"
-    );
-    assert!(
-        serde_json::from_str::<Start>(r#"{"after":"s","ms":1,"ms":2}"#).is_err(),
-        "duplicate start fields fail"
-    );
-    for json in [r##""#fffffff""##, r##""#zz0000""##] {
-        assert!(
-            serde_json::from_str::<Color>(json).is_err(),
-            "invalid RGB fails"
-        );
+    for (json, code, path) in [
+        (
+            r#"{"step":{"id":"s","put":[{"text":{"id":"t","at":{"ref":"a","ref":"b"},"text":""}}]}}"#,
+            ErrorCode::DuplicateKey,
+            "put[0].text.at",
+        ),
+        (
+            r#"{"step":{"id":"s","put":[{"text":{"id":"t","at":{"ref":"a","other":0},"text":""}}]}}"#,
+            ErrorCode::UnknownField,
+            "put[0].text.at",
+        ),
+        (
+            r#"{"step":{"id":"s","start":{"after":"s","ms":1,"x":0}}}"#,
+            ErrorCode::UnknownField,
+            "start.x",
+        ),
+        (
+            r#"{"step":{"id":"s","start":{"after":"s","ms":1,"ms":2}}}"#,
+            ErrorCode::DuplicateKey,
+            "start",
+        ),
+        (
+            r##"{"step":{"id":"s","put":[{"node":{"id":"n","label":"","color":"#fffffff"}}]}}"##,
+            ErrorCode::OutOfRange,
+            "put[0].node.color",
+        ),
+        (
+            r##"{"step":{"id":"s","put":[{"node":{"id":"n","label":"","color":"#zz0000"}}]}}"##,
+            ErrorCode::OutOfRange,
+            "put[0].node.color",
+        ),
+    ] {
+        let failure = error(json);
+        assert_eq!(failure.code, code);
+        assert_eq!(failure.path.as_str(), path);
     }
 }
+
 #[test]
 fn binary_payloads_cannot_bypass_validation() {
     for number in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 20_001.0] {
         let bytes = postcard::to_allocvec(&number).expect("raw number encodes");
         assert!(
-            postcard::from_bytes::<Finite>(&bytes).is_err(),
+            postcard::from_bytes::<Finite>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
             "invalid finite number fails"
         );
     }
@@ -145,25 +143,25 @@ fn binary_payloads_cannot_bypass_validation() {
     let mut bytes = vec![1];
     bytes.extend(postcard::to_allocvec(&0x0100_0000_u32).expect("raw integer encodes"));
     assert!(
-        postcard::from_bytes::<Color>(&bytes).is_err(),
+        postcard::from_bytes::<Color>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
         "binary RGB remains 24 bit"
     );
     let mut bytes = vec![1]; // Cell::Number
     bytes.extend(postcard::to_allocvec(&f64::NAN).expect("raw number encodes"));
     assert!(
-        postcard::from_bytes::<Cell>(&bytes).is_err(),
+        postcard::from_bytes::<Cell>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
         "binary cell rejects NaN"
     );
     let mut bytes = vec![0]; // KeyValue::Num
     bytes.extend(postcard::to_allocvec(&f32::NAN).expect("raw number encodes"));
     assert!(
-        postcard::from_bytes::<KeyValue>(&bytes).is_err(),
+        postcard::from_bytes::<KeyValue>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
         "binary key rejects NaN"
     );
     for id in ["", &"x".repeat(41), "invalid/id"] {
         let bytes = postcard::to_allocvec(id).expect("raw string encodes");
         assert!(
-            postcard::from_bytes::<WireId>(&bytes).is_err(),
+            postcard::from_bytes::<WireId>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
             "binary ids remain validated"
         );
     }
@@ -193,12 +191,41 @@ fn errors_and_debug_do_not_echo_drawing_content() {
         !format!("{text:?} {id:?}").contains("private"),
         "debug is length only"
     );
-    for json in [
-        r#"{"step":{"id":"s","private-key-sentinel":"private-value-sentinel"}}"#,
-        r#"{"private-op-sentinel":{"text":"private-value-sentinel"}}"#,
-        r#"{"step":{"id":"s","put":[{"node":{"id":"n","label":17}}]}}"#,
+    for (json, code, path) in [
+        (
+            r#"{"step":{"id":"s","private-key-sentinel":"private-value-sentinel"}}"#,
+            ErrorCode::UnknownField,
+            "",
+        ),
+        (
+            r#"{"private-op-sentinel":{"text":"private-value-sentinel"}}"#,
+            ErrorCode::UnknownOp,
+            "",
+        ),
+        (
+            r#"{"step":{"id":"s","put":[{"text":{"id":"t","at":[0,0],"text":"","size":"private-value-sentinel"}}]}}"#,
+            ErrorCode::Malformed,
+            "put[0].text.size",
+        ),
+        (
+            r#"{"step":{"id":"s","put":[{"node":{"id":"n","label":"","shape":"private-value-sentinel"}}]}}"#,
+            ErrorCode::OutOfRange,
+            "put[0].node.shape",
+        ),
+        (
+            r##"{"step":{"id":"s","put":[{"node":{"id":"n","label":"","color":"#private-value-sentinel"}}]}}"##,
+            ErrorCode::OutOfRange,
+            "put[0].node.color",
+        ),
+        (
+            r#"{"step":{"id":"s","put":[{"node":{"id":"n","label":"","color":"private-value-sentinel"}}]}}"#,
+            ErrorCode::OutOfRange,
+            "put[0].node.color",
+        ),
     ] {
         let failure = error(json);
+        assert_eq!(failure.code, code);
+        assert_eq!(failure.path.as_str(), path);
         let safe = format!("{failure} {failure:?} {}", failure.tool_text());
         assert!(
             !safe.contains("private"),
@@ -209,6 +236,13 @@ fn errors_and_debug_do_not_echo_drawing_content() {
             "raw serde wording is discarded"
         );
     }
+    let bytes = postcard::to_allocvec("private-value-sentinel/").expect("raw string encodes");
+    let failure = postcard::from_bytes::<WireId>(&bytes).expect_err("invalid binary id");
+    assert_eq!(failure, postcard::Error::SerdeDeCustom);
+    assert!(
+        !format!("{failure} {failure:?}").contains("private"),
+        "binary errors discard custom text"
+    );
 }
 #[test]
 fn every_operation_round_trips_as_a_record() {

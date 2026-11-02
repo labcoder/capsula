@@ -1,6 +1,9 @@
 //! Model ids, host identities and millisecond times.
 
-use crate::{error::ErrorCode, limits::MAX_ID_CHARS};
+use crate::{
+    error::ErrorCode,
+    limits::{MAX_ID_CHARS, MAX_MOTION_MS},
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -58,6 +61,37 @@ impl Handle {
     }
 }
 
-/// Milliseconds on the wire.
+/// A relative time in milliseconds, bounded to one minute.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Ms(pub u32);
+#[serde(try_from = "u32", into = "u32")]
+pub struct Ms(u32);
+
+impl Ms {
+    /// Returns the relative time in milliseconds.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Adds relative times, returning none if the result exceeds the motion cap.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0
+            .checked_add(other.0)
+            .and_then(|value| Self::try_from(value).ok())
+    }
+}
+
+impl TryFrom<u32> for Ms {
+    type Error = ErrorCode;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value > MAX_MOTION_MS {
+            return Err(ErrorCode::OutOfRange);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<Ms> for u32 {
+    fn from(value: Ms) -> Self {
+        value.0
+    }
+}

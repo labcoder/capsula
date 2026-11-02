@@ -2,7 +2,7 @@
 
 use crate::{
     error::ErrorCode,
-    limits::{MAX_COORD, MAX_TEXT_CHARS},
+    limits::{MAX_COORD, MAX_SOURCE_BYTES, MAX_TEXT_CHARS},
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -38,6 +38,38 @@ impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Text")
             .field("len", &self.0.chars().count())
+            .finish()
+    }
+}
+
+/// Bounded UTF-8 source code, distinct from displayed text.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Source(Box<str>);
+impl Source {
+    /// Returns source for the bounded path or Mermaid parser, never for logs.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for Source {
+    type Error = ErrorCode;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() > MAX_SOURCE_BYTES {
+            return Err(ErrorCode::TooLong);
+        }
+        Ok(Self(value.into_boxed_str()))
+    }
+}
+impl From<Source> for String {
+    fn from(value: Source) -> Self {
+        value.0.into()
+    }
+}
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Source")
+            .field("bytes", &self.0.len())
             .finish()
     }
 }

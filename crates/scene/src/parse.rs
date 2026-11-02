@@ -10,10 +10,14 @@ pub fn parse_record(bytes: &[u8]) -> Result<Record, StepError> {
         return Err(StepError::new(ErrorCode::TooLong));
     }
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let record = serde_path_to_error::deserialize(&mut decoder).map_err(|error| StepError {
-        step: None,
-        path: FieldPath::from_decode(error.path()),
-        code: ErrorCode::from_decode(&error.inner().to_string()),
+    let record = serde_path_to_error::deserialize(&mut decoder).map_err(|error| {
+        let mut path = FieldPath::from_decode(error.path());
+        let code = ErrorCode::from_decode(&error.inner().to_string(), &mut path);
+        StepError {
+            step: None,
+            path,
+            code,
+        }
     })?;
     decoder
         .end()

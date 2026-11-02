@@ -10,6 +10,8 @@ pub const MAX_JSON_DEPTH: usize = 16;
 pub const MAX_ID_CHARS: usize = 40;
 /// Maximum Unicode scalar values in text.
 pub const MAX_TEXT_CHARS: usize = 400;
+/// Maximum UTF-8 bytes in path data or Mermaid source.
+pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
 /// Maximum committed steps per scene.
 pub const MAX_STEPS: usize = 64;
 /// Maximum live objects per scene, including pending removals.
@@ -46,6 +48,8 @@ pub const MAX_PATH_SEGMENTS: usize = 4_096;
 pub const MAX_GLOBAL_PATH_SEGMENTS: usize = 20_000;
 /// Maximum tracks per scene.
 pub const MAX_TRACKS: usize = 256;
+/// Maximum put operations in one step: objects plus tracks.
+pub const MAX_STEP_OPS: usize = MAX_LIVE_OBJECTS + MAX_TRACKS;
 /// Maximum keys in one track.
 pub const MAX_KEYS: usize = 32;
 /// Maximum object-graph depth.

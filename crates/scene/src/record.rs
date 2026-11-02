@@ -3,10 +3,10 @@ mod mixed;
 use crate::{
     id::{Ms, WireId},
     limits::{
-        MAX_CHART_CATEGORIES, MAX_KEYS, MAX_PATH_POINTS, MAX_RECORD_BYTES, MAX_SERIES_POINTS,
-        MAX_TABLE_COLUMNS,
+        MAX_CHART_CATEGORIES, MAX_KEYS, MAX_LIVE_OBJECTS, MAX_PATH_POINTS, MAX_SERIES_POINTS,
+        MAX_STEP_OPS, MAX_TABLE_COLUMNS,
     },
-    text::{Bounded, Finite, Number, Text},
+    text::{Bounded, Finite, Number, Source, Text},
 };
 pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
 use serde::{Deserialize, Serialize};
@@ -84,13 +84,13 @@ pub struct Step {
     pub say: Option<Text>,
     /// put.
     #[serde(default)]
-    pub put: Bounded<Op, MAX_RECORD_BYTES>,
+    pub put: Bounded<Op, MAX_STEP_OPS>,
     /// set.
     #[serde(default)]
-    pub set: Bounded<Change, MAX_RECORD_BYTES>,
+    pub set: Bounded<Change, MAX_LIVE_OBJECTS>,
     /// remove.
     #[serde(default)]
-    pub remove: Bounded<WireId, MAX_RECORD_BYTES>,
+    pub remove: Bounded<WireId, MAX_LIVE_OBJECTS>,
     /// start.
     #[serde(default)]
     pub start: Start,
@@ -402,7 +402,7 @@ pub struct PathOp {
     /// opacity.
     pub opacity: Option<Finite>,
     /// d.
-    pub d: Text,
+    pub d: Source,
     /// at.
     pub at: Option<Anchor>,
     /// scale.
@@ -835,5 +835,5 @@ pub struct Mermaid {
     #[serde(rename = "in")]
     pub parent: WireId,
     /// src.
-    pub src: Text,
+    pub src: Source,
 }

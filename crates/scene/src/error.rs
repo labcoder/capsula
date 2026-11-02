@@ -48,6 +48,9 @@ pub enum ErrorCode {
     /// Duplicate Key.
     #[error("scene.DuplicateKey")]
     DuplicateKey,
+    /// A required schema field is absent.
+    #[error("scene.MissingField")]
+    MissingField,
     /// Not Finite.
     #[error("scene.NotFinite")]
     NotFinite,
@@ -107,7 +110,7 @@ pub enum ErrorCode {
     OverBudget(Budget),
 }
 impl ErrorCode {
-    pub(crate) fn from_decode(message: &str) -> Self {
+    pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {
         if message.starts_with("scene.NotFinite") {
             return Self::NotFinite;
         }
@@ -123,9 +126,23 @@ impl ErrorCode {
         if message.starts_with("unknown field") {
             Self::UnknownField
         } else if message.starts_with("unknown variant") {
-            Self::UnknownOp
+            if path.is_op_tag() {
+                Self::UnknownOp
+            } else {
+                Self::OutOfRange
+            }
         } else if message.starts_with("duplicate field") {
             Self::DuplicateKey
+        } else if let Some(missing) = message.strip_prefix("missing field `") {
+            if let Some((field, _)) = missing.split_once('`')
+                && known_field(field)
+            {
+                path.push_field(field);
+            }
+            Self::MissingField
+        } else if message.starts_with("invalid value") || message.starts_with("number out of range")
+        {
+            Self::OutOfRange
         } else {
             Self::Malformed
         }
@@ -139,6 +156,20 @@ impl FieldPath {
     /// Returns the sanitized structural path.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    fn is_op_tag(&self) -> bool {
+        self.0.is_empty()
+            || self
+                .0
+                .strip_prefix("put[")
+                .and_then(|s| s.strip_suffix(']'))
+                .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+    }
+    fn push_field(&mut self, field: &str) {
+        if !self.0.is_empty() {
+            self.0.push('.');
+        }
+        self.0.push_str(field);
     }
     pub(crate) fn from_decode(path: &serde_path_to_error::Path) -> Self {
         use serde_path_to_error::Segment;
