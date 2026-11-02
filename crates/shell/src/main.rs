@@ -1,4 +1,4 @@
-//! `capsula`, Capsula's shell. It has no console window.
+//! `kumochi`, Kumochi's shell. It has no console window.
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod credential;
@@ -15,7 +15,7 @@ mod threads;
 
 use std::process::ExitCode;
 
-use capsula_protocol::constants;
+use kumochi_protocol::constants;
 use strings::Strings;
 
 fn main() -> ExitCode {
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(build = capsula_protocol::BUILD_ID, "shell started");
+    tracing::info!(build = kumochi_protocol::BUILD_ID, "shell started");
     let (events, link_events) = async_channel::unbounded();
     let (link, start) = match link::prepare(events) {
         Ok(prepared) => prepared,

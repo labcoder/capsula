@@ -11,8 +11,8 @@ is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything
   reads the DACL back before listening, and refuses remote clients.
 - Each pipe allows two instances: the one in use, and its replacement, created before the used
   one closes so another process can never take the name in between.
-- The brain only talks to the `capsula.exe` beside its own executable, and the shell only to
-  the `capsulad.exe` beside its own. Each side checks the other's image path through the pipe.
+- The brain only talks to the `kumochi.exe` beside its own executable, and the shell only to
+  the `kumochid.exe` beside its own. Each side checks the other's image path through the pipe.
 - On every start the brain writes a fresh random 32-byte **instance capability** to Windows
   Credential Manager. A shell proves it runs as the same user by reading it back. It's never on
   a command line, in a file, or in the environment.
@@ -265,7 +265,7 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
 
 ## Starting and reconnecting
 
-A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `capsulad.exe`
+A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `kumochid.exe`
 detached, outside its own job where the job allows it, and retries for up to ten seconds. A shell
 started by hand finds a running brain the same way, so after a shell crash nothing needs
 restarting.
@@ -273,5 +273,5 @@ restarting.
 ## Debugging
 
 A debug brain records the control frames it sends and receives, and the handshake with
-capabilities zeroed, when `CAPSULA_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
+capabilities zeroed, when `KUMOCHI_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
 decodes the recording with the same message types.

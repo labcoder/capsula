@@ -1,6 +1,6 @@
 //! Deleting threads and refused turns, as [`Runs`] settles them.
 
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES, Phase,
     RunId, SceneDescriptor, SceneId, Step, ThreadId,
 };

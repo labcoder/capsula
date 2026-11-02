@@ -1,5 +1,5 @@
-use capsula_protocol::frame::{self, FrameError, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, FrameError, Pipe};
+use kumochi_protocol::message::{
     DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
     ThreadCursor, ThreadId, ThreadRow,
 };

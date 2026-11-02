@@ -11,4 +11,4 @@ pub use secret::Secret;
 
 /// Identifies one build of both binaries: the version and the git commit. The brain refuses a
 /// shell whose id differs, because the two only work as a matched pair.
-pub const BUILD_ID: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("CAPSULA_COMMIT"));
+pub const BUILD_ID: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("KUMOCHI_COMMIT"));

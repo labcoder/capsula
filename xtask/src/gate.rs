@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use capsula_protocol::constants::{BRAIN_EXE, DISPLAY_NAME, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, DISPLAY_NAME, SHELL_EXE};
 use windows::Win32::Foundation::{POINT, RECT};
 
 use crate::platform::{
@@ -237,7 +237,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         output.join("identity.txt"),
         format!(
             "driver_build_id={}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
-            capsula_protocol::BUILD_ID,
+            kumochi_protocol::BUILD_ID,
             gate_capture::file_sha256(&exe)?,
             images.shell_sha256,
             images.brain_sha256

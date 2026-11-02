@@ -40,7 +40,7 @@ pub(crate) type PipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
 pub(crate) async fn test_pair(name: &str) -> io::Result<(NamedPipeServer, PipeClient)> {
     let name = format!(
         r"\\.\pipe\{}-test-{}-{name}",
-        capsula_protocol::constants::OBJECT_PREFIX,
+        kumochi_protocol::constants::OBJECT_PREFIX,
         std::process::id()
     );
     let server = create_owner_only(&name, Instance::First)?;
@@ -347,7 +347,11 @@ mod tests {
     }
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
-        let name = format!(r"\\.\pipe\capsula-test-{}", std::process::id());
+        let name = format!(
+            r"\\.\pipe\{}-test-{}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        );
         let first = create_owner_only(&name, Instance::First).expect("first instance");
         let again = create_owner_only(&name, Instance::First);
         assert!(again.is_err(), "a second first instance must fail");

@@ -17,7 +17,7 @@ mod tests;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, SceneId,
     Step, ThreadId,
 };

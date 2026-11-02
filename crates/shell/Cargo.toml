@@ -1,6 +1,6 @@
 [package]
-name = "capsula-shell"
-description = "Capsula's shell, capsula: everything the user sees, hears and touches."
+name = "kumochi-shell"
+description = "Kumochi's shell, kumochi: everything the user sees, hears and touches."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,12 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "capsula"
+name = "kumochi"
 path = "src/main.rs"
 
 [dependencies]
 async-channel = "2"
-capsula-protocol.workspace = true
+kumochi-protocol.workspace = true
 fluent-bundle.workspace = true
 gpui-kit.workspace = true
 keyring.workspace = true
@@ -43,7 +43,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-capsula-brain = { path = "../brain" }
+kumochi-brain = { path = "../brain" }
 
 [lints]
 workspace = true

@@ -460,7 +460,7 @@ mod tests {
             let display_ms = if !hover && index == 100 { 50 } else { 13 };
             writeln!(
                 csv,
-                "capsula.exe,42,0x{chain:X},DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,{display_ms},0,0,0,0,{}",
+                "app.exe,42,0x{chain:X},DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,{display_ms},0,0,0,0,{}",
                 paint + 1
             )
             .unwrap();

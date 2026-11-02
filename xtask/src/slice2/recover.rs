@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_STEP_LABEL, MAX_STEPS,
     PageEventKind, PageOf, Phase, RunId, SceneDescriptor, SceneId, Step,
 };
@@ -384,7 +384,7 @@ fn scenes(client: &mut Client) -> Result<Vec<SceneDescriptor>> {
 
 #[cfg(test)]
 mod tests {
-    use capsula_protocol::message::{DataToShell, MAX_STEPS, SceneDescriptor, SceneId, Step};
+    use kumochi_protocol::message::{DataToShell, MAX_STEPS, SceneDescriptor, SceneId, Step};
 
     use super::Applied;
     use crate::slice2::client::Frame;

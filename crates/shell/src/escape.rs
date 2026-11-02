@@ -1,7 +1,7 @@
 //! What Esc does, decided locally before anything reaches the brain.
 //!
 //! The order is fixed: stop moving work first, clear an idle drawing second, otherwise
-//! dismiss the topmost local panel. Esc is held system-wide only while Capsula speaks or
+//! dismiss the topmost local panel. Esc is held system-wide only while Kumochi speaks or
 //! shows a drawing, so an app in front keeps it otherwise.
 
 /// What the shell knows is moving or on screen. Speech arrives in slice 7, so `speaking` stays

@@ -12,7 +12,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
 use crate::platform::{self, Process};
 
@@ -297,7 +297,7 @@ fn measure(
                 "DWM CSV lacks the expected header and samples: {rows} rows"
             );
             println!(
-                "DWM CSV retains all 1Hz rows and PIDs, including the first invalid warmup value; its bounded window extends beyond the CPU interval; use CSV timestamps; whole-desktop activity, not Capsula attribution"
+                "DWM CSV retains all 1Hz rows and PIDs, including the first invalid warmup value; its bounded window extends beyond the CPU interval; use CSV timestamps; whole-desktop activity, not Kumochi attribution"
             );
         }
         Ok(())

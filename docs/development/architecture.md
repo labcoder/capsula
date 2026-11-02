@@ -1,22 +1,22 @@
 # Architecture
 
-How Capsula works inside. This page is the map. Each module has its own page under `docs/development/` with the detail. The full design record lives outside the repo.
+How Kumochi works inside. This page is the map. Each module has its own page under `docs/development/` with the detail. The full design record lives outside the repo.
 
-Capsula is built in slices. Slice 0 is the skeleton: the two processes, their pipes and handshake, and the Job Objects. Sections below describe the whole first release, so some of what they show arrives with later slices.
+Kumochi is built in slices. Slice 0 is the skeleton: the two processes, their pipes and handshake, and the Job Objects. Sections below describe the whole first release, so some of what they show arrives with later slices.
 
 ## The two processes
 
-Capsula is a GPUI **shell** and a headless **brain**. The shell owns everything you touch, see and hear. The brain owns history, models and authority. The brain keeps its helpers in a Windows Job Object, so a brain crash never leaves them running.
+Kumochi is a GPUI **shell** and a headless **brain**. The shell owns everything you touch, see and hear. The brain owns history, models and authority. The brain keeps its helpers in a Windows Job Object, so a brain crash never leaves them running.
 
 ```mermaid
 flowchart LR
-  subgraph Shell["capsula.exe (GPUI)"]
+  subgraph Shell["kumochi.exe (GPUI)"]
     In["Shortcut and Esc<br/>Raw Input"]
     Au["Mic and speakers<br/>played-sample clock"]
     Co["Conductor"]
     Pr["Overlay, panels<br/>2D and 3D presenter"]
   end
-  subgraph Brain["capsulad.exe (headless, tokio)"]
+  subgraph Brain["kumochid.exe (headless, tokio)"]
     Core["Core loop"]
     Disp["Dispatcher and ledger"]
     Store[("SQLite + FTS5")]
@@ -24,9 +24,9 @@ flowchart LR
     Conn["Connections"]
   end
   subgraph Job["Job Object"]
-    Scr["capsulad --screen"]
+    Scr["kumochid --screen"]
     CC["claude (one per question,<br/>in its own run job)"]
-    Br["capsulad --mcp-bridge"]
+    Br["kumochid --mcp-bridge"]
   end
   Shell <-->|"control pipe + data pipe"| Brain
   Core --> Scr
@@ -41,9 +41,9 @@ flowchart LR
 | Shell | The shortcut, Esc, microphone, speakers and their clock, the overlay and panels, scene layout and painting |
 | Brain | Runs, the tool dispatcher, connections and credentials, the store, scene validation, voice models, the Job Object |
 | Screen worker | Screen capture, UI Automation, OCR and image encoding. It's killable, because a stuck UIA provider can't be stopped any other way |
-| Claude Code | The user's own Claude Code, started fresh for each question in its own nested run job, restricted to Capsula's tools. Ending a question terminates that run job only |
+| Claude Code | The user's own Claude Code, started fresh for each question in its own nested run job, restricted to Kumochi's tools. Ending a question terminates that run job only |
 
-The shell keeps no state on disk, only its log, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Capsula\logs` (`Capsula Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
+The shell keeps no state on disk, only its log, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
 
 ## Crates
 
@@ -51,8 +51,8 @@ The shell keeps no state on disk, only its log, so restarting it is always safe.
 flowchart TD
   protocol["protocol<br/>messages, ids, constants"]
   scene["scene<br/>drawing format, validator,<br/>layout, 3D geometry"]
-  brain["brain<br/>bin capsulad"]
-  shell["shell<br/>bin capsula"]
+  brain["brain<br/>bin kumochid"]
+  shell["shell<br/>bin kumochi"]
   xtask["xtask<br/>bench, eval, fixtures"]
   brain --> protocol
   brain --> scene
@@ -158,7 +158,7 @@ sequenceDiagram
   Sh->>Sh: clear the drawing (the thread keeps it)
 ```
 
-Capsula holds Esc from other apps only while it's speaking or a drawing is on screen.
+Kumochi holds Esc from other apps only while it's speaking or a drawing is on screen.
 
 ## Tools and authority
 
@@ -193,7 +193,7 @@ flowchart LR
   E --> F["done<br/>(retried until it is)"]
 ```
 
-Deletion covers every copy Capsula controls. It can't reach issues already filed or what providers keep under their own terms, and the delete dialog says so.
+Deletion covers every copy Kumochi controls. It can't reach issues already filed or what providers keep under their own terms, and the delete dialog says so.
 
 ## Claude Code
 
@@ -204,12 +204,12 @@ claude -p --restricted --strict-mcp-config --mcp-config <owned>
        --disable-slash-commands --tools "" --no-session-persistence ...
 ```
 
-It runs with an allowlisted environment, telemetry opt-outs, and a working folder and temp folder that Capsula owns. Before any real input, an audit of its startup facts, checked against a schema for that exact Claude Code version, must show only Capsula's tool and the reviewed built-in plugins, no skills or commands, and the user's own plan. Anything else fails closed. Claude Code doesn't report hooks or memory, so those rest on restricted mode and launch settings rather than the audit. Capsula never reads Claude Code's credentials.
+It runs with an allowlisted environment, telemetry opt-outs, and a working folder and temp folder that Kumochi owns. Before any real input, an audit of its startup facts, checked against a schema for that exact Claude Code version, must show only Kumochi's tool and the reviewed built-in plugins, no skills or commands, and the user's own plan. Anything else fails closed. Claude Code doesn't report hooks or memory, so those rest on restricted mode and launch settings rather than the audit. Kumochi never reads Claude Code's credentials.
 
 ## Rules that protect you
 
-- Capsula itself sends no telemetry. Nothing leaves the machine except calls to the accounts you set up.
-- Claude Code is your own program. Capsula asks it to switch telemetry off, shows what it reports, and runs it either way.
+- Kumochi itself sends no telemetry. Nothing leaves the machine except calls to the accounts you set up.
+- Claude Code is your own program. Kumochi asks it to switch telemetry off, shows what it reports, and runs it either way.
 - Secrets live only in Windows Credential Manager, never in logs, arguments or files.
 - Prompts, transcripts and screenshots are never logged.
 

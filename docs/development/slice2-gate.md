@@ -7,21 +7,21 @@ window and no mouse or keyboard input. It runs on Rez, at normal priority, on a 
 
 ```mermaid
 flowchart LR
-  X[cargo xtask slice2-gate] -->|cargo build| B[capsulad.exe, dev build]
+  X[cargo xtask slice2-gate] -->|cargo build| B[kumochid.exe, dev build]
   X -->|copies| F["target/slice2-gate/&lt;time&gt;/bin"]
-  F --> C["capsula.exe (a copy of xtask)"]
-  F --> D[capsulad.exe]
+  F --> C["kumochi.exe (a copy of xtask)"]
+  F --> D[kumochid.exe]
   C -->|starts, kills, restarts| D
   C <-->|control and data pipes| D
 ```
 
-- The brain serves only the `capsula.exe` beside its own executable (see [ipc](ipc.md)), so the gate
-  copies the brain and itself, renamed `capsula.exe`, into a fresh folder and runs the scripted
+- The brain serves only the `kumochi.exe` beside its own executable (see [ipc](ipc.md)), so the gate
+  copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` folder and fixture script (`CAPSULA_FIXTURE`, dev builds
+- Each item gets its own `%LOCALAPPDATA%` folder and fixture script (`KUMOCHI_FIXTURE`, dev builds
   only), so items never share a store and the developer's dev store is never touched. The gate
-  refuses to start while any `capsula.exe` or `capsulad.exe` runs, because a dev brain would hold
+  refuses to start while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold
   the session's pipes.
 - The client answers `Ping`, grants credit for each data frame it takes, and records every frame
   with the instant its reader thread took it. Its data reader can pause, take frames one at a
@@ -57,5 +57,5 @@ flowchart LR
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
 - Retrieval, summaries and Claude Code also hold thread content; slices 3 and 8 add them to the
   deletion item.
-- The brain is a dev build, because only dev builds read `CAPSULA_FIXTURE`, so its timings are
+- The brain is a dev build, because only dev builds read `KUMOCHI_FIXTURE`, so its timings are
   slower than a release brain's would be.

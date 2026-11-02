@@ -2,7 +2,7 @@
 //! with no run id while the delete is pending or fenced, and the answer retires its runs and
 //! scenes.
 
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, Phase, RunId, SceneId, ThreadId,
 };
 

@@ -6,7 +6,7 @@ next typed turn continues; **New thread** clears that selection and opens the ty
 Neither action sends a thread mutation or creates a row until a turn is submitted.
 
 The open thread's **Delete** asks first, in a gpui-kit alert dialog. The dialog names what
-Capsula can't remove: issues already filed on GitHub, and what the model provider keeps. A
+Kumochi can't remove: issues already filed on GitHub, and what the model provider keeps. A
 confirmed thread stays listed until the brain answers, its row marked Deleting… and disabled,
 and the next turn no longer continues it. Then its row and messages go. While four deletes
 [guess] are unanswered, or waiting on turns sent before them, Delete says to wait. A delete that
@@ -118,5 +118,5 @@ Esc stops work first, clears a drawing second, and only then dismisses the threa
 it is focused. The panel counts as focused only once its window reports activation, as the
 typing panel does, so a deactivation that arrives before then can't hide a panel that just
 opened. Blur hides it without restoring the old foreground; ordinary dismissal restores
-the previous foreground when Capsula still owns it. Newly created panels inherit an active
+the previous foreground when Kumochi still owns it. Newly created panels inherit an active
 hold's capture exclusion. The initial panel size, 48 by 34 interface rems, is a [guess].

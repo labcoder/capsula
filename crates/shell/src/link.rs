@@ -15,10 +15,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender, WeakSender};
-use capsula_protocol::BUILD_ID;
-use capsula_protocol::constants::BRAIN_EXE;
-use capsula_protocol::frame::{self, FrameError, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::BUILD_ID;
+use kumochi_protocol::constants::BRAIN_EXE;
+use kumochi_protocol::frame::{self, FrameError, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
     MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId,
 };

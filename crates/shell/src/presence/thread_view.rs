@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use capsula_protocol::message::{EventId, PageEventKind, ThreadId};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::Escape as EscapeKey;
@@ -15,6 +14,7 @@ use gpui_kit::{
     KeyBinding, ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render,
     Styled as _, Subscription, Task, WeakEntity, Window, div, list, px,
 };
+use kumochi_protocol::message::{EventId, PageEventKind, ThreadId};
 
 use super::{Presence, PresenceEvent, send};
 use crate::strings::{Strings, Text};

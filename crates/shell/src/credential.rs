@@ -1,9 +1,9 @@
 //! Reads the brain's instance capability from Windows Credential Manager.
 
-use capsula_protocol::Secret;
-use capsula_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
-use capsula_protocol::message::{CAPABILITY_LEN, Capability};
 use keyring::Entry;
+use kumochi_protocol::Secret;
+use kumochi_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
+use kumochi_protocol::message::{CAPABILITY_LEN, Capability};
 
 /// The capability couldn't be read.
 #[derive(Debug, thiserror::Error)]

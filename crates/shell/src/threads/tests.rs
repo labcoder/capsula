@@ -1,5 +1,5 @@
 use super::*;
-use capsula_protocol::message::{PageEventKind, RunId};
+use kumochi_protocol::message::{PageEventKind, RunId};
 
 #[test]
 fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early() {

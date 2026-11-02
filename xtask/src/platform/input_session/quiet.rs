@@ -5,7 +5,7 @@ use std::io::{Write as _, stdout};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail, ensure};
-use capsula_protocol::constants::OBJECT_PREFIX;
+use kumochi_protocol::constants::OBJECT_PREFIX;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{

@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 
 use anyhow::{Context as _, Result, ensure};
-use capsula_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
+use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -875,7 +875,7 @@ mod tests {
 
     use super::super::guard::{InputClass, PhysicalInput, physical_event};
     use super::layout_id;
-    use capsula_protocol::constants::FOCUS_INPUT_MARKER;
+    use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {
         let mut raw = RAWINPUT::default();

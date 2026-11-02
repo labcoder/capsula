@@ -1,4 +1,4 @@
-use capsula_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf};
+use kumochi_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf};
 
 use super::*;
 use crate::coordinator::{Coordinator, Effect, StoreOp};

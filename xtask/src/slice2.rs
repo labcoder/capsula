@@ -1,8 +1,8 @@
 //! `cargo xtask slice2-gate`: the slice 2 gate. It runs the real dev brain with fixture scripts and
 //! drives its real pipes from a scripted client, with no mouse or keyboard input.
 //!
-//! The brain only serves the `capsula.exe` beside it, so the gate copies the brain and itself, as
-//! `capsula.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
+//! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
+//! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
 //! Each item gets its own `%LOCALAPPDATA%`, so no item sees another's store, and the developer's own
 //! dev store is never touched.
 #![expect(
@@ -25,8 +25,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
-use capsula_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
+use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
 use crate::platform;
 use client::{Client, Frame};
@@ -104,7 +104,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
     );
     let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["build", "--quiet", "--package", "capsula-brain"])
+        .args(["build", "--quiet", "--package", "kumochi-brain"])
         .status()
         .context("building the brain")?;
     ensure!(built.success(), "the brain didn't build");
