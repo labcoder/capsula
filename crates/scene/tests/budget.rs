@@ -831,13 +831,23 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
     put(
         &mut state,
         &mut budget,
+        vec![json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}})],
+    );
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (1, 2));
+    put(
+        &mut state,
+        &mut budget,
         vec![
-            json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}}),
             json!({"diagram":{"id":"d"}}),
             json!({"node":{"id":"a","in":"d","label":""}}),
             json!({"node":{"id":"b","in":"d","label":""}}),
-            json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}}),
         ],
+    );
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (2, 4));
+    put(
+        &mut state,
+        &mut budget,
+        vec![json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}})],
     );
     assert_eq!((budget.usage().tracks, budget.usage().keys), (3, 6));
     let error = rejected(

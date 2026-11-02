@@ -1,6 +1,6 @@
 use super::{
     PrepareError,
-    state::{LayoutState, Placed, Rest},
+    state::{LayoutState, Placed},
 };
 use crate::{
     ErrorCode, Handle, Op, StepError, Text,
@@ -29,6 +29,12 @@ pub(super) struct Build<'a> {
     pub cancel: &'a AtomicBool,
     pub scales: &'a BTreeMap<Handle, f32>,
 }
+struct Geometry {
+    bounds: Rect,
+    anchors: [Vec2; 2],
+    primitives: Vec<Prim>,
+}
+
 impl Build<'_> {
     pub(super) fn check_cancel(&self) -> Result<(), PrepareError> {
         if self.cancel.load(Ordering::Relaxed) {
@@ -68,436 +74,528 @@ impl Build<'_> {
             .map_or(self.theme.accent, |color| self.theme.resolve(color))
             .into()
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the primitive variants share one checked construction and publication boundary"
-    )]
     pub(super) fn primitive(
         &mut self,
-        op: &Op,
+        source: &Arc<Op>,
         handle: Handle,
         parent: Option<Handle>,
         state: &LayoutState,
         cached: Option<&Placed>,
     ) -> Result<Placed, PrepareError> {
         self.check_cancel()?;
-        let visual = object::visual(op).ok_or_else(|| layout_error(ErrorCode::Unsupported))?;
+        let visual = object::visual(source).ok_or_else(|| layout_error(ErrorCode::Unsupported))?;
+        let geometry = match &**source {
+            Op::Text(value) => self.text(value, state, parent, cached)?,
+            Op::Path(value) => self.path(value, handle, state, parent, cached)?,
+            Op::Line(value) => self.line(value, Head::None, state, parent, cached)?,
+            Op::Arrow(value) => self.line(value, Head::End, state, parent, cached)?,
+            Op::Shape(value) => self.shape(value, state, parent, cached)?,
+            Op::Highlight(value) => self.highlight(value, state, parent, cached)?,
+            Op::Callout(value) => {
+                return super::callout::build(self, source, value, handle, parent, state, cached);
+            }
+            _ => return Err(layout_error(ErrorCode::Unsupported)),
+        };
+        if !geometry.bounds.within_canvas() {
+            return Err(layout_error(ErrorCode::OutOfRange));
+        }
+        let mut placed = Placed::new(
+            Item {
+                handle,
+                parent,
+                primitives: geometry.primitives.into(),
+                bounds: geometry.bounds,
+                transform: Affine::default(),
+                opacity: visual.opacity.map_or(1.0, crate::Finite::get),
+            },
+            Arc::clone(source),
+            cached,
+        );
+        placed.anchors = geometry.anchors;
+        Ok(placed)
+    }
+
+    fn text(
+        &mut self,
+        text: &crate::record::TextOp,
+        state: &LayoutState,
+        parent: Option<Handle>,
+        cached: Option<&Placed>,
+    ) -> Result<Geometry, PrepareError> {
         let mut anchors = [Vec2::default(); 2];
         let mut output = Vec::new();
-        let bounds =
-            match op {
-                Op::Text(text) => {
-                    let at = if let Some(previous) = cached {
-                        previous.anchors[0]
-                    } else {
-                        anchor(state, &text.at, parent)?.0
-                    };
-                    anchors[0] = at;
-                    let style = TextStyle {
-                        size: text.size.map_or(self.theme.font_size, crate::Finite::get),
-                        bold: text.bold,
-                    };
-                    let width = text.max_width.map(crate::Finite::get);
-                    let size = self.measure(&text.text, style, width)?;
-                    let x = match text.align {
-                        Align::Left => at.x,
-                        Align::Center => at.x - size.x * 0.5,
-                        Align::Right => at.x - size.x,
-                    };
-                    let origin = Vec2::new(x, at.y - size.y * 0.5);
-                    output.push(Prim::Text {
-                        origin,
-                        text: text.text.clone(),
-                        style,
-                        color: text
-                            .color
-                            .as_ref()
-                            .map_or(self.theme.fg, |color| self.theme.resolve(color))
-                            .into(),
-                        max_width: width,
-                        align: text.align,
-                    });
-                    Rect { origin, size }
-                }
-                Op::Path(path_op) => {
-                    let at = if let Some(previous) = cached {
-                        previous.anchors[0]
-                    } else {
-                        path_op
-                            .at
-                            .as_ref()
-                            .map(|at| anchor(state, at, parent).map(|v| v.0))
-                            .transpose()?
-                            .unwrap_or_default()
-                    };
-                    anchors[0] = at;
-                    if let Some(&scale) = self.scales.get(&handle) {
-                        let local_scale = path_op.scale.map_or(1.0, crate::Finite::get);
-                        let paths = super::path::flatten(path_op.d.as_str(), scale)?;
-                        let mut all = Vec::new();
-                        for path in paths {
-                            let points: Arc<[Vec2]> = path
-                                .points
-                                .iter()
-                                .map(|point| *point * local_scale + at)
-                                .collect();
-                            all.extend(points.iter().copied());
-                            if let Some(fill) = &path_op.fill {
-                                output.push(Prim::Fill {
-                                    points: Arc::clone(&points),
-                                    color: self.theme.resolve(fill).into(),
-                                });
-                            }
-                            output.push(Prim::Line {
-                                points,
-                                closed: path.closed,
-                                color: self.color(path_op.color.as_ref()),
-                                width: path_op.width.map_or(2.0, crate::Finite::get),
-                                dashed: path_op.dash,
-                            });
-                        }
-                        point_bounds(&all)?
-                    } else {
-                        let previous = cached.ok_or(PrepareError::Stale)?;
-                        output.extend(previous.item.primitives.iter().cloned().map(
-                            |mut primitive| {
-                                if let Prim::Line { color, .. } = &mut primitive {
-                                    *color = self.color(path_op.color.as_ref());
-                                }
-                                primitive
-                            },
-                        ));
-                        previous.item.bounds
-                    }
-                }
-                Op::Line(line) | Op::Arrow(line) => {
-                    anchors = if let Some(previous) = cached {
-                        previous.anchors
-                    } else {
-                        [
-                            anchor(state, &line.from, parent)?.0,
-                            anchor(state, &line.to, parent)?.0,
-                        ]
-                    };
-                    let mut points = vec![anchors[0]];
-                    if !line.via.is_empty() {
-                        points.extend(
-                            line.via
-                                .iter()
-                                .map(|point| Vec2::new(point[0].get(), point[1].get())),
-                        );
-                    } else if let Some(bend) = line.bend.filter(|bend| bend.get().abs() > 0.001) {
-                        let delta = anchors[1] - anchors[0];
-                        let middle = (anchors[0] + anchors[1]) * 0.5;
-                        let control = middle + Vec2::new(-delta.y, delta.x) * (bend.get() * 0.5);
-                        for index in 1..path::PROCEDURAL_CURVE_PIECES {
-                            let t = f32::from(
-                                u16::try_from(index).expect("procedural curve count fits u16"),
-                            ) / f32::from(
-                                u16::try_from(path::PROCEDURAL_CURVE_PIECES)
-                                    .expect("procedural curve count fits u16"),
-                            );
-                            points.push(
-                                anchors[0] * (1.0 - t).powi(2)
-                                    + control * (2.0 * (1.0 - t) * t)
-                                    + anchors[1] * t.powi(2),
-                            );
-                        }
-                    }
-                    points.push(anchors[1]);
-                    let color = self.color(line.color.as_ref());
-                    let head = line.head.unwrap_or(if matches!(op, Op::Arrow(_)) {
-                        Head::End
-                    } else {
-                        Head::None
-                    });
-                    let mut extent = point_bounds(&points)?;
-                    if matches!(head, Head::Start | Head::Both) {
-                        let head = arrow_head(points[1], points[0]);
-                        extent = extent.union(point_bounds(&head)?);
+        let bounds = {
+            let at = if let Some(previous) = cached {
+                previous.anchors[0]
+            } else {
+                anchor(state, &text.at, parent)?.0
+            };
+            anchors[0] = at;
+            let style = TextStyle {
+                size: text.size.map_or(self.theme.font_size, crate::Finite::get),
+                bold: text.bold,
+            };
+            let width = text.max_width.map(crate::Finite::get);
+            let size = self.measure(&text.text, style, width)?;
+            let x = match text.align {
+                Align::Left => at.x,
+                Align::Center => at.x - size.x * 0.5,
+                Align::Right => at.x - size.x,
+            };
+            let origin = Vec2::new(x, at.y - size.y * 0.5);
+            output.push(Prim::Text {
+                origin,
+                text: text.text.clone(),
+                style,
+                color: text
+                    .color
+                    .as_ref()
+                    .map_or(self.theme.fg, |color| self.theme.resolve(color))
+                    .into(),
+                max_width: width,
+                align: text.align,
+            });
+            Rect { origin, size }
+        };
+        Ok(Geometry {
+            bounds,
+            anchors,
+            primitives: output,
+        })
+    }
+
+    fn path(
+        &mut self,
+        path_op: &crate::record::PathOp,
+        handle: Handle,
+        state: &LayoutState,
+        parent: Option<Handle>,
+        cached: Option<&Placed>,
+    ) -> Result<Geometry, PrepareError> {
+        let mut anchors = [Vec2::default(); 2];
+        let mut output = Vec::new();
+        let bounds = {
+            let at = if let Some(previous) = cached {
+                previous.anchors[0]
+            } else {
+                path_op
+                    .at
+                    .as_ref()
+                    .map(|at| anchor(state, at, parent).map(|v| v.0))
+                    .transpose()?
+                    .unwrap_or_default()
+            };
+            anchors[0] = at;
+            if let Some(&scale) = self.scales.get(&handle) {
+                let local_scale = path_op.scale.map_or(1.0, crate::Finite::get);
+                let paths = super::path::flatten(path_op.d.as_str(), scale)?;
+                let mut all = Vec::new();
+                for path in paths {
+                    let points: Arc<[Vec2]> = path
+                        .points
+                        .iter()
+                        .map(|point| *point * local_scale + at)
+                        .collect();
+                    all.extend(points.iter().copied());
+                    if let Some(fill) = &path_op.fill {
                         output.push(Prim::Fill {
-                            points: head.into(),
-                            color,
-                        });
-                    }
-                    if matches!(head, Head::End | Head::Both) {
-                        let head = arrow_head(points[points.len() - 2], points[points.len() - 1]);
-                        extent = extent.union(point_bounds(&head)?);
-                        output.push(Prim::Fill {
-                            points: head.into(),
-                            color,
+                            points: Arc::clone(&points),
+                            color: self.theme.resolve(fill).into(),
                         });
                     }
                     output.push(Prim::Line {
-                        points: points.into(),
-                        closed: false,
-                        color,
-                        width: line.width.map_or(2.0, crate::Finite::get),
-                        dashed: line.dash,
+                        points,
+                        closed: path.closed,
+                        color: self.color(path_op.color.as_ref()),
+                        width: path_op.width.map_or(2.0, crate::Finite::get),
+                        dashed: path_op.dash,
                     });
-                    extent
                 }
-                Op::Shape(shape) => {
-                    let rect = if let Some(bounds) = shape.bounds {
-                        rect(bounds)
-                    } else {
-                        let at = if let Some(previous) = cached {
-                            previous.anchors[0]
-                        } else {
-                            shape
-                                .at
-                                .as_ref()
-                                .map(|at| anchor(state, at, parent).map(|v| v.0))
-                                .transpose()?
-                                .unwrap_or_default()
-                        };
-                        anchors[0] = at;
-                        let size = shape.size.map_or_else(
-                            || {
-                                let radius = shape.r.map_or(40.0, crate::Finite::get);
-                                Vec2::new(radius * 2.0, radius * 2.0)
-                            },
-                            |size| Vec2::new(size[0].get(), size[1].get()),
-                        );
-                        Rect::centered(at, size)
-                    };
-                    let rect = if shape.kind == ShapeKind::Circle {
-                        let diameter = rect.size.x.min(rect.size.y);
-                        Rect::centered(rect.center(), Vec2::new(diameter, diameter))
-                    } else {
-                        rect
-                    };
-                    let color = self.color(shape.color.as_ref());
-                    let fill = shape
-                        .fill
-                        .as_ref()
-                        .map(|fill| self.theme.resolve(fill).into());
-                    let width = shape.width.map_or(2.0, crate::Finite::get);
-                    let mut bounds = rect;
-                    match shape.kind {
-                        ShapeKind::Rect => {
-                            let radius = shape
-                                .radius
-                                .map_or(0.0, crate::Finite::get)
-                                .min(rect.size.x.min(rect.size.y) * 0.5);
-                            output.push(Prim::Rect {
-                                rect,
-                                radius,
-                                fill,
-                                border: (!shape.dash).then_some((color, width)),
-                            });
-                            if shape.dash {
-                                output.push(Prim::Line {
-                                    points: rounded_rect(rect, radius),
-                                    closed: true,
-                                    color,
-                                    width,
-                                    dashed: true,
-                                });
+                point_bounds(&all)?
+            } else {
+                let previous = cached.ok_or(PrepareError::Stale)?;
+                output.extend(
+                    previous
+                        .item
+                        .primitives
+                        .iter()
+                        .cloned()
+                        .map(|mut primitive| {
+                            if let Prim::Line { color, .. } = &mut primitive {
+                                *color = self.color(path_op.color.as_ref());
                             }
-                        }
-                        ShapeKind::Circle | ShapeKind::Ellipse => {
-                            let points = ellipse(rect, path::ELLIPSE_SEGMENTS);
-                            if let Some(color) = fill {
-                                output.push(Prim::Fill {
-                                    points: Arc::clone(&points),
-                                    color,
-                                });
-                            }
-                            output.push(Prim::Line {
-                                points,
-                                closed: true,
-                                color,
-                                width,
-                                dashed: shape.dash,
-                            });
-                        }
-                        ShapeKind::Polygon => {
-                            let points: Arc<[Vec2]> = shape
-                                .points
-                                .iter()
-                                .map(|point| Vec2::new(point[0].get(), point[1].get()))
-                                .collect();
-                            if points.len() < 3 {
-                                return Err(layout_error(ErrorCode::OutOfRange));
-                            }
-                            bounds = point_bounds(&points)?;
-                            if let Some(color) = fill {
-                                output.push(Prim::Fill {
-                                    points: Arc::clone(&points),
-                                    color,
-                                });
-                            }
-                            output.push(Prim::Line {
-                                points,
-                                closed: true,
-                                color,
-                                width,
-                                dashed: shape.dash,
-                            });
-                        }
-                    }
-                    if let Some(label) = &shape.label {
-                        let style = TextStyle {
-                            size: self.theme.font_size,
-                            bold: false,
-                        };
-                        let measured = self.measure(label, style, Some(bounds.size.x))?;
-                        let origin = bounds.center() - measured * 0.5;
-                        output.push(Prim::Text {
-                            origin,
-                            text: label.clone(),
-                            style,
-                            color: self.theme.fg.into(),
-                            max_width: Some(bounds.size.x),
-                            align: Align::Center,
-                        });
-                        bounds = bounds.union(Rect {
-                            origin,
-                            size: measured,
-                        });
-                    }
-                    bounds
-                }
-                Op::Callout(callout) => {
-                    return super::callout::build(self, op, callout, handle, parent, state, cached);
-                }
-                Op::Highlight(highlight) => {
-                    let (_, mut target) = if let Some(old) = cached {
-                        (
-                            old.anchors[0],
-                            Rect {
-                                origin: old.anchors[0],
-                                size: old.anchors[1],
-                            },
-                        )
-                    } else {
-                        anchor(state, &highlight.target, parent)?
-                    };
-                    if target.size.x < 2.0 || target.size.y < 2.0 {
-                        target = Rect::centered(target.center(), Vec2::new(24.0, 24.0));
-                    }
-                    anchors = [target.origin, target.size];
-                    let pad = highlight.pad.map_or(6.0, crate::Finite::get);
-                    let bounds = Rect {
-                        origin: target.origin - Vec2::new(pad, pad),
-                        size: target.size + Vec2::new(pad * 2.0, pad * 2.0),
-                    };
-                    let color = highlight.color.as_ref().map_or_else(
-                        || {
-                            self.theme
-                                .resolve(&Color::Token(crate::record::Token::Amber))
-                                .into()
-                        },
-                        |color| self.theme.resolve(color).into(),
-                    );
-                    match highlight.style {
-                        crate::record::HighlightStyle::Underline => output.push(Prim::Line {
-                            points: Arc::from([
-                                Vec2::new(bounds.origin.x, bounds.max().y),
-                                bounds.max(),
-                            ]),
-                            closed: false,
-                            color,
-                            width: 3.0,
-                            dashed: false,
+                            primitive
                         }),
-                        crate::record::HighlightStyle::Marker => output.push(Prim::Rect {
-                            rect: bounds,
-                            radius: 0.0,
-                            fill: Some(color.faded(0.25)),
-                            border: None,
-                        }),
-                        crate::record::HighlightStyle::Box => output.push(Prim::Rect {
-                            rect: bounds,
-                            radius: 6.0,
-                            fill: Some(color.faded(0.16)),
-                            border: Some((color, 2.0)),
-                        }),
-                        crate::record::HighlightStyle::Spotlight => {
-                            let min = Vec2::new(
-                                bounds
-                                    .origin
-                                    .x
-                                    .clamp(self.viewport.origin.x, self.viewport.max().x),
-                                bounds
-                                    .origin
-                                    .y
-                                    .clamp(self.viewport.origin.y, self.viewport.max().y),
-                            );
-                            let max = Vec2::new(
-                                bounds.max().x.clamp(min.x, self.viewport.max().x),
-                                bounds.max().y.clamp(min.y, self.viewport.max().y),
-                            );
-                            let viewport = self.viewport;
-                            for (origin, size) in [
-                                (
-                                    viewport.origin,
-                                    Vec2::new(viewport.size.x, min.y - viewport.origin.y),
-                                ),
-                                (
-                                    Vec2::new(viewport.origin.x, max.y),
-                                    Vec2::new(viewport.size.x, viewport.max().y - max.y),
-                                ),
-                                (
-                                    Vec2::new(viewport.origin.x, min.y),
-                                    Vec2::new(min.x - viewport.origin.x, max.y - min.y),
-                                ),
-                                (
-                                    Vec2::new(max.x, min.y),
-                                    Vec2::new(viewport.max().x - max.x, max.y - min.y),
-                                ),
-                            ] {
-                                if size.x > 0.0 && size.y > 0.0 {
-                                    output.push(Prim::Rect {
-                                        rect: Rect { origin, size },
-                                        radius: 0.0,
-                                        fill: Some(
-                                            crate::display::Paint::from(self.theme.halo).faded(0.5),
-                                        ),
-                                        border: None,
-                                    });
-                                }
-                            }
-                            output.push(Prim::Rect {
-                                rect: bounds,
-                                radius: 8.0,
-                                fill: None,
-                                border: Some((color, 3.0)),
-                            });
-                        }
-                        crate::record::HighlightStyle::Ring => output.push(Prim::Rect {
-                            rect: bounds,
-                            radius: 6.0,
-                            fill: None,
-                            border: Some((color, 2.0)),
-                        }),
-                    }
-                    bounds
-                }
-                _ => return Err(layout_error(ErrorCode::Unsupported)),
-            };
-        if !bounds.within_canvas() {
-            return Err(layout_error(ErrorCode::OutOfRange));
-        }
-        Ok(Placed {
-            item: Item {
-                handle,
-                parent,
-                primitives: output.into(),
-                bounds,
-                transform: cached.map_or_else(Affine::default, |previous| previous.item.transform),
-                opacity: visual.opacity.map_or(1.0, crate::Finite::get),
-            },
-            source: Arc::new(op.clone()),
+                );
+                previous.item.bounds
+            }
+        };
+        Ok(Geometry {
+            bounds,
             anchors,
-            rest: cached.map_or_else(Rest::default, |previous| previous.rest),
-            rank: None,
-            initialized: false,
-            motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
-            references: cached
-                .map_or_else(|| object::reference_ids(op), |old| old.references.clone()),
+            primitives: output,
         })
+    }
+
+    fn line(
+        &mut self,
+        line: &crate::record::Line,
+        default_head: Head,
+        state: &LayoutState,
+        parent: Option<Handle>,
+        cached: Option<&Placed>,
+    ) -> Result<Geometry, PrepareError> {
+        let anchors;
+        let mut output = Vec::new();
+        let bounds = {
+            anchors = if let Some(previous) = cached {
+                previous.anchors
+            } else {
+                [
+                    anchor(state, &line.from, parent)?.0,
+                    anchor(state, &line.to, parent)?.0,
+                ]
+            };
+            let mut points = vec![anchors[0]];
+            if !line.via.is_empty() {
+                points.extend(
+                    line.via
+                        .iter()
+                        .map(|point| Vec2::new(point[0].get(), point[1].get())),
+                );
+            } else if let Some(bend) = line.bend.filter(|bend| bend.get().abs() > 0.001) {
+                let delta = anchors[1] - anchors[0];
+                let middle = (anchors[0] + anchors[1]) * 0.5;
+                let control = middle + Vec2::new(-delta.y, delta.x) * (bend.get() * 0.5);
+                for index in 1..path::PROCEDURAL_CURVE_PIECES {
+                    let t =
+                        f32::from(u16::try_from(index).expect("procedural curve count fits u16"))
+                            / f32::from(
+                                u16::try_from(path::PROCEDURAL_CURVE_PIECES)
+                                    .expect("procedural curve count fits u16"),
+                            );
+                    points.push(
+                        anchors[0] * (1.0 - t).powi(2)
+                            + control * (2.0 * (1.0 - t) * t)
+                            + anchors[1] * t.powi(2),
+                    );
+                }
+            }
+            points.push(anchors[1]);
+            let color = self.color(line.color.as_ref());
+            let head = line.head.unwrap_or(default_head);
+            let mut extent = point_bounds(&points)?;
+            if matches!(head, Head::Start | Head::Both) {
+                let head = arrow_head(points[1], points[0]);
+                extent = extent.union(point_bounds(&head)?);
+                output.push(Prim::Fill {
+                    points: head.into(),
+                    color,
+                });
+            }
+            if matches!(head, Head::End | Head::Both) {
+                let head = arrow_head(points[points.len() - 2], points[points.len() - 1]);
+                extent = extent.union(point_bounds(&head)?);
+                output.push(Prim::Fill {
+                    points: head.into(),
+                    color,
+                });
+            }
+            output.push(Prim::Line {
+                points: points.into(),
+                closed: false,
+                color,
+                width: line.width.map_or(2.0, crate::Finite::get),
+                dashed: line.dash,
+            });
+            extent
+        };
+        Ok(Geometry {
+            bounds,
+            anchors,
+            primitives: output,
+        })
+    }
+
+    fn shape(
+        &mut self,
+        shape: &crate::record::Shape,
+        state: &LayoutState,
+        parent: Option<Handle>,
+        cached: Option<&Placed>,
+    ) -> Result<Geometry, PrepareError> {
+        let mut anchors = [Vec2::default(); 2];
+        let mut output = Vec::new();
+        let bounds = {
+            let rect = if let Some(bounds) = shape.bounds {
+                rect(bounds)
+            } else {
+                let at = if let Some(previous) = cached {
+                    previous.anchors[0]
+                } else {
+                    shape
+                        .at
+                        .as_ref()
+                        .map(|at| anchor(state, at, parent).map(|v| v.0))
+                        .transpose()?
+                        .unwrap_or_default()
+                };
+                anchors[0] = at;
+                let size = shape.size.map_or_else(
+                    || {
+                        let radius = shape.r.map_or(40.0, crate::Finite::get);
+                        Vec2::new(radius * 2.0, radius * 2.0)
+                    },
+                    |size| Vec2::new(size[0].get(), size[1].get()),
+                );
+                Rect::centered(at, size)
+            };
+            let rect = if shape.kind == ShapeKind::Circle {
+                let diameter = rect.size.x.min(rect.size.y);
+                Rect::centered(rect.center(), Vec2::new(diameter, diameter))
+            } else {
+                rect
+            };
+            let (mut bounds, outline) = self.shape_outline(shape, rect)?;
+            output.extend(outline);
+            if let Some(label) = &shape.label {
+                let style = TextStyle {
+                    size: self.theme.font_size,
+                    bold: false,
+                };
+                let measured = self.measure(label, style, Some(bounds.size.x))?;
+                let origin = bounds.center() - measured * 0.5;
+                output.push(Prim::Text {
+                    origin,
+                    text: label.clone(),
+                    style,
+                    color: self.theme.fg.into(),
+                    max_width: Some(bounds.size.x),
+                    align: Align::Center,
+                });
+                bounds = bounds.union(Rect {
+                    origin,
+                    size: measured,
+                });
+            }
+            bounds
+        };
+        Ok(Geometry {
+            bounds,
+            anchors,
+            primitives: output,
+        })
+    }
+
+    fn highlight(
+        &mut self,
+        highlight: &crate::record::Highlight,
+        state: &LayoutState,
+        parent: Option<Handle>,
+        cached: Option<&Placed>,
+    ) -> Result<Geometry, PrepareError> {
+        let anchors;
+        let mut output = Vec::new();
+        let bounds = {
+            let (_, mut target) = if let Some(old) = cached {
+                (
+                    old.anchors[0],
+                    Rect {
+                        origin: old.anchors[0],
+                        size: old.anchors[1],
+                    },
+                )
+            } else {
+                anchor(state, &highlight.target, parent)?
+            };
+            if target.size.x < 2.0 || target.size.y < 2.0 {
+                target = Rect::centered(target.center(), Vec2::new(24.0, 24.0));
+            }
+            anchors = [target.origin, target.size];
+            let pad = highlight.pad.map_or(6.0, crate::Finite::get);
+            let bounds = Rect {
+                origin: target.origin - Vec2::new(pad, pad),
+                size: target.size + Vec2::new(pad * 2.0, pad * 2.0),
+            };
+            let color = highlight.color.as_ref().map_or_else(
+                || {
+                    self.theme
+                        .resolve(&Color::Token(crate::record::Token::Amber))
+                        .into()
+                },
+                |color| self.theme.resolve(color).into(),
+            );
+            match highlight.style {
+                crate::record::HighlightStyle::Underline => output.push(Prim::Line {
+                    points: Arc::from([Vec2::new(bounds.origin.x, bounds.max().y), bounds.max()]),
+                    closed: false,
+                    color,
+                    width: 3.0,
+                    dashed: false,
+                }),
+                crate::record::HighlightStyle::Marker => output.push(Prim::Rect {
+                    rect: bounds,
+                    radius: 0.0,
+                    fill: Some(color.faded(0.25)),
+                    border: None,
+                }),
+                crate::record::HighlightStyle::Box => output.push(Prim::Rect {
+                    rect: bounds,
+                    radius: 6.0,
+                    fill: Some(color.faded(0.16)),
+                    border: Some((color, 2.0)),
+                }),
+                crate::record::HighlightStyle::Spotlight => {
+                    output.extend(self.spotlight(bounds));
+                    output.push(Prim::Rect {
+                        rect: bounds,
+                        radius: 8.0,
+                        fill: None,
+                        border: Some((color, 3.0)),
+                    });
+                }
+                crate::record::HighlightStyle::Ring => output.push(Prim::Rect {
+                    rect: bounds,
+                    radius: 6.0,
+                    fill: None,
+                    border: Some((color, 2.0)),
+                }),
+            }
+            bounds
+        };
+        Ok(Geometry {
+            bounds,
+            anchors,
+            primitives: output,
+        })
+    }
+
+    fn shape_outline(
+        &mut self,
+        shape: &crate::record::Shape,
+        rect: Rect,
+    ) -> Result<(Rect, Vec<Prim>), PrepareError> {
+        let mut output = Vec::new();
+        let color = self.color(shape.color.as_ref());
+        let fill = shape
+            .fill
+            .as_ref()
+            .map(|fill| self.theme.resolve(fill).into());
+        let width = shape.width.map_or(2.0, crate::Finite::get);
+        let mut bounds = rect;
+        match shape.kind {
+            ShapeKind::Rect => {
+                let radius = shape
+                    .radius
+                    .map_or(0.0, crate::Finite::get)
+                    .min(rect.size.x.min(rect.size.y) * 0.5);
+                output.push(Prim::Rect {
+                    rect,
+                    radius,
+                    fill,
+                    border: (!shape.dash).then_some((color, width)),
+                });
+                if shape.dash {
+                    output.push(Prim::Line {
+                        points: rounded_rect(rect, radius),
+                        closed: true,
+                        color,
+                        width,
+                        dashed: true,
+                    });
+                }
+            }
+            ShapeKind::Circle | ShapeKind::Ellipse => {
+                let points = ellipse(rect, path::ELLIPSE_SEGMENTS);
+                if let Some(color) = fill {
+                    output.push(Prim::Fill {
+                        points: Arc::clone(&points),
+                        color,
+                    });
+                }
+                output.push(Prim::Line {
+                    points,
+                    closed: true,
+                    color,
+                    width,
+                    dashed: shape.dash,
+                });
+            }
+            ShapeKind::Polygon => {
+                let points: Arc<[Vec2]> = shape
+                    .points
+                    .iter()
+                    .map(|point| Vec2::new(point[0].get(), point[1].get()))
+                    .collect();
+                if points.len() < 3 {
+                    return Err(layout_error(ErrorCode::OutOfRange));
+                }
+                bounds = point_bounds(&points)?;
+                if let Some(color) = fill {
+                    output.push(Prim::Fill {
+                        points: Arc::clone(&points),
+                        color,
+                    });
+                }
+                output.push(Prim::Line {
+                    points,
+                    closed: true,
+                    color,
+                    width,
+                    dashed: shape.dash,
+                });
+            }
+        }
+
+        Ok((bounds, output))
+    }
+
+    fn spotlight(&self, bounds: Rect) -> Vec<Prim> {
+        let mut output = Vec::new();
+        let min = Vec2::new(
+            bounds
+                .origin
+                .x
+                .clamp(self.viewport.origin.x, self.viewport.max().x),
+            bounds
+                .origin
+                .y
+                .clamp(self.viewport.origin.y, self.viewport.max().y),
+        );
+        let max = Vec2::new(
+            bounds.max().x.clamp(min.x, self.viewport.max().x),
+            bounds.max().y.clamp(min.y, self.viewport.max().y),
+        );
+        let viewport = self.viewport;
+        for (origin, size) in [
+            (
+                viewport.origin,
+                Vec2::new(viewport.size.x, min.y - viewport.origin.y),
+            ),
+            (
+                Vec2::new(viewport.origin.x, max.y),
+                Vec2::new(viewport.size.x, viewport.max().y - max.y),
+            ),
+            (
+                Vec2::new(viewport.origin.x, min.y),
+                Vec2::new(min.x - viewport.origin.x, max.y - min.y),
+            ),
+            (
+                Vec2::new(max.x, min.y),
+                Vec2::new(viewport.max().x - max.x, max.y - min.y),
+            ),
+        ] {
+            if size.x > 0.0 && size.y > 0.0 {
+                output.push(Prim::Rect {
+                    rect: Rect { origin, size },
+                    radius: 0.0,
+                    fill: Some(crate::display::Paint::from(self.theme.halo).faded(0.5)),
+                    border: None,
+                });
+            }
+        }
+
+        output
     }
 }
 
@@ -528,6 +626,7 @@ pub(super) fn reference(
     id: &crate::WireId,
     parent: Option<Handle>,
 ) -> Result<Rect, PrepareError> {
+    // shortcut: references resolve at preparation; add following only with motion ownership.
     let object = state
         .objects
         .get(id)

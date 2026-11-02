@@ -240,8 +240,9 @@ checks. The structs themselves are plain geometry, not a validated input boundar
 palette. Host foreground/accent overrides do not change fixed named colors.
 
 `display` defines immutable prepared primitives and handle-tagged items. Polygon and
-polyline vertices use shared slices; sampled frame items share the prepared primitives
-instead of cloning text or path storage. `TextMeasure` supplies the same shaping sizes
+polyline vertices use shared slices; painters can share prepared primitives instead
+of cloning text or path storage. Debug output summarizes counts, not drawing content
+or vertex arrays. A7 supplies sampled frames. `TextMeasure` supplies the same shaping sizes
 used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No
@@ -276,12 +277,26 @@ only the composed scales of new paths and paths whose segment count changed;
 there is no cloned scene, budget snapshot or pending-charge input. Commit captures
 these facts before preparation can lag behind a later ancestor track. That later
 step retessellates affected paths without changing an older prepared result.
+The admitted input, recovery-log event and ticket share an `Arc<Step>`; its JSON and
+postcard representations remain the original step payload, without another wrapper.
+
+```mermaid
+flowchart LR
+    C[Persist and commit] --> T[Opaque ticket]
+    T --> P[Prepare with preceding layout]
+    P --> V[Validate against current scene and base]
+    V --> A[Activate and retain after-state]
+    A --> S[Stop using last activated after-state]
+    S --> C
+    L[Original commit and cut log] --> R[Recover kept preparations]
+    R --> P
+```
 
 `PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
 host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
 nodes and edges, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
-Tables/charts remain unsupported until A6. `PreparedStep` contains owned display changes,
+Charts remain unsupported until the chart layer of A6. `PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
 mutates an earlier picture. The host calls `PreparedStep::validate` against the current
 scene and predecessor immediately before accepting the result.
@@ -294,11 +309,13 @@ checked, including motion extrema rather than only the final resting rectangle.
 
 The live host retains the last activated `after` layout. On Stop it discards queued
 preparations and calls `LayoutState::cut` on that retained state, using SceneState's
-authoritative survivor handles, parents and references. A detached survivor absorbs
+authoritative survivor handles and parents after semantic reference pruning. A detached survivor absorbs
 its ancestor's static and final activated transforms, including generated glides and
 opacity. No per-revision layout undo deltas or persisted geometry are needed.
 A cut fences both old results and old predecessor states, even when a result's
 objects survive the cut.
+Resting transforms currently scale, rotate, then translate by `pos + (x, y)`;
+A7 must confirm this composition against its sampler.
 
 `layout::recover` shares semantic replay's ordered traversal. Every original step
 and effective cut is semantically validated, but layout skips any step dropped by
@@ -323,6 +340,32 @@ test below normal priority, then run its executable at normal priority under the
 exclusive Rez lock after 30 seconds without cargo/rustc. Main had no preparation
 pipeline, so there is no before speedup baseline. Results are not painter, frame,
 real-font or end-to-end timings.
+
+### Tables
+
+`layout::table` ports S1's fitted column widths and number formatting into preparation.
+Only rows present in this prepared prefix participate. Natural widths shrink text
+columns first, then numeric columns; wrapped measurement determines header and row
+heights. Explicit alignments win, otherwise a column containing only numeric cells
+aligns right. Text, booleans and padded blank cells align left. Missing cells are
+rendered blank; excess cells and alignments are rejected by admission, never truncated.
+Numbers have grouped thousands and at most two decimal places; an extreme finite
+number uses scientific notation if grouped output would exceed the display-text cap.
+
+A table's explicit box supplies its origin and available width; content determines
+its height, as in S1. Without a box it uses the host viewport's origin and width.
+Empty tables still prepare their header and background. Adding, updating or removing
+a row rebuilds that table's current geometry at the new step's activation, without
+changing an earlier prepared picture. A detached row keeps its placed columns and
+absorbed ancestor transform, including when later cell/color updates arrive.
+
+The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
+`alignment_defaults_and_explicit_override` retain their names. Preparation replaces
+S1's draw-time measurement and entrance progress; A7 owns sampling. No source data is
+silently clipped to a table cap. The ignored
+`measure_prepare_table_at_column_and_row_caps` fixture rebuilds one table with eight
+columns, forty rows and 400 characters per cell using deterministic measurement.
+It follows the exclusive-lock release timing method above, not a real-font/frame test.
 
 ## Incremental drawing input
 

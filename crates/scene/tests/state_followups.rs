@@ -470,7 +470,7 @@ fn call_phase_and_oversized_replay_fail_at_the_exact_boundary() {
     call.finish().expect("complete");
     let event = SceneEvent::Step {
         revision: 1,
-        step: step(r#"{"id":"first"}"#),
+        step: step(r#"{"id":"first"}"#).into(),
     };
     assert_eq!(
         SceneState::replay(header, &vec![event; 129])
@@ -505,7 +505,7 @@ fn new_state_types_never_debug_print_ids_or_drawing_text() {
             "{:?}",
             SceneEvent::Step {
                 revision: 1,
-                step: source
+                step: source.into()
             }
         ),
         format!("{:?}", cut(1, vec![committed.handles[0].1])),

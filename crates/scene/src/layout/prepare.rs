@@ -84,12 +84,10 @@ pub fn prepare(
             order.push(id.clone());
         }
     }
-    if sources.values().any(|(_, op)| {
-        matches!(
-            &**op,
-            Op::Table(_) | Op::Row(_) | Op::Chart(_) | Op::Series(_)
-        )
-    }) {
+    if sources
+        .values()
+        .any(|(_, op)| matches!(&**op, Op::Chart(_) | Op::Series(_)))
+    {
         return Err(layout_error(ErrorCode::Unsupported));
     }
     let mut removed = Vec::new();
@@ -136,7 +134,7 @@ pub fn prepare(
     }
     let mut containers: Vec<_> = order
         .iter()
-        .filter(|id| matches!(&*sources[*id].1, Op::Diagram(_)))
+        .filter(|id| matches!(&*sources[*id].1, Op::Diagram(_) | Op::Table(_)))
         .cloned()
         .collect();
     while !containers.is_empty() {
@@ -148,37 +146,33 @@ pub fn prepare(
         };
         let id = containers.remove(index);
         let (handle, source) = &sources[&id];
-        let Op::Diagram(diagram) = &**source else {
-            unreachable!("container list contains diagrams");
+        let (bounds, opacity) = match &**source {
+            Op::Diagram(value) => (value.bounds, value.opacity),
+            Op::Table(value) => (value.bounds, value.opacity),
+            _ => unreachable!("container list contains diagrams and tables"),
         };
         let previous = after.objects.get(&id).cloned();
         let parent = parent(source, &after, previous.as_ref())?;
-        let references = previous.as_ref().map_or_else(
-            || object::reference_ids(source),
-            |old| old.references.clone(),
-        );
-        let object = Placed {
-            item: Item {
+        let mut object = Placed::new(
+            Item {
                 handle: *handle,
                 parent,
                 primitives: Arc::from([]),
-                bounds: diagram.bounds.map_or_else(Rect::default, rect),
-                transform: previous
-                    .as_ref()
-                    .map_or_else(Affine::default, |old| old.item.transform),
-                opacity: diagram.opacity.map_or(1.0, crate::Finite::get),
+                bounds: bounds.map_or_else(Rect::default, rect),
+                transform: Affine::default(),
+                opacity: opacity.map_or(1.0, crate::Finite::get),
             },
-            source: Arc::clone(source),
-            anchors: [Vec2::default(); 2],
-            rest: rests.get(&id).copied().unwrap_or_default(),
-            rank: None,
-            initialized: previous.as_ref().is_some_and(|old| old.initialized),
-            motion: previous.map_or_else(BTreeMap::new, |old| old.motion),
-            references,
-        };
+            Arc::clone(source),
+            previous.as_ref(),
+        );
+        object.anchors = [Vec2::default(); 2];
+        object.rest = rests.get(&id).copied().unwrap_or_default();
+        object.rank = None;
+
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
+    super::table::place(&sources, &before, &mut after, &removed, &mut build)?;
     let mut glides = nodes::place(&sources, &order, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
         after
@@ -208,7 +202,12 @@ pub fn prepare(
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
-        .filter(|id| !matches!(&*sources[*id].1, Op::Diagram(_) | Op::Node(_)))
+        .filter(|id| {
+            !matches!(
+                &*sources[*id].1,
+                Op::Diagram(_) | Op::Node(_) | Op::Table(_) | Op::Row(_)
+            )
+        })
         .cloned()
         .collect();
     while !pending.is_empty() {
@@ -418,6 +417,11 @@ fn patch(source: &Op, change: &Change) -> Op {
                 edge.label = Some(value.clone());
             }
         }
+        Op::Row(row) => {
+            if let Some(value) = &change.cells {
+                row.cells = value.clone();
+            }
+        }
         _ => {}
     }
     if let Some(color) = &change.color {
@@ -436,6 +440,8 @@ fn patch(source: &Op, change: &Change) -> Op {
             Op::Diagram(value) => color!(value),
             Op::Node(value) => color!(value),
             Op::Edge(value) => color!(value),
+            Op::Table(value) => color!(value),
+            Op::Row(value) => color!(value),
             _ => {}
         }
     }
@@ -578,4 +584,60 @@ fn residency(items: &[Item], before: &LayoutState) -> usize {
         }
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn residency_counts_shared_stroke_and_fill_vertices_once() {
+        let crate::Record::Begin(header) = crate::parse_record(
+            br#"{"begin":{"v":1,"scene":"bytes","surface":"inline","alt":""}}"#,
+        )
+        .expect("header") else {
+            panic!("begin");
+        };
+        let mut before = LayoutState::new(&SceneState::begin(header).expect("scene"));
+        let points: Arc<[Vec2]> =
+            Arc::from([Vec2::default(), Vec2::new(1.0, 1.0), Vec2::new(2.0, 0.0)]);
+        let color =
+            crate::display::Paint::from(crate::record::Rgb::try_from(0x00ff_ffff).expect("RGB"));
+        let item = Item {
+            handle: Handle::new(1, 0).expect("handle"),
+            parent: None,
+            bounds: Rect::default(),
+            transform: Affine::default(),
+            opacity: 1.0,
+            primitives: Arc::from([
+                Prim::Line {
+                    points: Arc::clone(&points),
+                    closed: false,
+                    color,
+                    width: 1.0,
+                    dashed: false,
+                },
+                Prim::Fill { points, color },
+            ]),
+        };
+        assert_eq!(
+            residency(std::slice::from_ref(&item), &before),
+            2 * size_of::<Prim>() + 3 * size_of::<Vec2>()
+        );
+        let crate::Record::Step(step) = crate::parse_record(
+            br#"{"step":{"id":"first","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}]}}"#,
+        )
+        .expect("step") else {
+            panic!("step");
+        };
+        before.objects.insert(
+            "p".to_owned().try_into().expect("id"),
+            Placed::new(item.clone(), Arc::new(step.put[0].clone()), None),
+        );
+        assert_eq!(residency(std::slice::from_ref(&item), &before), 0);
+        let recolored = Item {
+            primitives: item.primitives.to_vec().into(),
+            ..item
+        };
+        assert_eq!(residency(&[recolored], &before), 2 * size_of::<Prim>());
+    }
 }
