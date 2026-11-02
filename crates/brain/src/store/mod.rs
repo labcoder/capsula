@@ -2,9 +2,9 @@
 //!
 //! One file in WAL mode. Every commit is durable (`synchronous=FULL`), so "saved" means the
 //! transaction committed. Deleting a thread is two transactions: the first hides it and bumps its
-//! deletion generation, the second removes every row, and a checkpoint then truncates the WAL
-//! (architecture v1 §6.4). That zeroes the deleted rows, but until the purge step lands, stale
-//! copies can survive in page gaps and FTS index keys (see [`Store::finish_delete`]).
+//! deletion generation, the second removes every row, and a purge then rebuilds the FTS index,
+//! vacuums the file and truncates the WAL, so no copy of the deleted text survives in page gaps
+//! or FTS index keys (architecture v1 §6.4).
 
 mod schema;
 #[cfg(test)]
@@ -12,11 +12,12 @@ mod tests;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsula_protocol::constants;
 use capsula_protocol::message::{RunId, ThreadId};
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, ErrorCode, InterruptHandle, OptionalExtension as _, params};
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -180,11 +181,71 @@ impl std::fmt::Debug for Thread {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum Deletion {
-    /// The rows are gone and the WAL was checkpointed and truncated.
+    /// The rows are gone and the purge after them finished.
     Finished,
-    /// The rows are gone, but a reader blocked the checkpoint, so the WAL and the main file
-    /// still hold the old pages until a later checkpoint.
+    /// The rows are gone, but the purge is still owed, so old copies of them may remain in the
+    /// files until it's retried.
     Pending,
+}
+
+/// How a purge attempt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Purge {
+    /// Nothing is owed: the FTS rebuild, VACUUM and checkpoint all succeeded, or none was due.
+    Done,
+    /// It gave way to queued store work and is still owed.
+    Yielded,
+    /// A reader blocked the checkpoint; it's still owed.
+    Blocked,
+}
+
+/// Counts work queued for the store, so a purge gives way to it: a step checks the count before
+/// it starts, and queuing work interrupts a step already running. Clones share the count.
+#[derive(Clone)]
+pub struct Queue(Arc<QueueShared>);
+
+struct QueueShared {
+    state: Mutex<QueueState>,
+    interrupt: InterruptHandle,
+}
+
+#[derive(Default)]
+struct QueueState {
+    queued: usize,
+    purging: bool,
+}
+
+impl std::fmt::Debug for Queue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Queue").finish_non_exhaustive()
+    }
+}
+
+impl Queue {
+    /// Counts one more piece of work, handed over by `hand_over`, and interrupts a running purge
+    /// step. Counting and sending under one lock means a step either sees the count or is
+    /// interrupted.
+    pub fn push<T>(&self, hand_over: impl FnOnce() -> T) -> T {
+        let mut state = self.lock();
+        state.queued += 1;
+        let handed = hand_over();
+        if state.purging {
+            self.0.interrupt.interrupt();
+        }
+        handed
+    }
+
+    /// The store took one piece of queued work.
+    pub fn pop(&self) {
+        let mut state = self.lock();
+        state.queued = state.queued.saturating_sub(1);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, QueueState> {
+        // The state is two plain fields, valid whatever a panicking holder left.
+        self.0.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A thread's deletion generation. Work stamped with an older one is stale.
@@ -198,8 +259,8 @@ pub struct Recovered {
     pub crashed_runs: usize,
     /// Deletions the last brain didn't finish, now finished.
     pub finished_deletions: usize,
-    /// Deletions whose rows are now gone but whose checkpoint a reader blocked.
-    pub pending_deletions: usize,
+    /// The purge is still owed after recovery tried it, because a reader blocked its checkpoint.
+    pub purge_pending: bool,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
 }
@@ -208,6 +269,11 @@ pub struct Recovered {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    queue: Queue,
+    /// Mirrors the `purge_pending` row.
+    purge_pending: bool,
+    /// The rebuild and VACUUM succeeded since the last deletion, so only the checkpoint is owed.
+    vacuumed: bool,
 }
 
 /// The store's file, in the data folder.
@@ -243,11 +309,34 @@ impl Store {
              PRAGMA temp_store = MEMORY;",
         )?;
         schema::migrate(&mut conn)?;
-        Ok(Self { conn })
+        let purge_pending = conn
+            .query_row("SELECT 1 FROM purge_pending", [], |_| Ok(()))
+            .optional()?
+            .is_some();
+        let queue = Queue(Arc::new(QueueShared {
+            state: Mutex::default(),
+            interrupt: conn.get_interrupt_handle(),
+        }));
+        Ok(Self {
+            conn,
+            queue,
+            purge_pending,
+            vacuumed: false,
+        })
     }
 
-    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
-    /// deletions left pending finish. Run it once at start, before any new run.
+    /// The count of work queued for this store, which a purge gives way to.
+    pub fn queue(&self) -> Queue {
+        self.queue.clone()
+    }
+
+    /// Whether a deletion's purge is still owed.
+    pub fn purge_pending(&self) -> bool {
+        self.purge_pending
+    }
+
+    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`,
+    /// deletions left pending finish, and an owed purge runs. Run it once at start, before any new run.
     ///
     /// shortcut: two sessions of the same user run two brains on one store, and the second's
     /// recovery fails the first's live runs; that needs Windows Server or multi-session Windows,
@@ -279,10 +368,8 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
-        // A checkpoint a reader blocked last time gets another chance here.
-        if self.checkpoint()? == Deletion::Pending {
-            recovered.pending_deletions = std::mem::take(&mut recovered.finished_deletions);
-        }
+        // Nothing is queued yet, so the purge can only finish or meet a reader.
+        recovered.purge_pending = self.purge()? != Purge::Done;
         Ok(recovered)
     }
 
@@ -487,12 +574,8 @@ impl Store {
     }
 
     /// Deletion's second transaction: removes every row of a thread [`Store::begin_delete`]
-    /// fenced, then truncates the WAL. Returns [`Deletion::Pending`] when a reader blocked the
-    /// checkpoint.
-    ///
-    /// shortcut: the rows are zeroed, but stale cell copies in b-tree page gaps and whole tokens
-    /// in FTS5's `events_fts_idx` keys can survive; the purge PR (slice 2, before PR 7, which
-    /// makes deletion reachable) adds the FTS rebuild, VACUUM and checkpoint that remove them.
+    /// fenced and records the purge as owed, then runs the purge. Returns
+    /// [`Deletion::Pending`] when the purge gave way to queued work or met a reader.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't being deleted.
@@ -510,35 +593,103 @@ impl Store {
             return Err(StoreError::NoThread);
         }
         self.remove(thread)?;
-        self.checkpoint()
+        Ok(match self.purge()? {
+            Purge::Done => Deletion::Finished,
+            Purge::Yielded | Purge::Blocked => Deletion::Pending,
+        })
     }
 
-    /// Deletes a thread's rows in one transaction. The foreign keys have no cascade, so a table
-    /// this misses makes the last delete fail rather than leave rows behind.
+    /// Removes what deleted rows leave behind: FTS `rebuild` drops the separator keys in
+    /// `events_fts_idx`, `VACUUM` rewrites every page so no gap keeps an old cell, and a TRUNCATE
+    /// checkpoint moves the result into the main file and empties the WAL. Only then is the purge
+    /// marked done. Each step gives way to queued work, and an interrupted step rolls back, so
+    /// the purge stays owed. A retry in the same session skips the steps that already succeeded;
+    /// after a restart it runs whole.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails for another reason; the purge stays owed.
+    pub fn purge(&mut self) -> Result<Purge, StoreError> {
+        if !self.purge_pending {
+            return Ok(Purge::Done);
+        }
+        if !self.vacuumed {
+            let rebuild = "INSERT INTO events_fts (events_fts) VALUES ('rebuild')";
+            if self.step(|conn| conn.execute_batch(rebuild))?.is_none()
+                || self.step(|conn| conn.execute_batch("VACUUM"))?.is_none()
+            {
+                return Ok(Purge::Yielded);
+            }
+            // Later writes never bring deleted text back, so a retry only owes the checkpoint.
+            self.vacuumed = true;
+        }
+        match self.step(checkpoint_now)? {
+            None => return Ok(Purge::Yielded),
+            Some(false) => {
+                tracing::warn!("a reader blocked the purge's checkpoint; it's retried later");
+                return Ok(Purge::Blocked);
+            }
+            Some(true) => {}
+        }
+        self.conn.execute("DELETE FROM purge_pending", [])?;
+        self.purge_pending = false;
+        // The WAL now holds only the cleared row, so a reader blocking this leaves nothing behind.
+        if !checkpoint_now(&self.conn)? {
+            tracing::debug!("a reader blocked the checkpoint after the purge");
+        }
+        Ok(Purge::Done)
+    }
+
+    /// Runs one purge step unless work is queued; `None` when it gave way, before or during it.
+    fn step<T>(
+        &self,
+        run: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<Option<T>, StoreError> {
+        {
+            let mut state = self.queue.lock();
+            if state.queued > 0 {
+                return Ok(None);
+            }
+            state.purging = true;
+        }
+        let result = run(&self.conn);
+        self.queue.lock().purging = false;
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == ErrorCode::OperationInterrupted =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Deletes a thread's rows and records the purge as owed, in one transaction. The foreign
+    /// keys have no cascade, so a table this misses makes the last delete fail rather than leave
+    /// rows behind.
     fn remove(&mut self, thread: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;
+        tx.execute("INSERT OR IGNORE INTO purge_pending (id) VALUES (1)", [])?;
         tx.commit()?;
+        self.purge_pending = true;
+        self.vacuumed = false;
         Ok(())
     }
+}
 
-    /// Copies the WAL into the main file and truncates it to zero bytes, so the zeroed pages
-    /// replace the old ones in both. A reader holding an older snapshot blocks it.
-    ///
-    /// shortcut: a blocked checkpoint is retried only by `recover()` at the next start; the
-    /// purge PR retries it in-session.
-    fn checkpoint(&self) -> Result<Deletion, StoreError> {
-        let busy: i64 = self
-            .conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-        if busy == 0 {
-            return Ok(Deletion::Finished);
-        }
-        tracing::warn!("a reader blocked the checkpoint; the next start retries it");
-        Ok(Deletion::Pending)
-    }
+/// Copies the WAL into the main file and truncates it to zero bytes; false when a reader holding
+/// an older snapshot blocked it. It never waits on that reader, so queued work isn't held up.
+fn checkpoint_now(conn: &Connection) -> rusqlite::Result<bool> {
+    let wait: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+    conn.busy_timeout(Duration::ZERO)?;
+    let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    conn.busy_timeout(Duration::from_millis(u64::try_from(wait).unwrap_or(0)))?;
+    Ok(busy? == 0)
 }
 
 /// Inserts events for an active run of a live thread, marking the thread changed.

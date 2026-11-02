@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -61,6 +61,12 @@ END;
 CREATE TRIGGER events_fts_delete AFTER DELETE ON events WHEN old.text IS NOT NULL BEGIN
     INSERT INTO events_fts (events_fts, rowid, text) VALUES ('delete', old.id, old.text);
 END;
+";
+
+/// The purge a deletion still owes: one row from its second transaction until the FTS rebuild,
+/// VACUUM and checkpoint after it have all succeeded.
+const V2: &str = "
+CREATE TABLE purge_pending (id INTEGER PRIMARY KEY CHECK (id = 1)) STRICT;
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.

@@ -38,4 +38,6 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [dev-dependencies]
+# hooks: a progress handler lets a test queue work from inside a running purge step.
+rusqlite = { version = "0.41", default-features = false, features = ["hooks"] }
 tokio = { version = "1", features = ["test-util"] }

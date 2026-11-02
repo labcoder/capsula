@@ -1,26 +1,36 @@
 //! The store's thread: one thread owns the connection and runs the coordinator's store
 //! operations in order, answering with acknowledgements.
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{EventKind, NewEvent, Store};
+use crate::store::{EventKind, NewEvent, Purge, Queue, Store};
+
+/// How long the queue stays empty before an owed purge starts [guess].
+const QUIET: Duration = Duration::from_millis(200);
+/// How long a purge waits after a reader blocked it or SQLite failed [guess].
+const RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(crate) struct StoreThread {
     ops: mpsc::Sender<StoreOp>,
+    /// Counts the queued ops, so a purge gives way to them.
+    queue: Queue,
     /// Fires when the thread has run every queued op and closed the store.
     done: oneshot::Receiver<()>,
 }
 
 impl StoreThread {
     pub(crate) fn spawn(mut store: Store, acks: UnboundedSender<Input>) -> std::io::Result<Self> {
-        let (ops, queue) = mpsc::channel();
+        let (ops_tx, ops) = mpsc::channel();
         let (finished, done) = oneshot::channel();
+        let queue = store.queue();
+        let taken = queue.clone();
         thread::Builder::new()
             .name("store".to_owned())
             .spawn(move || {
@@ -28,9 +38,31 @@ impl StoreThread {
                 // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
-                for op in queue {
+                let mut next_purge = store.purge_pending().then(Instant::now);
+                loop {
+                    let op = match next_purge {
+                        None => ops.recv().ok(),
+                        // An owed purge waits for a quiet queue, so it doesn't start mid-run.
+                        Some(at) => match ops
+                            .recv_timeout(at.saturating_duration_since(Instant::now()).max(QUIET))
+                        {
+                            Ok(op) => Some(op),
+                            Err(RecvTimeoutError::Timeout) => {
+                                next_purge = purge(&mut store);
+                                continue;
+                            }
+                            Err(RecvTimeoutError::Disconnected) => None,
+                        },
+                    };
+                    let Some(op) = op else {
+                        break;
+                    };
+                    taken.pop();
                     if acks.send(apply(&mut store, op)).is_err() {
                         tracing::debug!("an acknowledgement had no listener");
+                    }
+                    if store.purge_pending() && next_purge.is_none() {
+                        next_purge = Some(Instant::now());
                     }
                 }
                 drop(store);
@@ -38,19 +70,40 @@ impl StoreThread {
                     tracing::debug!("nobody waited for the store to close");
                 }
             })?;
-        Ok(Self { ops, done })
+        Ok(Self {
+            ops: ops_tx,
+            queue,
+            done,
+        })
     }
 
-    /// Queues an operation. False when the thread has gone, which only a panic there causes.
+    /// Queues an operation, interrupting a purge so the op doesn't wait behind it. False when
+    /// the thread has gone, which only a panic there causes.
     pub(crate) fn send(&self, op: StoreOp) -> bool {
-        self.ops.send(op).is_ok()
+        self.queue.push(|| self.ops.send(op).is_ok())
     }
 
-    /// Lets the queued operations finish, then closes the store. The receiver fires when it has,
-    /// and fails if the thread panicked; nothing blocks on the thread itself.
+    /// Lets the queued operations finish, then closes the store; a running purge stops, and the
+    /// next start runs it. The receiver fires when it has, and fails if the thread panicked;
+    /// nothing blocks on the thread itself.
     pub(crate) fn close(self) -> oneshot::Receiver<()> {
-        drop(self.ops);
-        self.done
+        let Self { ops, queue, done } = self;
+        queue.push(|| drop(ops));
+        done
+    }
+}
+
+/// Tries an owed purge; when to try again, or `None` once nothing is owed.
+fn purge(store: &mut Store) -> Option<Instant> {
+    match store.purge() {
+        Ok(Purge::Done) => None,
+        // The op it gave way to is already queued, so the next try waits for quiet again.
+        Ok(Purge::Yielded) => Some(Instant::now()),
+        Ok(Purge::Blocked) => Some(Instant::now() + RETRY),
+        Err(error) => {
+            tracing::error!(%error, "the purge failed; it's retried");
+            Some(Instant::now() + RETRY)
+        }
     }
 }
 
@@ -137,13 +190,75 @@ fn apply(store: &mut Store, op: StoreOp) -> Input {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use capsula_protocol::message::{RunId, Step, ThreadId};
+    use rusqlite::Connection;
     use tokio::sync::mpsc;
 
     use super::StoreThread;
     use crate::coordinator::{Input, StoreOp};
-    use crate::store::{RunEnd, Store};
+    use crate::store::{Deletion, RunEnd, Store};
     use crate::test_support::Scratch;
+
+    /// A store with its one thread hidden for deletion.
+    fn deleting(scratch: &Scratch) -> Store {
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store
+            .begin_turn(ThreadId(1), Some("t"), RunId(1), "doomed")
+            .expect("turn");
+        store.begin_delete(ThreadId(1)).expect("begin");
+        store
+    }
+
+    fn finish(store: &mut Store) {
+        assert_eq!(
+            store.finish_delete(ThreadId(1)).expect("finish"),
+            Deletion::Pending
+        );
+    }
+
+    /// Waits for the store's thread to finish the owed purge, with nothing sent to it.
+    fn purged_in_session(scratch: &Scratch, store: Store) {
+        let (acks, _replies) = mpsc::unbounded_channel();
+        let thread = StoreThread::spawn(store, acks).expect("thread");
+        let watcher = Connection::open(scratch.db()).expect("watcher");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let owed = || -> i64 {
+            watcher
+                .query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))
+                .expect("count")
+        };
+        while owed() > 0 {
+            assert!(Instant::now() < deadline, "the purge is still owed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(watcher);
+        thread.close().blocking_recv().expect("closed");
+    }
+
+    #[test]
+    fn a_purge_that_gave_way_finishes_once_the_queue_is_quiet() {
+        let scratch = Scratch::new("quiet-purge");
+        let mut store = deleting(&scratch);
+        store.queue().push(|| ());
+        finish(&mut store);
+        store.queue().pop();
+        purged_in_session(&scratch, store);
+    }
+
+    #[test]
+    fn a_purge_a_reader_blocked_is_retried_in_session() {
+        let scratch = Scratch::new("blocked-purge");
+        let mut store = deleting(&scratch);
+        let reader = Connection::open(scratch.db()).expect("reader");
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM events;")
+            .expect("snapshot");
+        finish(&mut store);
+        drop(reader);
+        purged_in_session(&scratch, store);
+    }
 
     #[test]
     fn every_operation_gets_one_reply_in_order() {
