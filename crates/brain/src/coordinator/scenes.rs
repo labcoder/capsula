@@ -5,7 +5,7 @@
 use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
 use super::{Coordinator, Effect, Stale, StoreOp};
-use crate::store::{Interruption, RunEnd, SceneState};
+use crate::store::SceneState;
 
 impl Coordinator {
     /// The visible set, oldest first.
@@ -106,22 +106,28 @@ impl Coordinator {
         }
     }
 
+    /// A new connection is served: only runs it starts from here are its own to stop.
+    pub fn begin_session(&mut self) {
+        self.session_start = RunId(self.last_run.0 + 1);
+    }
+
     /// A Stop for a run that already ended, which the shell could still stop while it drew the
     /// run's last steps. Its scene keeps what stayed, as a current run's Stop would: with its
     /// outcome when its writes are still pending, else in a write of its own. A run already
-    /// stopped is stale.
+    /// stopped, or one an earlier connection started, is stale.
     pub(super) fn late_stop(
         &mut self,
         run: RunId,
         mut revealed: Vec<u32>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        if run < self.session_start {
+            return Err(Stale);
+        }
         if let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) {
             let (outstanding, steps) = (ended.outstanding(), ended.steps);
             let ending = ended.ending.as_mut().expect("an ending run has an Ending");
-            // Only the shell that went away drew this run, so a later shell's Stop can't trim it.
-            let lost = ending.outcome == RunEnd::Interrupted(Interruption::ShellLost);
-            if lost || ending.revealed.is_some() {
+            if ending.revealed.is_some() {
                 return Err(Stale);
             }
             if outstanding {

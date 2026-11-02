@@ -118,9 +118,9 @@ never lost:
   the run's writes are pending, the selection goes with its outcome once they settle, or with
   the late first step that begins its scene; once they're done and the scene is visible, the
   brain writes the selection on its own, or the scene's clear when nothing stayed. A scene is
-  trimmed once: a later `Stop` for its run is stale. So is one that comes while a run that
-  ended because its shell went away is still being stored, since only that shell drew it. One
-  that arrives while the engine has finished but its last step is still being stored interrupts
+  trimmed once: a later `Stop` for its run is stale. So is one for a run an earlier connection
+  started, ended or not, and after a restart, since a connection can stop only runs it started
+  itself. One that arrives while the engine has finished but its last step is still being stored interrupts
   the run, since the shell never showed that step.
 
 ## Budgets

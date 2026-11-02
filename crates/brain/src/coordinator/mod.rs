@@ -367,6 +367,9 @@ pub struct Coordinator {
     clearing: Vec<(SceneId, bool)>,
     /// Visible scenes whose kept selection no outcome recorded, the same way.
     keeping: Vec<(SceneId, Vec<u32>, bool)>,
+    /// The first run the connection being served could start; older runs were drawn by a
+    /// shell that's gone, so this one's Stop can't name them.
+    session_start: RunId,
 }
 
 impl Coordinator {
@@ -381,6 +384,7 @@ impl Coordinator {
             scenes,
             clearing: Vec::new(),
             keeping: Vec::new(),
+            session_start: RunId(last_run.0 + 1),
         }
     }
 

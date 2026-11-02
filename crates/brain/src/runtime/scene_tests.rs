@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::coordinator::{Input, StoreOp};
 use crate::runtime::{Brain, CLOSE_WAIT, Ended, Quit, SCENES_WAIT, Seen};
-use crate::store::{RunEnd, SceneTarget, Store};
+use crate::store::{RunEnd, SceneTarget, Store, Swap};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, SENTINEL, Scratch};
 
@@ -953,6 +953,7 @@ async fn through_the_store<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) {
             DataToShell::StepCommit { run: of, .. } if of == run => return,
             DataToShell::StepCommit { .. }
             | DataToShell::AssistantText { .. }
+            | DataToShell::SceneSnapshot { .. }
             | DataToShell::RunEnd { .. } => {}
             other => panic!("unexpected {other:?}"),
         }
@@ -1171,4 +1172,187 @@ fn named_kept(scene: SceneId) -> SceneDescriptor {
         revision: 3,
         committed: 1,
     }
+}
+
+/// Three steps, then a run that never finishes, so a lost shell ends it.
+const LOST_AFTER_THREE: &str = "0 step a\n0 step b\n0 step c\n5000 text never";
+
+/// When another connection sends its Stop for a run a lost shell drew.
+#[derive(Clone, Copy, Debug)]
+enum Foreign {
+    /// While the run's outcome waits on the store.
+    Ending,
+    /// Once its outcome is stored.
+    Stored,
+    /// After the brain restarted.
+    Reopened,
+}
+
+/// Connection A draws three steps and is lost. Then connection B sends a Stop with
+/// `revealed` for A's run at `when`. Returns the committed count the next connection names
+/// for A's scene, and its revision and kept labels after a restart.
+async fn foreign_stop(
+    scratch: &Scratch,
+    when: Foreign,
+    revealed: Vec<u32>,
+) -> (Option<u32>, Option<(u32, Vec<String>)>) {
+    let mut brain = patient_brain(scratch, LOST_AFTER_THREE);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        let scene = steps(&mut shell, 3).await;
+        let lock = matches!(when, Foreign::Ending).then(|| hold(scratch));
+        drop(shell);
+        (run, scene, lock)
+    };
+    let (ended, (run, scene, lock)) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    if matches!(when, Foreign::Reopened) {
+        brain.close().await;
+        brain = patient_brain(scratch, LOST_AFTER_THREE);
+    }
+    let mut observed = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        // Scenes comes once the visible set has settled, so only an ending run's Stop goes first.
+        if lock.is_none() {
+            shell.scenes().await;
+        }
+        shell.send(&ControlToBrain::Stop { run, revealed }).await;
+        seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
+        if let Some(lock) = lock {
+            lock.execute_batch("ROLLBACK").expect("unlocked");
+            shell.scenes().await;
+        }
+        through_the_store(&mut shell).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    let named = scenes_on_reconnect(&mut brain).await;
+    brain.close().await;
+    let committed = named
+        .iter()
+        .find(|named| named.scene == scene)
+        .map(|named| named.committed);
+    (committed, kept_after_restart(scratch, scene))
+}
+
+#[tokio::test]
+async fn another_connection_s_stop_never_trims_a_lost_run_s_scene() {
+    let all = || Some((3, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]));
+    for when in [Foreign::Ending, Foreign::Stored, Foreign::Reopened] {
+        for revealed in [Vec::new(), vec![0]] {
+            let scratch = Scratch::new("foreign-stop");
+            assert_eq!(
+                foreign_stop(&scratch, when, revealed.clone()).await,
+                (Some(3), all()),
+                "{when:?} with {revealed:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_stop_read_after_the_data_pipe_ends_still_keeps_its_selection() {
+    let scratch = Scratch::new("grace-stop");
+    let mut brain = test_support::brain(&scratch, "0 step a\n0 step b\n0 step c");
+    let mut observed = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        let scene = steps(&mut shell, 3).await;
+        while shell.state().await != (run, Phase::Done) {}
+        let Shell {
+            control_in,
+            mut control_out,
+            data_in,
+            data_out,
+            ..
+        } = shell;
+        drop((data_in, data_out));
+        let stop = ControlToBrain::Stop {
+            run,
+            revealed: vec![0],
+        };
+        let stop = frame::encode(&stop, Pipe::Control).expect("encodes");
+        control_out.write_all(&stop).await.expect("sent");
+        seen(&mut observed, |seen| *seen == Seen::ControlApplied).await;
+        drop((control_in, control_out));
+        scene
+    };
+    let (ended, scene) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    let named = scenes_on_reconnect(&mut brain).await;
+    brain.close().await;
+    assert_eq!(
+        named
+            .iter()
+            .find(|named| named.scene == scene)
+            .map(|named| named.committed),
+        Some(1)
+    );
+    assert_eq!(
+        kept_after_restart(&scratch, scene),
+        Some((3, vec!["a".to_owned()]))
+    );
+}
+
+#[tokio::test]
+async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped() {
+    let scratch = Scratch::new("ids-after-purge");
+    let mut brain = test_support::brain(&scratch, "0 step a\n0 step b\n0 step c");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("go").await;
+        let (run, _) = shell.state().await;
+        while shell.state().await != (run, Phase::Done) {}
+        drop(shell);
+        run
+    };
+    let (ended, deleted) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.begin_delete(ThreadId(1)).expect("hidden");
+    store.finish_delete(ThreadId(1)).expect("removed");
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("a purge is owed")
+        .copy(&std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+        .expect("copy")
+        .expect("not stopped");
+    assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
+    store.leftovers().remove().expect("removed");
+    drop(store);
+    let mut brain = test_support::brain(&scratch, "0 text a\n5000 text never");
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        shell.submit("again").await;
+        let (run, _) = shell.state().await;
+        shell.stop(run).await;
+        while shell.state().await != (run, Phase::Interrupted) {}
+        drop(shell);
+        run
+    };
+    let (ended, run) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert!(
+        run > deleted,
+        "a deleted run's id is never handed out again"
+    );
+    assert_eq!(outcomes(&scratch), [outcome("interrupted", "stop")]);
 }

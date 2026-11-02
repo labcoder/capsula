@@ -292,6 +292,7 @@ impl Brain {
             .epoch
             .checked_add(1)
             .expect("connection epochs never wrap");
+        self.coordinator.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
