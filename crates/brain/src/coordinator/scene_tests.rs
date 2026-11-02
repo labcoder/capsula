@@ -16,6 +16,7 @@ fn visible(ids: &[u64]) -> Vec<SceneState> {
             scene: SceneId(id),
             thread: ThreadId(1),
             run: RunId(0),
+            stopped: false,
             revision: 1,
             kept: vec![step("old")],
         })
@@ -355,6 +356,7 @@ fn a_scene_state_s_debug_leaves_its_labels_out() {
         scene: SceneId(1),
         thread: ThreadId(2),
         run: RunId(4),
+        stopped: false,
         revision: 3,
         kept: vec![Step {
             label: "zqxsentinel".to_owned(),

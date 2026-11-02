@@ -37,6 +37,8 @@ pub struct SceneState {
     pub revision: u32,
     /// The steps that stayed.
     pub kept: Vec<Step>,
+    /// Its run was stopped and its selection applied, so another Stop can't trim it again.
+    pub stopped: bool,
 }
 
 impl std::fmt::Debug for SceneState {
@@ -47,6 +49,7 @@ impl std::fmt::Debug for SceneState {
             .field("run", &self.run)
             .field("revision", &self.revision)
             .field("kept", &self.kept.len())
+            .field("stopped", &self.stopped)
             .finish()
     }
 }
@@ -253,6 +256,7 @@ impl Store {
             }
         }
         let revision = u32::try_from(steps.len()).unwrap_or(u32::MAX);
+        let stopped = revealed.iter().any(|(stopped, _)| *stopped == run);
         let kept = steps
             .into_iter()
             .filter(|(run, step)| {
@@ -269,6 +273,7 @@ impl Store {
             run: RunId(row_id(run)),
             revision,
             kept,
+            stopped,
         })
     }
 

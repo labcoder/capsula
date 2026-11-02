@@ -103,6 +103,7 @@ mod tests {
             scene: SceneId(id),
             thread: ThreadId(1),
             run: RunId(0),
+            stopped: false,
             revision: 9,
             kept: labels
                 .iter()

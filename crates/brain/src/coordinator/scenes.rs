@@ -57,6 +57,7 @@ impl Coordinator {
                 run,
                 revision: 0,
                 kept: Vec::new(),
+                stopped: false,
             },
         );
         debug_assert!(
@@ -106,32 +107,37 @@ impl Coordinator {
     }
 
     /// A Stop for a run that already ended, which the shell could still stop while it drew the
-    /// run's last steps. Its scene keeps what stayed, as a current run's Stop would, in a write of
-    /// its own. A run still ending with steps pending, or already stopped, is stale.
+    /// run's last steps. Its scene keeps what stayed, as a current run's Stop would: with its
+    /// outcome when its writes are still pending, else in a write of its own. A run already
+    /// stopped is stale.
     pub(super) fn late_stop(
         &mut self,
         run: RunId,
         mut revealed: Vec<u32>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        let unsettled = |ended: &super::Run| {
-            ended.outstanding()
-                || ended
-                    .ending
-                    .as_ref()
-                    .is_some_and(|ending| ending.outcome == RunEnd::Interrupted(Interruption::Stop))
-        };
-        if self
-            .ending
-            .iter()
-            .any(|ended| ended.id == run && unsettled(ended))
-        {
-            return Err(Stale);
+        if let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) {
+            let (outstanding, steps) = (ended.outstanding(), ended.steps);
+            let ending = ended.ending.as_mut().expect("an ending run has an Ending");
+            // Only the shell that went away drew this run, so a later shell's Stop can't trim it.
+            let lost = ending.outcome == RunEnd::Interrupted(Interruption::ShellLost);
+            if lost || ending.revealed.is_some() {
+                return Err(Stale);
+            }
+            if outstanding {
+                // Its outcome isn't written yet, so the selection goes with it once its writes
+                // settle, the way a Stop's does.
+                revealed.retain(|&index| index < steps);
+                revealed.sort_unstable();
+                revealed.dedup();
+                ending.revealed = Some(revealed);
+                return Ok(());
+            }
         }
         let state = self
             .scenes
             .iter()
-            .find(|state| state.run == run)
+            .find(|state| state.run == run && !state.stopped)
             .ok_or(Stale)?;
         let scene = state.scene;
         if self.keeping.iter().any(|(kept, _, _)| *kept == scene) {
@@ -236,6 +242,7 @@ pub(super) fn keep(
         .filter(|(index, _)| revealed.contains(index))
         .map(|(_, step)| step)
         .collect();
+    state.stopped = true;
     if !state.kept.is_empty() {
         return None;
     }
