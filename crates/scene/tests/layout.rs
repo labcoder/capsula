@@ -1,5 +1,5 @@
 //! Incremental placement, preparation isolation and ordered-cut recovery.
-use capsula_scene::{
+use kumochi_scene::{
     Admission, Begin, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
     display::{MeasureError, Prim, TextMeasure, TextStyle},
     layout::{
@@ -58,7 +58,7 @@ fn committed(
     scene: &mut SceneState,
     budget: &mut GlobalBudget,
     value: Value,
-) -> capsula_scene::Committed {
+) -> kumochi_scene::Committed {
     let Admission::New(candidate) = scene.admit(&step(value), budget).expect("admitted fixture")
     else {
         panic!("new step");
@@ -67,7 +67,7 @@ fn committed(
 }
 fn picture(
     scene: &SceneState,
-    committed: capsula_scene::Committed,
+    committed: kumochi_scene::Committed,
     before: &LayoutState,
     measure: &mut Measure,
 ) -> Result<PreparedStep, PrepareError> {
@@ -210,9 +210,9 @@ fn review_empty_boxless_diagram_can_be_cut_after_a_resting_offset() {
     assert_eq!(kept.items().len(), 1);
     assert_eq!(
         kept.bounds(&id("d")).expect("bounds"),
-        Some(capsula_scene::geom::Rect {
-            origin: capsula_scene::geom::Vec2::new(0.0, 40.0),
-            size: capsula_scene::geom::Vec2::default()
+        Some(kumochi_scene::geom::Rect {
+            origin: kumochi_scene::geom::Vec2::new(0.0, 40.0),
+            size: kumochi_scene::geom::Vec2::default()
         })
     );
 }
@@ -248,7 +248,7 @@ fn review_same_step_callout_resolves_the_nodes_post_glide_position() {
             .expect("bounds")
             .expect("node")
             .center(),
-        capsula_scene::geom::Vec2::new(320.0, 36.0)
+        kumochi_scene::geom::Vec2::new(320.0, 36.0)
     );
     let callout = next
         .display
@@ -259,7 +259,7 @@ fn review_same_step_callout_resolves_the_nodes_post_glide_position() {
     let Prim::Line { points, .. } = &callout.primitives[0] else {
         panic!("leader");
     };
-    assert_eq!(points[1], capsula_scene::geom::Vec2::new(320.0, 56.0));
+    assert_eq!(points[1], kumochi_scene::geom::Vec2::new(320.0, 56.0));
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn review_same_step_highlight_uses_the_diagrams_measured_children() {
             .expect("bounds")
             .expect("highlight")
             .size,
-        capsula_scene::geom::Vec2::new(92.0, 52.0)
+        kumochi_scene::geom::Vec2::new(92.0, 52.0)
     );
 }
 
@@ -314,8 +314,8 @@ fn review_reverse_put_order_places_new_predecessors_before_successors() {
     let b = next.after.bounds(&id("b")).expect("bounds").expect("b");
     let c = next.after.bounds(&id("c")).expect("bounds").expect("c");
     assert!(!b.intersects(c));
-    assert_eq!(b.origin, capsula_scene::geom::Vec2::new(16.0, 128.0));
-    assert_eq!(c.origin, capsula_scene::geom::Vec2::new(16.0, 240.0));
+    assert_eq!(b.origin, kumochi_scene::geom::Vec2::new(16.0, 128.0));
+    assert_eq!(c.origin, kumochi_scene::geom::Vec2::new(16.0, 240.0));
 }
 
 #[test]
@@ -550,7 +550,7 @@ fn kept_recovery_failures_report_the_revision_and_layout_checks_full_envelopes()
     let error = picture(&scene, scaled, &before, &mut Measure::default())
         .expect_err("intermediate scale exceeds measured cap even though resting scale is one");
     assert!(
-        matches!(error,PrepareError::Layout(error) if error.code==capsula_scene::ErrorCode::OutOfRange)
+        matches!(error,PrepareError::Layout(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
     );
 }
 
@@ -624,7 +624,7 @@ fn explicit_position_precedes_a_glide_and_later_glides_use_its_resting_value() {
     assert_eq!(generated.glides.len(), 1);
     assert_eq!(
         generated.glides[0].to,
-        capsula_scene::geom::Vec2::new(-25.0, 0.0)
+        kumochi_scene::geom::Vec2::new(-25.0, 0.0)
     );
     let explicit = run(vec![
         json!({"anim":{"target":"d","track":"pos","keys":[[0,[20,0]]]}}),
@@ -812,7 +812,7 @@ fn reference_anchors_use_the_referencing_parents_basis() {
     let Prim::Line { points, .. } = &line.primitives[0] else {
         panic!("polyline");
     };
-    assert_eq!(points[0], capsula_scene::geom::Vec2::new(150.0, 36.0));
+    assert_eq!(points[0], kumochi_scene::geom::Vec2::new(150.0, 36.0));
 }
 
 #[test]
@@ -844,7 +844,7 @@ fn invalid_host_measurements_fail_before_publication() {
     )
     .expect("input");
     assert!(
-        matches!(prepare(input,&mut Invalid,&AtomicBool::new(false)),Err(PrepareError::Layout(error)) if error.code==capsula_scene::ErrorCode::OutOfRange)
+        matches!(prepare(input,&mut Invalid,&AtomicBool::new(false)),Err(PrepareError::Layout(error)) if error.code==kumochi_scene::ErrorCode::OutOfRange)
     );
     assert!(
         before.items().is_empty(),
@@ -918,7 +918,7 @@ fn empty_recovery_does_not_charge_a_scene_before_its_first_commit() {
         &AtomicBool::new(false),
     )
     .expect("empty recovery");
-    assert_eq!(scene.usage(), capsula_scene::budget::Usage::default());
+    assert_eq!(scene.usage(), kumochi_scene::budget::Usage::default());
     assert_eq!(layout.revision(), 0);
     assert!(layout.items().is_empty());
 }
@@ -944,7 +944,7 @@ fn generated_group_glides_cannot_push_old_nodes_beyond_the_coordinate_cap() {
         json!({"id":"next","put":[{"node":{"id":"overflow","in":"d","label":"D"}}]}),
     );
     assert!(
-        matches!(picture(&scene,next,&first.after,&mut measure),Err(PrepareError::Layout(error)) if error.code==capsula_scene::ErrorCode::OutOfRange)
+        matches!(picture(&scene,next,&first.after,&mut measure),Err(PrepareError::Layout(error)) if error.code==kumochi_scene::ErrorCode::OutOfRange)
     );
     assert_eq!(
         first
@@ -953,6 +953,6 @@ fn generated_group_glides_cannot_push_old_nodes_beyond_the_coordinate_cap() {
             .expect("old bounds")
             .expect("old node")
             .origin,
-        capsula_scene::geom::Vec2::new(-19970.0, 16.0)
+        kumochi_scene::geom::Vec2::new(-19970.0, 16.0)
     );
 }
