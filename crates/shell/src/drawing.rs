@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToBrain, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
     Step,
 };

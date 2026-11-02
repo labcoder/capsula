@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use capsula_protocol::constants::{BRAIN_EXE, DATA_DIR, FIXTURE_ENV, STORE_FILE};
+use kumochi_protocol::constants::{BRAIN_EXE, DATA_DIR, FIXTURE_ENV, STORE_FILE};
 
 /// How long a quitting brain gets to exit.
 const EXIT: Duration = Duration::from_secs(15);

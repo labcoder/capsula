@@ -7,7 +7,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use capsula_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
+use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
 mod summary;
 pub(super) use summary::{summarize_click, summarize_keyboard};

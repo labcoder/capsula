@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId,
     SceneDescriptor, SceneId, Step, ThreadId,
 };
@@ -631,7 +631,7 @@ async fn a_shell_that_stops_reading_data_ends_the_run_as_stalled() {
 }
 
 /// Rez measurement for the pull request, not a check: run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_`.
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_`.
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "a measurement, run by hand on Rez"]
@@ -694,7 +694,7 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
 
 /// Rez measurement for the pull request, not a check: the first step's latency from the turn, and
 /// the second's after it. Run it with
-/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_first_step`.
+/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_first_step`.
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "a measurement, run by hand on Rez"]

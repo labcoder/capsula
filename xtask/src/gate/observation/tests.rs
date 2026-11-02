@@ -16,7 +16,7 @@ pub(super) fn directory() -> std::path::PathBuf {
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
         "{}-observer-test-{}-{stamp}",
-        capsula_protocol::constants::OBJECT_PREFIX,
+        kumochi_protocol::constants::OBJECT_PREFIX,
         std::process::id()
     ));
     fs::create_dir(&path).unwrap();

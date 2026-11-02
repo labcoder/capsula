@@ -1,5 +1,5 @@
 //! Canonical identity, validation, cancellation and recovery regressions.
-use capsula_scene::{
+use kumochi_scene::{
     Admission, Admitted, Begin, Budget, CallState, Committed, ErrorCode, GlobalBudget, Handle,
     Record, SceneEvent, SceneState, Step, StopCut, StopOutcome, WireId, parse_record,
 };
@@ -41,7 +41,7 @@ fn commit(state: &mut SceneState, global: &mut GlobalBudget, json: &str) -> Comm
 fn cut(activated: u32, revealed: Vec<Handle>) -> StopCut {
     StopCut {
         activated,
-        revealed: capsula_scene::text::Bounded::new(revealed).expect("bounded handles"),
+        revealed: kumochi_scene::text::Bounded::new(revealed).expect("bounded handles"),
     }
 }
 fn text(name: &str, object: &str) -> String {
@@ -294,19 +294,19 @@ fn stale_admissions_bind_scene_global_instance_and_global_generation() {
     let candidate = admit(&a, &global, &step(&text("a", "a")));
     assert_eq!(
         b.commit(candidate, &mut global),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
     let candidate = admit(&a, &global, &step(&text("a", "a")));
     assert_eq!(
         a.commit(candidate, &mut GlobalBudget::default()),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
     let candidate = admit(&a, &global, &step(&text("a", "a")));
     commit(&mut b, &mut global, &text("b", "b"));
     let generation = global.generation();
     assert_eq!(
         a.commit(candidate, &mut global),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
     assert_eq!(
         (a.revision(), a.object_count(), global.generation()),
@@ -326,7 +326,7 @@ fn stale_admissions_bind_scene_global_instance_and_global_generation() {
     a.clear(&mut global).expect("matching budget context");
     assert_eq!(
         a.commit(candidate, &mut global),
-        Err(capsula_scene::StaleAdmission)
+        Err(kumochi_scene::StaleAdmission)
     );
 }
 

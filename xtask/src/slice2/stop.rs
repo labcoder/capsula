@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Phase, RunId,
 };
 

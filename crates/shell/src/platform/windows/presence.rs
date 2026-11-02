@@ -1,4 +1,4 @@
-//! Capsula's presence beyond what GPUI draws: the tray icon and its menu, the dock's hit-test
+//! Kumochi's presence beyond what GPUI draws: the tray icon and its menu, the dock's hit-test
 //! proxy, and the window styles that keep presence windows out of the taskbar and focus. The
 //! proxy's alpha mask lives in `hit_mask.rs`.
 
@@ -7,8 +7,8 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use capsula_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use gpui_kit::Window;
+use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -57,7 +57,7 @@ use super::observer::{self, Observe, ProxyHandle};
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 /// The only icon this process puts in the tray.
 const TRAY_ID: u32 = 1;
-/// Identifies Capsula's hover subclass on presence windows.
+/// Identifies Kumochi's hover subclass on presence windows.
 const HOVER_SUBCLASS_ID: usize = 0xca5;
 /// Menu commands: positions are `1..=9`, so 0 stays "nothing picked".
 const RETRY_COMMAND: usize = 10;
@@ -80,7 +80,7 @@ pub(crate) enum PresenceEvent {
     Retry,
     /// A panel close request hides the panel without quitting the shell.
     DismissPanel,
-    /// Esc reached Capsula: the global hotkey, a focused panel, or the Stop fallback.
+    /// Esc reached Kumochi: the global hotkey, a focused panel, or the Stop fallback.
     Escape,
     /// The user picked Quit in the tray menu.
     Quit,
@@ -426,7 +426,7 @@ impl Drop for PresenceNative {
 pub(crate) enum PresenceSurface {
     Overlay,
     Panel,
-    /// The only surface Capsula activates, and only when asked to.
+    /// The only surface Kumochi activates, and only when asked to.
     Text,
 }
 
@@ -587,7 +587,7 @@ fn set_affinity(hwnd: HWND, capture: Capture) -> Result<(), PresenceError> {
     Ok(())
 }
 
-/// The window that was in front before Capsula activated one of its own, with its process, so
+/// The window that was in front before Kumochi activated one of its own, with its process, so
 /// a handle Windows reused for another app's window is never brought forward.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Foreground(HWND, u32);
@@ -599,7 +599,7 @@ fn process_of(hwnd: HWND) -> u32 {
     process
 }
 
-/// The one input Capsula sends: a mouse event with no motion, buttons, wheel or keys, tagged
+/// The one input Kumochi sends: a mouse event with no motion, buttons, wheel or keys, tagged
 /// so the gate harness can tell it from the user's input.
 fn focus_input() -> INPUT {
     INPUT {
@@ -617,7 +617,7 @@ fn focus_input() -> INPUT {
 /// or `None` when this window already had the front. Call it once per open.
 ///
 /// Windows lets the process that received the last input event set the foreground, and the
-/// user's keys went to the app in front, so Capsula first sends [`focus_input`]. With an
+/// user's keys went to the app in front, so Kumochi first sends [`focus_input`]. With an
 /// elevated app in front, UIPI drops it and the activation fails.
 ///
 /// # Errors
@@ -975,7 +975,7 @@ unsafe extern "system" fn hover_subclass(
 #[cfg(test)]
 mod tests {
     use super::{focus_input, place_hidden, proxy_proc, signed_words};
-    use capsula_protocol::constants::FOCUS_INPUT_MARKER;
+    use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT_MOUSE, MOUSE_EVENT_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::{

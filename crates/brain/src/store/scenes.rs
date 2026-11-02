@@ -3,7 +3,7 @@
 //! visible set. The visible set is the newest four scenes of live threads with no
 //! `scene_cleared`, so recovery at start reads the same set the brain held in memory.
 
-use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step, ThreadId};
+use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step, ThreadId};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Deserialize;
 

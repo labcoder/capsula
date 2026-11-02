@@ -7,8 +7,8 @@
 //! Data for a run no `RunState` has named yet is held, with its credit, until one does, so a run
 //! Esc cancelled before it was named never shows anything.
 
-use capsula_protocol::frame::Pipe;
-use capsula_protocol::message::{
+use kumochi_protocol::frame::Pipe;
+use kumochi_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES,
     MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId,
 };
@@ -522,17 +522,17 @@ mod delete_tests;
 
 #[cfg(test)]
 mod tests {
-    use capsula_protocol::frame::Pipe;
-    use capsula_protocol::message::{
+    use kumochi_protocol::frame::Pipe;
+    use kumochi_protocol::message::{
         ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
         SceneDescriptor, SceneId, Step, ThreadId,
     };
 
-    use capsula_brain::coordinator::{
+    use kumochi_brain::coordinator::{
         Coordinator, Effect as BrainEffect, EngineEvent, Input, StoreOp,
     };
-    use capsula_brain::store::Store;
-    use capsula_protocol::message::ControlToShell;
+    use kumochi_brain::store::Store;
+    use kumochi_protocol::message::ControlToShell;
 
     use super::{Applied, Refused, Runs, TEXT_KEPT};
     use crate::drawing::{Chunk, Effect};
@@ -673,7 +673,11 @@ mod tests {
 
     #[test]
     fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() {
-        let dir = std::env::temp_dir().join(format!("capsula-shell-runs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "{}-shell-runs-{}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("scratch folder");
         let mut store = Store::open(&dir.join("store.db")).expect("store");
         let mut runs = Runs::default();

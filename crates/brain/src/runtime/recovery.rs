@@ -3,8 +3,8 @@
 
 use std::collections::VecDeque;
 
-use capsula_protocol::frame::Pipe;
-use capsula_protocol::message::{DataToShell, SceneId, Step};
+use kumochi_protocol::frame::Pipe;
+use kumochi_protocol::message::{DataToShell, SceneId, Step};
 
 use crate::store::SceneState;
 
@@ -93,7 +93,7 @@ impl Recovery {
 
 #[cfg(test)]
 mod tests {
-    use capsula_protocol::message::{DataToShell, RunId, SceneId, Step, ThreadId};
+    use kumochi_protocol::message::{DataToShell, RunId, SceneId, Step, ThreadId};
 
     use super::Recovery;
     use crate::store::SceneState;

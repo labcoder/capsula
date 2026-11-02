@@ -17,12 +17,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use capsula_protocol::frame::{self, Pipe};
-use capsula_protocol::message::{
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
 };
-use capsula_protocol::tap::Direction;
+use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -350,7 +350,7 @@ impl Brain {
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
         let (turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
-        let (pages_tx, mut pages) = mpsc::channel(capsula_protocol::message::MAX_PENDING_PAGES);
+        let (pages_tx, mut pages) = mpsc::channel(kumochi_protocol::message::MAX_PENDING_PAGES);
         let (out_tx, mut out) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();

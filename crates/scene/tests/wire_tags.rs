@@ -1,6 +1,6 @@
 //! Golden postcard discriminants: declaration order is append only.
-use capsula_scene::Record;
-use capsula_scene::record::{
+use kumochi_scene::Record;
+use kumochi_scene::record::{
     Align, Anchor, AxisScale, Cell, ChartKind, Color, Direction, Ease, Enter, Head, HighlightStyle,
     KeyValue, NodeShape, Op, Point, ShapeKind, Side, Start, Surface, Token, Track, Version,
 };

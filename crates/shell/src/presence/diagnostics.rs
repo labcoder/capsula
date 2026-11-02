@@ -1,4 +1,4 @@
-//! `capsula --input-diagnostics=<file>`: one line per input milestone, for the input-session
+//! `kumochi --input-diagnostics=<file>`: one line per input milestone, for the input-session
 //! harness. Lines carry a performance-counter stamp and durations, never keys or text. A normal
 //! run creates no file.
 

@@ -4,10 +4,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use capsula_brain::SCREEN_WORKER;
-use capsula_brain::platform::Job;
+use kumochi_brain::SCREEN_WORKER;
+use kumochi_brain::platform::Job;
 
-const WORKER: &str = env!("CARGO_BIN_EXE_capsulad");
+const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const SETTLE: Duration = Duration::from_millis(300);
 
 #[test]

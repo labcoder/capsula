@@ -1,4 +1,4 @@
-use capsula_protocol::message::{
+use kumochi_protocol::message::{
     ControlToBrain, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
     Step,
 };
@@ -469,7 +469,7 @@ fn a_wrong_revision_chunk_spoils_its_snapshot_live_or_held() {
 
 /// The per-step cost of a live step for a scene already shown, with four shown: the reducer
 /// work every `StepCommit` pays. Run on Rez under the measuring lock:
-/// `cargo test --release -p capsula-shell -- --ignored measure_live_step_admission --nocapture`.
+/// `cargo test --release -p kumochi-shell -- --ignored measure_live_step_admission --nocapture`.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
 fn measure_live_step_admission() {

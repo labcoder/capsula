@@ -1,6 +1,6 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
-use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, Step, ThreadId};
+use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, Step, ThreadId};
 
 use super::Input;
 use crate::store::{RunEnd, SceneTarget};

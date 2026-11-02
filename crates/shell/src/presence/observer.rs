@@ -1,4 +1,4 @@
-//! `capsula --gate-observer=<file>`: the gate harness's record of what the dock really did. Each
+//! `kumochi --gate-observer=<file>`: the gate harness's record of what the dock really did. Each
 //! hit-mask commit logs the exact rows it drew and owned, each dock paint its frame, each frame's
 //! completion its dispatch on the proxy, and each tagged click its receipt, all stamped with the
 //! performance counter. The UI thread only moves fixed-size records into a preallocated bounded
@@ -15,8 +15,8 @@ use std::rc::Rc;
 use std::thread::JoinHandle;
 
 use async_channel::{Receiver, Sender};
-use capsula_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
+use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
 use super::geometry::{PanelVisibility, Position};
 use super::outline::Ownership;
@@ -985,7 +985,7 @@ mod tests {
     fn an_observer_never_overwrites_existing_evidence() {
         let path = std::env::temp_dir().join(format!(
             "{}-observer-test-{}",
-            capsula_protocol::constants::OBJECT_PREFIX,
+            kumochi_protocol::constants::OBJECT_PREFIX,
             std::process::id()
         ));
         let mut file = std::fs::File::create_new(&path).unwrap();

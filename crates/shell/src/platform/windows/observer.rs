@@ -2,8 +2,8 @@
 //! tagged clicks the moment it dispatches them, and the dock's paint posts it each frame's id.
 //! Without an observer the proxy ignores all three, so normal runs behave as before.
 
-use capsula_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 use gpui_kit::Window;
+use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Performance::QueryPerformanceFrequency;

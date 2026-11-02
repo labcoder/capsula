@@ -1,6 +1,6 @@
 [package]
-name = "capsula-brain"
-description = "Capsula's headless brain, capsulad."
+name = "kumochi-brain"
+description = "Kumochi's headless brain, kumochid."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,11 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "capsulad"
+name = "kumochid"
 path = "src/main.rs"
 
 [dependencies]
-capsula-protocol.workspace = true
+kumochi-protocol.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 # hooks: the progress handler that stops a purge's copy.

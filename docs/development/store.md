@@ -1,7 +1,7 @@
 # The store
 
 The brain keeps threads, their events and runs in one SQLite file,
-`%LOCALAPPDATA%\<product>\capsula.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
+`%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
 ## Settings
@@ -83,19 +83,19 @@ long-lived readers and the checkpoint lifecycle that bounds them.
 sequenceDiagram
   participant S as Store thread
   participant H as Purge helper
-  participant DB as capsula.db
+  participant DB as kumochi.db
   S->>DB: tx 1: state=deleting, deletion_generation+1
   Note over S: hidden from lists and search, takes no new runs or events
   S->>S: stop the thread's producers (later slices)
   S->>DB: tx 2: delete events (and FTS rows), runs, thread; purge_pending=1
   Note over S: no live thread's run active, no op for 200 ms
   S->>H: copy
-  H->>DB: read-only: VACUUM INTO capsula.db.purge-snapshot
+  H->>DB: read-only: VACUUM INTO kumochi.db.purge-snapshot
   H->>H: on the snapshot: purge_pending=0, FTS rebuild, optimize
-  H->>H: VACUUM INTO capsula.db.purge-clean, remove the snapshot, sync
+  H->>H: VACUUM INTO kumochi.db.purge-clean, remove the snapshot, sync
   H-->>S: copied
   S->>DB: no change since the snapshot? TRUNCATE checkpoint, close
-  S->>DB: link capsula.db as purge-old, move purge-clean over capsula.db, reopen
+  S->>DB: link kumochi.db as purge-old, move purge-clean over kumochi.db, reopen
   S->>H: remove
   H->>DB: delete purge-old (and any copy left)
   H-->>S: removed: purge done
@@ -119,30 +119,30 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    up, so the swap's checkpoint later finds little to copy. The drain must copy all of it before
    the copy goes on: a reader still holding part of the WAL, or another connection checkpointing,
    makes the attempt stop and back off, so a long reader defers the purge. Then it opens the file
-   read-only and runs `VACUUM INTO` into `capsula.db.purge-snapshot`. A WAL reader never holds
+   read-only and runs `VACUUM INTO` into `kumochi.db.purge-snapshot`. A WAL reader never holds
    the writer, so the store keeps serving.
 2. **Clean.** On the snapshot it clears the `purge_pending` row, runs FTS `rebuild`, which
    rewrites the index from the remaining events and so drops the deleted terms' separator keys,
    then `optimize`, which merges the rebuilt index into one segment. Without `optimize`, FTS5's
    first merges after a rebuild stalled single store ops for up to about 180 ms at 232 MiB on Rez.
 3. **Compact.** `VACUUM INTO` writes the snapshot into fresh pages in
-   `capsula.db.purge-clean`, so no gap or free page the rebuild left keeps an old key. The
+   `kumochi.db.purge-clean`, so no gap or free page the rebuild left keeps an old key. The
    snapshot is removed and the result synced.
 4. **Swap**, on the store thread. Unless its connection changed something since the snapshot
    started, it TRUNCATE-checkpoints the WAL so no committed data lives only there, closes the
    file and checks that no WAL is left that SQLite could replay onto the new file. Then it
-   hard-links `capsula.db` as `capsula.db.purge-old`, moves the copy over `capsula.db` with
+   hard-links `kumochi.db` as `kumochi.db.purge-old`, moves the copy over `kumochi.db` with
    `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which returns only once
-   the move is on disk, and reopens. `capsula.db` names a whole store at every instant. The
+   the move is on disk, and reopens. `kumochi.db` names a whole store at every instant. The
    link keeps the old file's data alive, so the move only drops a name: without it the move
    itself freed the old file, about 0.12 ms per MiB on Rez (115 ms at 984 MiB). If the move
-   fails, the extra name is removed at once, which is cheap while `capsula.db` still holds the
+   fails, the extra name is removed at once, which is cheap while `kumochi.db` still holds the
    data.
 5. **Remove**, on a helper. `purge-old` still holds the deleted rows' bytes, so the purge isn't
    done until it's deleted, along with any copy an attempt didn't use. Deleting the old store
    takes as long as freeing its space (about 60 ms at 515 MiB, 110 ms at 984 MiB on Rez), and
    ops keep running meanwhile. `purge-old` is never opened through SQLite, and it's kept while
-   `capsula.db` is missing, since it may then be the only copy. The removal counts as done only
+   `kumochi.db` is missing, since it may then be the only copy. The removal counts as done only
    once a fresh check finds none of the files: a file another process holds with delete sharing
    can keep its name after its deletion succeeds, until that process closes it. Rez's NTFS
    removes the name at once.
@@ -186,7 +186,7 @@ The purge is cleanup that can be retried:
 - **It's retried at start.** The row survives a crash, and so do the purge's files, which count as
   owed even when the row is gone: a crash after the move leaves the clean store and
   `purge-old`. The store thread removes them on its helper as soon as it starts, before any copy;
-  opening the store never deletes anything. A `purge-old` beside a missing `capsula.db` stops
+  opening the store never deletes anything. A `purge-old` beside a missing `kumochi.db` stops
   the start instead of creating an empty store. Recovery only reports an owed purge. Closing the
   store stops a running copy without waiting for it.
 - **It costs disk, not memory.** `VACUUM INTO` writes straight to its file, with no in-memory
@@ -220,4 +220,4 @@ deletions, and whether the purge is still owed.
 
 shortcut: two sessions of the same user run two brains on one store, and the second's recovery
 fails the first's live runs. That needs Windows Server or multi-session Windows, so a
-per-session store or a lock waits until Capsula supports them.
+per-session store or a lock waits until Kumochi supports them.

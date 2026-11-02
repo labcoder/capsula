@@ -4,7 +4,7 @@
 targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
-# Vulnerabilities always fail. Unmaintained crates fail only when Capsula depends on them
+# Vulnerabilities always fail. Unmaintained crates fail only when Kumochi depends on them
 # directly: GPUI's transitive ones (instant, paste, rustybuzz, ttf-parser) have no upgrade.
 unmaintained = "workspace"
 ignore = []
@@ -37,7 +37,7 @@ exceptions = [
 ]
 
 [licenses.private]
-# Capsula's own crates are AGPL-3.0-only, a license the list above keeps out of dependencies.
+# Kumochi's own crates are AGPL-3.0-only, a license the list above keeps out of dependencies.
 ignore = true
 
 [bans]

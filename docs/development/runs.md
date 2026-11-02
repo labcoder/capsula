@@ -136,7 +136,7 @@ with the engines that use them.
 ## The fixture engine
 
 Until slice 3 brings real engines, every run plays a fixture script
-(`crates/brain/fixtures/default.txt`, or in a dev build the file `CAPSULA_FIXTURE` names). One
+(`crates/brain/fixtures/default.txt`, or in a dev build the file `KUMOCHI_FIXTURE` names). One
 line per event: `<ms> text <words>`, `<ms> fill <bytes>`, `<ms> step <label>`, `<ms> fail`, and
 `late <label>`, a step the engine still finishes after it's cancelled. The coordinator refuses
 that late step as stale, and the store would refuse it too.
