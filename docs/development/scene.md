@@ -78,8 +78,7 @@ choose an `ErrorCode`; the parser's original message is discarded. `StepError`
 uses `MissingField` for absent required fields and appends only an allowlisted
 field name to its path. `UnknownOp` denotes only an unknown record/op tag;
 unknown vocabulary values and invalid numeric values are `OutOfRange`.
-`StepError`
-`Display` and `Debug` contain only the path and code. `tool_text` may include a
+`StepError`'s `Display` and `Debug` contain only the path and code. `tool_text` may include a
 known step id when replying to its model, but never the rejected field value.
 `Text` and `WireId` debug formatting exposes lengths only. Do not trace records,
 serialize drawing content into logs, or trace a model-facing tool reply.
@@ -125,7 +124,8 @@ Drain each supplied delta until `None`, then provide the next delta. At EOF call
 
 The outer object must contain exactly one `records` key and an array of record
 objects. Escaped spellings of that key work; repeated keys and additional keys
-fail. Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
+fail. A leading byte-order mark (BOM) and invalid UTF-8 outside strings are rejected.
+Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
 escapes and paired UTF-16 surrogate escapes are handled incrementally. Duplicate
 fields inside a record remain the typed parser's responsibility.
 
@@ -134,6 +134,7 @@ envelope and 32 KiB from each record's opening brace through its closing brace.
 Surrounding array whitespace is charged only to the drawing. Container depth is
 at most 16, including the envelope object and records array. One 32 KiB buffer is
 allocated at construction; scanning and record delivery allocate nothing further.
+`Malformed { at }` reports the zero-based drawing byte offset of the first invalid byte.
 Every syntax, size, depth or truncation error is terminal. There is no newline
 resynchronization, and trailing non-whitespace after the envelope fails. Earlier
 records may already have been emitted, so callers retain their committed prefix.
@@ -157,18 +158,6 @@ measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal
 priority with the lock held:
 
 ```text
+nice -n 10 cargo test -p capsula-scene --release --no-run
 cargo test -p capsula-scene --release -- --ignored --nocapture --test-threads=1
 ```
-
-Rez result, 2026-11-02 at 01:34 PST (Windows 11, i9-10900K):
-
-| Input delta | Throughput (MB/s) | Cost per delta (ns) | Allocations after construction |
-|---|---:|---:|---:|
-| 40 bytes | 271.489 | 147.326 | 0 |
-| 4 KiB | 305.390 | 13,412.341 | 0 |
-
-The lock was held from 01:33:20 until 01:34:38; existing builds finished before
-the 30-second quiet interval completed at 01:34:35. No compilation occurred in
-the timed run. Capy, Edge and Node processes remained open; their CPU usage was
-not measured. These are tokenizer-only absolute figures, not end-to-end drawing
-latencies or a speedup over a prior implementation.

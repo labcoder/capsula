@@ -42,9 +42,11 @@ fn scan(bytes: &[u8], delta: usize) -> Result<Vec<Vec<u8>>, TokenError> {
 
 #[test]
 fn every_split_preserves_records_and_unicode() {
-    let records: [&[u8]; 3] = [
+    let records: [&[u8]; 4] = [
         br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"description"}}"#,
         r#"{"step":{"id":"s","say":"é水🙂","put":[{"text":{"id":"t","at":[0,0],"text":"quote \" brace } slash \\ pair \uD83D\uDE42"}}]}}"#.as_bytes(),
+        br#"{ "pretty" 	: [ 1 	, true
+, false , null , "ends\\" ] }"#,
         br#"{"end":{}}"#,
     ];
     let mut drawing = b" \r\n{ \"records\" : [ ".to_vec();
@@ -162,50 +164,56 @@ fn byte_and_depth_limits_are_exact() {
         scan(&drawing, 4096).err(),
         Some(TokenError::DrawingTooLarge)
     );
-    for depth in [16, 17] {
-        let drawing = format!(
-            r#"{{"records":[{{"v":{}0{}}}]}}"#,
-            "[".repeat(depth - 3),
-            "]".repeat(depth - 3)
-        );
-        let result = scan(drawing.as_bytes(), 1);
-        assert_eq!(
-            result.is_ok(),
-            depth == 16,
-            "depth includes the envelope object and array"
-        );
-        if depth == 17 {
-            assert_eq!(result.err(), Some(TokenError::TooDeep));
-        }
-    }
+    let at_cap = br#"{"v":[[[[[[[[[[[[[0]]]]]]]]]]]]]}"#;
+    let drawing = format!(
+        r#"{{"records":[{}]}}"#,
+        std::str::from_utf8(at_cap).expect("ASCII fixture")
+    );
+    let actual = scan(drawing.as_bytes(), 1).expect("depth 16 is legal");
+    assert!(
+        actual.iter().map(Vec::as_slice).eq([at_cap.as_slice()]),
+        "exact single record at depth 16"
+    );
+    assert_eq!(
+        scan(br#"{"records":[{"v":[[[[[[[[[[[[[[0]]]]]]]]]]]]]]}]}"#, 1).err(),
+        Some(TokenError::TooDeep)
+    );
 }
 
 #[test]
 fn malformed_json_is_terminal_and_never_resynchronizes() {
-    let fixtures: &[&[u8]] = &[
-        b"{}",
-        br#"{"other":[]}"#,
-        br#"{"records":[],"records":[]}"#,
-        br#"{"records":[],"other":0}"#,
-        br#"{"records":[{},]}"#,
-        br#"{"records":[true]}"#,
-        br#"{"records":[{"x":}]}"#,
-        br#"{"records":[{"x":01}]}"#,
-        br#"{"records":[{"x":1.}]}"#,
-        br#"{"records":[{"x":1e+}]}"#,
-        br#"{"records":[{"x":tru}]}"#,
-        br#"{"records":[{"x":null false}]}"#,
-        br#"{"records":[{"x":[1,]}]}"#,
-        br#"{"records":[{"x":1,}]}"#,
-        br#"{"records":[{"x" 1}]}"#,
-        br#"{"records":[{"x":"\q"}]}"#,
-        br#"{"records":[{"x":"\uD800"}]}"#,
-        br#"{"records":[{"x":"\uDC00"}]}"#,
-        br#"{"records":[{"x":"\uD800\u0041"}]}"#,
-        br#"{"records":[{"x":"\u0x00"}]}"#,
-        br#"{"records":[{"x":]}]}"#,
+    use TokenError::Malformed;
+    let fixtures: &[(&[u8], TokenError)] = &[
+        (b"{}", Malformed { at: 1 }),
+        (br#"{"other":[]}"#, Malformed { at: 2 }),
+        (br#"{"records":[],"records":[]}"#, Malformed { at: 13 }),
+        (br#"{"records":[],"other":0}"#, Malformed { at: 13 }),
+        (br#"{"records":[{},]}"#, Malformed { at: 15 }),
+        (br#"{"records":[true]}"#, Malformed { at: 12 }),
+        (br#"{"records":[{"x":}]}"#, Malformed { at: 17 }),
+        (br#"{"records":[{"x":01}]}"#, Malformed { at: 18 }),
+        (br#"{"records":[{"x":1.}]}"#, Malformed { at: 19 }),
+        (br#"{"records":[{"x":1e+}]}"#, Malformed { at: 20 }),
+        (br#"{"records":[{"x":tru}]}"#, Malformed { at: 20 }),
+        (br#"{"records":[{"x":null false}]}"#, Malformed { at: 22 }),
+        (br#"{"records":[{"x":[1,]}]}"#, Malformed { at: 20 }),
+        (br#"{"records":[{"x":1,}]}"#, Malformed { at: 19 }),
+        (br#"{"records":[{"x" 1}]}"#, Malformed { at: 17 }),
+        (br#"{"records":[{"x":"\q"}]}"#, Malformed { at: 19 }),
+        (br#"{"records":[{"x":"\uD800"}]}"#, Malformed { at: 24 }),
+        (br#"{"records":[{"x":"\uDC00"}]}"#, Malformed { at: 23 }),
+        (
+            br#"{"records":[{"x":"\uD800\u0041"}]}"#,
+            Malformed { at: 29 },
+        ),
+        (br#"{"records":[{"x":"\u0x00"}]}"#, Malformed { at: 21 }),
+        (br#"{"records":[{"x":]}]}"#, Malformed { at: 17 }),
+        (b"\xef\xbb\xbf{\"records\":[]}", Malformed { at: 0 }),
+        (b"{\xff\"records\":[]}", Malformed { at: 1 }),
+        (b"{\"records\":[\xff]}", Malformed { at: 12 }),
+        (b"{\"records\":[]}\xff", Malformed { at: 14 }),
     ];
-    for fixture in fixtures {
+    for (fixture, expected) in fixtures {
         let mut tokenizer = Tokenizer::new();
         let mut rest = *fixture;
         let error = loop {
@@ -215,6 +223,10 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
                 Ok(None) => panic!("malformed fixture must fail before end of input"),
             }
         };
+        assert_eq!(
+            &error, expected,
+            "the first invalid byte determines the error"
+        );
         let mut valid_tail: &[u8] = b"\n{\"end\":{}}]}";
         assert_eq!(
             tokenizer.next(&mut valid_tail).err(),
@@ -230,10 +242,7 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
     let valid = br#"{"records":[]}"#;
     let mut garbage = valid.to_vec();
     garbage.push(b'x');
-    assert_eq!(
-        scan(&garbage, 1).err(),
-        Some(TokenError::Malformed { at: valid.len() })
-    );
+    assert_eq!(scan(&garbage, 1).err(), Some(Malformed { at: valid.len() }));
 }
 
 #[test]
@@ -247,20 +256,21 @@ fn incomplete_stream_and_invalid_utf8_fail() {
     ] {
         assert_eq!(scan(fixture, 1).err(), Some(TokenError::Truncated));
     }
-    for invalid in [
-        b"\xff".as_slice(),
-        b"\xc0\xaf",
-        b"\xed\xa0\x80",
-        b"\xf4\x90\x80\x80",
-        b"\xe2\x22",
-        b"\x00",
-    ] {
+    let invalid_utf8: &[(&[u8], usize)] = &[
+        (b"\xff", 18),
+        (b"\xc0\xaf", 18),
+        (b"\xed\xa0\x80", 19),
+        (b"\xf4\x90\x80\x80", 19),
+        (b"\xe2\x22", 19),
+        (b"\x00", 18),
+    ];
+    for (invalid, at) in invalid_utf8 {
         let mut fixture = b"{\"records\":[{\"x\":\"".to_vec();
-        fixture.extend(invalid);
+        fixture.extend(*invalid);
         fixture.extend(b"\"}]}");
-        assert!(
-            matches!(scan(&fixture, 1), Err(TokenError::Malformed { .. })),
-            "invalid string encoding fails"
+        assert_eq!(
+            scan(&fixture, 1).err(),
+            Some(TokenError::Malformed { at: *at })
         );
     }
     let numbers = br#"{"records":[{"v":[-0,0,1,-12,0.5,1e4,-0.25E-2,true,false,null]}]}"#;
