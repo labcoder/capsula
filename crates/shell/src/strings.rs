@@ -45,7 +45,6 @@ pub(crate) enum Text {
     ThreadUser,
     ThreadAssistant,
     ThreadStep,
-    ThreadRevealed,
     ThreadsOffline,
     ThreadSearchTooLong,
     ThreadsFailed,
@@ -53,7 +52,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 39] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -90,7 +89,6 @@ impl Text {
         Self::ThreadUser,
         Self::ThreadAssistant,
         Self::ThreadStep,
-        Self::ThreadRevealed,
         Self::ThreadsOffline,
         Self::ThreadSearchTooLong,
         Self::ThreadsFailed,
@@ -146,7 +144,6 @@ impl Text {
             Self::ThreadUser => "thread-user",
             Self::ThreadAssistant => "thread-assistant",
             Self::ThreadStep => "thread-step",
-            Self::ThreadRevealed => "thread-revealed",
             Self::ThreadsOffline => "threads-offline",
             Self::ThreadSearchTooLong => "threads-search-too-long",
             Self::ThreadsFailed => "threads-failed",

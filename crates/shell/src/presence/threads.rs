@@ -114,8 +114,6 @@ impl Presence {
                         if previous.is_some() {
                             panel.previous = previous;
                         }
-                        panel.focused = true;
-                        panel.typing.activated();
                         list.update(cx, |list, cx| list.focus(window, cx));
                     }
                     Err(error) => tracing::warn!(%error, "can't focus the threads panel"),

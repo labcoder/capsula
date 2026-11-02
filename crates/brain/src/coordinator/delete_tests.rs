@@ -65,7 +65,11 @@ fn next_run(core: &mut Coordinator) -> RunId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Control(ControlToShell::RunState { run, .. }) => Some(*run),
+            Effect::Control(ControlToShell::RunState {
+                run,
+                phase: Phase::Thinking,
+                ..
+            }) => Some(*run),
             _ => None,
         })
         .expect("the turn was admitted")
@@ -112,23 +116,23 @@ fn a_blank_turn_is_refused_without_a_run() {
 fn the_fence_refuses_exactly_the_submits_sent_before_the_delete() {
     for outcome in [Deleted::Hidden, Deleted::Removed] {
         let mut core = fresh();
-        // A new-thread turn read before the delete, then two more sent before it: one naming
+        // A new-thread turn, thread 4, read before the delete, then two more sent before it: one naming
         // the thread, one a new thread.
         next_run(&mut core);
-        core.handle(delete(T, 3)).expect("accepted");
+        core.handle(delete(U, 3)).expect("accepted");
         let stored = Some(RunId(7));
         assert_eq!(
-            core.handle(answer(T, outcome, stored)),
-            Ok(vec![told(T, outcome, stored)])
+            core.handle(answer(U, outcome, stored)),
+            Ok(vec![told(U, outcome, stored)])
         );
-        assert_eq!(core.handle(turn(Some(T))), Ok(refused(Some(T))));
+        assert_eq!(core.handle(turn(Some(U))), Ok(refused(Some(U))));
         assert_eq!(next_run(&mut core), RunId(11), "{outcome:?}");
         assert!(core.fenced.is_empty(), "the third submit retired the fence");
         // A later submit naming the thread can only follow a NotHidden; the store decides it.
         assert!(
-            core.handle(turn(Some(T)))
+            core.handle(turn(Some(U)))
                 .expect("not stale")
-                .contains(&state(RunId(12), T, Phase::Thinking))
+                .contains(&state(RunId(12), U, Phase::Thinking))
         );
     }
 }
@@ -173,7 +177,11 @@ fn a_watermark_belongs_to_the_connection_that_sent_it() {
     );
     assert!(core.fenced.is_empty());
     assert_eq!(core.handle(resend(T)), Ok(Vec::new()));
-    assert_eq!(core.handle(resend(T)), Ok(vec![store_delete(T)]), "consumed once");
+    assert_eq!(
+        core.handle(resend(T)),
+        Ok(vec![store_delete(T)]),
+        "consumed once"
+    );
 
     // Rebound by the resend before the answer: the fence is the new connection's count.
     let mut core = fresh();
@@ -185,7 +193,8 @@ fn a_watermark_belongs_to_the_connection_that_sent_it() {
         resend: true,
     };
     assert_eq!(core.handle(rebind), Ok(Vec::new()), "no second op");
-    core.handle(answer(U, Deleted::Hidden, None)).expect("answered");
+    core.handle(answer(U, Deleted::Hidden, None))
+        .expect("answered");
     assert_eq!(core.fenced, [(U, 1)]);
 }
 
@@ -217,7 +226,11 @@ fn past_eight_in_flight_a_delete_is_refused_and_the_accepted_ones_stay() {
         core.handle(delete(ninth, 0)),
         Ok(vec![told(ninth, Deleted::NotHidden, None)])
     );
-    assert_eq!(core.handle(delete(ThreadId(3), 0)), Ok(Vec::new()), "rebinds");
+    assert_eq!(
+        core.handle(delete(ThreadId(3), 0)),
+        Ok(Vec::new()),
+        "rebinds"
+    );
     assert_eq!(core.deleting.len(), 8);
     core.handle(answer(ThreadId(3), Deleted::Removed, None))
         .expect("answered");
