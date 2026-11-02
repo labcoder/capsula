@@ -25,8 +25,11 @@ pub struct Incarnation(pub u64);
 pub struct ThreadId(pub u64);
 
 /// One user turn, and the epoch every run-scoped message carries. Ids only grow, even across
-/// restarts, so a stale message can never pass for a new one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// restarts, so a stale message can never pass for a new one. The default, 0, is below every id
+/// the brain hands out.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct RunId(pub u64);
 
 /// The shell's first frame on each pipe.
@@ -60,6 +63,10 @@ pub const MAX_STEP_LABEL: usize = 256;
 /// is too big to send, and several of the 64 KiB text frames runs stream, so a reading shell
 /// rarely waits on a grant.
 pub const DATA_WINDOW: u32 = 512 * 1024;
+
+/// The most typed turns the brain holds before it has taken them. One more ends the connection
+/// as broken, so the shell keeps fewer than this many `TextSubmit`s unanswered [guess].
+pub const MAX_PENDING_TURNS: usize = 64;
 
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
@@ -103,6 +110,13 @@ pub enum ControlToBrain {
     },
     /// The answer to [`ControlToShell::Ping`].
     Pong,
+    /// The second Esc, after the shell has already cleared the drawing locally. The thread keeps
+    /// the drawing for replay. shortcut: names the run whose drawing was cleared; slice 4 names
+    /// scenes.
+    ClearDrawing {
+        /// The run whose drawing was cleared.
+        run: RunId,
+    },
 }
 
 /// Brain to shell, on the control pipe.

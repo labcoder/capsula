@@ -7,6 +7,8 @@
 )]
 mod windows;
 
+#[cfg(all(windows, test))]
+pub(crate) use windows::test_pair;
 #[cfg(windows)]
 pub(crate) use windows::{
     Capture, Deliver, EscapeHotkey, EventTime, Foreground, MaskUpdate, PipeClient, PresenceError,
@@ -16,5 +18,3 @@ pub(crate) use windows::{
     place_hidden_presence_window, place_presence_window, restore_foreground, session_id,
     set_capture, window_handle, work_area,
 };
-#[cfg(all(windows, test))]
-pub(crate) use windows::test_pair;

@@ -5,6 +5,7 @@ use super::{
     PresenceEvent, PresenceSurface, SharedString, TextView, configure_surface, constants,
     diagnostics, options, platform, send,
 };
+use gpui_kit::component::input::InputEvent;
 use gpui_kit::{AnyWindowHandle, AppContext as _};
 
 #[derive(Clone, Copy)]
@@ -48,12 +49,14 @@ pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
     pub(super) typing: Typing,
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     /// The window in front before the panel took focus, given back when it closes.
     previous: Option<Foreground>,
     /// Input diagnostics only: the draft at the last dismiss, compared on the next open.
     draft: Option<SharedString>,
     activation: Option<gpui_kit::Subscription>,
+    /// Enter sends the draft as a turn.
+    _submit: gpui_kit::Subscription,
 }
 
 impl Presence {
@@ -107,7 +110,8 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
-        Ok(())
+        // The placeholder steps count as a drawing only while the panel shows them.
+        self.runs_changed(cx)
     }
 
     fn create_text(&self, cx: &mut Context<'_, Self>) -> Result<TextPanel, OpenError> {
@@ -124,6 +128,9 @@ impl Presence {
             cx.new(|_| TextView {
                 input,
                 stop,
+                steps: Vec::new(),
+                answer: SharedString::default(),
+                notice: None,
                 events,
             })
         })
@@ -166,14 +173,23 @@ impl Presence {
                 tracing::error!(%error, "can't observe typing panel activation");
             }
         });
+        let input = view.read(cx).input.clone();
+        let submit = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { shift: false, .. } = event
+                && let Err(error) = this.submit(cx)
+            {
+                tracing::error!(%error, "can't send the typed turn");
+            }
+        });
         Ok(TextPanel {
             window,
             typing: Typing::default(),
-            input: view.read(cx).input.clone(),
+            input,
             view,
             previous: None,
             draft: None,
             activation: None,
+            _submit: submit,
         })
     }
 
@@ -213,7 +229,7 @@ impl Presence {
         if self.escape_hold.shows_stop() {
             self.pointer_changed(cx)?;
         }
-        Ok(())
+        self.runs_changed(cx)
     }
 }
 

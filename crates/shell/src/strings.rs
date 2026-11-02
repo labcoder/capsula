@@ -28,11 +28,14 @@ pub(crate) enum Text {
     BottomLeft,
     BottomCenter,
     BottomRight,
+    TurnBusy,
+    TurnOffline,
+    TurnTooLong,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 22] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -52,6 +55,9 @@ impl Text {
         Self::BottomLeft,
         Self::BottomCenter,
         Self::BottomRight,
+        Self::TurnBusy,
+        Self::TurnOffline,
+        Self::TurnTooLong,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -87,6 +93,9 @@ impl Text {
             Self::BottomLeft => "position-bottom-left",
             Self::BottomCenter => "position-bottom-center",
             Self::BottomRight => "position-bottom-right",
+            Self::TurnBusy => "turn-busy",
+            Self::TurnOffline => "turn-offline",
+            Self::TurnTooLong => "turn-too-long",
         }
     }
 }

@@ -7,12 +7,12 @@ use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_TIMEOUT, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, FlushFileBuffers, OPEN_EXISTING, ReadFile,
@@ -34,6 +34,8 @@ pub(crate) struct PipeClient {
     handle: OwnedHandle,
     /// Milliseconds each read or write may take; `INFINITE` by default.
     timeout_ms: AtomicU32,
+    /// Set by [`PipeClient::abort`]: every transfer fails from then on.
+    aborted: AtomicBool,
 }
 
 impl PipeClient {
@@ -64,7 +66,19 @@ impl PipeClient {
         Ok(Self {
             handle,
             timeout_ms: AtomicU32::new(INFINITE),
+            aborted: AtomicBool::new(false),
         })
+    }
+
+    /// Fails the transfers under way on any thread, and every later one, so the threads blocked
+    /// on this pipe return. The pipe stays open until it's dropped.
+    pub(crate) fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        // SAFETY: cancels every transfer on this handle; each waits for its own operation to
+        // finish before its buffer and `OVERLAPPED` go away (see `transfer`).
+        if let Err(error) = unsafe { CancelIoEx(self.raw(), None) } {
+            tracing::debug!(%error, "no transfer was under way to cancel");
+        }
     }
 
     /// The executable of the process serving this pipe.
@@ -105,10 +119,21 @@ impl PipeClient {
             hEvent: HANDLE(event.as_raw_handle()),
             ..Default::default()
         };
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
+        }
         if let Err(error) = start(self.raw(), &raw mut overlapped)
             && error.code() != ERROR_IO_PENDING.to_hresult()
         {
             return Err(error);
+        }
+        // An abort between the check above and the start found nothing to cancel.
+        if self.aborted.load(Ordering::SeqCst) {
+            // SAFETY: cancels only this operation; the wait below lets it finish before
+            // `overlapped` and the buffer go away.
+            if let Err(error) = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) } {
+                tracing::debug!(%error, "cancel found the transfer already done");
+            }
         }
         // SAFETY: the event handle is open for the borrow.
         let waited = unsafe {
@@ -220,6 +245,7 @@ pub(crate) fn test_pair(name: &str) -> io::Result<(PipeClient, PipeClient)> {
     let server = PipeClient {
         handle: server,
         timeout_ms: AtomicU32::new(INFINITE),
+        aborted: AtomicBool::new(false),
     };
     Ok((server, client))
 }
