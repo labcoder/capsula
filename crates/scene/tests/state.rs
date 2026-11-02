@@ -292,13 +292,22 @@ fn stale_admissions_bind_scene_global_instance_and_global_generation() {
     let mut b = scene();
     let mut global = GlobalBudget::default();
     let candidate = admit(&a, &global, &step(&text("a", "a")));
-    assert!(b.commit(candidate, &mut global).is_err());
+    assert_eq!(
+        b.commit(candidate, &mut global),
+        Err(capsula_scene::StaleAdmission)
+    );
     let candidate = admit(&a, &global, &step(&text("a", "a")));
-    assert!(a.commit(candidate, &mut GlobalBudget::default()).is_err());
+    assert_eq!(
+        a.commit(candidate, &mut GlobalBudget::default()),
+        Err(capsula_scene::StaleAdmission)
+    );
     let candidate = admit(&a, &global, &step(&text("a", "a")));
     commit(&mut b, &mut global, &text("b", "b"));
     let generation = global.generation();
-    assert!(a.commit(candidate, &mut global).is_err());
+    assert_eq!(
+        a.commit(candidate, &mut global),
+        Err(capsula_scene::StaleAdmission)
+    );
     assert_eq!(
         (a.revision(), a.object_count(), global.generation()),
         (0, 0, generation)
@@ -315,7 +324,10 @@ fn stale_admissions_bind_scene_global_instance_and_global_generation() {
         .expect("rejected admission did not invalidate candidate");
     let candidate = admit(&a, &global, &step(&text("later", "later")));
     a.clear(&mut global);
-    assert!(a.commit(candidate, &mut global).is_err());
+    assert_eq!(
+        a.commit(candidate, &mut global),
+        Err(capsula_scene::StaleAdmission)
+    );
 }
 
 #[test]
@@ -324,12 +336,22 @@ fn stop_zero_and_invalid_cuts_are_atomic_and_revisions_never_decrease() {
     let mut global = GlobalBudget::default();
     let first = commit(&mut state, &mut global, &text("first", "a"));
     let generation = global.generation();
-    for bad in [
-        cut(2, vec![]),
-        cut(1, vec![first.handles[0].1; 2]),
-        cut(0, vec![first.handles[0].1]),
+    for (bad, code, path) in [
+        (cut(2, vec![]), ErrorCode::OutOfRange, "stop.activated"),
+        (
+            cut(1, vec![first.handles[0].1; 2]),
+            ErrorCode::DuplicateKey,
+            "stop.revealed[1]",
+        ),
+        (
+            cut(0, vec![first.handles[0].1]),
+            ErrorCode::UnknownRef,
+            "stop.revealed[0]",
+        ),
     ] {
-        assert!(state.stop(&bad, &mut global).is_err());
+        let error = state.stop(&bad, &mut global).expect_err("invalid cut");
+        assert_eq!(error.code, code);
+        assert_eq!(error.path.as_str(), path);
         assert_eq!(
             (state.revision(), state.object_count(), global.generation()),
             (1, 1, generation)
