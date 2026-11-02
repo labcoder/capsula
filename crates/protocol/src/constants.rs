@@ -19,6 +19,9 @@ pub const DATA_DIR: &str = if cfg!(debug_assertions) {
     "Capsula"
 };
 
+/// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
+pub const STORE_FILE: &str = "capsula.db";
+
 /// Log file name prefixes; the appender adds the date. Neither may start with the other, because
 /// the appender prunes old files by prefix and would count the other process's logs.
 pub const BRAIN_LOG: &str = "capsula-brain";
