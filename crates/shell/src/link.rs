@@ -942,8 +942,10 @@ mod tests {
             stops.push(sent.elapsed());
         }
         control.abort();
-        assert!(link.link.join().expect("joined"));
         let _ = brain.join();
+        // Closing the brain's end ends the connection.
+        drop(control);
+        assert!(link.link.join().expect("joined"));
         report("Stop -> Interrupted round trip", &mut stops);
 
         for chunk in [240_000, 40] {
