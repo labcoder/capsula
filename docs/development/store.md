@@ -73,10 +73,12 @@ So the second transaction also records a **purge** as owed. The purge replaces t
 clean copy, built off the store's thread so turns and runs don't wait for it:
 
 1. **Snapshot.** A helper thread first drains the WAL: a passive checkpoint on its own
-   read-write connection copies into the file whatever no reader still needs, without waiting on
-   the writer or holding it up, so the swap's checkpoint later finds little to copy. Then it opens
-   the file read-only and runs `VACUUM INTO` into `capsula.db.purge-snapshot`. A WAL reader
-   never holds the writer, so the store keeps serving.
+   read-write connection copies the WAL into the file without waiting on the writer or holding it
+   up, so the swap's checkpoint later finds little to copy. The drain must copy all of it before
+   the copy goes on: a reader still holding part of the WAL, or another connection checkpointing,
+   makes the attempt stop and back off, so a long reader defers the purge. Then it opens the file
+   read-only and runs `VACUUM INTO` into `capsula.db.purge-snapshot`. A WAL reader never holds
+   the writer, so the store keeps serving.
 2. **Clean.** On the snapshot it clears the `purge_pending` row, runs FTS `rebuild`, which
    rewrites the index from the remaining events and so drops the deleted terms' separator keys,
    then `optimize`, which merges the rebuilt index into one segment. Without `optimize`, FTS5's
@@ -106,12 +108,14 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
 **What store work waits for.** Only the swap stops the store thread: 7–11 ms from 46 MiB to
 984 MiB on Rez, flat with size (`measure_purge`, logged with the pull request). During a copy or
 a removal ops share the disk with the helper; the worst op measured during either was 22 ms,
-against 6 ms with no purge running. A deletion a reader kept in the WAL doesn't grow the swap
-either: with a tenth of the store deleted behind a reader (a 115 MiB WAL at 984 MiB), the swap
-took 222 ms without the drain and 18–19 ms with it, and ops during the drain took at most 48 ms
-(`measure_swap_after_a_held_reader`). Without any purge, the first write after such a reader
-lets go copies that WAL itself through SQLite's automatic checkpoint (243 ms there). These are
-measurements on Rez's NVMe drive, not a bound for slower disks. On a volume without hard links (FAT, some network shares) the move falls back to
+against 6 ms with no purge running. A deletion a reader kept in the WAL is copied into the file
+by the drain on the helper, not by the swap on the store thread: with a tenth of the store
+deleted behind a reader, 19–123 MiB of WAL, the swap took 8–19 ms against 7–11 ms normally,
+because its TRUNCATE still frees a large WAL file. Without the drain it took 217–223 ms at
+984 MiB. Ops during the drain took at most 48 ms (`measure_swap_after_a_held_reader`). Without
+any purge, the first write after such a reader lets go copies that WAL itself through SQLite's
+automatic checkpoint (243 ms there). These are measurements on Rez's NVMe drive, not a bound for
+slower disks. On a volume without hard links (FAT, some network shares) the move falls back to
 freeing the old file itself, so the swap grows with the store again.
 
 The purge is cleanup that can be retried:
@@ -127,13 +131,13 @@ The purge is cleanup that can be retried:
 - **It needs room.** A copy starts only if the volume has twice the store's size free (its pages
   in the WAL included) plus 256 MiB [guess] for foreground writes; otherwise it waits like a
   failed try. Until the removal, the old store keeps its space.
-- **It backs off.** A copy an op made stale, a swap a reader blocked, a move that failed,
-  too little room, a file that can't be deleted and any SQLite or file error leave the purge
-  owed. Each leaves the old file serving, except a reopen that fails after the move worked,
-  which leaves the store unavailable until it opens again (below). The next try waits 1 minute [guess], doubling up to 30 minutes
-  [guess], so short turns spaced just far enough apart can't make it copy the store again and
-  again. A finished purge resets the wait. Once nothing is owed the thread sleeps until an op
-  arrives.
+- **It backs off.** A copy an op made stale, a drain a reader cut short, a swap a reader
+  blocked, a move that failed, too little room, a file that can't be deleted and any SQLite or
+  file error leave the purge owed. Each leaves the old file serving, except a reopen that fails
+  after the move worked, which leaves the store unavailable until it opens again (below). The
+  next try waits 1 minute [guess], doubling up to 30 minutes [guess], so short turns spaced just
+  far enough apart can't make it copy the store again and again. A finished purge resets the
+  wait. Once nothing is owed the thread sleeps until an op arrives.
 - **A failed reopen recovers.** If the store can't be reopened after the move, it's unavailable:
   every op fails rather than write anywhere else. Before each op, and on each retry, the thread
   opens the file again, never creating it, and reads `purge_pending` only from a file it opened.

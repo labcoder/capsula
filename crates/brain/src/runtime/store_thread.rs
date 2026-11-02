@@ -525,8 +525,8 @@ mod tests {
     }
 
     #[test]
-    fn a_purge_a_reader_blocked_is_retried_in_session() {
-        let scratch = Scratch::new("blocked-purge");
+    fn a_purge_a_reader_held_off_is_retried_in_session() {
+        let scratch = Scratch::new("held-off-purge");
         let mut store = owing(&scratch);
         let reader = Connection::open(scratch.db()).expect("reader");
         reader
@@ -540,10 +540,11 @@ mod tests {
             .end_run(ThreadId(2), RunId(2), &[], RunEnd::Done)
             .expect("ended");
         let (thread, attempts) = spawn(store);
-        assert_eq!(next(&attempts), Attempt::Blocked);
+        // The drain can't copy the WAL past the reader, so the copy stops.
+        assert_eq!(next(&attempts), Attempt::Stale);
         drop(reader);
         // A retry racing the reader's close can find its file still held.
-        done_after(&attempts, &[Attempt::Blocked, Attempt::Failed]);
+        done_after(&attempts, &[Attempt::Stale, Attempt::Failed]);
         thread.close().blocking_recv().expect("closed");
         assert_eq!(owed(&scratch), 0);
     }

@@ -301,13 +301,19 @@ pub(super) fn old(db: &Path) -> PathBuf {
 /// checkpoint on the store's thread finds little left to copy: a large deletion a reader kept in
 /// the WAL took the swap past 200 ms at 1 GiB on Rez. Passive, so it never waits on the store's
 /// writer or holds it up; it can't be stopped once started, and an op meanwhile shares the disk.
+/// False unless it copied the whole WAL: a reader still holding part of it, or another
+/// connection checkpointing, would leave that copy to the swap, so the purge waits instead.
 pub(super) fn drain(db: &Path, stop: &Arc<AtomicBool>) -> Result<bool, StoreError> {
     if stop.load(Ordering::Relaxed) {
         return Ok(false);
     }
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
-    Ok(true)
+    let (busy, frames, copied): (i64, i64, i64) =
+        conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    // Busy leaves both counts at -1, which match.
+    Ok(busy == 0 && copied == frames)
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.

@@ -525,18 +525,18 @@ fn a_checkpoint_a_reader_blocks_keeps_the_old_file_and_the_purge_owed() {
     let scratch = Scratch::new("blocked");
     let mut store = Store::open(&scratch.db()).expect("store");
     owed_purge(&mut store);
+    let copied = clean_copy(&store);
+    // After the copy's drain, another connection writes and then reads with that write still in
+    // the WAL. The store's own connection wrote nothing, so the copy isn't stale, but the WAL
+    // can't be emptied under the reader.
     let reader = Connection::open(scratch.db()).expect("reader");
     reader
-        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .execute_batch("CREATE TABLE elsewhere (x); BEGIN; SELECT count(*) FROM events;")
         .expect("snapshot");
-    // A write past the reader's snapshot, so the WAL can't be emptied under it.
-    let (thread, run) = turn(&mut store, Err("later"), "later");
-    store
-        .end_run(thread, run, &[], RunEnd::Done)
-        .expect("ended");
 
     let started = std::time::Instant::now();
-    assert_eq!(purge(&mut store), Swap::Blocked);
+    assert_eq!(store.swap(&copied).expect("swap"), Swap::Blocked);
+    store.leftovers().remove().expect("purge files removed");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "the checkpoint didn't wait out the busy timeout"
@@ -859,6 +859,36 @@ fn a_store_whose_reopen_failed_serves_again_once_its_file_opens() {
     store.leftovers().remove().expect("removed");
     assert!(!contains_marker(&scratch.db()));
     assert_eq!(store.search("served", 10).expect("search"), vec![thread]);
+}
+
+#[test]
+fn a_reader_holding_the_wal_defers_the_copy_until_it_lets_go() {
+    let scratch = Scratch::new("drain-held");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    owed_purge(&mut store);
+    let reader = Connection::open(scratch.db()).expect("reader");
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .expect("snapshot");
+    // A write past the reader's snapshot, which no checkpoint can copy while it reads.
+    let (thread, run) = turn(&mut store, Err("later"), "later");
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("idle")
+        .copy(&Arc::new(AtomicBool::new(false)))
+        .expect("copy");
+    assert!(copied.is_none(), "the swap would have had the WAL to copy");
+    assert!(store.purge_pending());
+    assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
+
+    drop(reader);
+    assert_eq!(purge(&mut store), Swap::Done);
+    assert!(!store.purge_pending());
+    assert!(!contains_marker(&scratch.db()));
 }
 
 #[test]
