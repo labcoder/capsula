@@ -168,6 +168,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
         let (next, phase) = shell.state().await;
         assert!(next > run, "{next:?} after {run:?}");
         assert_eq!(phase, Phase::Thinking);
+        assert_eq!(shell.data().await, DataToShell::RunEnd { run });
         let first = timeout(Duration::from_millis(500), shell.data()).await;
         assert_eq!(
             first.expect("the new run streams"),
@@ -191,6 +192,53 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             .expect("search")
             .contains(&first_thread)
     );
+}
+
+#[tokio::test]
+async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
+    let scratch = Scratch::new("runend");
+    let mut brain = test_support::brain(&scratch, "0 text a\n0 step one\n0 text b");
+    let ((control, data), mut shell) = connect("runend").await;
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("go").await;
+        // Done can arrive on control before any of the data is read: the pipes aren't ordered.
+        let (run, _) = shell.state().await;
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        let mut frames = Vec::new();
+        loop {
+            let frame = shell.data().await;
+            let last = frame == DataToShell::RunEnd { run };
+            frames.push(frame);
+            if last {
+                break;
+            }
+        }
+        let text = |delta: &str| DataToShell::AssistantText {
+            run,
+            delta: delta.to_owned(),
+        };
+        assert_eq!(
+            frames,
+            [
+                text("a"),
+                DataToShell::StepCommit {
+                    run,
+                    index: 0,
+                    step: Step {
+                        label: "one".to_owned()
+                    }
+                },
+                text("b"),
+                DataToShell::RunEnd { run },
+            ]
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close();
 }
 
 // Real time: paused time would jump ahead whenever the runtime waits on the store's own thread.

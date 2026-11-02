@@ -368,7 +368,9 @@ impl Link<'_, '_> {
     /// Data frames carry content, so the tap never records them.
     fn data(&mut self, message: &DataToShell) {
         let run = match message {
-            DataToShell::AssistantText { run, .. } | DataToShell::StepCommit { run, .. } => *run,
+            DataToShell::AssistantText { run, .. }
+            | DataToShell::StepCommit { run, .. }
+            | DataToShell::RunEnd { run } => *run,
         };
         match frame::encode(message, Pipe::Data) {
             Ok(frame) => {

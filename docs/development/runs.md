@@ -92,6 +92,10 @@ never lost:
 
 ### What the shell can rely on
 
+- **A run's data is complete at its `RunEnd`, on the data pipe.** Every run that reaches a
+  terminal `RunState` also gets one `RunEnd`, after all of its data frames. The two pipes aren't
+  ordered with each other, so a terminal `RunState` on control says nothing about what has
+  arrived on data; the shell keeps reading the run's data until its `RunEnd`.
 - `RunState Done` means the run's text, steps and outcome are committed.
 - Every other terminal `RunState` comes at once, whatever the store is doing, so `Stop`'s
   answer never waits on an fsync or a long write. It's the shell's to show, not a promise that

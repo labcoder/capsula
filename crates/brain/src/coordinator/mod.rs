@@ -329,7 +329,7 @@ impl Coordinator {
                     ..
                 }) = done.ending
                 {
-                    effects.push(run_state(&done, Phase::Done));
+                    told(&done, Phase::Done, &mut effects);
                 }
             }
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
@@ -553,6 +553,10 @@ impl Coordinator {
                 thread,
                 phase: Phase::Failed,
             }));
+            // Every ending but Done was already told, with its data's end.
+            if ending.outcome == RunEnd::Done {
+                effects.push(Effect::Data(DataToShell::RunEnd { run: id }));
+            }
         }
         if ended.turn.is_some() || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
@@ -590,7 +594,7 @@ impl Coordinator {
                 RunEnd::Interrupted(_) => Phase::Interrupted,
                 RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
             };
-            effects.push(run_state(&run, phase));
+            told(&run, phase, effects);
         }
         run.ending = Some(Ending {
             outcome,
@@ -676,6 +680,13 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         thread: run.thread,
         phase,
     })
+}
+
+/// Tells the shell a run ended: its terminal phase on the control pipe, and the end of its data on
+/// the data pipe, after every frame it was sent.
+fn told(run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
+    effects.push(run_state(run, phase));
+    effects.push(Effect::Data(DataToShell::RunEnd { run: run.id }));
 }
 
 /// The text streamed since the last write, taken for the next one.

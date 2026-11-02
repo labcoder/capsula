@@ -61,13 +61,14 @@ flowchart LR
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
 | Control | `RunState`, `Ping` | 256 queued frames [guess] | The shell counts as hung and the connection ends |
-| Data | `AssistantText`, `StepCommit` | Unbounded queue; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
+| Data | `AssistantText`, `StepCommit`, `RunEnd` | Unbounded queue; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
   big to send, and several 64 KiB text frames. Grants never raise the credit past the window.
 - **Stop drops the stopped run's unsent data**, and so does a new turn that replaces a run, so
-  the replacement's first frame isn't stuck behind text nobody will show.
+  the replacement's first frame isn't stuck behind text nobody will show. The run's `RunEnd` is
+  queued after the drop, so it still arrives.
 - **Watchdog.** Only while a run is active, the brain sends `Ping` every 500 ms and ends the
   connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
   runs there are no timers, and a run's deadline goes when the run does.

@@ -171,6 +171,12 @@ pub enum DataToShell {
         /// The step.
         step: Step,
     },
+    /// The run's last data frame. The pipes aren't ordered with each other, so a terminal
+    /// `RunState` on the control pipe doesn't mean the run's data has arrived; this does.
+    RunEnd {
+        /// The run that ended.
+        run: RunId,
+    },
 }
 
 #[cfg(test)]
