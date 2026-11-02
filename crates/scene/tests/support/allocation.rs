@@ -10,6 +10,7 @@ thread_local! {
 struct CountingAllocator;
 
 fn bump() {
+    // A destroyed thread-local slot only disables counting during shutdown.
     let _ = COUNT.try_with(|count| {
         if let Some(value) = count.get() {
             count.set(Some(value.saturating_add(1)));
