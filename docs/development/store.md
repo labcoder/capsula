@@ -51,6 +51,12 @@ the store thread still services due or completed purge work while pages arrive.
 
 ## Deleting a thread
 
+`Store::delete` runs one `DeleteThread`. It reads the thread's state and newest run first, so
+`last_run` still names that run once its rows are gone. A failure before the first transaction
+commits answers `NotHidden` and leaves the thread live. A failure after it answers `Hidden`, and
+the next start finishes the deletion. A thread that's already gone answers `Removed`. Only the
+error's kind is logged.
+
 ```mermaid
 sequenceDiagram
   participant S as Store thread

@@ -46,7 +46,7 @@ threads-failed = Couldn't load threads. Close this panel and open it again to re
 
 thread-delete = Delete
 thread-delete-title = Delete this thread?
-thread-delete-body = This removes the thread and its drawings from this PC. It can't remove copies your model provider already received under its own terms.
+thread-delete-body = This removes the thread and its drawings from this PC. It can't remove issues you already filed on GitHub, or what your model provider keeps under its own terms.
 thread-delete-cancel = Cancel
 thread-deleting = Deleting…
 thread-delete-failed = Couldn't delete the thread. It's still here; try again.

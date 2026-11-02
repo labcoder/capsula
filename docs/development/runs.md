@@ -94,6 +94,7 @@ never lost:
 | A new turn | `interrupted(replaced)` | at once |
 | The shell went away | `interrupted(shell_lost)` | no |
 | The shell took no data for 2 s | `interrupted(view_stalled)` | at once |
+| Its thread is being deleted | `interrupted(deleted)` | at once |
 | A budget ran out | `failed(budget)` | at once |
 | The engine failed or sent an oversized step | `failed(engine)` | at once |
 | A store write failed | `failed(store)` | at once |

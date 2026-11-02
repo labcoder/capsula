@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use super::{PATIENCE, Shell, duplex, patient_brain};
 use crate::coordinator::StoreOp;
-use crate::runtime::{Brain, Ended, Seen};
+use crate::runtime::{Brain, Ended, Quit, Seen};
 use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::Scratch;
@@ -220,4 +220,56 @@ async fn an_answer_before_the_resend_consumes_it_and_a_lost_answer_is_asked_agai
     });
     brain.close().await;
     assert_eq!(listed(&scratch), 1, "only the next turn's thread");
+}
+
+/// Serves a connection whose shell sends a delete for T and then quits; the quit's outcome.
+async fn delete_then_quit(brain: Brain) -> Quit {
+    let mut brain = brain;
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.scenes().await;
+        shell.send(&delete(0)).await;
+        shell.send(&ControlToBrain::Quitting).await;
+        drop(shell);
+    };
+    let served = async { tokio::join!(brain.serve(control, data, &mut tap), client).0 };
+    let ended = timeout(PATIENCE, served).await.expect("in time");
+    let Ended::Quit { deadline } = ended else {
+        panic!("expected a quit, got {ended:?}");
+    };
+    brain.quit(deadline).await
+}
+
+/// A brain whose store already holds T, from one finished run.
+async fn with_a_thread(scratch: &Scratch) -> Brain {
+    let mut brain = patient_brain(scratch, "0 text a");
+    connection!(brain, |shell| async {
+        one_run(&mut shell).await;
+    });
+    brain
+}
+
+#[tokio::test]
+async fn a_quit_waits_for_an_accepted_delete() {
+    let scratch = Scratch::new("quit-delete");
+    let brain = with_a_thread(&scratch).await;
+    assert_eq!(delete_then_quit(brain).await, Quit::Complete);
+    assert_eq!(listed(&scratch), 0);
+}
+
+#[tokio::test]
+async fn a_delete_that_hid_nothing_makes_the_quit_incomplete() {
+    let scratch = Scratch::new("quit-undeleted");
+    let brain = with_a_thread(&scratch).await;
+    rusqlite::Connection::open(scratch.db())
+        .expect("open")
+        .execute_batch(
+            "CREATE TRIGGER no_hide BEFORE UPDATE OF state ON threads BEGIN
+                 SELECT RAISE(ABORT, 'kept');
+             END;",
+        )
+        .expect("trap");
+    assert_eq!(delete_then_quit(brain).await, Quit::Incomplete);
+    assert_eq!(listed(&scratch), 1, "the thread comes back");
 }
