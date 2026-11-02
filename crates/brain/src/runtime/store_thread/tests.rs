@@ -759,3 +759,32 @@ fn measure_page_reads() {
         eprintln!("{}", lines.join("\n  "));
     }
 }
+
+#[test]
+fn a_delete_in_session_purges_its_thread() {
+    let scratch = Scratch::new("delete-purge");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for thread in [1, 2] {
+        store
+            .begin_turn(ThreadId(thread), Some("t"), RunId(thread), "text")
+            .expect("turn");
+        store
+            .end_run(ThreadId(thread), RunId(thread), &[], RunEnd::Done)
+            .expect("ended");
+    }
+    assert_eq!(owed(&scratch), 0, "no purge is owed before the delete");
+    let (thread, attempts) = spawn(store);
+    assert!(thread.send(StoreOp::Delete {
+        thread: ThreadId(1)
+    }));
+    assert_eq!(next(&attempts), Attempt::Done);
+    thread.close().blocking_recv().expect("closed");
+    assert_eq!(owed(&scratch), 0);
+    let store = Store::open(&scratch.db()).expect("reopen");
+    assert!(!store.leftovers().exist(), "no copy is left");
+    let threads: Vec<ThreadId> = store
+        .thread_page(None, 50)
+        .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
+        .expect("threads");
+    assert_eq!(threads, [ThreadId(2)]);
+}
