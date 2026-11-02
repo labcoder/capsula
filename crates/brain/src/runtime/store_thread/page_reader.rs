@@ -45,9 +45,20 @@ struct Progress {
 pub(super) struct Barrier {
     progress: Mutex<Progress>,
     moved: Condvar,
+    /// Hears that a read waits for an op.
+    #[cfg(test)]
+    pub(super) waiting: Option<UnboundedSender<super::super::Seen>>,
 }
 
 impl Barrier {
+    pub(super) fn new(#[cfg(test)] waiting: Option<UnboundedSender<super::super::Seen>>) -> Self {
+        Self {
+            #[cfg(test)]
+            waiting,
+            ..Self::default()
+        }
+    }
+
     /// One more accepted op finished, whether it succeeded or not.
     pub(super) fn complete(&self) {
         lock(&self.progress).completed += 1;
@@ -61,9 +72,17 @@ impl Barrier {
 
     /// Waits until `stamp` ops have finished; false when the store's thread ended first.
     pub(super) fn wait(&self, stamp: u64) -> bool {
+        let progress = lock(&self.progress);
+        #[cfg(test)]
+        if progress.completed < stamp
+            && !progress.terminal
+            && let Some(waiting) = &self.waiting
+        {
+            waiting.send(super::super::Seen::ReadWaiting).ok();
+        }
         let progress = self
             .moved
-            .wait_while(lock(&self.progress), |progress| {
+            .wait_while(progress, |progress| {
                 progress.completed < stamp && !progress.terminal
             })
             .unwrap_or_else(PoisonError::into_inner);
@@ -227,10 +246,14 @@ fn hold(
     Ok(())
 }
 
+/// Tells a test whether each checkpoint left nothing owed, then waits for its release.
+#[cfg(test)]
+pub(crate) type HelperGate = (mpsc::Sender<bool>, mpsc::Receiver<()>);
+
 /// Checkpoints when raised, and again after a delay while frames are left, until stopped.
 pub(super) fn spawn_helper(
     exit: &Exit,
-    #[cfg(test)] observed: Option<UnboundedSender<super::super::Seen>>,
+    #[cfg(test)] gate: Option<HelperGate>,
 ) -> io::Result<JoinHandle<()>> {
     let (side, checkpoints) = (Arc::clone(&exit.side), Arc::clone(&exit.checkpoints));
     thread::Builder::new()
@@ -240,14 +263,17 @@ pub(super) fn spawn_helper(
             while checkpoints.next(retry) {
                 let left = match side.checkpoint() {
                     Ok(done) => !done,
+                    // The op that opens the store again raises another.
+                    Err(StoreError::Closed) => false,
                     Err(error) => {
                         tracing::warn!(%error, "a checkpoint failed; it's retried");
                         true
                     }
                 };
                 #[cfg(test)]
-                if let Some(observed) = &observed {
-                    observed.send(super::super::Seen::Checkpointed).ok();
+                if let Some((done, release)) = &gate {
+                    done.send(!left).ok();
+                    release.recv().ok();
                 }
                 retry = left.then(|| {
                     retry.map_or(FIRST_RETRY, |retry: Duration| (retry * 2).min(LAST_RETRY))

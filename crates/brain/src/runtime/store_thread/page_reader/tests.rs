@@ -38,6 +38,14 @@ struct Running {
 
 /// An owed purge starts at once and isn't retried during the test.
 fn run(store: Store, pauses: Option<Pauses>) -> Running {
+    run_with(store, pauses, None)
+}
+
+fn run_with(
+    store: Store,
+    pauses: Option<Pauses>,
+    checkpoint_gate: Option<super::HelperGate>,
+) -> Running {
     let (acks, replies) = mpsc::unbounded_channel();
     let (observed, seen) = mpsc::unbounded_channel();
     let (gates, gates_heard) = std_mpsc::channel();
@@ -52,6 +60,7 @@ fn run(store: Store, pauses: Option<Pauses>) -> Running {
         observed: Some(observed),
         gates: Some(gates_heard),
         read_gates: Some(read_gates_heard),
+        checkpoint_gate,
         pauses,
     };
     Running {
@@ -143,15 +152,7 @@ fn a_read_sees_the_ops_queued_before_it() {
     assert!(running.thread.send(turn(1)));
     running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_turn(op)));
     assert!(running.thread.send(threads(7)));
-    running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_read(op)));
-    // The one bounded wait for an absence: without the barrier the read answers at once.
-    assert!(
-        running
-            .acks
-            .recv_timeout(Duration::from_millis(100))
-            .is_err(),
-        "the read waits for the turn"
-    );
+    running.saw(|seen| *seen == Seen::ReadWaiting);
     release.send(()).expect("held");
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
     assert_eq!(listed(running.ack()), [ThreadId(1)]);
@@ -336,19 +337,79 @@ fn a_panicking_store_thread_fails_the_reads_waiting_on_it() {
 }
 
 #[test]
-fn a_commit_is_checkpointed_by_the_helper() {
-    let scratch = Scratch::new("helper-checkpoints");
-    let running = run(Store::open(&scratch.db()).expect("store"), None);
+fn the_helper_keeps_a_raise_made_while_it_ran_and_retries_what_a_reader_held() {
+    let scratch = Scratch::new("helper-raises");
+    let (checked, done) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let running = run_with(
+        Store::open(&scratch.db()).expect("store"),
+        None,
+        Some((checked, released)),
+    );
     let on_disk = || std::fs::metadata(scratch.db()).expect("file").len();
-    let before = on_disk();
-    assert!(running.thread.send(StoreOp::BeginTurn {
-        thread: ThreadId(1),
+    let big = |id| StoreOp::BeginTurn {
+        thread: ThreadId(id),
         title: Some("t".to_owned()),
-        run: RunId(1),
+        run: RunId(id),
         text: "x".repeat(64 * 1024),
-    }));
+    };
+    assert!(running.thread.send(big(1)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
-    running.saw(|seen| *seen == Seen::Checkpointed);
-    assert!(on_disk() > before + 64 * 1024, "the turn reached the file");
+    assert_eq!(done.recv_timeout(PATIENCE), Ok(true));
+    // Raised while that checkpoint is held, after its result.
+    let before = on_disk();
+    assert!(running.thread.send(big(2)));
+    assert_eq!(running.ack(), Input::TurnStored { run: RunId(2) });
+    release.send(()).expect("held");
+    assert_eq!(done.recv_timeout(PATIENCE), Ok(true), "the raise was kept");
+    assert!(on_disk() > before + 64 * 1024, "turn 2 reached the file");
+
+    let reader = rusqlite::Connection::open(scratch.db()).expect("reader");
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .expect("snapshot");
+    assert!(running.thread.send(big(3)));
+    assert_eq!(running.ack(), Input::TurnStored { run: RunId(3) });
+    release.send(()).expect("held");
+    assert_eq!(
+        done.recv_timeout(PATIENCE),
+        Ok(false),
+        "the reader holds turn 3"
+    );
+    let before = on_disk();
+    drop(reader);
+    release.send(()).expect("held");
+    assert_eq!(
+        done.recv_timeout(PATIENCE),
+        Ok(true),
+        "retried with no new raise"
+    );
+    assert!(on_disk() > before + 64 * 1024, "turn 3 reached the file");
+    drop(release);
+    running.thread.close().blocking_recv().expect("closed");
+}
+
+#[test]
+fn the_helper_owes_nothing_while_the_store_is_closed() {
+    let scratch = Scratch::new("helper-closed");
+    let mut store = owing(&scratch);
+    with_thread(&mut store, 2);
+    let copied = store
+        .owed()
+        .expect("owed")
+        .expect("idle")
+        .copy(&Arc::new(Cancel::default()))
+        .expect("copy")
+        .expect("not stopped");
+    let wal = store.swap_failing_reopen(&copied);
+    let (checked, done) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let running = run_with(store, None, Some((checked, released)));
+    assert_eq!(next(&running.attempts), Attempt::Failed);
+    assert!(running.thread.send(turn(3)));
+    assert_eq!(running.ack(), Input::StoreFailed { run: RunId(3) });
+    assert_eq!(done.recv_timeout(PATIENCE), Ok(true), "nothing to retry");
+    drop(release);
+    std::fs::remove_dir(&wal).expect("out of the way");
     running.thread.close().blocking_recv().expect("closed");
 }

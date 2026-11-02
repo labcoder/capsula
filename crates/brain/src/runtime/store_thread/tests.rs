@@ -46,6 +46,7 @@ fn spawn_with_room(
         observed: None,
         gates: None,
         read_gates: None,
+        checkpoint_gate: None,
         pauses: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
@@ -537,8 +538,9 @@ fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
 }
 
 /// Rez measurement for the pull request, not a check: how long a page read takes, and a write
-/// sent right behind it, on the large measured stores with a purge owed. Pages are a thread's 50
-/// newest events at near a turn's cap each, and a search for a phrase every event holds. The
+/// sent right behind it, on the large measured stores with a purge owed. The events page reads a
+/// thread's 51 newest events, 25 turns just under the 256 KiB cap and 26 short answers, about
+/// 6.5 MB, and the search is for a phrase every event holds. The
 /// writes go to a thread the pages don't read, and each one's run is ended (untimed), so no run
 /// stays active to hold off the owed purge. Each reply is timed as it arrives, in either order.
 /// The write alone, with no read ahead of it, is the before. Run it with
@@ -568,7 +570,7 @@ fn measure_page_reads() {
         let mut store = measured_store(&scratch, shape);
         let size = std::fs::metadata(scratch.db()).expect("size").len() >> 20;
         let history = ThreadId(1_000_000);
-        // Just under a turn's 256 KiB cap, so an events page reads about 12.8 MB.
+        // Just under a turn's 256 KiB cap.
         let long = "near the frame budget ".repeat(11_900);
         for turn in 0..50_u64 {
             let run = RunId(1_000_000 + turn);
@@ -652,7 +654,7 @@ fn measure_page_reads() {
         assert_eq!(threads.len(), 50, "every thread matches");
         let pages = [
             (
-                "events page, 50 turns near 256 KiB",
+                "events page, 51 rows read, 25 near 256 KiB",
                 PageOf::Events {
                     thread: history,
                     before: None,
@@ -758,6 +760,7 @@ fn a_delete_in_session_purges_its_thread() {
 /// A purge copy paused at each of `points`, with how a test reaches and releases each.
 struct Paused {
     thread: StoreThread,
+    side: Arc<crate::store::Side>,
     attempts: std_mpsc::Receiver<Attempt>,
     acks: std_mpsc::Receiver<Input>,
     /// Hears that a write waits for the copy to let go of the live store.
@@ -812,9 +815,11 @@ fn armed_and_paused(scratch: &Scratch, points: &[Point]) -> Paused {
             }
         }
     });
+    let side = store.side();
     let thread = StoreThread::spawn(store, acks_tx, schedule).expect("thread");
     let paused = Paused {
         thread,
+        side,
         attempts,
         acks,
         waiting,
@@ -900,6 +905,21 @@ fn a_write_waits_for_a_copy_reading_the_live_store_but_not_for_its_cleanup() {
         release(&paused, 1);
         then_purged(paused);
     }
+}
+
+#[test]
+fn a_write_never_waits_for_the_helper_behind_a_drain() {
+    let scratch = Scratch::new("drain-beside-helper");
+    let paused = armed_and_paused(&scratch, &[Point::Helper]);
+    reached(&paused, 0);
+    let helper = paused.side.hold_helper();
+    release(&paused, 0);
+    assert!(paused.thread.send(StoreOp::Delete {
+        thread: ThreadId(2)
+    }));
+    assert_removed(&paused, 2);
+    drop(helper);
+    then_purged(paused);
 }
 
 #[test]
