@@ -98,11 +98,16 @@ pub(crate) struct Runs {
 impl Runs {
     /// Selects the thread the next typed turn continues; no message or store write is needed.
     /// A thread being deleted is never selected: the next turn starts a new one.
-    pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) {
-        let thread = thread.filter(|thread| !self.holds(*thread));
+    /// Refuses, changing nothing, a thread that holds a delete slot, so the caller leaves the
+    /// open thread alone too.
+    pub(crate) fn select_thread(&mut self, thread: Option<ThreadId>) -> bool {
+        if thread.is_some_and(|thread| self.holds(thread)) {
+            return false;
+        }
         self.thread = thread;
         self.durable = thread.is_some();
         self.selection_pending = self.pending;
+        true
     }
 
     /// A run is moving that Esc hasn't stopped, or a turn is waiting for its run.
@@ -277,10 +282,11 @@ impl Runs {
         if self.pending > 0 {
             self.gone.push((thread, self.pending));
         }
+        // A view with no known owner began under a superseded run, so it may be this thread's.
         if self
             .shown
             .as_ref()
-            .is_some_and(|shown| shown.thread == Some(thread))
+            .is_some_and(|shown| shown.thread.is_none_or(|owner| owner == thread))
         {
             self.shown = None;
         }

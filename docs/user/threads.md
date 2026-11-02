@@ -15,6 +15,7 @@ Esc stops moving work before clearing a drawing or dismissing the focused panel.
 away hides the panel. The panel reloads after reconnecting to the background process.
 
 To delete the open thread, choose **Delete** and confirm. It stays in the list, marked
-Deleting…, until it's gone from this PC, and your next message starts a new thread. Capsula
-can't remove issues you already filed on GitHub, or what your model provider keeps under its own
-terms. If deleting fails, the thread stays and you can try again.
+Deleting…, until it's removed, and your next message starts a new thread. The copy on disk is
+scrubbed shortly after. Capsula can't remove issues you already filed on GitHub, or what your
+model provider keeps under its own terms. If deleting fails, the thread stays and you can try
+again.

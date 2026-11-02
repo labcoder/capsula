@@ -5,7 +5,7 @@ use capsula_protocol::message::{
     RunId, SceneDescriptor, SceneId, Step, ThreadId,
 };
 
-use super::Runs;
+use super::{Runs, Shown};
 use crate::drawing::Chunk;
 
 const BYTES: u32 = 10;
@@ -208,6 +208,56 @@ fn a_confirmed_delete_untargets_the_thread_and_a_hide_fences_its_held_frames_onc
 }
 
 #[test]
+fn a_removal_clears_a_view_whose_owner_is_unknown_and_spares_the_next_run() {
+    let (t, u) = (ThreadId(9), ThreadId(3));
+    let mut runs = connected();
+    runs.select_thread(Some(t));
+    submit(&mut runs);
+    state(&mut runs, 1, 9, Phase::Thinking);
+    assert!(runs.select_thread(Some(u)));
+    submit(&mut runs);
+    state(&mut runs, 2, 3, Phase::Thinking);
+    runs.apply_data(text(1), BYTES);
+    assert_eq!(
+        runs.shown().map(|shown| (shown.run, shown.thread)),
+        Some((RunId(1), None)),
+        "run 2 superseded run 1 before its text"
+    );
+    assert!(runs.confirm_delete(t));
+    runs.deleted(t, Deleted::Removed, Some(RunId(1)));
+    assert_eq!(runs.shown(), None, "T's text may be in that view");
+    runs.apply_data(text(2), BYTES);
+    assert_eq!(
+        runs.shown(),
+        Some(&Shown {
+            run: RunId(2),
+            thread: Some(u),
+            text: "t".to_owned(),
+        })
+    );
+    assert_eq!(
+        runs.stop(),
+        Some(ControlToBrain::Stop {
+            run: RunId(2),
+            revealed: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn a_thread_being_deleted_cant_be_selected() {
+    let (t, u) = (ThreadId(9), ThreadId(3));
+    let mut runs = connected();
+    assert!(runs.select_thread(Some(u)));
+    assert!(runs.confirm_delete(t));
+    assert!(
+        !runs.select_thread(Some(t)),
+        "the caller leaves the open thread on U"
+    );
+    assert_eq!(submit(&mut runs), Some(u));
+}
+
+#[test]
 fn a_turn_sent_before_its_thread_was_deleted_never_targets_it() {
     let mut runs = connected();
     runs.select_thread(Some(ThreadId(9)));
@@ -240,7 +290,15 @@ fn a_delete_that_hid_nothing_frees_its_slot_and_fences_nothing() {
             .credit,
         BYTES
     );
-    assert!(runs.shown().is_some(), "run 1 isn't fenced");
+    assert_eq!(
+        runs.shown(),
+        Some(&Shown {
+            run: RunId(1),
+            thread: Some(ThreadId(9)),
+            text: "t".to_owned(),
+        }),
+        "run 1 isn't fenced"
+    );
     assert!(
         runs.confirm_delete(ThreadId(9)),
         "it can be confirmed again"

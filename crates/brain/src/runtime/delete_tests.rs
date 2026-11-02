@@ -194,7 +194,7 @@ async fn an_answer_before_the_resend_consumes_it_and_a_lost_answer_is_asked_agai
         // A second answer would come before this turn's state.
         shell.submit("next").await;
         let (next, _) = timeout(PATIENCE, shell.state()).await.expect("in time");
-        assert!(next > run);
+        assert_eq!(next, RunId(run.0 + 1));
     });
     let asked = std::iter::from_fn(|| observed.try_recv().ok())
         .filter(|seen| matches!(seen, Seen::StoreOpQueued(op) if is_delete(op)));
@@ -432,12 +432,17 @@ async fn cross_pipe(read: Read) {
     });
     brain.close().await;
     let store = Store::open(&scratch.db()).expect("reopen");
-    let threads: Vec<ThreadId> = store
+    let mut threads: Vec<ThreadId> = store
         .thread_page(None, 50)
         .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
         .expect("threads");
     if read == Read::NotHidden {
-        assert_eq!(threads.len(), 2, "{read:?}");
+        threads.sort_unstable();
+        assert_eq!(
+            threads,
+            [T, U],
+            "both rows stay, whichever changed last: {read:?}"
+        );
     } else {
         assert_eq!(threads, [U], "no row of T came back: {read:?}");
     }

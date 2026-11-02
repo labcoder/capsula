@@ -152,7 +152,8 @@ applied first, even one read in the same poll as the end. Store replies keep rea
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close. A deletion's purge (`store.md`) copies the store on a helper thread only
 while no run is active. A write arriving, or closing, stops the copy and waits only until it has
-let go of the live store, at most 29 ms at 984 MiB on Rez, never for the rest of the copy.
+let go of the live store, never for the rest of the copy: the worst of 10 samples at 984 MiB on
+Rez was 29 ms, though none forced the cancel deep into `VACUUM INTO`.
 Removing its files runs on a helper too, so turns and runs stop only for the swap, about
 10 ms on Rez up to 984 MiB, and otherwise share the disk with the helper.
 
