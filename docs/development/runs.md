@@ -118,9 +118,9 @@ never lost:
   the run's writes are pending, the selection goes with its outcome once they settle, or with
   the late first step that begins its scene; once they're done and the scene is visible, the
   brain writes the selection on its own, or the scene's clear when nothing stayed. A scene is
-  trimmed once: a later `Stop` for its run is stale. So is one that comes while a run that
-  ended because its shell went away is still being stored, since only that shell drew it. One
-  that arrives while the engine has finished but its last step is still being stored interrupts
+  trimmed once: a later `Stop` for its run is stale. So is one for a run an earlier connection
+  started, ended or not, and after a restart, since a connection can stop only runs it started
+  itself. One that arrives while the engine has finished but its last step is still being stored interrupts
   the run, since the shell never showed that step.
 
 ## Budgets
@@ -146,7 +146,8 @@ The store runs on its own thread, which owns the connection and keeps the store 
 operations in order, one transaction each, every one answered. The fixture engine, the store
 thread and the deadline timer report back as inputs, and the pipes' readers and writers are
 described in `ipc.md`. A shell that disconnects ends the current run as
-`interrupted(shell_lost)`. Store replies keep reaching the coordinator while no shell is
+`interrupted(shell_lost)`. Every Stop and Clear the control reader read before the pipe ended is
+applied first, even one read in the same poll as the end. Store replies keep reaching the coordinator while no shell is
 connected, and on exit the brain waits up to 2 s for ended runs to be stored, then up to 2 s for
 the store to close. A deletion's purge (`store.md`) copies the store on a helper thread only
 while no run is active, and an op arriving, or closing, stops the copy without waiting for it.

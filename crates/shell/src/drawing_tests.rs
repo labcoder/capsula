@@ -437,3 +437,62 @@ fn a_mismatched_or_short_snapshot_never_installs() {
     assert!(shown(&drawing).is_empty());
     assert!(!drawing.active(), "recovery is over");
 }
+
+#[test]
+fn a_wrong_revision_chunk_spoils_its_snapshot_live_or_held() {
+    let mut drawing = received(1, &[named(1, 2, 2)]);
+    assert_eq!(drawing.apply_snapshot(1, chunk(1, 1, &["old"])), Ok(BYTES));
+    assert_eq!(drawing.apply_snapshot(1, last(1, 2, &["new"])), Ok(BYTES));
+    assert!(
+        shown(&drawing).is_empty(),
+        "a live wrong chunk never installs"
+    );
+    assert!(!drawing.active(), "recovery is over");
+
+    let mut drawing = Drawing::default();
+    drawing.connected(1);
+    assert_eq!(drawing.apply_snapshot(1, chunk(1, 1, &["old"])), Ok(0));
+    assert_eq!(drawing.apply_snapshot(1, last(1, 2, &["new"])), Ok(0));
+    assert_eq!(
+        drawing.apply_scenes(&[named(1, 2, 2)]),
+        Ok(Effect {
+            clear: None,
+            credit: 2 * BYTES
+        })
+    );
+    assert!(
+        shown(&drawing).is_empty(),
+        "a held wrong chunk never installs"
+    );
+    assert!(!drawing.active(), "recovery is over");
+}
+
+/// The per-step cost of a live step for a scene already shown, with four shown: the reducer
+/// work every `StepCommit` pays. Run on Rez under the measuring lock:
+/// `cargo test --release -p capsula-shell -- --ignored measure_live_step_admission --nocapture`.
+#[test]
+#[ignore = "a measurement, run by hand on Rez"]
+fn measure_live_step_admission() {
+    const CALLS: u32 = 1_000_000;
+    let mut drawing = received(1, &[]);
+    for scene in 1..=4 {
+        live(&mut drawing, scene, 0, "");
+    }
+    let mut samples: Vec<f64> = (0..7)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            for index in 0..CALLS {
+                let step = Step {
+                    label: String::new(),
+                };
+                drawing.step(RunId(4), SceneId(4), index, step);
+            }
+            started.elapsed().as_secs_f64() * 1e9 / f64::from(CALLS)
+        })
+        .collect();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "live step admission: median {:.1} ns, min {:.1} ns, max {:.1} ns per step",
+        samples[3], samples[0], samples[6]
+    );
+}

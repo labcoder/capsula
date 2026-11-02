@@ -90,12 +90,7 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
-    let link = Link {
-        out: &out,
-        queue: &queue,
-        ready: &ready,
-        tap: &mut tap,
-    };
+    let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0);
     let client = async {
@@ -136,7 +131,6 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
 async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let scratch = Scratch::new("page-credit");
     let mut brain = test_support::brain(&scratch, "5000 text later");
@@ -148,12 +142,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let (mut output, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
-    let link = Link {
-        out: &out,
-        queue: &queue,
-        ready: &ready,
-        tap: &mut tap,
-    };
+    let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let writer = super::super::write_data(&mut output, &queue, &ready, &room);
     let client = async {
@@ -285,12 +274,7 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let (mut output, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
-    let link = Link {
-        out: &out,
-        queue: &queue,
-        ready: &ready,
-        tap: &mut tap,
-    };
+    let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let writer = super::super::write_data(&mut output, &queue, &ready, &room);
     let client = async {
@@ -520,12 +504,7 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     let (_turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let mut tap = Tap::from_env();
-    let link = Link {
-        out: &out,
-        queue: &queue,
-        ready: &ready,
-        tap: &mut tap,
-    };
+    let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let client = async {
         assert!(queue.borrow_mut().admit_page());

@@ -90,11 +90,17 @@ pub(crate) struct Session {
     /// be reconnected to.
     generation: u64,
     credit: Arc<Credit>,
+    /// The brain it reached.
+    incarnation: Incarnation,
 }
 
 impl Session {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn incarnation(&self) -> Incarnation {
+        self.incarnation
     }
 
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
@@ -397,7 +403,11 @@ impl Link {
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
     /// on its own thread and control here. False when the UI has gone.
     fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> bool {
-        let Connection { control, data, .. } = connection;
+        let Connection {
+            control,
+            data,
+            incarnation,
+        } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
         let generation = self.shared.generations.fetch_add(1, Ordering::SeqCst) + 1;
@@ -437,7 +447,11 @@ impl Link {
             let _queued = control_out.try_send(ControlToBrain::Quitting);
         }
         let open = events
-            .send_blocking(LinkEvent::Connected(Session { generation, credit }))
+            .send_blocking(LinkEvent::Connected(Session {
+                generation,
+                credit,
+                incarnation,
+            }))
             .is_ok();
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
