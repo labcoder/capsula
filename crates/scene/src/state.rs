@@ -472,8 +472,8 @@ impl SceneState {
 
     /// Rebuilds a scene in an isolated context from original steps and ordered cuts.
     ///
-    /// The budget layer combines final replayed charges, never intermediate peaks
-    /// from replaying independent scenes in a different global order.
+    /// Global installation must check the combined final replayed charges, not
+    /// intermediate peaks from independently replaying scenes in a different order.
     /// # Errors
     /// Rejects invalid log order, duplicate commits, redundant cuts or invalid steps.
     /// # Panics
