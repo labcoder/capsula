@@ -20,6 +20,8 @@ use crate::platform::gate_pipe::{self, PipeClient};
 
 /// How long a brain that's starting gets to accept the client.
 const CONNECT: Duration = Duration::from_secs(15);
+/// How long the brain gets to answer `Hello`.
+const WELCOME: Duration = Duration::from_secs(5);
 
 /// A frame the brain sent, or the end of one of its pipes.
 #[derive(Debug)]
@@ -293,6 +295,7 @@ impl Drop for Client {
 
 fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
     let control = PipeClient::open(&Pipe::Control.name(session))?;
+    control.set_read_timeout(Some(WELCOME));
     let hello = Hello {
         build_id: BUILD_ID.to_owned(),
         capability: capability(session)?,
@@ -309,6 +312,7 @@ fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
         }
         other => bail!("no welcome: {other:?}"),
     }
+    control.set_read_timeout(None);
     let data = PipeClient::open(&Pipe::Data.name(session))?;
     frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
     let shared = Arc::new(Shared {

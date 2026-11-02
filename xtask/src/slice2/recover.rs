@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use capsula_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_STEP_LABEL, MAX_STEPS,
-    PageEventKind, PageOf, Phase, RunId, SceneDescriptor, SceneId,
+    PageEventKind, PageOf, Phase, RunId, SceneDescriptor, SceneId, Step,
 };
 
 use super::brain::Case;
@@ -95,16 +95,8 @@ pub(super) fn kill(folder: &Path) -> Result<Row> {
     ))
 }
 
-/// Each visible scene's descriptor and the steps its chunks carried, in order.
-#[derive(Debug, Default)]
-struct Recovered {
-    descriptors: Vec<SceneDescriptor>,
-    chunks: usize,
-    steps: BTreeMap<SceneId, usize>,
-    /// Scenes whose last chunk arrived.
-    complete: Vec<SceneId>,
-    failures: Vec<String>,
-}
+/// Drawings made before the reconnects, each one scene of the fixture's `MAX_STEPS` steps.
+const DRAWINGS: usize = 4;
 
 pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     let label = "s".repeat(MAX_STEP_LABEL);
@@ -114,7 +106,7 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     let mut client = Client::connect()?;
     let mut last = RunId(0);
     let mut thread = None;
-    for _ in 0..4 {
+    for _ in 0..DRAWINGS {
         let (run, named) = turn(&mut client, thread, "gate draw")?;
         thread = Some(named);
         if ended(&mut client, run)?.1 != Phase::Done {
@@ -125,7 +117,7 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     }
     drop(client);
     let mut client = Client::connect_paused()?;
-    let mut second = recover(&mut client, last)?;
+    let mut second = recover(&mut client, last, &label)?;
     client.data(&DataToBrain::PageRequest {
         request: 1,
         page: PageOf::Threads {
@@ -139,23 +131,16 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
         })
         .context("the connection didn't serve a page after recovery")?;
     drop(client);
-    let mut client = Client::connect()?;
-    let third = settle(&mut client)?;
-    client.quit()?;
-    brain.exited()?;
-    let cleared = second.descriptors.get(1).map(|descriptor| descriptor.scene);
-    let kept: Vec<_> = second
-        .descriptors
+    let kept: Vec<SceneDescriptor> = second
+        .named
         .iter()
-        .filter(|descriptor| Some(descriptor.scene) != cleared)
+        .filter(|descriptor| Some(descriptor.scene) != second.cleared)
         .copied()
         .collect();
-    if third.descriptors != kept {
-        second.failures.push(format!(
-            "after the clear and the stale Stop the scenes are {:?}, not {kept:?}",
-            third.descriptors
-        ));
-    }
+    let mut client = Client::connect()?;
+    let third = settle(&mut client, &kept, &label)?;
+    client.quit()?;
+    brain.exited()?;
     if second.chunks < 3 {
         second
             .failures
@@ -163,14 +148,14 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     }
     second.failures.extend(third.failures);
     let detail = format!(
-        "4 scenes of {MAX_STEPS} steps × {MAX_STEP_LABEL} B, {} chunks; Stop for run {} and \
-         ClearDrawing of one scene sent after the first chunk; every installed scene was \
-         complete at its last chunk, none partial; the next connection named {} scenes, without \
-         the cleared one, each unchanged and complete. One scene can't reach 3 chunks today \
-         (32 KiB target, at most {MAX_STEPS} × {MAX_STEP_LABEL} B), so the chunks span scenes",
-        second.chunks,
-        last.0,
-        third.descriptors.len()
+        "{DRAWINGS} drawings of {MAX_STEPS} steps × {MAX_STEP_LABEL} B, {} chunks; Stop for run {} \
+         and ClearDrawing of the second scene after the first chunk. By the shell's rules \
+         (install at the last chunk only, never a cleared scene), the other 3 installed whole \
+         with the fixture's steps and the cleared one never did, checked after every chunk; the \
+         next connection named the same 3, unchanged, and installed them whole. One scene can't \
+         reach 3 chunks today (32 KiB target, at most {MAX_STEPS} × {MAX_STEP_LABEL} B), so the \
+         chunks span scenes",
+        second.chunks, last.0
     );
     Ok(Row::checked(
         "Reconnect with a multi-chunk drawing while Stop arrives",
@@ -179,20 +164,118 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     ))
 }
 
+/// The client's applied-message record, kept by the shell's rules: chunks stage per scene, a
+/// scene installs only at its last chunk, and a scene cleared locally or not named by `Scenes`
+/// never installs.
+#[derive(Debug, Default)]
+struct Applied {
+    named: Vec<SceneDescriptor>,
+    staged: BTreeMap<SceneId, Vec<Step>>,
+    installed: BTreeMap<SceneId, Vec<Step>>,
+    cleared: Option<SceneId>,
+    chunks: usize,
+    failures: Vec<String>,
+}
+
+impl Applied {
+    fn new(named: Vec<SceneDescriptor>) -> Self {
+        Self {
+            named,
+            ..Self::default()
+        }
+    }
+
+    fn clear(&mut self, scene: SceneId) {
+        self.cleared = Some(scene);
+        self.staged.remove(&scene);
+        self.installed.remove(&scene);
+    }
+
+    /// Applies a frame if it's a chunk, and checks the cleared scene is still absent.
+    fn apply(&mut self, frame: &Frame) -> bool {
+        let Frame::Data(
+            DataToShell::SceneSnapshot {
+                scene,
+                revision,
+                chunk,
+                last,
+            },
+            _,
+        ) = frame
+        else {
+            return false;
+        };
+        self.chunks += 1;
+        let named = self
+            .named
+            .iter()
+            .any(|descriptor| descriptor.scene == *scene && descriptor.revision == *revision);
+        if named && self.cleared != Some(*scene) {
+            if self.installed.contains_key(scene) {
+                self.failures
+                    .push(format!("{scene:?} sent a chunk after its last"));
+            }
+            let staged = self.staged.entry(*scene).or_default();
+            staged.extend(chunk.iter().cloned());
+            if *last {
+                let steps = self.staged.remove(scene).unwrap_or_default();
+                self.installed.insert(*scene, steps);
+            }
+        }
+        if let Some(cleared) = self.cleared
+            && self.installed.contains_key(&cleared)
+        {
+            self.failures
+                .push(format!("the cleared {cleared:?} installed"));
+        }
+        true
+    }
+
+    /// Exactly `scenes` are installed, each the fixture's whole drawing, and nothing is left
+    /// staged short of its last chunk.
+    fn expect(&mut self, scenes: &[SceneId], label: &str, when: &str) {
+        let installed: Vec<SceneId> = self.installed.keys().copied().collect();
+        if installed != scenes {
+            self.failures
+                .push(format!("{when}: {installed:?} installed, not {scenes:?}"));
+        }
+        for (scene, steps) in &self.installed {
+            if steps.len() != MAX_STEPS || steps.iter().any(|step| step.label != label) {
+                self.failures.push(format!(
+                    "{when}: {scene:?} installed {} steps, not the fixture's {MAX_STEPS}",
+                    steps.len()
+                ));
+            }
+        }
+        if !self.staged.is_empty() {
+            self.failures.push(format!(
+                "{when}: {:?} stopped short of their last chunk",
+                self.staged.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    fn scenes(&self) -> Vec<SceneId> {
+        self.named
+            .iter()
+            .map(|descriptor| descriptor.scene)
+            .collect()
+    }
+}
+
 /// Takes `Scenes` and one chunk, sends `Stop` for `last` and clears the second scene, then
 /// takes the rest.
-fn recover(client: &mut Client, last: RunId) -> Result<Recovered> {
-    let descriptors = scenes(client)?;
-    let cleared = descriptors
-        .get(1)
-        .map(|descriptor| descriptor.scene)
-        .context("fewer than two scenes are visible")?;
+fn recover(client: &mut Client, last: RunId, label: &str) -> Result<Applied> {
+    let mut applied = Applied::new(scenes(client)?);
+    if applied.named.len() != DRAWINGS {
+        bail!(
+            "{} scenes named, not the {DRAWINGS} drawn",
+            applied.named.len()
+        );
+    }
+    let cleared = applied.named[1].scene;
     client.allow_data(1);
-    let mut recovered = Recovered {
-        descriptors,
-        ..Recovered::default()
-    };
-    client.until(PATIENCE, |seen| take(&mut recovered, &seen.frame))?;
+    client.until(PATIENCE, |seen| applied.apply(&seen.frame).then_some(()))?;
     client.control(&ControlToBrain::Stop {
         run: last,
         revealed: vec![0],
@@ -200,45 +283,47 @@ fn recover(client: &mut Client, last: RunId) -> Result<Recovered> {
     client.control(&ControlToBrain::ClearDrawing {
         scene_ids: vec![cleared],
     })?;
+    applied.clear(cleared);
     client.resume_data();
-    let wanted: Vec<SceneId> = recovered
-        .descriptors
-        .iter()
-        .map(|descriptor| descriptor.scene)
+    let kept: Vec<SceneId> = applied
+        .scenes()
+        .into_iter()
         .filter(|scene| *scene != cleared)
         .collect();
     client.until(PATIENCE, |seen| {
-        take(&mut recovered, &seen.frame);
-        wanted
-            .iter()
-            .all(|scene| recovered.complete.contains(scene))
+        applied.apply(&seen.frame);
+        kept.iter()
+            .all(|scene| applied.installed.contains_key(scene))
             .then_some(())
     })?;
     let taken = client.log.len();
     client.drain(Duration::from_millis(500));
     for seen in &client.log[taken..] {
-        let _late = take(&mut recovered, &seen.frame);
+        applied.apply(&seen.frame);
     }
-    check(&mut recovered, Some(cleared));
-    Ok(recovered)
+    applied.expect(&kept, label, "after the clear");
+    Ok(applied)
 }
 
-/// Takes `Scenes` and every chunk it names.
-fn settle(client: &mut Client) -> Result<Recovered> {
-    let descriptors = scenes(client)?;
-    let wanted = descriptors.len();
-    let mut recovered = Recovered {
-        descriptors,
-        ..Recovered::default()
-    };
+/// Takes `Scenes` and every chunk it names, expecting `kept` unchanged.
+fn settle(client: &mut Client, kept: &[SceneDescriptor], label: &str) -> Result<Applied> {
+    let mut applied = Applied::new(scenes(client)?);
+    if applied.named != kept {
+        applied.failures.push(format!(
+            "the next connection named {:?}, not {kept:?}",
+            applied.named
+        ));
+    }
+    let wanted = applied.named.len();
     if wanted > 0 {
         client.until(PATIENCE, |seen| {
-            take(&mut recovered, &seen.frame);
-            (recovered.complete.len() == wanted).then_some(())
+            applied.apply(&seen.frame);
+            (applied.installed.len() == wanted).then_some(())
         })?;
     }
-    check(&mut recovered, None);
-    Ok(recovered)
+    let scenes: Vec<SceneId> = kept.iter().map(|descriptor| descriptor.scene).collect();
+    applied.expect(&scenes, label, "on the next connection");
+    Ok(applied)
 }
 
 fn scenes(client: &mut Client) -> Result<Vec<SceneDescriptor>> {
@@ -248,56 +333,76 @@ fn scenes(client: &mut Client) -> Result<Vec<SceneDescriptor>> {
     })
 }
 
-/// Applies one chunk as the shell would: a scene installs only at its last chunk.
-fn take(recovered: &mut Recovered, frame: &Frame) -> Option<()> {
-    let Frame::Data(
-        DataToShell::SceneSnapshot {
-            scene,
-            revision,
-            chunk,
-            last,
-        },
-        _,
-    ) = frame
-    else {
-        return None;
-    };
-    recovered.chunks += 1;
-    let named = recovered
-        .descriptors
-        .iter()
-        .find(|descriptor| descriptor.scene == *scene);
-    if named.is_none_or(|descriptor| descriptor.revision != *revision) {
-        recovered.failures.push(format!(
-            "a chunk for {scene:?} at revision {revision} wasn't named"
-        ));
-    }
-    if recovered.complete.contains(scene) {
-        recovered
-            .failures
-            .push(format!("{scene:?} sent a chunk after its last"));
-    }
-    *recovered.steps.entry(*scene).or_default() += chunk.len();
-    if *last {
-        recovered.complete.push(*scene);
-    }
-    Some(())
-}
+#[cfg(test)]
+mod tests {
+    use capsula_protocol::message::{DataToShell, MAX_STEPS, SceneDescriptor, SceneId, Step};
 
-/// Every scene installed carries exactly the steps its descriptor keeps; a scene the client
-/// cleared is dropped, as the shell drops it.
-fn check(recovered: &mut Recovered, cleared: Option<SceneId>) {
-    for descriptor in &recovered.descriptors {
-        if Some(descriptor.scene) == cleared {
-            continue;
+    use super::Applied;
+    use crate::slice2::client::Frame;
+
+    fn chunk(scene: u64, steps: usize, label: &str) -> Frame {
+        Frame::Data(
+            DataToShell::SceneSnapshot {
+                scene: SceneId(scene),
+                revision: 1,
+                chunk: vec![
+                    Step {
+                        label: label.to_owned(),
+                    };
+                    steps
+                ],
+                last: false,
+            },
+            0,
+        )
+    }
+
+    fn last(mut frame: Frame) -> Frame {
+        if let Frame::Data(DataToShell::SceneSnapshot { last, .. }, _) = &mut frame {
+            *last = true;
         }
-        let steps = recovered.steps.get(&descriptor.scene).copied().unwrap_or(0);
-        let committed = usize::try_from(descriptor.committed).unwrap_or(usize::MAX);
-        if !recovered.complete.contains(&descriptor.scene) || steps != committed {
-            recovered.failures.push(format!(
-                "{:?} installed {steps} of {committed} steps",
-                descriptor.scene
-            ));
-        }
+        frame
+    }
+
+    fn named(scenes: &[u64]) -> Applied {
+        Applied::new(
+            scenes
+                .iter()
+                .map(|scene| SceneDescriptor {
+                    scene: SceneId(*scene),
+                    revision: 1,
+                    committed: 64,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_scene_installs_only_whole_at_its_last_chunk() {
+        let mut applied = named(&[1, 2]);
+        assert!(applied.apply(&chunk(1, MAX_STEPS - 1, "s")));
+        assert!(applied.apply(&last(chunk(1, 1, "s"))));
+        assert!(applied.apply(&chunk(2, 3, "s")));
+        applied.expect(&[SceneId(1)], "s", "now");
+        assert_eq!(
+            applied.failures,
+            ["now: [SceneId(2)] stopped short of their last chunk"]
+        );
+    }
+
+    #[test]
+    fn a_cleared_scene_never_installs_and_wrong_steps_fail() {
+        let mut applied = named(&[1, 2]);
+        applied.clear(SceneId(2));
+        applied.apply(&last(chunk(2, MAX_STEPS, "s")));
+        applied.apply(&last(chunk(1, MAX_STEPS, "other")));
+        applied.apply(&last(chunk(3, MAX_STEPS, "s")));
+        applied.expect(&[SceneId(1)], "s", "now");
+        assert_eq!(
+            applied.failures,
+            ["now: SceneId(1) installed 64 steps, not the fixture's 64"]
+        );
+        assert!(!applied.installed.contains_key(&SceneId(2)), "cleared");
+        assert!(!applied.installed.contains_key(&SceneId(3)), "never named");
     }
 }

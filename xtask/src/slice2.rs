@@ -21,9 +21,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use capsula_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use capsula_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
@@ -35,6 +36,8 @@ type Item = fn(&Path) -> Result<Row>;
 
 /// The argument the copied gate runs with.
 const INNER: &str = "--inner";
+/// How long the whole gate may run before it and its brains are killed.
+const GATE_LIMIT: Duration = Duration::from_mins(20);
 /// How long one expected frame may take before the item fails.
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -92,6 +95,11 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 /// every item, or only those whose names hold the filter.
 fn prepare(only: Option<&str>) -> Result<()> {
     ensure!(
+        cfg!(debug_assertions),
+        "run the gate from a debug xtask (`cargo xtask slice2-gate`): a release one would copy a \
+         release brain, which uses the installed product's pipe and credential names"
+    );
+    ensure!(
         platform::processes()?.is_empty(),
         "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
     );
@@ -113,13 +121,31 @@ fn prepare(only: Option<&str>) -> Result<()> {
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     println!("slice 2 gate in {}", folder.display());
-    let status = Command::new(bin.join(SHELL_EXE))
+    let mut gate = Command::new(bin.join(SHELL_EXE))
         .args(["slice2-gate", INNER])
         .arg(&folder)
         .args(only)
-        .status()
+        .spawn()
         .context("running the gate")?;
-    ensure!(status.success(), "the gate failed");
+    let end = Instant::now() + GATE_LIMIT;
+    while gate.try_wait()?.is_none() {
+        if Instant::now() >= end {
+            let brains: Vec<_> = platform::processes()?
+                .into_iter()
+                .filter(|entry| entry.parent == gate.id())
+                .collect();
+            gate.kill()?;
+            gate.wait()?;
+            for brain in brains {
+                let _gone = Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &brain.pid.to_string()])
+                    .status();
+            }
+            bail!("the gate didn't finish in {GATE_LIMIT:?}; it and its brains were killed");
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    ensure!(gate.wait()?.success(), "the gate failed");
     Ok(())
 }
 

@@ -18,6 +18,12 @@ use super::{PATIENCE, Row, ended, first_text, marker, percentile, run_end, store
 const REPEATS: usize = 20;
 /// The p95 a Stop must be answered within [guess].
 const STOP_P95_MS: f64 = 50.0;
+/// The saturated fixture's fills: 17 of 61,000 bytes stay inside the 1 MiB text budget, and
+/// once 8 have gone out on credit the other 9 are more than the brain's data queue holds.
+const FILLS: u64 = 17;
+const FILL: usize = 61_000;
+/// The brain's data-queue cap, `DATA_CAP` in its runtime: at or above it, engine events wait.
+const DATA_CAP: u64 = 512 * 1024;
 /// Replacement turns sent right behind a Stop.
 const REPLACEMENTS: usize = 10;
 /// The most a Stop and the replacement turn may be apart.
@@ -46,14 +52,13 @@ fn esc(folder: &Path, pressure: Pressure) -> Result<Row> {
             "Esc against a non-reading shell",
             format!("0 text start\n{}", "10 fill 4096\n".repeat(200)),
         ),
-        // 16 frames of 65,000 bytes stay inside the 1 MiB text budget; 8 fill the credit window
-        // and the other 8 fill the 512 KiB data queue. The last line keeps the run going past the Stop.
+        // The last line keeps the run going past the Stop.
         Pressure::Saturated => (
             "esc-saturated",
             "Esc against a saturated data writer",
             format!(
                 "0 text start\n{}5000 text end\n",
-                "0 fill 65000\n".repeat(16)
+                format!("0 fill {FILL}\n").repeat(usize::try_from(FILLS)?)
             ),
         ),
     };
@@ -76,7 +81,7 @@ fn esc(folder: &Path, pressure: Pressure) -> Result<Row> {
             client.pause_data();
         }
         client.drain(Duration::from_millis(300));
-        taken.push(data_bytes(&client, run));
+        taken.push(fills(&client, run));
         let sent = client.control(&ControlToBrain::Stop {
             run,
             revealed: Vec::new(),
@@ -110,32 +115,48 @@ fn esc(folder: &Path, pressure: Pressure) -> Result<Row> {
          max {max:.1} ms; every run stored interrupted(stop), none view_stalled"
     );
     if pressure == Pressure::Saturated {
-        let low = taken.iter().min().copied().unwrap_or(0);
-        let high = taken.iter().max().copied().unwrap_or(0);
         let window = u64::from(DATA_WINDOW);
+        for (count, frame, bytes) in &taken {
+            let queued = FILLS.saturating_sub(*count) * frame;
+            if bytes + frame <= window || *bytes > window {
+                failures.push(format!("{bytes} B taken leaves room in the credit window"));
+            }
+            if queued <= DATA_CAP {
+                failures.push(format!(
+                    "{queued} B unsent isn't over the {DATA_CAP} B queue cap"
+                ));
+            }
+        }
+        let (count, frame, bytes) = taken.iter().min().copied().unwrap_or_default();
+        let unsent = FILLS.saturating_sub(count);
         let _infallible = write!(
             detail,
-            "; data taken without credit before Stop: {low}..{high} bytes of the {window}-byte window"
+            "; before every Stop the client had taken {count} of {FILLS} fill frames of {frame} B \
+             ({bytes} B, no room for another in the {window} B credit window), so the {unsent} \
+             unsent are {} B, over the {DATA_CAP} B queue cap",
+            unsent * frame
         );
-        if low + 65_100 < window || high > window {
-            failures.push("the credit window wasn't exhausted at Stop".to_owned());
-        }
     }
     Ok(Row::checked(item, &failures, detail))
 }
 
-/// Data bytes, headers included, the client has taken for `run`.
-fn data_bytes(client: &Client, run: RunId) -> u64 {
-    client
-        .log
-        .iter()
-        .filter_map(|seen| match &seen.frame {
-            Frame::Data(DataToShell::AssistantText { run: named, .. }, bytes) if *named == run => {
-                Some(u64::from(*bytes))
+/// The fill frames the client has taken for `run`, the largest one's size, and every byte of its
+/// text taken, headers included.
+fn fills(client: &Client, run: RunId) -> (u64, u64, u64) {
+    let mut taken = (0, 0, 0);
+    for seen in &client.log {
+        if let Frame::Data(DataToShell::AssistantText { run: named, delta }, bytes) = &seen.frame
+            && *named == run
+        {
+            let bytes = u64::from(*bytes);
+            if delta.len() == FILL {
+                taken.0 += 1;
+                taken.1 = taken.1.max(bytes);
             }
-            _ => None,
-        })
-        .sum()
+            taken.2 += bytes;
+        }
+    }
+    taken
 }
 
 pub(super) fn replacement(folder: &Path) -> Result<Row> {

@@ -34,15 +34,24 @@ flowchart LR
 | Item | What the client does | Pass |
 |---|---|---|
 | Esc against a non-reading shell | Stops reading data during a stream, sends `Stop`; 20 times | `Stop` written to `RunState Interrupted` read at p95 under 50 ms [guess]; every run stored `interrupted(stop)`, never `view_stalled` |
-| Esc against a saturated data writer | The same, reading but granting no credit while the fixture streams its 1 MiB text budget | As above, with the whole credit window taken before `Stop` |
-| Replacement run after Esc | `Stop` then `TextSubmit` within 1 ms, 10 times in a row | The new run's id is higher; the old run's last state is `Interrupted`, and its `RunEnd` precedes the new run's data with nothing of it after |
+| Esc against a saturated data writer | The same, reading but granting no credit while the fixture streams 17 deltas of 61,000 B inside the 1 MiB text budget | As above. Before each `Stop`, the frames taken leave no room in the credit window, and the fill frames still unsent (fixture count minus taken, times the observed frame size) are over the brain's 512 KiB data-queue cap |
+| Replacement run after Esc | `Stop` then `TextSubmit` within 1 ms, 10 times in a row | The new run's id is higher; the old run's last state is `Interrupted`; nothing of the old run arrives after its `RunEnd`, which precedes the new run's data. Old-run frames read after `Interrupted` are counted, not failed |
 | Late closed step after Stop refused | Stops a run whose fixture finishes a `late` step on cancel | One `StepCommit` (the one before `Stop`); the late label is in no table, FTS or file |
 | Kill mid-run, then recover | `TerminateProcess` after two committed steps and later text, then restarts | The run is `failed(crash)`; both steps and the text stored with them are kept, the text after them isn't |
-| Reconnect with a multi-chunk drawing while Stop arrives | Draws 4 full scenes, reconnects, takes one chunk, sends `Stop` and `ClearDrawing`, then reconnects again | Every installed scene is complete at its last chunk; the next connection doesn't name the cleared scene and the others are unchanged |
+| Reconnect with a multi-chunk drawing while Stop arrives | Draws 4 full scenes, reconnects, takes one chunk, sends `Stop` and `ClearDrawing`, then reconnects again | Applying chunks by the shell's rules (a scene installs only at its last chunk; a scene cleared locally or not named never installs), exactly the 3 uncleared scenes install, each with the fixture's 64 steps; the cleared one is absent after the clear and after every later chunk; nothing is left short of its last chunk. The next connection names the same 3, unchanged, and installs them whole |
 | §6.4 deletion on fixture data | Plants a marker in a thread's title, user text, assistant text and step label, deletes it, kills and restarts the brain | The purge's whole result (no row, no `purge_pending`, no purge file); the marker is in no raw file (`.db`, `-wal`, `-shm`, logs; UTF-8, any case), no table and no FTS match, while a kept thread's marker is found |
 | Esc on the real key in the real shell | Not run | Needs an input session on the desk (OSC-132) |
 
+- The two pipes aren't ordered with each other, so frames already in the data pipe can arrive after
+  the control pipe's `Interrupted`. The gate's replacement criterion is the wire order the protocol
+  promises, nothing of the old run after its `RunEnd`; the shell's fence that drops those late
+  frames when it applies them is covered by its unit tests.
+- The client applies recovery chunks by the shell's rules and checks them against the fixture's
+  known drawings. The real shell's install logic is covered by its unit tests, as its fence is.
 - `Stale` is the brain's own verdict and isn't on the pipe, so the late-step item checks its effects.
+- Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
+  waited for before its buffer goes. The whole gate is killed, with its brains, after 20 minutes.
+  It refuses to run from a release xtask, whose brain would use the installed product's names.
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
