@@ -168,6 +168,7 @@ impl Coordinator {
     /// A new connection is served: only runs it starts from here are its own to stop.
     pub fn begin_session(&mut self) {
         self.session_start = RunId(self.last_run.0 + 1);
+        self.begin_deletes();
     }
 
     /// A Stop for a run that already ended, which the shell could still stop while it drew the

@@ -11,12 +11,12 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use capsula_protocol::message::{DataToShell, PageOf, RunId, SceneId};
+use capsula_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{Copied, EventKind, NewEvent, Store, StoreError, Swap, cleared_body};
+use crate::store::{Copied, Deletion, EventKind, NewEvent, Store, StoreError, Swap, cleared_body};
 
 /// How often the thread looks at a running helper.
 const POLL: Duration = Duration::from_millis(50);
@@ -382,6 +382,11 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::SceneKept { scene, ok });
             purger.op_arrived(store);
         }
+        StoreOp::Delete { thread } => {
+            purger.op_arriving();
+            answer(acks, delete(store, thread));
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,
@@ -460,6 +465,26 @@ fn read(store: &mut Store, epoch: u64, request: u32, page: PageOf) -> Input {
         epoch,
         request,
         reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+    }
+}
+
+/// Deletes a thread; an unavailable store hides nothing. A failure is logged by kind only.
+fn delete(store: &mut Store, thread: ThreadId) -> Input {
+    let deletion = match store.reconnect() {
+        Ok(()) => store.delete(thread),
+        Err(error) => Deletion {
+            outcome: Deleted::NotHidden,
+            last_run: None,
+            error: Some(error),
+        },
+    };
+    if let Some(error) = &deletion.error {
+        tracing::warn!(%error, outcome = ?deletion.outcome, "a delete didn't finish");
+    }
+    Input::Deleted {
+        thread,
+        outcome: deletion.outcome,
+        last_run: deletion.last_run,
     }
 }
 

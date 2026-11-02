@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use capsula_protocol::frame::{self, Pipe};
 use capsula_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, MAX_PENDING_TURNS,
-    MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
+    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
 };
 use capsula_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -183,24 +183,41 @@ impl Brain {
     /// once its effects are applied and the brain waits again.
     #[cfg(test)]
     fn control_taken(&self, input: &Input) {
-        if matches!(input, Input::Stop { .. } | Input::Clear { .. }) {
+        if matches!(
+            input,
+            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. }
+        ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
         }
     }
 
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
-    /// as shell loss would, drains every accepted store write, clears the visible set and what's
-    /// still clearing in one write, waits for its commit, then closes the store. No stage starts
-    /// a budget of its own. Only a committed clear is a complete quit; otherwise the scenes come
-    /// back at the next start, as after a crash.
+    /// as shell loss would, drains every accepted store write and delete, clears the visible set
+    /// and what's still clearing in one write, waits for its commit, then closes the store. No
+    /// stage starts a budget of its own. Only a committed clear with every delete done is a
+    /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
+    /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        let mut undeleted = false;
         let cleared = tokio::time::timeout_at(deadline, async {
-            while self.coordinator.ending_runs() > 0 || self.coordinator.clears_in_flight() {
+            while self.coordinator.ending_runs() > 0
+                || self.coordinator.clears_in_flight()
+                || self.coordinator.deletes_pending()
+            {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
                 };
+                // Latched before the answer settles its delete, so an emptied list can't pass
+                // for success.
+                undeleted |= matches!(
+                    input,
+                    Input::Deleted {
+                        outcome: Deleted::NotHidden,
+                        ..
+                    }
+                );
                 self.offline(input);
             }
             self.offline(Input::ClearVisible);
@@ -225,11 +242,12 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
-        if cleared {
+        if cleared && !undeleted {
             Quit::Complete
         } else {
             tracing::warn!(
-                "the quit was incomplete; the visible scenes come back at the next start"
+                undeleted,
+                "the quit was incomplete; what it didn't clear or delete comes back at the next start"
             );
             Quit::Incomplete
         }
@@ -486,9 +504,9 @@ impl Brain {
                 ping_sent = None;
                 self.deadline = None;
             }
-            if self.apply(effects, Some(&mut link)).is_err() {
-                tracing::warn!("a shell frame couldn't be queued; ending the connection");
-                return Ended::Lost;
+            if let Err(ended) = self.apply(effects, Some(&mut link)) {
+                tracing::warn!(?ended, "ending the connection");
+                return ended;
             }
         }
     }
@@ -508,13 +526,16 @@ impl Brain {
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
     /// shell's control queue is full nothing more goes to the shell, but every store, engine and
-    /// timer effect still applies, since the coordinator counts them as done; then it fails.
+    /// timer effect still applies, since the coordinator counts them as done; then it fails, as
+    /// it does when the shell broke the protocol.
     fn apply(
         &mut self,
         effects: Vec<Effect>,
         mut link: Option<&mut Link<'_, '_>>,
-    ) -> Result<(), Full> {
+    ) -> Result<(), Ended> {
+        let shell = link.is_some();
         let mut full = false;
+        let mut broken = None;
         for effect in effects {
             match effect {
                 Effect::Store(op) => {
@@ -578,9 +599,13 @@ impl Brain {
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }
+                Effect::Broken(reason) => broken = Some(reason),
             }
         }
-        if full { Err(Full) } else { Ok(()) }
+        if let Some(reason) = broken.filter(|_| shell) {
+            return Err(Ended::Broken(reason));
+        }
+        if full { Err(Ended::Lost) } else { Ok(()) }
     }
 }
 
@@ -646,6 +671,15 @@ fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
             return Err(Ended::Broken("more scenes cleared than can be visible"));
         }
         ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
+        ControlToBrain::DeleteThread {
+            thread,
+            after_turns,
+            resend,
+        } => Some(Input::Delete {
+            thread,
+            after_turns,
+            resend,
+        }),
         ControlToBrain::Pong | ControlToBrain::Hello(_) | ControlToBrain::Quitting => None,
     })
 }
@@ -800,6 +834,7 @@ impl<'a, 't> Link<'a, 't> {
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
+            DataToShell::ScenesRemoved { .. } => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. } => Owner::Scene(*scene),
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {

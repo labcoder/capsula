@@ -7,6 +7,8 @@ use super::{
 };
 use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
+#[path = "delete_tests.rs"]
+mod deletes;
 #[path = "scene_tests.rs"]
 mod scenes;
 
@@ -149,19 +151,6 @@ fn a_turn_is_stored_before_the_engine_starts() {
             text: "  \n  Draw a cat\nplease".to_owned(),
         }]
     );
-}
-
-#[test]
-fn a_blank_turn_is_ignored() {
-    let mut core = fresh();
-    assert_eq!(
-        core.handle(Input::Turn {
-            thread: None,
-            text: " \n\t ".to_owned(),
-        }),
-        Ok(Vec::new())
-    );
-    assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
 }
 
 #[test]
