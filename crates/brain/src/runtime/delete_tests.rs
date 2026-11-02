@@ -57,10 +57,15 @@ async fn one_run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(shell: &mut Sh
 
 /// The threads a restarted store lists.
 fn listed(scratch: &Scratch) -> usize {
+    live_threads(scratch).len()
+}
+
+fn live_threads(scratch: &Scratch) -> Vec<ThreadId> {
     let store = Store::open(&scratch.db()).expect("reopen");
     store
+        .pages()
         .thread_page(None, 50)
-        .map(|(rows, _)| rows.len())
+        .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
         .expect("threads")
 }
 
@@ -582,11 +587,7 @@ async fn cross_pipe(read: Read) {
         );
     });
     brain.close().await;
-    let store = Store::open(&scratch.db()).expect("reopen");
-    let mut threads: Vec<ThreadId> = store
-        .thread_page(None, 50)
-        .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
-        .expect("threads");
+    let mut threads = live_threads(&scratch);
     if read == Read::NotHidden {
         threads.sort_unstable();
         assert_eq!(

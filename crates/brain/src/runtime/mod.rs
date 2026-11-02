@@ -126,8 +126,14 @@ pub(crate) struct Brain {
 pub(crate) enum Seen {
     /// The core queued this op for the store thread.
     StoreOpQueued(crate::coordinator::StoreOp),
-    /// The store thread began this op; a write may then wait on a lock.
+    /// The store thread, or the page reader, began this op; a write may then wait on a lock.
     StoreOpStarted(crate::coordinator::StoreOp),
+    /// The page reader holds a read at its gate with a snapshot open.
+    ReadHeld,
+    /// A clean copy waits for a side connection in use before it's swapped in.
+    SwapWaiting,
+    /// The page reader waits for an op queued before its read.
+    ReadWaiting,
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     /// A page reply landed while the data queue was full and waits for room.

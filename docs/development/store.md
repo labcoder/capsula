@@ -13,6 +13,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `foreign_keys=ON` | Rows can't point at a missing thread or run |
 | `secure_delete=ON` | Deleted rows are overwritten with zeros, not left in freeblocks or free pages. Stale cell copies in the gaps a page rebuild leaves are out of its reach, so the purge replaces the file (see below) |
 | `temp_store=MEMORY` | Statement journals, which hold the pages a delete removes, never spill to `%TEMP%` |
+| `wal_autocheckpoint=0` | A commit never copies the WAL into the file itself; the checkpoint helper does that off the store thread (see [Page reads and checkpoints](#page-reads-and-checkpoints)) |
 
 ## Tables
 
@@ -44,10 +45,46 @@ content. The threads panel's pages leave `scene_begin` and `scene_cleared` out.
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
 and never returns a thread being deleted.
 
+## Page reads and checkpoints
+
 The [threads panel](panels.md) reads bounded thread, ranked search, and newest-first event pages
-on the serving connection. Each read is one autocommit statement, finished before returning,
-with no retained snapshot. Reads neither stop the purge's copy nor postpone its quiet deadline;
-the store thread still services due or completed purge work while pages arrive.
+on the page reader: a thread beside the store thread with its own read-only, query-only
+connection (`temp_store=MEMORY` too). So a long search never holds up a write queued behind
+it. Each read is one autocommit statement, finished before returning, so no snapshot outlives it.
+Reads neither stop the purge's copy nor postpone it: a page request never reaches the store
+thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
+
+A read waits until the store thread has finished every op queued before it, failed and empty
+ones included, so it sees the thread a turn just created. Ops queued after it may show too: a
+delete can overtake an older read, which the shell's revision fences already handle. The reply
+goes back on the brain's input channel as before, so the epoch fence and held-page limits are
+unchanged.
+
+Commits never checkpoint. After every op and every read, the checkpoint helper, a thread with its
+own read-write connection, runs a passive checkpoint, which never waits on the writer or a
+reader. Frames a reader still needs are left in the WAL; the helper retries after 50 ms, doubling
+up to 1 s [guess], and again as soon as a read ends. This takes the WAL copy off commits; it
+doesn't bound the WAL while a long read holds a snapshot.
+
+```mermaid
+flowchart LR
+  B[Brain] -- writes, deletes, clears --> S[Store thread]
+  B -- page reads, stamped with the ops before them --> R[Page reader]
+  S -- ops finished --> R
+  S -- after each op --> H[Checkpoint helper]
+  R -- after each read --> H
+  S --> DB[(kumochi.db)]
+  R -. read-only .-> DB
+  H -. passive checkpoint .-> DB
+```
+
+The reader's and the helper's connections each sit in a slot, open lazily and never create the
+file. The swap holds both slots, their connections closed, from before its checkpoint until the
+store has reopened (below), so neither opens the old file. While the store is unavailable after a
+failed reopen, page reads fail and checkpoints wait. Closing the store lets queued ops and reads
+finish, then closes the reader, the helper and the store, in that order, so the store's
+connection is the last to close; nothing blocks the caller meanwhile. If the store thread
+panics, waiting reads fail and both side connections close for good.
 
 ## Deleting a thread
 
@@ -62,22 +99,39 @@ How long the store thread spends on one delete, the thread's stand-in captures i
 
 | Store | p50 / p95 / worst | After a reader held the WAL | WAL held |
 |---|---|---|---|
-| 46 MiB | 7.4 / 9.8 / 10.2 ms | 21.9 / 22.2 / 24.3 ms | 13.4 MiB |
-| 232 MiB | 18.0 / 23.3 / 26.2 ms | 75.0 / 83.8 / 88.8 ms | 41.7 MiB |
-| 515 MiB | 25.9 / 35.2 / 36.1 ms | 86.4 / 88.0 / 97.0 ms | 36.0 MiB |
-| 984 MiB | 41.6 / 52.6 / 54.3 ms | 153.4 / 155.0 / 156.0 ms | 58.9 MiB |
+| 46 MiB | 7.4 / 7.7 / 9.7 ms | 8.6 / 11.4 / 12.3 ms | 52.5 MiB |
+| 232 MiB | 18.3 / 18.7 / 19.7 ms | 39.2 / 45.9 / 51.9 ms | 215.1 MiB |
+| 515 MiB | 26.3 / 29.1 / 29.4 ms | 28.0 / 28.1 / 29.5 ms | 187.2 MiB |
+| 984 MiB | 45.1 / 47.5 / 54.6 ms | 44.8 / 44.9 / 49.6 ms | 316.4 MiB |
+
+Commits don't checkpoint, so a commit after a reader let go no longer copies the WAL that reader
+held: before that change the right-hand column was 24, 89, 97 and 156 ms. The measurement opens
+the store alone, with no checkpoint helper, so nothing copies the WAL between samples and it grows
+larger than it would in the brain.
 
 The purge's copy is the one reader of the live store besides the store thread, so a write never
 commits under its snapshot: before any write the store thread stops the copy and waits until it
-has closed its connections to the live store, its drain and its snapshot, and nothing more of the
-copy. At 984 MiB (`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a
-delete from enqueue to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during
-the snapshot, against 9.9 ms with nothing running, and the write right behind it 1.1 ms.
+has let go of the live store, and nothing more of the copy. Letting go means two things: its drain
+has finished its checkpoint on the helper's connection, which stays open for the helper, and its
+snapshot's own read-only connection has closed. The copy takes the helper's connection before it
+holds off writes, so a write never waits for a checkpoint the helper is running. Measured before
+the page reader and the checkpoint helper existed, and not yet remeasured with them: at 984 MiB
+(`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a delete from enqueue
+to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during the snapshot, against
+9.9 ms with nothing running, and the write right behind it 1.1 ms.
 
-shortcut: a reader outside the store thread that held a snapshot through a big write makes the
-next commit checkpoint that WAL, past the ~100 ms foreground bound (the right-hand column above,
-156 ms at 984 MiB). Only the purge reads that way today, and it lets go first; OSC-152 brings
-long-lived readers and the checkpoint lifecycle that bounds them.
+A write queued behind a page read no longer waits for it (`measure_page_reads`, release build on
+Rez, 30 rounds; medians, worst in brackets):
+
+| Store | Common-word search | BeginTurn behind it, store thread reading | On the page reader |
+|---|---|---|---|
+| 46 MiB | 62.2 (65.4) ms | 63.9 (69.7) ms | 0.9 (1.2) ms |
+| 232 MiB | 315.4 (355.0) ms | 332.4 (362.8) ms | 1.1 (16.5) ms |
+| 515 MiB | 62.3 (69.9) ms | 66.8 (82.9) ms | 0.9 (1.3) ms |
+| 984 MiB | 57.9 (60.5) ms | 65.4 (79.7) ms | 0.9 (1.2) ms |
+
+A write behind an events page went from 93–101 ms to 0.8 ms (worst 7.4 ms), against 0.8 ms with no
+read ahead of it.
 
 ```mermaid
 sequenceDiagram
@@ -114,10 +168,11 @@ CAPS-22 review found, because two kinds of copy survive secure-delete:
 So the second transaction also records a **purge** as owed. The purge replaces the file with a
 clean copy, built off the store's thread so turns and runs don't wait for it:
 
-1. **Snapshot.** A helper thread first drains the WAL: a passive checkpoint on its own
-   read-write connection copies the WAL into the file without waiting on the writer or holding it
-   up, so the swap's checkpoint later finds little to copy. The drain must copy all of it before
-   the copy goes on: a reader still holding part of the WAL, or another connection checkpointing,
+1. **Snapshot.** A helper thread first drains the WAL: a passive checkpoint on the checkpoint
+   helper's connection, taken before the copy holds off writes and so never beside the helper's
+   own checkpoint, copies the WAL into the file without
+   waiting on the writer or holding it up, so the swap's checkpoint later finds little to copy.
+   The drain must copy all of it before the copy goes on: a reader still holding part of the WAL
    makes the attempt stop and back off, so a long reader defers the purge. Then it opens the file
    read-only and runs `VACUUM INTO` into `kumochi.db.purge-snapshot`. A WAL reader never holds
    the writer, so the store keeps serving.
@@ -129,7 +184,8 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    `kumochi.db.purge-clean`, so no gap or free page the rebuild left keeps an old key. The
    snapshot is removed and the result synced.
 4. **Swap**, on the store thread. Unless its connection changed something since the snapshot
-   started, it TRUNCATE-checkpoints the WAL so no committed data lives only there, closes the
+   started, it takes the page reader's and the helper's connections, closing them, then
+   TRUNCATE-checkpoints the WAL so no committed data lives only there, closes the
    file and checks that no WAL is left that SQLite could replay onto the new file. Then it
    hard-links `kumochi.db` as `kumochi.db.purge-old`, moves the copy over `kumochi.db` with
    `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which returns only once
@@ -147,7 +203,9 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    can keep its name after its deletion succeeds, until that process closes it. Rez's NTFS
    removes the name at once.
 
-**What store work waits for.** Only the swap stops the store thread: 7–11 ms from 46 MiB to
+**What store work waits for.** These numbers were measured before the page reader and the
+checkpoint helper existed, and aren't yet remeasured with them. Only the swap stops the store
+thread: 7–11 ms from 46 MiB to
 984 MiB on Rez, flat with size (`measure_purge`, logged with the pull request). During a copy or
 a removal ops share the disk with the helper; the worst op measured during either was 22 ms,
 against 6 ms with no purge running. A deletion a reader kept in the WAL is copied into the file
@@ -155,8 +213,7 @@ by the drain on the helper, not by the swap on the store thread: with a tenth of
 deleted behind a reader, 19–123 MiB of WAL, the swap took 8–19 ms against 7–11 ms normally,
 because its TRUNCATE still frees a large WAL file. Without the drain it took 217–223 ms at
 984 MiB. Ops during the drain took at most 48 ms (`measure_swap_after_a_held_reader`). Without
-any purge, the first write after such a reader lets go copies that WAL itself through SQLite's
-automatic checkpoint (243 ms there). These are measurements on Rez's NVMe drive, not a bound for
+any purge, the checkpoint helper copies that WAL once the reader lets go; commits never do. These are measurements on Rez's NVMe drive, not a bound for
 slower disks. On a volume without hard links (FAT, some network shares) the move falls back to
 freeing the old file itself, so the swap grows with the store again.
 
@@ -170,11 +227,15 @@ The purge is cleanup that can be retried:
   for 200 ms [guess]. A write sets the copy's stop flag before it runs, and the swap throws away a
   copy made before a write, so no write is lost. A removal runs during runs too, and ops don't
   stop it.
+- **A ready swap goes first.** Once a copy is ready, the page reader and the helper start
+  nothing new until the swap is done or given up. The store thread retries every 50 ms while the
+  read or checkpoint running finishes, for up to 2 s [guess], and keeps serving writes; a write
+  ends the wait, since the copy is then stale.
 - **It needs room.** A copy starts only if the volume has twice the store's size free (its pages
   in the WAL included) plus 256 MiB [guess] for foreground writes; otherwise it waits like a
   failed try. Until the removal, the old store keeps its space.
 - **It backs off.** A copy an op made stale, a drain a reader cut short, a swap a reader
-  blocked, a move that failed, too little room, a file that can't be deleted and any SQLite or
+  blocked past that wait, a move that failed, too little room, a file that can't be deleted and any SQLite or
   file error leave the purge owed. Each leaves the old file serving, except a reopen that fails
   after the move worked, which leaves the store unavailable until it opens again (below). The
   next try waits 1 minute [guess], doubling up to 30 minutes [guess], so short turns spaced just

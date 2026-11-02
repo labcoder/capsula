@@ -105,11 +105,11 @@ Pages share credit, the queue cap, and the stall watchdog with run data. At the 
 events and new turns wait. RunEnd keeps its existing ordered, one-event-past-the-cap allowance.
 Stop revokes only its run's unsent frames, never page frames.
 
-Store reads execute one autocommit statement on the serving connection and finish it before
-returning. They neither cancel a purge copy nor postpone its quiet deadline. Due or completed
-purge work is still serviced when reads arrive. A serving reader sees the committed WAL end,
-so even a statement stepped but not finished permits a complete drain; no page operation
-retains a snapshot after it returns.
+Store reads execute one autocommit statement on the page reader's own connection and finish it
+before returning, after every store op queued before them (see
+[the store](store.md#page-reads-and-checkpoints)). A write queued behind a long search doesn't
+wait for it, and reads neither cancel a purge copy nor postpone it. No page operation retains a
+snapshot after it returns.
 
 Search words, titles, and page text never enter tracing, diagnostics, error Display, or
 loggable Debug. The pipe tap records control only; pages always travel on data.

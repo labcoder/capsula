@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Swap, purge};
+use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Store, Swap, purge};
 use crate::test_support::Scratch;
 
 fn add(store: &mut Store, title: &str, text: &str) -> ThreadId {
@@ -36,6 +36,7 @@ fn ids(rows: &[ThreadRow]) -> Vec<u64> {
 
 fn list(store: &Store, search: Option<&str>, after: Option<ThreadCursor>) -> DataToShell {
     store
+        .pages()
         .read_page(
             u32::MAX,
             PageOf::Threads {
@@ -48,6 +49,7 @@ fn list(store: &Store, search: Option<&str>, after: Option<ThreadCursor>) -> Dat
 
 fn events(store: &Store, thread: ThreadId, before: Option<EventId>) -> DataToShell {
     store
+        .pages()
         .read_page(u32::MAX, PageOf::Events { thread, before })
         .expect("page")
 }
@@ -59,11 +61,11 @@ fn keyset_pages_keep_original_threads_once_while_new_threads_arrive() {
     for _ in 0..7 {
         add(&mut store, "title", "text");
     }
-    let (first, mut next) = store.thread_page(None, 2).expect("first");
+    let (first, mut next) = store.pages().thread_page(None, 2).expect("first");
     let mut seen = ids(&first);
     while next.is_some() {
         add(&mut store, "newer", "newer");
-        let (rows, cursor) = store.thread_page(next, 2).expect("next");
+        let (rows, cursor) = store.pages().thread_page(next, 2).expect("next");
         seen.extend(ids(&rows));
         next = cursor;
     }
@@ -72,8 +74,8 @@ fn keyset_pages_keep_original_threads_once_while_new_threads_arrive() {
         .conn
         .execute("UPDATE threads SET updated_ms = 99", [])
         .expect("ties");
-    let (first, next) = store.thread_page(None, 2).expect("tied first");
-    let (second, _) = store.thread_page(next, 2).expect("tied next");
+    let (first, next) = store.pages().thread_page(None, 2).expect("tied first");
+    let (second, _) = store.pages().thread_page(next, 2).expect("tied next");
     assert_eq!(ids(&first), vec![10, 9]);
     assert_eq!(ids(&second), vec![8, 7]);
 }
@@ -85,7 +87,7 @@ fn updated_threads_move_above_the_cursor_without_duplicates() {
     for _ in 0..6 {
         add(&mut store, "title", "text");
     }
-    let (rows, next) = store.thread_page(None, 2).expect("first");
+    let (rows, next) = store.pages().thread_page(None, 2).expect("first");
     assert_eq!(ids(&rows), vec![6, 5]);
     store
         .conn
@@ -95,11 +97,11 @@ fn updated_threads_move_above_the_cursor_without_duplicates() {
         .conn
         .execute("UPDATE threads SET updated_ms = 101 WHERE id = 1", [])
         .expect("unseen moves");
-    let (later, next) = store.thread_page(next, 50).expect("later");
+    let (later, next) = store.pages().thread_page(next, 50).expect("later");
     assert_eq!(ids(&later), vec![4, 3, 2]);
     assert_eq!(next, None);
     assert_eq!(
-        ids(&store.thread_page(None, 2).expect("fresh").0),
+        ids(&store.pages().thread_page(None, 2).expect("fresh").0),
         vec![1, 5]
     );
 }
@@ -112,20 +114,23 @@ fn deleting_threads_are_hidden_from_list_search_and_events() {
     let live = add(&mut store, "live", "the red fox");
     store.begin_delete(hidden).expect("hide");
     assert_eq!(
-        ids(&store.thread_page(None, 50).expect("list").0),
+        ids(&store.pages().thread_page(None, 50).expect("list").0),
         vec![live.0]
     );
     assert_eq!(
-        ids(&store.search_page("red fox", 50).expect("search").0),
+        ids(&store.pages().search_page("red fox", 50).expect("search").0),
         vec![live.0]
     );
     assert_eq!(
-        store.events_page(hidden, None, 50).expect("hidden"),
+        store.pages().events_page(hidden, None, 50).expect("hidden"),
         (vec![], None)
     );
     for thread in [ThreadId(999), ThreadId(u64::MAX)] {
         assert_eq!(
-            store.events_page(thread, None, 50).expect("missing"),
+            store
+                .pages()
+                .events_page(thread, None, 50)
+                .expect("missing"),
             (vec![], None)
         );
     }
@@ -145,20 +150,25 @@ fn phrase_search_pages_follow_rank_and_deduplicate_threads() {
     store
         .end_run(ThreadId(1), RunId(4), &[], RunEnd::Done)
         .expect("end");
-    let (rows, next) = store.search_page("RED fox", 1).expect("best");
+    let (rows, next) = store.pages().search_page("RED fox", 1).expect("best");
     assert_eq!(ids(&rows), vec![1]);
     let (rows, next) = store
+        .pages()
         .search_page_after("RED fox", next, 1)
         .expect("tie first");
     assert_eq!(ids(&rows), vec![3]);
     let (rows, next) = store
+        .pages()
         .search_page_after("RED fox", next, 1)
         .expect("tie second");
     assert_eq!(ids(&rows), vec![2]);
     assert_eq!(next, None);
     for words in ["fox red", "", "\0", "red\0fox", r#"" OR * NEAR("#] {
         assert_eq!(
-            store.search_page(words, 50).expect("literal phrase"),
+            store
+                .pages()
+                .search_page(words, 50)
+                .expect("literal phrase"),
             (vec![], None)
         );
     }
@@ -172,12 +182,13 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
     let weak = format!("red fox {}", "filler ".repeat(100));
     add(&mut store, "weak", &weak);
     add(&mut store, "weak tie", &weak);
-    let (rows, next) = store.search_page("red fox", 2).expect("first");
+    let (rows, next) = store.pages().search_page("red fox", 2).expect("first");
     assert_eq!(ids(&rows), vec![1, 3]);
     store
         .begin_delete(ThreadId(3))
         .expect("hide the cursor's thread");
     let (rows, next) = store
+        .pages()
         .search_page_after("red fox", next, 2)
         .expect("continued");
     assert_eq!(ids(&rows), vec![2]);
@@ -196,7 +207,10 @@ fn a_search_continues_after_its_cursor_thread_is_deleted_and_refuses_a_non_finit
                 rank_bits: rank.to_bits(),
             }),
         };
-        assert!(matches!(store.read_page(1, page), Err(StoreError::Read)));
+        assert!(matches!(
+            store.pages().read_page(1, page),
+            Err(StoreError::Read)
+        ));
     }
 }
 
@@ -211,7 +225,7 @@ fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
     store
         .begin_turn(thread, Some("active"), run, "needle")
         .expect("an active run");
-    let (rows, next) = store.search_page("needle", 50).expect("first");
+    let (rows, next) = store.pages().search_page("needle", 50).expect("first");
     assert_eq!(ids(&rows), (6..=55).rev().collect::<Vec<_>>());
     let other = "other ".repeat(57);
     let answer = NewEvent {
@@ -221,6 +235,7 @@ fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
     };
     store.append(thread, run, &[answer]).expect("an answer");
     let (rows, next) = store
+        .pages()
         .search_page_after("needle", next, 50)
         .expect("continued");
     assert_eq!(ids(&rows), vec![5, 4, 3, 2, 1]);
@@ -253,7 +268,7 @@ fn newest_events_continue_exactly_before_the_last_returned_id_and_skip_revealed_
             )
             .expect("event");
     }
-    let (rows, before) = store.events_page(thread, None, 2).expect("newest");
+    let (rows, before) = store.pages().events_page(thread, None, 2).expect("newest");
     assert_eq!(
         rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
         vec![4, 3]
@@ -263,7 +278,7 @@ fn newest_events_continue_exactly_before_the_last_returned_id_and_skip_revealed_
     assert_eq!(rows[0].text, "");
     assert_eq!(rows[0].run, Some(RunId(2)));
     assert_eq!(before, Some(EventId(3)));
-    let (rows, before) = store.events_page(thread, before, 2).expect("older");
+    let (rows, before) = store.pages().events_page(thread, before, 2).expect("older");
     assert_eq!(
         rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
         vec![2, 1]
@@ -457,7 +472,7 @@ fn page_reads_release_the_snapshot_before_a_passive_checkpoint() {
             before: None,
         },
     ] {
-        store.read_page(1, page).expect("read");
+        store.pages().read_page(1, page).expect("read");
         add(&mut store, "after the read", "more");
         let (busy, frames, copied): (i64, i64, i64) = helper
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
@@ -491,7 +506,8 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
             .expect("statement");
         let mut rows = query.query([]).expect("query");
         assert!(rows.next().expect("step").is_some());
-        assert!(purge::drain(&scratch.db(), &stop).expect("drain"));
+        let side = store.side();
+        assert!(purge::drain(&side, side.hold_helper(), &stop).expect("drain"));
         let helper = rusqlite::Connection::open(scratch.db()).expect("helper");
         let (frames, copied): (i64, i64) = helper
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
@@ -513,7 +529,11 @@ fn a_stepped_serving_statement_still_allows_a_full_drain_and_purge() {
     assert!(!store.purge_pending());
     assert!(!store.leftovers().exist());
     assert_eq!(
-        ids(&store.thread_page(None, 50).expect("live survives").0),
+        ids(&store
+            .pages()
+            .thread_page(None, 50)
+            .expect("live survives")
+            .0),
         vec![live.0]
     );
 }
@@ -532,6 +552,7 @@ fn page_failures_never_expose_sqlite_content() {
         .execute("UPDATE events SET kind = 'private content'", [])
         .expect("bad kind");
     let error = store
+        .pages()
         .read_page(
             1,
             PageOf::Events {
@@ -547,8 +568,9 @@ fn page_failures_never_expose_sqlite_content() {
         .execute_batch("ALTER TABLE threads RENAME TO unavailable;")
         .expect("test failure");
     for error in [
-        store.thread_page(None, 50).expect_err("list fails"),
+        store.pages().thread_page(None, 50).expect_err("list fails"),
         store
+            .pages()
             .search_page("private search", 50)
             .expect_err("search fails"),
     ] {
