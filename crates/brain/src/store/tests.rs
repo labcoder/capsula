@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use capsula_protocol::message::{RunId, ThreadId};
+use capsula_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::Connection;
 
 use crate::test_support::Scratch;
@@ -1758,4 +1758,88 @@ fn measure_purge() {
         }
         eprintln!("{name} after the purges: {}", alone(&mut store));
     }
+}
+
+#[test]
+fn a_delete_reports_how_far_it_got_and_the_threads_newest_run() {
+    let scratch = Scratch::new("delete-outcomes");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, first) = turn(&mut store, Err("t"), "x");
+    store
+        .end_run(thread, first, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, newest) = turn(&mut store, Ok(thread), "y");
+    let (other, other_run) = turn(&mut store, Err("u"), "z");
+    assert!(other_run > newest);
+    let done = store.delete(thread);
+    assert_eq!(
+        (done.outcome, done.last_run),
+        (Deleted::Removed, Some(newest))
+    );
+    assert!(done.error.is_none());
+    let again = store.delete(thread);
+    assert_eq!(
+        (again.outcome, again.last_run),
+        (Deleted::Removed, None),
+        "already gone"
+    );
+
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER keep_threads BEFORE DELETE ON threads BEGIN
+                 SELECT RAISE(ABORT, 'kept');
+             END;",
+        )
+        .expect("trap");
+    let hidden = store.delete(other);
+    assert_eq!(
+        (hidden.outcome, hidden.last_run),
+        (Deleted::Hidden, Some(other_run))
+    );
+    assert!(hidden.error.is_some());
+    assert!(
+        store
+            .thread_page(None, 50)
+            .map(|(rows, _)| rows)
+            .expect("threads")
+            .is_empty(),
+        "hidden"
+    );
+    store
+        .conn
+        .execute_batch("DROP TRIGGER keep_threads;")
+        .expect("untrapped");
+    let finished = store.delete(other);
+    assert_eq!(
+        (finished.outcome, finished.last_run),
+        (Deleted::Removed, Some(other_run)),
+        "a hidden thread is removed"
+    );
+}
+
+#[test]
+fn a_delete_that_cant_hide_the_thread_leaves_it_live() {
+    let scratch = Scratch::new("delete-not-hidden");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, _) = turn(&mut store, Err("t"), "x");
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER no_hide BEFORE UPDATE OF state ON threads BEGIN
+                 SELECT RAISE(ABORT, 'kept');
+             END;",
+        )
+        .expect("trap");
+    let deletion = store.delete(thread);
+    assert_eq!(
+        (deletion.outcome, deletion.last_run),
+        (Deleted::NotHidden, None)
+    );
+    assert!(deletion.error.is_some());
+    let threads = store
+        .thread_page(None, 50)
+        .map(|(rows, _)| rows)
+        .expect("threads");
+    assert_eq!(threads.len(), 1, "still live");
 }

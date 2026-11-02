@@ -298,3 +298,27 @@ fn the_answer_retires_the_threads_scenes_and_tells_the_data_pipe() {
         "answered once"
     );
 }
+
+#[test]
+fn only_an_answer_that_crossed_connections_is_kept_and_none_outlives_the_next() {
+    let mut core = fresh();
+    core.handle(delete(T, 0)).expect("accepted");
+    core.handle(answer(T, Deleted::Removed, None))
+        .expect("answered");
+    assert!(core.crossed.is_empty(), "this connection's own answer");
+    core.handle(delete(U, 0)).expect("accepted");
+    for _ in 0..3 {
+        core.begin_session();
+    }
+    assert_eq!(
+        core.deleting.len(),
+        1,
+        "an accepted delete outlives connections"
+    );
+    core.handle(answer(U, Deleted::Removed, None))
+        .expect("answered");
+    assert_eq!(core.crossed, [U]);
+    core.begin_session();
+    assert!(core.crossed.is_empty());
+    assert!(!core.deletes_pending());
+}
