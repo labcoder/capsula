@@ -649,3 +649,47 @@ async fn a_reconnect_restores_whole_scenes_in_chunks_while_a_stop_and_a_clear_ar
     brain.close().await;
     assert_eq!(recovered(&scratch), [b]);
 }
+
+/// Rez measurement for the pull request, not a check: from a connection to four full scenes
+/// installed. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_scene_recovery`.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "a measurement, run by hand on Rez"]
+async fn measure_scene_recovery() {
+    use capsula_protocol::message::{MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES};
+    let label = "x".repeat(MAX_STEP_LABEL);
+    let labels = vec![label.as_str(); MAX_STEPS];
+    let mut samples = Vec::new();
+    for round in 0..30 {
+        let scratch = Scratch::new("measure-scenes");
+        drawn(&scratch, &[&labels[..]; MAX_VISIBLE_SCENES]);
+        let mut brain = test_support::brain(&scratch, "");
+        let ((control, data), mut shell) = pipes(&format!("measure-scenes-{round}")).await;
+        let mut tap = Tap::from_env();
+        let client = async {
+            let started = tokio::time::Instant::now();
+            assert_eq!(shell.scenes().await.len(), MAX_VISIBLE_SCENES);
+            let mut installed = 0;
+            while installed < MAX_VISIBLE_SCENES {
+                let DataToShell::SceneSnapshot { chunk, last, .. } = shell.data().await else {
+                    panic!("snapshots only");
+                };
+                shell.credit(chunk.len() * (MAX_STEP_LABEL + 2) + 64).await;
+                installed += usize::from(last);
+            }
+            samples.push(started.elapsed());
+            drop(shell);
+        };
+        let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        brain.close().await;
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "connect -> four full scenes installed: p50 {:?} p95 {:?} max {:?} (n={})",
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100],
+        samples[samples.len() - 1],
+        samples.len()
+    );
+}

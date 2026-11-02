@@ -694,3 +694,48 @@ async fn measure_stop_under_a_saturated_writer_and_throughput() {
         &mut streams,
     );
 }
+
+/// Rez measurement for the pull request, not a check: the first step's latency from the turn, and
+/// the second's after it. Run it with
+/// `cargo test --release -p capsula-brain -- --ignored --nocapture measure_first_step`.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "a measurement, run by hand on Rez"]
+async fn measure_first_step_latency() {
+    let mut firsts = Vec::new();
+    let mut seconds = Vec::new();
+    for round in 0..30 {
+        let scratch = Scratch::new("measure-step");
+        let mut brain = test_support::brain(&scratch, "0 step first\n0 step second");
+        let ((control, data), mut shell) = pipes(&format!("measure-step-{round}")).await;
+        let mut tap = Tap::from_env();
+        let client = async {
+            let sent = tokio::time::Instant::now();
+            shell.submit("draw").await;
+            let mut steps = Vec::new();
+            while steps.len() < 2 {
+                if let DataToShell::StepCommit { .. } = shell.data().await {
+                    steps.push(sent.elapsed());
+                }
+            }
+            firsts.push(steps[0]);
+            seconds.push(steps[1].saturating_sub(steps[0]));
+            drop(shell);
+        };
+        let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        brain.close().await;
+    }
+    for (name, samples) in [
+        ("turn -> first StepCommit", &mut firsts),
+        ("first -> second StepCommit", &mut seconds),
+    ] {
+        samples.sort_unstable();
+        eprintln!(
+            "{name}: p50 {:?} p95 {:?} max {:?} (n={})",
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+            samples[samples.len() - 1],
+            samples.len()
+        );
+    }
+}
