@@ -558,7 +558,7 @@ fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
     let scratch = Scratch::new("ending");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = turn(&mut store, Err("t"), "hi");
-    let (other, _) = turn(&mut store, Err("u"), "hey");
+    let (other, other_run) = turn(&mut store, Err("u"), "hey");
     let tail = [NewEvent {
         kind: EventKind::AssistantText,
         text: Some("tail"),
@@ -587,13 +587,55 @@ fn an_ending_stores_its_events_and_outcome_together_or_not_at_all() {
         0,
         "the touch rolled back with the rest"
     );
+    // A failure after the tail is inserted takes the tail back with it.
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_outcome BEFORE UPDATE ON runs BEGIN
+                 SELECT RAISE(ABORT, 'refused');
+             END;",
+        )
+        .expect("trigger");
+    assert!(matches!(
+        store.end_run(thread, run, &tail, RunEnd::Done),
+        Err(StoreError::Sql(_))
+    ));
+    assert_eq!(rows(&store.conn, "events"), 2, "only the two turns");
+    assert_eq!(run_row(&store, run), ("active".to_owned(), None));
+    store
+        .conn
+        .execute_batch("DROP TRIGGER refuse_outcome")
+        .expect("drop");
+    store
+        .end_run(other, other_run, &tail, RunEnd::Done)
+        .expect("a live thread's ending");
+    assert_eq!(run_row(&store, other_run), ("done".to_owned(), None));
+    let stored: Vec<(i64, Option<String>)> = store
+        .conn
+        .prepare("SELECT run, text FROM events WHERE kind != 'user' ORDER BY id")
+        .expect("query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    assert_eq!(
+        stored,
+        [(
+            super::sql_id(other_run.0, StoreError::NoRun).expect("id"),
+            Some("tail".to_owned())
+        )]
+    );
     store.begin_delete(thread).expect("begin");
     assert!(matches!(
         store.end_run(thread, run, &tail, RunEnd::Done),
         Err(StoreError::NoThread)
     ));
     assert_eq!(run_row(&store, run), ("active".to_owned(), None));
-    assert_eq!(rows(&store.conn, "events"), 2, "only the two turns");
+    assert_eq!(
+        rows(&store.conn, "events"),
+        3,
+        "the two turns and the other's tail"
+    );
     store
         .end_run(thread, run, &[], RunEnd::Failed(Failure::Store))
         .expect("an outcome alone needs no live thread");

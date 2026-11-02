@@ -462,8 +462,17 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     .expect("turn");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("ending"),
-        vec![state(R, T, Phase::Failed), failed_store()],
-        "the old run's step failed while its replacement is current"
+        vec![
+            state(R, T, Phase::Failed),
+            failed_store(),
+            Effect::Store(StoreOp::BeginTurn {
+                thread: T,
+                title: None,
+                run: RunId(11),
+                text: "again".to_owned(),
+            }),
+        ],
+        "the old run's step failed while its replacement waits"
     );
     assert_eq!(
         core.handle(Input::TurnStored { run: RunId(11) })
@@ -677,4 +686,120 @@ fn the_engine_is_heard_only_once_its_turn_is_stored() {
     })
     .expect("turn");
     assert_eq!(core.handle(engine(R, EngineEvent::Done)), Err(Stale));
+}
+
+#[test]
+fn a_deadline_after_done_leaves_the_finished_run_alone() {
+    let mut core = started();
+    core.handle(engine(R, EngineEvent::Step(step("last"))))
+        .expect("current");
+    core.handle(engine(R, EngineEvent::Text("tail".to_owned())))
+        .expect("current");
+    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Err(Stale),
+        "the engine finished within its budget"
+    );
+    assert_eq!(
+        core.handle(ack(0, "last")).expect("current"),
+        vec![
+            committed(0, "last"),
+            text("tail"),
+            end_run(Some("tail"), None, RunEnd::Done)
+        ]
+    );
+    assert_eq!(
+        core.handle(Input::RunStored { run: R }).expect("ending"),
+        vec![state(R, T, Phase::Done)]
+    );
+}
+
+#[test]
+fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
+    let (b, c) = (RunId(11), RunId(12));
+    let turn = |run: RunId, text: &str| {
+        Effect::Store(StoreOp::BeginTurn {
+            thread: T,
+            title: None,
+            run,
+            text: text.to_owned(),
+        })
+    };
+    let mut core = started();
+    core.handle(engine(R, EngineEvent::Step(step("one"))))
+        .expect("current");
+    core.handle(engine(R, EngineEvent::Text("tail".to_owned())))
+        .expect("current");
+    assert_eq!(
+        core.handle(Input::Turn {
+            thread: Some(T),
+            text: "b".to_owned(),
+        })
+        .expect("turn"),
+        vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Interrupted),
+            state(b, T, Phase::Thinking),
+            Effect::ArmDeadline {
+                run: b,
+                after: WALL_CLOCK
+            },
+        ],
+        "run 10's step is still in the store, so run 11's turn waits"
+    );
+    assert_eq!(
+        core.handle(Input::Stop {
+            run: b,
+            revealed: Vec::new(),
+        })
+        .expect("current"),
+        vec![state(b, T, Phase::Interrupted)]
+    );
+    assert_eq!(core.handle(Input::TurnStored { run: b }), Err(Stale));
+    assert_eq!(
+        core.handle(Input::Turn {
+            thread: Some(T),
+            text: "c".to_owned(),
+        })
+        .expect("turn"),
+        vec![
+            state(c, T, Phase::Thinking),
+            Effect::ArmDeadline {
+                run: c,
+                after: WALL_CLOCK
+            },
+        ]
+    );
+    assert_eq!(
+        core.handle(ack(0, "one")).expect("ending"),
+        vec![
+            end_run(
+                Some("tail"),
+                None,
+                RunEnd::Interrupted(Interruption::Replaced)
+            ),
+            turn(b, "b"),
+        ]
+    );
+    assert_eq!(
+        core.handle(Input::TurnStored { run: b }).expect("ending"),
+        vec![
+            Effect::Store(StoreOp::EndRun {
+                thread: T,
+                run: b,
+                text: None,
+                revealed: Some(Vec::new()),
+                end: RunEnd::Interrupted(Interruption::Stop),
+            }),
+            turn(c, "c"),
+        ]
+    );
+    assert_eq!(
+        core.handle(Input::TurnStored { run: c }).expect("current"),
+        vec![Effect::StartEngine {
+            run: c,
+            text: "c".to_owned(),
+        }]
+    );
 }
