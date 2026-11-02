@@ -90,10 +90,13 @@ guards one call's begin/step/end order; a new call gets a fresh guard and must
 repeat the stored header with typed equality. Ending a call does not end its scene.
 
 `admit` resolves references against earlier surviving objects plus every object
-declared in the same step, independent of put order. It rejects cycles, missing
+declared in the same step, independent of put order. `start.after` must name an
+earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
 or wrongly typed parents/endpoints, properties the target does not own, invalid
-track values/times, and removals that orphan a surviving dependant. Mermaid
-expansion remains unsupported until its layout layer lands.
+track values/times, and removals that orphan a surviving dependant. Only `draw`
+has kind-specific track ownership checks so far; the motion layer defines the
+remaining property rules. Mermaid expansion must run before admission; it remains
+unsupported until A8.
 
 Ids, including dropped or removed ids, stay reserved for the scene's lifetime.
 An identical typed step id is a no-op even after its step was dropped; a conflicting
@@ -112,13 +115,25 @@ Neither Stop nor append renumbers old handles. The returned commit index is
 zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
 and slots beyond the 856-operation bound.
 
+The ignored `measure_whole_scene_removal_admit` test measures the complete
+admission call for 600 existing text objects and 600 removals, including the
+metadata-map clone and semantic checks. It uses five warm-ups and 128 samples;
+fixture construction and candidate destruction are outside the timed interval.
+Build `--release --test state_followups --no-run` below normal priority, acquire
+the shared measurement lock and wait for 30 seconds without cargo/rustc, then run
+that executable with `--exact measure_whole_scene_removal_admit --ignored
+--nocapture --test-threads=1` at normal priority. Results belong in the PR/report,
+not this page. This is an admission measurement, not a frame or end-to-end latency.
+
 ## Stop and recovery
 
 `StopCut.activated` is the revision activated **through**, not a count of kept
 steps. Zero returns `Cleared` without resetting revision. Stop first undoes all
 unactivated steps' removals, then drops their objects and retains exactly the
 revealed handles in the activated prefix. A retained object whose dependency was
-discarded becomes detached: preparation retains its already placed geometry.
+discarded becomes detached. This can leave a node, row or series without its parent,
+or an edge without an endpoint. Its live placed geometry stays frozen; A5 must
+prepare incrementally through the log so recovery obtains that pre-cut placement.
 Dropped steps keep their ids and original revisions; their future sets/removals
 are no longer replayed as active work.
 
@@ -140,8 +155,16 @@ can be used with expanded-work limits.
 
 At runtime the shell retires removals at activation; the brain calls `retire`
 only on StepShown or retires the kept prefix on Stop. Repeated retirement is a
-no-op. A failed step is not retired until clear. `clear` is terminal and idempotent;
-its separate host clear event removes the scene from the visible recovery set.
+no-op. Preparation failure stops the scene with the same cut: it keeps activated
+objects, drops the failed step and every queued successor, and restores their
+removals. A first-step failure cuts at zero and clears. The host accepts no further
+steps for that scene in the current call, persists the cut, and activates no later
+queued segment. A later call can continue the kept scene after that cut. This needs
+no separate failed-step event and leaves the 64-step/64-cut bound unchanged.
+
+An already-cut scene is left alone on a later Esc; a user clear goes through
+`clear`, not a second effective cut. `clear` is terminal and idempotent; its
+separate host clear event removes the scene from the visible recovery set.
 Prepared display residency is not an admission input.
 
 ## Caps

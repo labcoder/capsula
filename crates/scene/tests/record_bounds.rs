@@ -6,6 +6,16 @@ use capsula_scene::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[test]
+fn programmatically_built_lists_reject_excess_values() {
+    let at_cap = capsula_scene::text::Bounded::<u8, 2>::new(vec![1, 2]).expect("exact cap");
+    assert_eq!(&*at_cap, &[1, 2]);
+    assert_eq!(
+        capsula_scene::text::Bounded::<u8, 2>::new(vec![1, 2, 3]).err(),
+        Some(ErrorCode::TooLong)
+    );
+}
+
 fn parse(value: &Value) -> Result<Record, StepError> {
     parse_record(&serde_json::to_vec(value).expect("test fixture encodes"))
 }

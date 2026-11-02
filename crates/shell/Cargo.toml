@@ -42,5 +42,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+capsula-brain = { path = "../brain" }
+
 [lints]
 workspace = true

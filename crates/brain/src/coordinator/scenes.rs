@@ -2,10 +2,17 @@
 //! not yet durable. Every way a scene leaves the set writes a `scene_cleared`, so the store's
 //! recovery at start reads the set this holds.
 
+use std::time::Duration;
+
 use capsula_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
 use super::{Coordinator, Effect, Stale, StoreOp};
-use crate::store::{Interruption, RunEnd, SceneState};
+use crate::store::SceneState;
+
+/// The first wait before owed writes that failed are tried again [guess].
+pub(super) const FIRST_RETRY: Duration = Duration::from_millis(500);
+/// The longest, so a store that keeps failing is tried rarely instead of constantly [guess].
+const LAST_RETRY: Duration = Duration::from_secs(30);
 
 impl Coordinator {
     /// The visible set, oldest first.
@@ -25,11 +32,58 @@ impl Coordinator {
             || self.keeping.iter().any(|(_, _, writing)| *writing)
     }
 
-    /// Writes again every clear whose write failed.
+    /// Writes again every clear whose write failed. A timer armed before is forgotten: the
+    /// connection that would have heard it is gone.
     pub fn retry_clears(&mut self) -> Vec<Effect> {
+        self.retry_armed = None;
         let mut effects = Vec::new();
         self.retry(&mut effects);
+        self.arm_retry(&mut effects);
         effects
+    }
+
+    /// How many scenes have a clear or a kept selection owed. A scene whose late Stop's
+    /// selection is still being written can be cleared too; it counts once.
+    pub fn debt(&self) -> usize {
+        let kept_only = self
+            .keeping
+            .iter()
+            .filter(|(scene, _, _)| !self.clearing.iter().any(|(cleared, _)| cleared == scene));
+        self.clearing.len() + kept_only.count()
+    }
+
+    /// The retry timer fired: owed writes go out again, and if they fail the next wait is
+    /// longer.
+    pub(super) fn retry_now(&mut self, effects: &mut Vec<Effect>) {
+        self.retry_armed = None;
+        self.retry_after = (self.retry_after * 2).min(LAST_RETRY);
+        self.retry(effects);
+    }
+
+    /// Keeps the retry timer armed exactly while an owed write has none in flight, so a failure
+    /// is tried again even when nothing else reaches the store, such as while turns wait on the
+    /// debt. A deadline longer than the current wait, armed before a commit reset it, is replaced.
+    pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
+        if self.clearing.is_empty() && self.keeping.is_empty() {
+            self.retry_after = FIRST_RETRY;
+        }
+        let unwritten = self.clearing.iter().any(|(_, writing)| !writing)
+            || self.keeping.iter().any(|(_, _, writing)| !writing);
+        if !unwritten {
+            if self.retry_armed.take().is_some() {
+                effects.push(Effect::CancelRetry);
+            }
+            return;
+        }
+        if self
+            .retry_armed
+            .is_none_or(|armed| armed > self.retry_after)
+        {
+            self.retry_armed = Some(self.retry_after);
+            effects.push(Effect::ArmRetry {
+                after: self.retry_after,
+            });
+        }
     }
 
     /// The scene a run's first step evicts: the oldest, when four are visible. Only one first
@@ -79,6 +133,10 @@ impl Coordinator {
     /// and wait in `clearing` until their write commits. An id that isn't visible, because it's
     /// unknown, already durable or already clearing, changes nothing.
     pub(super) fn clear(&mut self, scenes: &[SceneId], effects: &mut Vec<Effect>) {
+        if !scenes.is_empty() {
+            let scenes = scenes.to_vec();
+            effects.push(Effect::RevokeScenes { scenes });
+        }
         let mut cleared = Vec::new();
         for scene in scenes {
             if let Some(at) = self.scenes.iter().position(|state| state.scene == *scene) {
@@ -95,6 +153,7 @@ impl Coordinator {
     /// A clear's write committed: those scenes' clears are durable.
     pub(super) fn cleared(&mut self, scenes: &[SceneId]) {
         self.clearing.retain(|(scene, _)| !scenes.contains(scene));
+        self.retry_after = FIRST_RETRY;
     }
 
     /// A clear's write failed: those scenes wait for a retry.
@@ -106,10 +165,15 @@ impl Coordinator {
         }
     }
 
+    /// A new connection is served: only runs it starts from here are its own to stop.
+    pub fn begin_session(&mut self) {
+        self.session_start = RunId(self.last_run.0 + 1);
+    }
+
     /// A Stop for a run that already ended, which the shell could still stop while it drew the
     /// run's last steps. Its scene keeps what stayed, as a current run's Stop would: with its
     /// outcome when its writes are still pending, else in a write of its own. A run already
-    /// stopped is stale.
+    /// stopped, or one an earlier connection started, is stale.
     pub(super) fn late_stop(
         &mut self,
         run: RunId,
@@ -119,9 +183,7 @@ impl Coordinator {
         if let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) {
             let (outstanding, steps) = (ended.outstanding(), ended.steps);
             let ending = ended.ending.as_mut().expect("an ending run has an Ending");
-            // Only the shell that went away drew this run, so a later shell's Stop can't trim it.
-            let lost = ending.outcome == RunEnd::Interrupted(Interruption::ShellLost);
-            if lost || ending.revealed.is_some() {
+            if ending.revealed.is_some() {
                 return Err(Stale);
             }
             if outstanding {
@@ -160,6 +222,7 @@ impl Coordinator {
     /// A kept selection's write committed.
     pub(super) fn kept(&mut self, scene: SceneId) {
         self.keeping.retain(|(kept, _, _)| *kept != scene);
+        self.retry_after = FIRST_RETRY;
     }
 
     /// A kept selection's write failed: it waits for a retry.
