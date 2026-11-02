@@ -4,8 +4,8 @@
 //! dismiss the topmost local panel. Esc is held system-wide only while Capsula speaks or
 //! shows a drawing, so an app in front keeps it otherwise.
 
-/// What the shell knows is moving or on screen. Slice 1 has no runs, speech or drawings, so
-/// every field stays false until slices 2 and 7 report them.
+/// What the shell knows is moving or on screen. Speech arrives in slice 7, so `speaking` stays
+/// false until then.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Activity {
     /// A run streams, speaks or acts.

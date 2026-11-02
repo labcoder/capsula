@@ -1,9 +1,8 @@
 # Keyboard input and Esc
 
 The shell recognizes one shortcut, left Ctrl plus left Alt, with Raw Input and no low-level
-keyboard hook. It also decides locally what Esc does. Slice 1 has no microphone, screen capture,
-runs or brain commands for either. Voice arrives in slice 7, capture in slice 6, and the run and
-Stop protocol in slice 2.
+keyboard hook. It also decides locally what Esc does, before the brain hears of it. Voice arrives
+in slice 7 and screen capture in slice 6.
 
 ## From key to Listening
 
@@ -123,14 +122,22 @@ Rejected alternatives:
 ## Esc
 
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second,
-otherwise dismiss the topmost local panel, which in slice 1 is the typing panel. The local
-effect always happens before any brain message. Slice 2 sends `Stop` and slice 4 sends
-`ClearDrawing` after it.
+otherwise dismiss the topmost local panel, the typing panel. The local effect always happens
+first, and nothing waits on the brain:
+
+- **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
+  on the control pipe. The fence is checked when a message is applied, so the run's frames
+  already queued in the shell are dropped too.
+- **Clear**, the next Esc, removes the run's steps, keeps its text, keeps its late steps out, and
+  queues `ClearDrawing`. The brain ignores it until slice 4 draws.
+- With no brain connected, or a control queue the brain isn't reading, the local effect still
+  happens and the unsent message is logged, without content.
 
 Esc is held system-wide with `RegisterHotKey` only while Capsula speaks or shows a drawing.
-Listening and an open status panel never hold it. Slice 1 has neither speech nor drawings, so
-global Esc stays unregistered. If registration is refused, the status panel shows Stop instead,
-and the refusal is logged without key or text content. An ignored fixture,
+Listening and an open status panel never hold it. Until slice 4 draws on the overlay, the
+placeholder steps count as a drawing only while the typing panel shows them, and there's no
+speech yet, so Esc is held only then. If registration is refused, the status panel shows Stop
+instead, and the refusal is logged without key or text content. An ignored fixture,
 `cargo test -p capsula-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.

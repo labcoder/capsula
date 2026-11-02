@@ -90,6 +90,30 @@ flowchart LR
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
 
+## The shell's side
+
+`crates/shell/src/link.rs` connects and reads control on the link thread, because pipe reads
+block. Once connected, each pipe gets a writer thread and data gets a reader thread. The UI
+thread sends on bounded channels and never waits: with no connection or a full channel the send
+fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as
+unsent after its local effect already happened.
+
+| Channel | Bound | When it's full |
+|---|---|---|
+| Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong` and `Quitting` |
+| Data out | 64 turns plus 8 for credit | Not reached: the shell refuses a turn first, below |
+| Brain to UI | unbounded, one channel in arrival order | The link thread never waits on the UI |
+
+- **Credit** for a data frame is granted once the UI thread has taken it, applied or dropped by
+  the fence, so a UI that stops taking frames stops the brain within its window. Grants add up
+  in a counter the data writer sends after each wake-up, so credit never queues behind turns.
+- **Turns.** The shell keeps at most 64 turns unanswered, the brain's own cap, counting each new
+  run's `RunState` as an answer, so it never sends the turn that would end the connection. It
+  refuses blank turns, which the brain ignores, and turns too long for a data frame.
+- **Broken input.** A malformed frame on either pipe, or a repeated `Welcome`, ends the
+  connection, and the link reconnects as after any loss. A lost brain fences every run it knew
+  and forgets the unanswered turns.
+
 ## Starting and reconnecting
 
 A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `capsulad.exe`
