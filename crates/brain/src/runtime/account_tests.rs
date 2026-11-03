@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
-use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{AccountOp, AccountView, ControlToBrain, ControlToShell, ErrorKey};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -24,7 +23,6 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::Account;
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
-use crate::ipc;
 use crate::platform::SessionLock;
 use crate::runtime::account::{Accounts, Net, exchange_task};
 use crate::tap::Tap;
@@ -37,8 +35,7 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
     /// The next control frame, whatever it is.
     async fn frame(&mut self) -> ControlToShell {
-        let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
-        timeout(PATIENCE, next)
+        timeout(PATIENCE, self.next_control())
             .await
             .expect("in time")
             .expect("readable")

@@ -7,7 +7,8 @@ use crate::{
     ErrorCode, Handle, Op,
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
-    record::{Align, Direction, Node, NodeShape},
+    mermaid::Extra,
+    record::{Align, Direction, Head, Node, NodeShape},
     state::object,
 };
 use std::{
@@ -400,12 +401,34 @@ pub(super) fn place(
             let contents = cluster
                 .then(|| compound::contents(members.iter().filter_map(|id| state.objects.get(id))))
                 .flatten();
+            let style = TextStyle {
+                size: build.theme.font_size,
+                bold: true,
+            };
+            let title = match parent.and_then(|group| state.extra(group)) {
+                Some(Extra::Group {
+                    title: Some(title), ..
+                }) if cluster => Some((title.clone(), build.measure(title, style, Some(180.0))?)),
+                _ => None,
+            };
             let group = state
                 .objects
                 .get_mut(&group_id)
                 .expect("group was resolved above");
             group.initialized |= focus.is_some();
-            if let Some(contents) = contents {
+            if let Some((text, size)) = title {
+                let (bounds, origin) = compound::banded(contents.unwrap_or_default(), size);
+                group.item.bounds = bounds;
+                group.item.primitives = Arc::from([Prim::Text {
+                    origin,
+                    text,
+                    style,
+                    color: build.theme.fg.into(),
+                    max_width: Some(180.0),
+                    align: Align::Center,
+                }]);
+                group.title = Some(size);
+            } else if let Some(contents) = contents {
                 group.item.bounds = contents;
             }
             // shortcut: a cluster growing on a later step never glides or moves, so it can overlap
@@ -444,7 +467,7 @@ fn free_slot(
     parent: Option<Handle>,
     rank: usize,
     size: Vec2,
-    dir: Direction,
+    (dir, reverse): (Direction, bool),
     viewport: Rect,
     fallback: Vec2,
 ) -> Result<Rect, PrepareError> {
@@ -463,6 +486,15 @@ fn free_slot(
         }
     };
     same_rank.sort_by(|a, b| across(a.origin).total_cmp(&across(b.origin)));
+    let lengthwise = |point: Vec2| {
+        if dir == Direction::Right {
+            point.x
+        } else {
+            point.y
+        }
+    };
+    // A reversed flow grows toward lower coordinates, so its earlier ranks end at their origins.
+    let sign = if reverse { -1.0 } else { 1.0 };
     let prior = state
         .objects
         .values()
@@ -471,35 +503,15 @@ fn free_slot(
         })
         .map(|object| {
             let rect = compound::member_rect(object);
-            if dir == Direction::Right {
-                rect.max().x
-            } else {
-                rect.max().y
-            }
+            sign * lengthwise(if reverse { rect.origin } else { rect.max() })
         })
         .max_by(f32::total_cmp);
-    let fallback = prior.map_or(
-        if dir == Direction::Right {
-            fallback.x
-        } else {
-            fallback.y
-        },
-        |edge| {
-            edge + diagram::RANK_GAP
-                + if dir == Direction::Right {
-                    size.x * 0.5
-                } else {
-                    size.y * 0.5
-                }
-        },
-    );
-    let along = same_rank.first().map_or(fallback, |rect| {
-        if dir == Direction::Right {
-            rect.center().x
-        } else {
-            rect.center().y
-        }
+    let fallback = prior.map_or(lengthwise(fallback), |edge| {
+        sign * (edge + diagram::RANK_GAP + lengthwise(size) * 0.5)
     });
+    let along = same_rank
+        .first()
+        .map_or(fallback, |rect| lengthwise(rect.center()));
     let across_size = if dir == Direction::Right {
         size.y
     } else {
@@ -716,22 +728,34 @@ pub(super) fn edge(
         let t = f32::from(n) / f32::from(pieces);
         points.push(a * (1.0 - t).powi(2) + control * (2.0 * (1.0 - t) * t) + b * t.powi(2));
     }
-    let head = arrow_head(points[usize::from(pieces) - 1], points[usize::from(pieces)]);
-    let mut bounds = point_bounds(&points)?.union(point_bounds(&head)?);
+    let (head, thick) = match state.extra(handle) {
+        Some(Extra::Link { head, thick }) => (*head, *thick),
+        _ => (Head::End, false),
+    };
+    let last = usize::from(pieces);
+    let mut heads = Vec::new();
+    if matches!(head, Head::End | Head::Both) {
+        heads.push(arrow_head(points[last - 1], points[last]));
+    }
+    if matches!(head, Head::Start | Head::Both) {
+        heads.push(arrow_head(points[1], points[0]));
+    }
+    let mut bounds = point_bounds(&points)?;
+    for head in &heads {
+        bounds = bounds.union(point_bounds(head)?);
+    }
     let color = build.color(edge.color.as_ref());
-    let mut primitives = vec![
-        Prim::Line {
-            points: points.into(),
-            closed: false,
-            color,
-            width: 2.0,
-            dashed: edge.dash,
-        },
-        Prim::Fill {
-            points: head.into(),
-            color,
-        },
-    ];
+    let mut primitives = vec![Prim::Line {
+        points: points.into(),
+        closed: false,
+        color,
+        width: if thick { 3.5 } else { 2.0 },
+        dashed: edge.dash,
+    }];
+    primitives.extend(heads.into_iter().map(|head| Prim::Fill {
+        points: head.into(),
+        color,
+    }));
     if let Some(label) = &edge.label {
         let style = TextStyle {
             size: build.theme.font_size - 1.0,

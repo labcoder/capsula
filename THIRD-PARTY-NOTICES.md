@@ -46,6 +46,13 @@ from `subgraph.spec.js:78` (the numeric-leading group id) and
 `flow-style.spec.js:181` (a class applied directly to a vertex). These are
 regression strings embedded in the Rust tests, not vendored upstream suites.
 
+`crates/scene/tests/mermaid.rs` reuses those inputs in
+`unsupported_odd_shapes_after_a_trailing_hyphen_are_not_bad_arrows`,
+`bare_membership_mentions_do_not_redeclare_a_shaped_node`,
+`style_inside_an_unquoted_group_title_is_plain_text`, and
+`a_class_suffix_after_a_shape_is_a_typed_refusal`. The five gate `.mmd` files
+and `refused.json` are project-authored.
+
 No upstream fixture directory or fixture inventory is vendored. The separate
 offline compatibility audit is not shipped and is not a claim of full compatibility.
 
