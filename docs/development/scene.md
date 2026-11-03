@@ -362,8 +362,11 @@ a row rebuilds that table's current geometry at the new step's activation, witho
 changing an earlier prepared picture. A detached row keeps its placed columns and
 absorbed ancestor transform, including when later cell/color/emphasis updates arrive.
 Emphasis changes rebuild both the text weight and the colored background band.
-The existing shared detachment path does not yet preserve inherited opacity across
-later updates; A7 must retain that factor independently of the object's own opacity.
+Updates to a detached row or to a detached table itself can still lose inherited
+opacity; row-only rebuilds preserve an untouched table's factor. A7 must retain
+inherited opacity independently of the object's own opacity.
+Width fitting tolerates at most 0.01 px of residual excess, so summed columns can
+be that much wider than the supplied box.
 
 Chart series use the same frozen-detachment rule: an immutable shared basis retains
 the plot rectangle, linear/log domains, categories, palette slot, bar group position,
@@ -376,18 +379,29 @@ Pie updates redistribute their retained span; a formerly zero-total series that
 becomes positive gets a full-circle fallback because it had no allocated span.
 These are placement facts only, never wire/persisted fields; ordered recovery
 rebuilds them from the original kept chart preparations and cuts.
+Series updates currently preserve their absorbed opacity. Explicit opacity changes
+use an `anim` opacity track, not `set.opacity`, which the strict schema rejects.
 
 Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
 labels. Numeric point pairs retain their x coordinates; scalar points use indices.
+Log ticks use whole decades. Automatic log domains round out to decades; an explicit
+window containing no whole decade has no tick labels.
 Stacks accumulate positive and negative bar values separately. Pie normalization
 includes every attached series, not only the first. Empty/zero-range/zero-total
 data is valid; admission rejects nonpositive log values and negative pie values.
+Series and pie slices take theme colors in order and repeat after eight; an explicit
+pie series color affects its first slice. Grouped bars with numeric x coordinates
+assume evenly spaced values, so uneven gaps can produce overlapping bars.
 Area fill and its open top stroke are both reserved; native dots need no flattened
 segments. The explicit chart box wins, otherwise the viewport supplies the origin
 and width with height capped at 300. No chart animation is sampled here; A7 owns it.
+Explicit titled charts reserve their 12 px label-origin inset at admission, including
+at the positive canvas edge; measured text still receives preparation's bounds check.
 The ignored `measure_prepare_charts_at_mark_and_pie_segment_caps` fixture updates
 five eight-series scatter charts at 20,000 marks and an eight-series pie at 19,886
 segments (163 slices); another pie slice would exceed the shared 20,000 segment cap.
+Those equal-sized slices are below the label threshold, so that pie fixture times
+no slice-label measurement and is not a worst-case label-shaping claim.
 It uses the same deterministic, exclusive-lock timing method as the table fixture.
 
 The S1 tests `numbers_are_grouped_rounded_and_trimmed` and

@@ -108,7 +108,7 @@ fn fit(widths: &mut [f32], textual: &[bool], available: f32, font: f32) {
         }
     }
     if excess > tolerance {
-        // Keep rounding residuals inside the available width after the bounded passes.
+        // shortcut: retain this defensive rounding fallback; remove when all bounded fits prove it redundant.
         let total = widths.iter().sum::<f32>();
         for width in widths {
             *width *= available / total;
@@ -566,6 +566,12 @@ fn place_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sub_centipixel_excess_stops_before_either_fitting_pass() {
+        let mut widths = [100.0, 100.0];
+        fit(&mut widths, &[true, false], 199.995, 14.0);
+        assert_eq!(widths.map(f32::to_bits), [100.0_f32.to_bits(); 2]);
+    }
     #[test]
     fn fractional_width_fitting_preserves_numeric_width_while_text_can_shrink() {
         let mut widths = [1164.6945, 321.97293, 118.40325, 100.91873];
