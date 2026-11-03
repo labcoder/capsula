@@ -361,12 +361,14 @@ stable; a cluster can grow into its siblings or off-screen on a later step becau
 it neither moves nor glides to bring new contents into view; A9 revisits this limit.
 Groups have no frame or label in the plain diagram vocabulary.
 New text, shapes, lines, paths, highlights and callouts inside a cluster contribute
-to its ranked size when all their anchors are absolute or refer to placed objects
-strictly inside its subtree. Source-order readiness passes resolve local dependency
-chains before ranking. References to the cluster itself, its ancestors, siblings or
-outside objects are still drawn late, so they do not contribute to its ranked size;
-A9's renders judge this shortcut. Changed objects retain the later-growth behavior
-above. Private Mermaid group labels belong to the parser/compiler layer.
+to its ranked size in a step that places the cluster or adds a node to it, when all
+their anchors are absolute or refer to placed objects strictly inside its subtree.
+Source-order readiness passes resolve local dependency chains before ranking.
+Anchors to or across a boxed diagram draw late because its glide applies after
+placement. References to the cluster itself, its ancestors, siblings or outside
+objects are also drawn late, so they do not contribute to its ranked size; A9's
+renders judge this shortcut. Changed objects retain the later-growth behavior above.
+Private Mermaid group labels belong to the parser/compiler layer.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram

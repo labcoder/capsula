@@ -96,17 +96,20 @@ pub(super) fn ancestry(
     chain
 }
 
-/// Whether `id` is placed strictly below `group`, bounded by the depth limit.
+/// Whether `id` is strictly below `group` without crossing a non-cluster diagram.
 pub(super) fn inside(state: &LayoutState, id: &WireId, group: Handle) -> bool {
-    let mut parent = state.objects.get(id).and_then(|object| object.item.parent);
+    let mut current = state.objects.get(id);
     for _ in 0..=MAX_OBJECT_DEPTH {
-        let Some(handle) = parent else {
+        let Some(object) = current else {
             return false;
         };
-        if handle == group {
+        if matches!(&*object.source, Op::Diagram(_)) && !is_cluster(state, object) {
+            return false;
+        }
+        if object.item.parent == Some(group) {
             return true;
         }
-        parent = get(state, handle).and_then(|object| object.item.parent);
+        current = object.item.parent.and_then(|parent| get(state, parent));
     }
     false
 }

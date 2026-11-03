@@ -256,6 +256,82 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
     assert_eq!(third.after.items(), recovered.items());
 }
 
+#[test]
+fn anchors_crossing_a_boxed_diagram_follow_its_resting_glide() {
+    let mut scene = new_scene("boxed_glide");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"glide","put":[
+            {"diagram":{"id":"outer","dir":"right"}},
+            {"diagram":{"id":"left","in":"outer"}},
+            {"diagram":{"id":"boxed","in":"left","dir":"right","box":[0,0,100,60]}},
+            {"node":{"id":"first","in":"boxed","label":"A"}},
+            {"node":{"id":"second","in":"boxed","label":"B"}},
+            {"edge":{"id":"internal","in":"boxed","from":"first","to":"second"}},
+            {"node":{"id":"local","in":"left","label":"C"}},
+            {"text":{"id":"tag","in":"left","at":{"ref":"second"},"text":"T"}},
+            {"text":{"id":"box_tag","in":"left","at":{"ref":"boxed"},"text":"Q"}},
+            {"edge":{"id":"cross","in":"left","from":"second","to":"local"}}
+        ]}),
+    );
+    let [glide] = picture.glides.as_slice() else {
+        panic!("one boxed glide");
+    };
+    assert_eq!(
+        glide.target,
+        picture.after.handle(&id("boxed")).expect("boxed handle")
+    );
+    assert_eq!(
+        [glide.to.x, glide.to.y].map(f32::to_bits),
+        [-66.0_f32, 0.0].map(f32::to_bits)
+    );
+    let node = bounds(&picture.after, "second");
+    assert_rect(node, [90.0, 48.0, 80.0, 40.0]);
+    let text = bounds(&picture.after, "tag");
+    let items = picture.after.items();
+    let left = items
+        .iter()
+        .find(|item| Some(item.handle) == picture.after.handle(&id("left")))
+        .expect("left");
+    let edge = items
+        .iter()
+        .find(|item| Some(item.handle) == picture.after.handle(&id("cross")))
+        .expect("cross edge");
+    let points = edge
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points),
+            _ => None,
+        })
+        .expect("edge line");
+    let from = left.transform.point(*points.first().expect("start"));
+    let to = left.transform.point(*points.last().expect("end"));
+    assert_eq!(
+        [text.center().x, text.center().y, from.x, from.y, to.x, to.y].map(f32::to_bits),
+        [130.0_f32, 68.0, 170.0, 68.0, 210.0, 68.0].map(f32::to_bits),
+        "text and edge endpoints follow the boxed diagram's resting glide"
+    );
+    assert_rect(text, [126.0, 63.0, 8.0, 10.0]);
+    assert_eq!(
+        [text.center().x, text.center().y].map(f32::to_bits),
+        [node.center().x, node.center().y].map(f32::to_bits)
+    );
+    assert_rect(bounds(&picture.after, "boxed"), [-62.0, 48.0, 232.0, 40.0]);
+    assert_rect(bounds(&picture.after, "box_tag"), [50.0, 63.0, 8.0, 10.0]);
+    assert_eq!(
+        [from.x, from.y, to.x, to.y].map(f32::to_bits),
+        [170.0_f32, 68.0, 210.0, 68.0].map(f32::to_bits)
+    );
+    assert_eq!(
+        [from.x, from.y].map(f32::to_bits),
+        [node.max().x, node.center().y].map(f32::to_bits)
+    );
+}
+
 fn input(value: &Value) -> (SceneState, GlobalBudget, PrepareInput) {
     let mut scene = new_scene("many");
     let before = LayoutState::new(&scene);
@@ -352,10 +428,6 @@ fn prepare_many_clusters() {
     }
 }
 fn flat_step(clusters: usize) -> Value {
-    assert!(
-        [16, 32, 64, 128, 299].contains(&clusters),
-        "supported cluster growth and coordinate-boundary counts"
-    );
     let mut put = Vec::with_capacity(1 + 2 * clusters);
     put.push(json!({"diagram":{"id":"root","dir":"down"}}));
     for index in 0..clusters {
