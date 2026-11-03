@@ -677,7 +677,7 @@ fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView
         let put: Vec<Value> = (start..(start + 150).min(shapes))
             .map(|n| {
                 json!({"shape":{
-                    "id":format!("s{n}"),"in":"g2","kind":"rect","box":[0,0,8,8],
+                    "id":format!("s{n}"),"in":"g2","kind":"polygon","points":[[0,0],[8,0],[8,8],[0,8]],
                     "enter":enters[n % enters.len()],"dur":1000
                 }})
             })
@@ -720,10 +720,7 @@ fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView
     view
 }
 
-#[test]
-#[ignore = "exclusive Rez timing: release, measuring.lock, no concurrent cargo/rustc"]
-fn frame_four_views_max() {
-    use std::{hint::black_box, time::Instant};
+fn capped_views() -> Vec<SceneView> {
     let mut budget = GlobalBudget::default();
     let views: Vec<_> = [600, 600, 150, 150]
         .into_iter()
@@ -736,8 +733,42 @@ fn frame_four_views_max() {
             budget.usage().objects,
             budget.usage().tracks
         ),
-        (4, 1500, 1024)
+        (4, 1500, 1024),
+        "all four scenes share one global budget at the legal caps"
     );
+    views
+}
+
+#[test]
+fn four_views_reach_the_legal_caps_without_frame_allocations() {
+    let views = capped_views();
+    let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
+    for now in [100, 2000, 59_999, 60_000] {
+        let ((), allocations) = allocation::count(|| {
+            for (view, frame) in views.iter().zip(&mut frames) {
+                view.frame(now, frame);
+            }
+        });
+        assert_eq!(
+            allocations, 0,
+            "four-view sampling at {now} allocates nothing"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame.items().len())
+                .sum::<usize>(),
+            1488,
+            "all geometry survives at the full caps"
+        );
+    }
+}
+
+#[test]
+#[ignore = "exclusive Rez timing: release, measuring.lock, no concurrent cargo/rustc"]
+fn frame_four_views_max() {
+    use std::{hint::black_box, time::Instant};
+    let views = capped_views();
     let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
     for early in [true, false] {
         for tick in 0..64 {
