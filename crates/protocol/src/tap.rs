@@ -354,8 +354,8 @@ pub fn dump(reader: &mut impl Read, out: &mut impl Write) -> Result<u64, DumpErr
         };
         writeln!(
             out,
-            "{seq:>5} {:<7?} {arrow}  {}",
-            record.pipe,
+            "{seq:>5} {:<7} {arrow}  {}",
+            format!("{:?}", record.pipe),
             record.describe()
         )?;
         seq += 1;

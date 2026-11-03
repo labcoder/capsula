@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
 
 use super::{R, T, fresh, state};
 use crate::coordinator::{Effect, Input, StoreOp};
-use crate::store::TitleSource;
+use crate::store::{Interruption, RunEnd, TitleSource};
 
 /// `fresh`'s main thread.
 const MAIN: ThreadId = ThreadId(1);
@@ -44,9 +44,33 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
             text: "again".to_owned(),
         })
         .expect("turn");
-    assert!(
-        next.contains(&state(RunId(11), MAIN, Phase::Thinking)),
-        "{next:?}"
+    assert_eq!(
+        next,
+        vec![
+            Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
+            state(R, MAIN, Phase::Interrupted),
+            super::run_end(R),
+            Effect::Store(StoreOp::EndRun {
+                thread: MAIN,
+                run: R,
+                text: None,
+                revealed: None,
+                clear: None,
+                end: RunEnd::Interrupted(Interruption::Replaced),
+            }),
+            Effect::Store(StoreOp::BeginTurn {
+                thread: MAIN,
+                title: None,
+                run: RunId(11),
+                text: "again".to_owned(),
+            }),
+            state(RunId(11), MAIN, Phase::Thinking),
+            Effect::ArmDeadline {
+                run: RunId(11),
+                after: super::WALL_CLOCK,
+            },
+        ]
     );
 }
 
