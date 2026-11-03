@@ -660,7 +660,9 @@ impl Link {
                 | ControlToShell::ThreadDeleted { .. }
                 | ControlToShell::TurnRefused { .. }
                 | ControlToShell::Settings { .. }
-                | ControlToShell::Error(_),
+                | ControlToShell::Error(_)
+                | ControlToShell::ScenesV1 { .. }
+                | ControlToShell::NoVisual { .. },
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -781,6 +783,11 @@ fn watch(
                     return;
                 }
             }
+            // shortcut: B4 consumes v1 membership, B8 NoVisual; B3 switches production to v1.
+            Ok(Some(ControlToShell::ScenesV1 { .. } | ControlToShell::NoVisual { .. })) => {
+                tracing::warn!("scene v1 control before its consumer; ending the connection");
+                return;
+            }
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
@@ -818,6 +825,17 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
     loop {
         reader.bytes = 0;
         match frame::read::<DataToShell>(&mut reader, Pipe::Data) {
+            // shortcut: B4 consumes v1 data; B3 switches the production fixture to v1.
+            Ok(Some(
+                DataToShell::SceneBegin { .. }
+                | DataToShell::SceneStepCommit { .. }
+                | DataToShell::SceneSnapshotV1 { .. }
+                | DataToShell::SceneCutApplied { .. }
+                | DataToShell::SceneEnd { .. },
+            )) => {
+                tracing::warn!("scene v1 data before its consumer; ending the connection");
+                break;
+            }
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);

@@ -39,7 +39,7 @@ pub const MAX_DELTA: usize = 64 * 1024;
 const TITLE_CHARS: usize = 80;
 
 /// Something that happened, for the coordinator to act on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Input {
     /// Read a page for one shell connection, without changing any run.
     ReadPage {
@@ -164,7 +164,7 @@ pub enum Input {
 }
 
 /// Something for the systems around the coordinator to do, in order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// Run a store operation in order, with one acknowledgement for every read or write.
     Store(StoreOp),
