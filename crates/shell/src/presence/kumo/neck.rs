@@ -151,6 +151,7 @@ impl Neck {
         }
         (segs, NECK)
     }
+
     /// The region the goo image must cover, or `None` when there's nothing to draw.
     pub(crate) fn bounds(&self) -> Option<Rect> {
         let (segs, n) = self.segments();
