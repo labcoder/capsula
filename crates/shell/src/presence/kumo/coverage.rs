@@ -30,7 +30,8 @@ impl Placement {
 }
 
 /// Writes each source row's hull of texels at or above [`CUTOFF`] into `rows`, from the
-/// leftmost to the rightmost. `pixels` is straight-alpha BGRA, `size` x `size`.
+/// leftmost to the rightmost. `pixels` is straight-alpha BGRA, `size` texels wide: the body's
+/// square or the neck's rectangle.
 pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
     rows.fill(None);
     let width = usize::from(size);
@@ -49,15 +50,17 @@ pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
 /// Maps source row hulls to device-pixel spans for an image drawn at `at`. A device pixel
 /// samples texel k when its centre lies within one texel of k's centre, so each texel span
 /// reaches half a texel further out on each side, plus one device pixel for the snap. Spans
-/// are clipped to the drawn quad and its snap pixel. `out` gets [`Placement::rows`] entries.
-pub(crate) fn device_spans(rows: &[Span<u16>], src: u16, at: Placement, out: &mut [Span<i32>]) {
+/// are clipped to the drawn quad and its snap pixel. The source is `width` texels wide and one
+/// texel tall per row hull. `out` gets [`Placement::rows`] entries.
+pub(crate) fn device_spans(rows: &[Span<u16>], width: u16, at: Placement, out: &mut [Span<i32>]) {
     out.fill(None);
-    if src == 0 || at.width <= 0 || at.height <= 0 {
+    let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    if width == 0 || height == 0 || at.width <= 0 || at.height <= 0 {
         return;
     }
     let (scale_x, scale_y) = (
-        f64::from(at.width) / f64::from(src),
-        f64::from(at.height) / f64::from(src),
+        f64::from(at.width) / f64::from(width),
+        f64::from(at.height) / f64::from(height),
     );
     let top = at.y - 1;
     let (min_x, max_x) = (at.x - 1, at.x + at.width + 1);
@@ -343,6 +346,21 @@ mod tests {
             at,
         });
         assert_eq!(out, vec![Some([3, 7]); 5]);
+    }
+
+    #[test]
+    fn a_wide_source_scales_each_axis_by_its_own_size() {
+        // Two texels wide, one tall, drawn 4 x 2: each texel row reaches one device pixel past
+        // its bilinear footprint on every side, clipped to the quad and its snap border.
+        let mut out = vec![None; 4];
+        let at = Placement {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        device_spans(&[Some([0, 2])], 2, at, &mut out);
+        assert_eq!(out, vec![Some([-1, 5]); 4]);
     }
 
     #[test]
