@@ -7,6 +7,7 @@ mod drawings;
 mod escape;
 mod geometry;
 mod gesture;
+mod kumo;
 mod launch;
 mod link;
 pub(crate) mod observer;
