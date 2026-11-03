@@ -109,6 +109,8 @@ pub enum SettingsOp {
     SetUserName(Option<UserName>),
     /// Onboarding is done; it doesn't show again.
     FinishOnboarding,
+    /// Cap how often Kumo draws.
+    SetMaxFrameRate(MaxFrameRate),
 }
 
 /// The settings as the brain holds them: once per connection before `Scenes`, and after
@@ -123,11 +125,82 @@ pub struct SettingsView {
     pub onboarded: bool,
     /// The main thread, Kumo's, which the shell labels with `assistant_name`.
     pub main_thread: ThreadId,
+    /// The most frames a second Kumo draws.
+    pub max_frame_rate: MaxFrameRate,
+}
+
+/// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
+/// can be lower (docs/development/frame-rate.md).
+/// Automatic (the default) picks 60 or 72, whichever the display's refresh divides more evenly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Option<u16>", into = "Option<u16>")]
+pub struct MaxFrameRate(Option<u16>);
+
+/// A frame rate cap that isn't one of [`MaxFrameRate::CAPS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0} isn't a frame rate cap")]
+pub struct NotACap(pub u16);
+
+impl MaxFrameRate {
+    /// The caps a user can pick besides Automatic.
+    pub const CAPS: [u16; 5] = [30, 60, 72, 120, 144];
+
+    /// Automatic: 60 or 72 by display.
+    pub const AUTOMATIC: Self = Self(None);
+
+    /// A cap in frames a second.
+    ///
+    /// # Errors
+    /// [`NotACap`] unless `fps` is one of [`MaxFrameRate::CAPS`].
+    pub fn cap(fps: u16) -> Result<Self, NotACap> {
+        if Self::CAPS.contains(&fps) {
+            Ok(Self(Some(fps)))
+        } else {
+            Err(NotACap(fps))
+        }
+    }
+
+    /// The cap the user picked, or `None` for Automatic.
+    #[must_use]
+    pub fn fps(self) -> Option<u16> {
+        self.0
+    }
+}
+
+impl TryFrom<Option<u16>> for MaxFrameRate {
+    type Error = NotACap;
+
+    fn try_from(fps: Option<u16>) -> Result<Self, NotACap> {
+        fps.map_or(Ok(Self::AUTOMATIC), Self::cap)
+    }
+}
+
+impl From<MaxFrameRate> for Option<u16> {
+    fn from(rate: MaxFrameRate) -> Self {
+        rate.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AssistantName, MAX_NAME_CHARS, NameError, UserName};
+    use super::{AssistantName, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, UserName};
+
+    #[test]
+    fn only_the_listed_caps_decode() {
+        let decode = |fps: Option<u16>| {
+            let bytes = postcard::to_allocvec(&fps).expect("encodes");
+            postcard::from_bytes::<MaxFrameRate>(&bytes).map(MaxFrameRate::fps)
+        };
+        assert_eq!(decode(None).ok(), Some(None));
+        for fps in [30, 60, 72, 120, 144] {
+            assert_eq!(decode(Some(fps)).ok(), Some(Some(fps)));
+        }
+        for fps in [0, 29, 31, 59, 61, 71, 73, 143, 145, u16::MAX] {
+            assert!(decode(Some(fps)).is_err(), "{fps}");
+            assert_eq!(MaxFrameRate::cap(fps), Err(NotACap(fps)));
+        }
+        assert_eq!(MaxFrameRate::default(), MaxFrameRate::AUTOMATIC);
+    }
 
     #[test]
     fn names_follow_the_one_rule() {

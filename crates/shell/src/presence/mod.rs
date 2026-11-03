@@ -5,6 +5,7 @@ mod deletes;
 pub(crate) mod diagnostics;
 mod drawings;
 mod escape;
+mod frame_rate;
 mod geometry;
 mod gesture;
 mod kumo;

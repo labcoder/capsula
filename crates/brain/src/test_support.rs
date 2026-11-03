@@ -10,8 +10,15 @@ use kumochi_protocol::constants;
 use kumochi_protocol::message::ThreadId;
 
 use crate::config::Config;
+use crate::connections::account::Worker;
+use crate::connections::clock::FixedClock;
+use crate::connections::http_client::HttpError;
+use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
+use crate::connections::vault::Vault;
+use crate::connections::vault::fake::FakeStore;
 use crate::engines::fixture::Fixture;
 use crate::runtime::Brain;
+use crate::runtime::account::{Accounts, Net};
 use crate::store::Store;
 
 /// A store file in its own temp folder, removed afterwards.
@@ -79,8 +86,36 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
         scenes,
         Box::new(fixture),
         config,
+        accounts(scratch),
     )
     .expect("brain")
+}
+
+/// An account system on an in-memory credential store, with its session lock in `scratch`.
+pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
+    let store = FakeStore::default();
+    let lock = scratch.0.join(constants::SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "test-accounts", &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    Accounts::spawn(worker, net()).expect("credential thread")
+}
+
+/// What an account system reaches outside the brain through, in tests: it never opens a
+/// browser or reaches the network, since launches and requests are refused.
+pub(crate) fn net() -> Net {
+    struct NoBrowser;
+    impl Launcher for NoBrowser {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            Err(LaunchError::Launch)
+        }
+    }
+    Net {
+        http: Arc::new(|| Err(HttpError::Configuration)),
+        launcher: Arc::new(NoBrowser),
+        clock: Arc::new(FixedClock(1_800_000_000)),
+    }
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.

@@ -1,4 +1,6 @@
-use kumochi_protocol::message::{ErrorKey, ThreadId};
+use kumochi_protocol::message::{ErrorKey, MaxFrameRate, ThreadId};
+
+use crate::strings::Text;
 
 use super::{
     AssistantName, Completion, Error, Field, NameError, Settings, SettingsOp, SettingsView, Update,
@@ -11,6 +13,7 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         user_name: user.map(|name| UserName::new(name).expect("valid user name")),
         onboarded: true,
         main_thread: ThreadId(1),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
     }
 }
 
@@ -566,4 +569,140 @@ fn debug_never_contains_names_or_drafts() {
         "the saved user name is redacted"
     );
     assert!(!debug.contains("DraftSentinel"), "the draft is redacted");
+}
+
+#[test]
+fn a_frame_rate_answer_completes_no_field() {
+    let mut settings = connected();
+    let rate = MaxFrameRate::cap(144).expect("a cap");
+    assert!(
+        !settings.send_max_frame_rate(MaxFrameRate::AUTOMATIC, |_| panic!(
+            "the current cap was sent"
+        )),
+        "the current cap isn't sent"
+    );
+    assert!(
+        !settings.send_max_frame_rate(rate, |_| false),
+        "an unsent cap queues nothing"
+    );
+    let mut sent = None;
+    assert!(settings.send_max_frame_rate(rate, |op| {
+        sent = Some(op);
+        true
+    }));
+    assert_eq!(sent, Some(SettingsOp::SetMaxFrameRate(rate)));
+    settings.change(Field::User, "Alex");
+    assert!(settings.save(Field::User, |_| true));
+    let mut answer = view("Kumo", Some("Oscar"));
+    answer.max_frame_rate = rate;
+    assert_eq!(settings.set_view(answer.clone(), Update::Answer), None);
+    assert!(
+        settings.field(Field::User).saving,
+        "the frame rate's answer isn't the name's"
+    );
+    assert_eq!(settings.view().map(|view| view.max_frame_rate), Some(rate));
+    assert_eq!(
+        settings.set_view(answer, Update::Answer),
+        Some(Completion {
+            failed: false,
+            field: Field::User
+        })
+    );
+    settings.disconnected();
+    assert!(!settings.send_max_frame_rate(MaxFrameRate::AUTOMATIC, |_| panic!("sent offline")));
+}
+
+#[test]
+fn a_second_frame_rate_choice_before_the_answer_is_sent() {
+    let mut settings = connected();
+    let rate = MaxFrameRate::cap(144).expect("a cap");
+    let mut sent = Vec::new();
+    for choice in [rate, MaxFrameRate::AUTOMATIC] {
+        assert!(settings.send_max_frame_rate(choice, |op| {
+            sent.push(op);
+            true
+        }));
+    }
+    assert!(
+        !settings.send_max_frame_rate(MaxFrameRate::AUTOMATIC, |_| panic!(
+            "the queued cap was sent"
+        )),
+        "the newest queued choice counts as current"
+    );
+    assert_eq!(
+        sent,
+        [
+            SettingsOp::SetMaxFrameRate(rate),
+            SettingsOp::SetMaxFrameRate(MaxFrameRate::AUTOMATIC)
+        ]
+    );
+}
+
+#[test]
+fn a_frame_rate_refusal_marks_no_field_and_clears_on_its_retry() {
+    let mut settings = connected();
+    let rate = MaxFrameRate::cap(30).expect("a cap");
+    assert!(settings.send_max_frame_rate(rate, |_| true));
+    settings.change(Field::User, "Alex");
+    assert!(settings.save(Field::User, |_| true));
+    assert_eq!(settings.error(ErrorKey::SettingsRefused.into()), None);
+    assert_eq!(settings.field(Field::User).error, None);
+    assert_eq!(settings.dock_notice(), Some(Text::DockError));
+    assert_eq!(
+        settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+        None
+    );
+    assert_eq!(
+        settings.set_view(view("Kumo", Some("Alex")), Update::Answer),
+        Some(Completion {
+            failed: false,
+            field: Field::User
+        })
+    );
+    assert_eq!(
+        settings.dock_notice(),
+        Some(Text::DockError),
+        "a name's answer isn't the retry"
+    );
+    assert!(settings.send_max_frame_rate(rate, |_| true));
+    let mut answer = view("Kumo", Some("Alex"));
+    answer.max_frame_rate = rate;
+    assert_eq!(settings.set_view(answer, Update::Answer), None);
+    assert_eq!(
+        settings.dock_notice(),
+        None,
+        "the frame rate's own retry clears it"
+    );
+}
+
+#[test]
+fn a_name_refusal_ahead_of_a_frame_rate_stays_on_the_name() {
+    let mut settings = connected();
+    settings.change(Field::User, "Alex");
+    assert!(settings.save(Field::User, |_| true));
+    assert!(settings.send_max_frame_rate(MaxFrameRate::cap(60).expect("a cap"), |_| true));
+    assert_eq!(
+        settings.error(ErrorKey::SettingsRefused.into()),
+        Some(Field::User)
+    );
+    assert_eq!(
+        settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+        Some(Completion {
+            failed: true,
+            field: Field::User
+        })
+    );
+    assert_eq!(
+        settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+        None
+    );
+    assert_eq!(
+        settings.field(Field::User).error,
+        Some(Error::Brain(ErrorKey::SettingsRefused.into()))
+    );
+    assert_eq!(
+        settings.dock_notice(),
+        Some(Text::DockError),
+        "the frame rate's answer keeps the name's notice"
+    );
 }
