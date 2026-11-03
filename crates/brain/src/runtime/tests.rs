@@ -4,7 +4,7 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId,
-    SceneDescriptor, SceneId, Step, ThreadId,
+    SceneDescriptor, SceneId, SettingsView, Step, ThreadId,
 };
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf,
@@ -29,6 +29,8 @@ mod deletes;
 mod pages;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "settings_tests.rs"]
+mod settings;
 
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -45,6 +47,8 @@ struct Shell<S> {
     thread: Option<ThreadId>,
     /// The last `Scenes` read.
     scenes: Option<Vec<SceneDescriptor>>,
+    /// Every `Settings` read, in order.
+    views: Vec<SettingsView>,
 }
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
@@ -58,6 +62,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             data_out,
             thread: None,
             scenes: None,
+            views: Vec::new(),
         }
     }
 
@@ -105,6 +110,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                         frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
+                Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
                 other => return other,
             }
         }
@@ -136,6 +142,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
+                ControlToShell::Settings { view, .. } => self.views.push(view),
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -212,7 +219,7 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         .expect("busy timeout");
     let fixture = Fixture::parse(script).expect("script");
     let scenes = store.scenes().expect("scenes");
-    Brain::new(store, high_water, scenes, fixture).expect("brain")
+    Brain::new(store, high_water, scenes, fixture, scratch.config()).expect("brain")
 }
 
 /// A connection holding the store's write lock, so the brain's writes wait until it ends.

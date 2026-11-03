@@ -27,7 +27,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(kumochi_brain::run()) {
+    let ran = runtime.block_on(kumochi_brain::run());
+    kumochi_brain::shut_down(runtime);
+    match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(error = %error, source = ?std::error::Error::source(&error), "brain stopped");

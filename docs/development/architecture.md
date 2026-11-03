@@ -215,4 +215,4 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 ## Where to read next
 
-`processes.md`, `ipc.md`, `scene.md`, `engines.md`, `store.md`, `voice.md`, `screen.md`, each added with its module.
+`processes.md`, `ipc.md`, `settings.md`, `scene.md`, `engines.md`, `store.md`, `voice.md`, `screen.md`, each added with its module.

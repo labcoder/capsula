@@ -4,6 +4,14 @@ use super::*;
 use crate::coordinator::{Coordinator, Effect, StoreOp};
 use crate::runtime::DATA_CAP;
 
+/// The frames a connection opens with, before any run state.
+fn preamble(frame: &[u8]) -> bool {
+    matches!(
+        frame::decode::<ControlToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
+        ControlToShell::Scenes { .. } | ControlToShell::Settings { .. }
+    )
+}
+
 fn threads() -> PageOf {
     PageOf::Threads {
         search: None,
@@ -172,13 +180,12 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         );
         turns_tx.send((None, "go".to_owned())).await.expect("turn");
         let mut bytes = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             bytes = timeout(PATIENCE, control.recv())
                 .await
                 .expect("state")
                 .expect("open");
-            let decoded = frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]);
-            if decoded.expect("decode") != (ControlToShell::Scenes { scenes: Vec::new() }) {
+            if !preamble(&bytes) {
                 break;
             }
         }
@@ -191,10 +198,13 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
             }
         ));
         controls_tx
-            .send(ControlToBrain::Stop {
-                run: RunId(1),
-                revealed: Vec::new(),
-            })
+            .send((
+                ControlToBrain::Stop {
+                    run: RunId(1),
+                    revealed: Vec::new(),
+                },
+                0,
+            ))
             .await
             .expect("stop");
         loop {
@@ -468,6 +478,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         (ThreadId(0), RunId(0)),
         Vec::new(),
         Fixture::parse("").expect("fixture"),
+        scratch.config(),
     )
     .expect("brain");
     let ((control, data), mut shell) = duplex();

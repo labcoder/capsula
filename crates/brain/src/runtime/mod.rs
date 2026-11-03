@@ -8,6 +8,7 @@
 mod data;
 pub(crate) mod fixture;
 mod recovery;
+mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
 
+use crate::config::Config;
 use crate::coordinator::{Coordinator, Effect, Input};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -111,6 +113,15 @@ pub(crate) struct Brain {
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
     chunk_target: usize,
+    /// The settings, owned here: they never touch runs or the store.
+    config: Config,
+    /// Settings changes waiting for the one write in flight, answered in order.
+    settings_ops: VecDeque<settings::Queued>,
+    /// The settings write in flight, off the core loop: a durable replace can take any time.
+    config_write: Option<settings::Write>,
+    /// Holds the next settings write until it sends or drops.
+    #[cfg(test)]
+    config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
     /// Hears what tests wait on instead of sleeping.
     #[cfg(test)]
     observer: mpsc::UnboundedSender<Seen>,
@@ -161,6 +172,7 @@ impl Brain {
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
         fixture: Fixture,
+        config: Config,
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
@@ -190,6 +202,11 @@ impl Brain {
             retry_at: None,
             epoch: 0,
             chunk_target: recovery::CHUNK_TARGET,
+            config,
+            settings_ops: VecDeque::new(),
+            config_write: None,
+            #[cfg(test)]
+            config_gate: None,
             #[cfg(test)]
             observer,
             #[cfg(test)]
@@ -197,6 +214,15 @@ impl Brain {
             #[cfg(test)]
             gates,
         })
+    }
+
+    /// Holds the next settings write before it touches the file, until the returned sender
+    /// sends or drops.
+    #[cfg(test)]
+    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<settings::Gate> {
+        let (release, held) = std::sync::mpsc::channel();
+        self.config_gate = Some(held);
+        release
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -245,6 +271,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.pump_settings_offline();
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
         let mut undeleted = self.coordinator.refused_delete();
@@ -289,6 +316,7 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
         if cleared && !undeleted {
             Quit::Complete
         } else {
@@ -304,6 +332,8 @@ impl Brain {
     /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
+        let deadline = Instant::now() + CLOSE_WAIT;
+        self.pump_settings_offline();
         let settled = tokio::time::timeout(CLOSE_WAIT, async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {
@@ -324,16 +354,23 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
     }
 
-    /// Keeps runs that ended moving through the store while no shell is connected. Never
-    /// returns; drop it when a shell connects.
+    /// Keeps runs that ended moving through the store, and settings changes being written,
+    /// while no shell is connected. Never returns; drop it when a shell connects.
     pub(crate) async fn idle(&mut self) {
+        self.pump_settings_offline();
         loop {
             let input = tokio::select! {
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
+                done = settings::written(&mut self.config_write) => {
+                    let settled = self.settings_done(done, None);
+                    debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+                    continue;
+                }
             };
             self.offline(input);
         }
@@ -411,17 +448,19 @@ impl Brain {
             loop {
                 tokio::select! {
                     biased;
-                    Some(message) = controls.recv() => self.control_offline(message, tap),
+                    Some((message, len)) = controls.recv() => {
+                        self.control_offline(message, len, tap);
+                    }
                     _ = &mut control_reader => break,
                     () = &mut grace => break,
                 }
             }
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
-        while let Ok(message) = controls.try_recv() {
+        while let Ok((message, len)) = controls.try_recv() {
             #[cfg(test)]
             self.observer.send(Seen::ControlDrained).ok();
-            self.control_offline(message, tap);
+            self.control_offline(message, len, tap);
         }
         let ended = match quit.get() {
             Some(deadline) => Ended::Quit { deadline },
@@ -433,8 +472,16 @@ impl Brain {
     }
 
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
-    fn control_offline(&mut self, message: ControlToBrain, tap: &mut Tap) {
-        tap.record(Pipe::Control, Direction::ToBrain, &message);
+    fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
+        tap.record(Pipe::Control, Direction::ToBrain, &message, len);
+        if let ControlToBrain::Settings(op) = message {
+            // Still written; the shell that sent it is gone, so nothing answers it.
+            self.settings_ops.push_back(settings::Queued {
+                op,
+                epoch: self.epoch,
+            });
+            return;
+        }
         if let Ok(Some(input)) = control_input(message) {
             #[cfg(test)]
             self.control_taken(&input);
@@ -457,7 +504,7 @@ impl Brain {
     /// a time whenever the data queue has room, ahead of engine events.
     async fn core(
         &mut self,
-        controls: &mut mpsc::Receiver<ControlToBrain>,
+        controls: &mut mpsc::Receiver<(ControlToBrain, usize)>,
         turns: &mut mpsc::Receiver<Turn>,
         pages: &mut mpsc::Receiver<Input>,
         room: &Notify,
@@ -467,11 +514,8 @@ impl Brain {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
         let barrier = Instant::now() + SCENES_WAIT;
-        // A clear whose write failed while no shell was connected is retried now at the latest.
-        self.retry_at = None;
-        let retried = self.coordinator.retry_clears();
-        if self.apply(retried, Some(&mut link)).is_err() {
-            return Ended::Lost;
+        if let Err(ended) = self.open(&mut link) {
+            return ended;
         }
         loop {
             if link.recovery.is_none() && self.coordinator.settled() {
@@ -488,12 +532,8 @@ impl Brain {
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
-                Some(message) = controls.recv() => {
-                    link.tap.record(Pipe::Control, Direction::ToBrain, &message);
-                    if message == ControlToBrain::Pong {
-                        ping_sent = None;
-                    }
-                    match control_input(message) {
+                Some((message, len)) = controls.recv() => {
+                    match self.control_frame(message, len, &mut link, &mut ping_sent) {
                         Ok(Some(input)) => input,
                         Ok(None) => continue,
                         Err(ended) => return ended,
@@ -505,6 +545,12 @@ impl Brain {
                 () = std::future::ready(()), if feed => {
                     let chunk = link.recovery.as_mut().and_then(Recovery::next_chunk);
                     if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
+                written = settings::written(&mut self.config_write) => {
+                    if self.settings_done(written, Some(&mut link)).is_err() {
                         return Ended::Lost;
                     }
                     continue;
@@ -562,6 +608,42 @@ impl Brain {
                 return ended;
             }
         }
+    }
+
+    /// A connection's first frames: the settings, then anything owed from while no shell was
+    /// connected.
+    fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        self.settings_now(link).map_err(|Full| Ended::Lost)?;
+        self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+        // A clear whose write failed while no shell was connected is retried now at the latest.
+        self.retry_at = None;
+        let retried = self.coordinator.retry_clears();
+        self.apply(retried, Some(link)).map_err(|_| Ended::Lost)
+    }
+
+    /// A control frame from the connected shell: recorded, then a settings change, a pong, or
+    /// an input for the coordinator.
+    fn control_frame(
+        &mut self,
+        message: ControlToBrain,
+        len: usize,
+        link: &mut Link<'_, '_>,
+        ping_sent: &mut Option<Instant>,
+    ) -> Result<Option<Input>, Ended> {
+        link.tap
+            .record(Pipe::Control, Direction::ToBrain, &message, len);
+        if message == ControlToBrain::Pong {
+            *ping_sent = None;
+        }
+        if let ControlToBrain::Settings(op) = message {
+            self.settings_ops.push_back(settings::Queued {
+                op,
+                epoch: self.epoch,
+            });
+            self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+            return Ok(None);
+        }
+        control_input(message)
     }
 
     /// New turns wait while too many runs are ending or too many writes are owed.
@@ -689,19 +771,19 @@ fn watchdog(
 /// connection ends as a quit whatever ends first.
 async fn read_control(
     pipe: &mut (impl AsyncRead + Unpin),
-    frames: &mpsc::Sender<ControlToBrain>,
+    frames: &mpsc::Sender<(ControlToBrain, usize)>,
     quit: &Cell<Option<Instant>>,
 ) -> Ended {
     loop {
-        match ipc::read::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some(ControlToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some(ControlToBrain::Quitting)) => {
+        match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
+            Ok(Some((ControlToBrain::Hello(_), _))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some((ControlToBrain::Quitting, _))) => {
                 let deadline = Instant::now() + CLOSE_WAIT;
                 quit.set(Some(deadline));
                 return Ended::Quit { deadline };
             }
-            Ok(Some(message)) => {
-                if frames.send(message).await.is_err() {
+            Ok(Some(sized)) => {
+                if frames.send(sized).await.is_err() {
                     return Ended::Lost;
                 }
             }
@@ -733,7 +815,10 @@ fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
             after_turns,
             resend,
         }),
-        ControlToBrain::Pong | ControlToBrain::Hello(_) | ControlToBrain::Quitting => None,
+        ControlToBrain::Pong
+        | ControlToBrain::Hello(_)
+        | ControlToBrain::Quitting
+        | ControlToBrain::Settings(_) => None,
     })
 }
 
@@ -868,9 +953,13 @@ impl<'a, 't> Link<'a, 't> {
     }
 
     fn control(&mut self, message: &ControlToShell) -> Result<(), Full> {
-        self.tap.record(Pipe::Control, Direction::ToShell, message);
         match frame::encode(message, Pipe::Control) {
-            Ok(frame) => self.out.try_send(frame).map_err(|_| Full),
+            Ok(frame) => {
+                let len = frame.len() - frame::HEADER_LEN;
+                self.tap
+                    .record(Pipe::Control, Direction::ToShell, message, len);
+                self.out.try_send(frame).map_err(|_| Full)
+            }
             Err(error) => {
                 tracing::error!(%error, "a control message didn't encode");
                 Ok(())
