@@ -130,7 +130,8 @@ form. It never uses a client id from the token response. `TokenSet` owns zeroizi
 credentials independently of the active account, so a later verification error doesn't
 consume them. A grant without a refresh token is representable; the account machine refuses it, since it
 can't be renewed or revoked, and drops its access token to expire on its own. The caller also retains registration and
-computes expiry through `Clock`; failed wall-time conversion doesn't consume the token set.
+computes expiry through `Clock`, from the time the response arrived, before the identity check;
+failed wall-time conversion doesn't consume the token set.
 
 **Local policies:** the token response record is at most 48 KiB, including escaping and unknown
 fields. Access and ID tokens are at most 16 KiB each, refresh tokens 8 KiB, granted scope 1 KiB,
@@ -186,9 +187,15 @@ credential job, a listener or exchange result), effects out (a view, an error, a
 start or close the listener, send a token request). `runtime::account::Accounts` runs those
 effects. Credential jobs go, one at a time and in order, to a `credentials` thread that owns the
 vault and its session lock; the listener and the exchange are tokio tasks; every result comes back
-on one channel the core loop polls. The brain reads the vault before it serves anything, and on
-quit waits for the job already dispatched, past the quit deadline if it must, before the instance
-capability is deleted.
+on one channel the core loop polls. The startup load runs there too, and the brain waits for it
+before it stores the instance capability or serves anything. On
+quit it waits for the job already dispatched, past the quit deadline if it must, before the instance
+capability is deleted. The runtime delivers exactly one `Vault` result per dispatched job (the
+credentials thread sends one per job it runs) and one `Exchanged` per sent request (the exchange
+task's last step). No runtime test drives a full exchange yet, so the machine also ignores a
+result with no request outstanding for its attempt, which keeps the next request and any owned
+set intact (`a_repeated_exchange_result_leaves_the_next_request_to_finish`,
+`a_repeated_exchange_result_keeps_the_owned_set`).
 
 ```mermaid
 stateDiagram-v2

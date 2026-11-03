@@ -633,6 +633,53 @@ fn a_replacing_sign_in_waits_for_the_sent_exchange_whose_set_is_listed() {
     );
 }
 
+/// The runtime delivers one result per request; a repeated one must not take the next request.
+#[test]
+fn a_repeated_exchange_result_leaves_the_next_request_to_finish() {
+    let mut h = Harness::new("account-repeat-sent");
+    h.op(AccountOp::SignIn);
+    h.callback("client-issued");
+    h.op(AccountOp::SignIn);
+    h.callback("client-issued");
+    h.reply(received(Some("refresh-first"), "subject-1", PLAN));
+    let first = h.sent[0].0;
+    h.feed(Input::Exchanged {
+        attempt: first,
+        result: received(Some("refresh-again"), "subject-1", PLAN),
+    });
+    assert_eq!(h.view(), &AccountView::SigningIn);
+    h.reply(received(Some("refresh-second"), "subject-1", PLAN));
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-second"));
+    assert_eq!(
+        h.revocations(),
+        [(
+            "client-issued".to_owned(),
+            "refresh-first".to_owned(),
+            NOW,
+            Origin::Exchange
+        )]
+    );
+}
+
+#[test]
+fn a_repeated_exchange_result_keeps_the_owned_set() {
+    let mut h = Harness::new("account-repeat-owning");
+    h.op(AccountOp::SignIn);
+    h.callback("client-issued");
+    h.hold = true;
+    h.reply(received(Some("refresh-first"), "subject-1", PLAN));
+    let attempt = h.sent[0].0;
+    h.feed(Input::Exchanged {
+        attempt,
+        result: received(Some("refresh-again"), "subject-1", PLAN),
+    });
+    h.release();
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-first"));
+    assert_eq!(h.revocations(), []);
+}
+
 #[test]
 fn a_replaced_attempts_waiting_code_is_never_sent() {
     let mut h = Harness::new("account-never-sent");

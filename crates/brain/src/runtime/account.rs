@@ -59,25 +59,20 @@ pub(crate) struct Accounts {
 }
 
 impl Accounts {
-    /// Reads the vault here, blocking, so it's read before anything is served, as the store
-    /// is; an early Busy is retried for a moment. Then starts the credential thread.
+    /// Starts the credential thread and waits, blocking, for its startup load, so the vault is
+    /// read before anything is served, as the store is; an early Busy is retried for a moment.
+    /// Blocking is fine: nothing else runs on the runtime yet.
     ///
     /// # Errors
-    /// Fails when the credential thread can't be started.
+    /// Fails when the credential thread can't be started or stops during the load.
     pub(crate) fn spawn<S: CredentialStore + 'static>(
-        mut worker: Worker<S>,
+        worker: Worker<S>,
         net: Net,
     ) -> std::io::Result<Self> {
-        let (mut state, started) = AccountState::start();
-        let mut effects = Vec::new();
-        for effect in started {
-            match effect {
-                Effect::Vault(job) => effects.extend(state.handle(Input::Vault(worker.run(job)))),
-                other => effects.push(other),
-            }
-        }
+        let (state, started) = AccountState::start();
         let (events_tx, events) = mpsc::unbounded_channel();
-        let (jobs, released) = spawn(worker, events_tx.clone())?;
+        let (loaded_tx, loaded) = std_mpsc::channel();
+        let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone())?;
         let mut accounts = Self {
             state,
             jobs: Some(jobs),
@@ -87,8 +82,12 @@ impl Accounts {
             listener: None,
             net,
         };
+        accounts.apply(started);
+        let done = loaded
+            .recv()
+            .map_err(|_| std::io::Error::other("the credential thread stopped"))?;
         // No shell is connected yet: only the work it starts matters, not what it would say.
-        accounts.apply(effects);
+        accounts.handle(done);
         Ok(accounts)
     }
 
@@ -202,9 +201,11 @@ impl Brain {
     }
 }
 
-/// The credential thread: runs each job whole, in order, and reports it.
+/// The credential thread: runs each job whole, in order, and reports it; the first, the startup
+/// load, to `loaded`.
 fn spawn<S: CredentialStore + 'static>(
     mut worker: Worker<S>,
+    loaded: std_mpsc::Sender<Input>,
     events: mpsc::UnboundedSender<Input>,
 ) -> std::io::Result<(std_mpsc::Sender<Job>, oneshot::Receiver<()>)> {
     let (jobs, queued) = std_mpsc::channel::<Job>();
@@ -212,8 +213,14 @@ fn spawn<S: CredentialStore + 'static>(
     thread::Builder::new()
         .name("credentials".to_owned())
         .spawn(move || {
+            let mut loaded = Some(loaded);
             for job in queued {
-                if events.send(Input::Vault(worker.run(job))).is_err() {
+                let done = Input::Vault(worker.run(job));
+                let sent = match loaded.take() {
+                    Some(loaded) => loaded.send(done).is_ok(),
+                    None => events.send(done).is_ok(),
+                };
+                if !sent {
                     break;
                 }
             }
@@ -269,7 +276,7 @@ async fn revoke_task(
     events.send(Input::Revoked(confirmed)).ok();
 }
 
-async fn exchange_task(
+pub(super) async fn exchange_task(
     attempt: u64,
     authorization: Authorization,
     net: Net,
@@ -283,6 +290,8 @@ async fn exchange_task(
             .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
             .map_err(ExchangeError::Http)?;
         let tokens = exchange(&http, &authorization).await?;
+        // Its lifetime starts on arrival, not after the identity check.
+        let now = net.clock.unix_seconds();
         let identity = verify(
             &http,
             &tokens.id_token,
@@ -294,7 +303,7 @@ async fn exchange_task(
         Ok::<_, ExchangeError>(Received {
             tokens,
             identity,
-            now: net.clock.unix_seconds(),
+            now,
         })
     }
     .await;
