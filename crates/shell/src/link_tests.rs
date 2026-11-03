@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
     ThreadId,
 };
 
-use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
 use crate::platform::{PipeClient, test_pair};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
@@ -475,6 +475,73 @@ fn a_repeated_handshake_ends_the_connection() {
         Ok(None)
     ));
     assert!(link.link.join().expect("joined"));
+}
+
+/// A connection's first frames in the order the brain sends them, which its tap test pins:
+/// the handshake takes Welcome, and the link passes Settings and Scenes on around the account
+/// view without ending the connection.
+#[test]
+fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
+    use kumochi_protocol::message::{AccountView, AssistantName, SettingsView};
+    let (control, shell_control) = pair("first-frames-control");
+    let (_data, shell_data) = pair("first-frames-data");
+    control.set_timeout(Some(PATIENCE));
+    let view = SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(9),
+    };
+    for message in [
+        ControlToShell::Welcome {
+            incarnation: Incarnation(4),
+        },
+        ControlToShell::Settings {
+            answer: false,
+            view: view.clone(),
+        },
+        ControlToShell::Account(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        }),
+        ControlToShell::Scenes { scenes: Vec::new() },
+    ] {
+        frame::write(&mut &control, &message, Pipe::Control).expect("written");
+    }
+    let incarnation = welcome(&shell_control).expect("the handshake takes Welcome");
+    assert_eq!(incarnation, Incarnation(4));
+    let (sender, events) = async_channel::unbounded();
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        shared: Arc::new(Shared::default()),
+    };
+    let (_handle, start) = start(link, sender);
+    let connection = Connection {
+        control: Arc::new(shell_control),
+        data: Arc::new(shell_data),
+        incarnation,
+    };
+    let link = thread::spawn(move || start.link.attend(connection, &start.events));
+    let events = patient(events);
+    let _session = connected(next(&events));
+    let LinkEvent::Settings {
+        view: shown,
+        answer: false,
+        ..
+    } = next(&events)
+    else {
+        panic!("settings first");
+    };
+    assert_eq!(shown, view);
+    let LinkEvent::Scenes(scenes) = next(&events) else {
+        panic!("scenes after the account view");
+    };
+    assert!(scenes.is_empty());
+    frame::write(&mut &control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    let pong = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
+    assert_eq!(pong.expect("still connected"), Some(ControlToBrain::Pong));
+    drop(control);
+    assert!(link.join().expect("joined"));
 }
 
 #[test]
