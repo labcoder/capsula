@@ -89,10 +89,11 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     migrate_to(conn, MIGRATIONS.len())
 }
 
-/// Applies the migrations past the file's version up to `target`; tests build older files with it.
+/// Applies the migrations up to `target`, capped at the known version; tests build older files.
 pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let known = MIGRATIONS.len();
+    let target = target.min(known);
     let applied = usize::try_from(found)
         .ok()
         .filter(|&applied| applied <= known)
@@ -104,4 +105,19 @@ pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), Sto
         tx.commit()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_target_past_the_known_migrations_applies_only_known_versions() {
+        let mut conn = Connection::open_in_memory().expect("opens");
+        migrate_to(&mut conn, usize::MAX).expect("clamps target");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, i64::try_from(MIGRATIONS.len()).expect("fits"));
+    }
 }

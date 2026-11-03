@@ -118,16 +118,10 @@ pub(super) fn choice_of(
     let (Some(model), Some(effort)) = (model, effort) else {
         return Ok(None);
     };
-    let effort = [
-        Effort::Minimal,
-        Effort::Low,
-        Effort::Medium,
-        Effort::High,
-        Effort::XHigh,
-    ]
-    .into_iter()
-    .find(|known| effort_text(*known) == effort)
-    .ok_or(rusqlite::Error::InvalidQuery)?;
+    let effort = Effort::ALL
+        .into_iter()
+        .find(|known| effort_text(*known) == effort)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
     let model = ModelSlug::new(model).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(Some(ModelChoice { model, effort }))
 }

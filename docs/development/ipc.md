@@ -131,6 +131,7 @@ flowchart LR
   first page keeps the main thread and at least one task whenever a task exists, shortening that
   task's title if it alone overflows the frame. A search ranks the main thread like any other.
 - `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
+  Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
 
 ## Scenes and recovery
 

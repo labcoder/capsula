@@ -112,7 +112,7 @@ fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
     dump(&mut file.as_slice(), &mut out).expect("dumps");
     assert_eq!(
         String::from_utf8(out).expect("utf-8"),
-        format!("    0 Data shell -> brain  Hello ({len} bytes)\n1 frames\n")
+        format!("    0 Data    shell -> brain  Hello ({len} bytes)\n1 frames\n")
     );
 }
 

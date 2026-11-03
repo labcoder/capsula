@@ -1,6 +1,5 @@
 //! What a thread is besides its events: its kind, its title and the model it runs on, and the
-//! shell's ops that change them. A title is user content, so its `Debug` prints only a length;
-//! slugs and efforts carry none.
+//! shell's ops that change them. Titles and model slugs print only their lengths in `Debug`.
 
 use std::fmt;
 
@@ -35,9 +34,15 @@ pub struct SlugError;
 
 /// A model's id as the catalog names it: 1–[`MAX_SLUG_BYTES`] bytes of `[a-z0-9._-]`. Whether
 /// the catalog still offers it is checked per run, not here.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ModelSlug(String);
+
+impl fmt::Debug for ModelSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ModelSlug(len={})", self.0.len())
+    }
+}
 
 impl ModelSlug {
     /// Checks `text` against the slug rule.
@@ -89,6 +94,17 @@ pub enum Effort {
     XHigh,
 }
 
+impl Effort {
+    /// Every effort, including choices stored before a catalog change.
+    pub const ALL: [Self; 5] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+}
+
 /// The model and effort a thread runs on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
@@ -133,7 +149,10 @@ mod tests {
             assert_eq!(ok(bad), Err(NameError::NotOneLine), "{bad:?}");
         }
         let bytes = postcard::to_allocvec(&"a".repeat(81)).expect("encodes");
-        assert!(postcard::from_bytes::<ThreadTitle>(&bytes).is_err());
+        assert_eq!(
+            postcard::from_bytes::<ThreadTitle>(&bytes),
+            Err(postcard::Error::SerdeDeCustom)
+        );
     }
 
     #[test]
@@ -145,7 +164,19 @@ mod tests {
             assert_eq!(ok(bad), Err(SlugError), "{bad:?}");
         }
         let bytes = postcard::to_allocvec(&"Not-A-Slug").expect("encodes");
-        assert!(postcard::from_bytes::<ModelSlug>(&bytes).is_err());
+        assert_eq!(
+            postcard::from_bytes::<ModelSlug>(&bytes),
+            Err(postcard::Error::SerdeDeCustom)
+        );
+    }
+
+    #[test]
+    fn every_effort_that_decodes_is_in_all() {
+        let decoded: Vec<Effort> = (0..=u8::MAX)
+            .filter_map(|tag| postcard::from_bytes(&[tag]).ok())
+            .collect();
+        assert!(decoded.iter().all(|effort| Effort::ALL.contains(effort)));
+        assert_eq!(decoded.len(), Effort::ALL.len());
     }
 
     #[test]
