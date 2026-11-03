@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use kumochi_protocol::constants;
 
+pub mod credential;
+
 #[cfg(windows)]
 #[expect(
     unsafe_code,

@@ -26,10 +26,12 @@ toml = { version = "1.1", default-features = false, features = ["std", "serde", 
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+zeroize = "1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
