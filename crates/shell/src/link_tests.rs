@@ -483,7 +483,7 @@ fn a_repeated_handshake_ends_the_connection() {
 /// view without ending the connection.
 #[test]
 fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
-    use kumochi_protocol::message::{AccountView, AssistantName, SettingsView};
+    use kumochi_protocol::message::{AccountView, AssistantName, MaxFrameRate, SettingsView};
     let (control, shell_control) = pair("first-frames-control");
     let (_data, shell_data) = pair("first-frames-data");
     control.set_timeout(Some(PATIENCE));
@@ -492,6 +492,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         user_name: None,
         onboarded: true,
         main_thread: ThreadId(9),
+        max_frame_rate: MaxFrameRate::AUTOMATIC,
     };
     for message in [
         ControlToShell::Welcome {
