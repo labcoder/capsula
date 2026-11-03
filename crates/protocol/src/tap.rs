@@ -47,6 +47,9 @@ impl Tapped for ControlToBrain {
             Self::DeleteThread { .. } => "DeleteThread",
             Self::Settings(_) => "Settings",
             Self::ThreadOp(_) => "ThreadOp",
+            Self::StopScenes { .. } => "StopScenes",
+            Self::StepShown { .. } => "StepShown",
+            Self::StepFailed { .. } => "StepFailed",
         }
     }
 
@@ -83,6 +86,8 @@ impl Tapped for ControlToShell {
             Self::TurnRefused { .. } => "TurnRefused",
             Self::Settings { .. } => "Settings",
             Self::Error(_) => "Error",
+            Self::ScenesV1 { .. } => "ScenesV1",
+            Self::NoVisual { .. } => "NoVisual",
         }
     }
 
@@ -136,6 +141,11 @@ impl Tapped for DataToShell {
             Self::PageFailed { .. } => "PageFailed",
             Self::SceneSnapshot { .. } => "SceneSnapshot",
             Self::ScenesRemoved { .. } => "ScenesRemoved",
+            Self::SceneBegin { .. } => "SceneBegin",
+            Self::SceneStepCommit { .. } => "SceneStepCommit",
+            Self::SceneSnapshotV1 { .. } => "SceneSnapshotV1",
+            Self::SceneCutApplied { .. } => "SceneCutApplied",
+            Self::SceneEnd { .. } => "SceneEnd",
         }
     }
 

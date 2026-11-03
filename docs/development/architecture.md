@@ -62,6 +62,7 @@ flowchart TD
   shell --> scene
   xtask --> protocol
   xtask --> scene
+  protocol --> scene
 ```
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.

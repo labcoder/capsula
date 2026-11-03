@@ -403,7 +403,12 @@ impl Threads {
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. }
             | DataToShell::SceneSnapshot { .. }
-            | DataToShell::ScenesRemoved { .. } => {}
+            | DataToShell::ScenesRemoved { .. }
+            | DataToShell::SceneBegin { .. }
+            | DataToShell::SceneStepCommit { .. }
+            | DataToShell::SceneSnapshotV1 { .. }
+            | DataToShell::SceneCutApplied { .. }
+            | DataToShell::SceneEnd { .. } => {}
         }
     }
 
