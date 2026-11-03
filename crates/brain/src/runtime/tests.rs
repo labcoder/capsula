@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
@@ -100,6 +101,9 @@ struct Shell<S> {
     scenes: Option<Vec<SceneDescriptor>>,
     /// Every `Settings` read, in order.
     views: Vec<SettingsView>,
+    /// Control frames other than pings that arrived while it waited on data, for the next
+    /// control read.
+    held: VecDeque<ControlToShell>,
 }
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
@@ -114,6 +118,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             thread: None,
             scenes: None,
             views: Vec::new(),
+            held: VecDeque::new(),
         }
     }
 
@@ -147,11 +152,18 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         self.control_out.write_all(&frame).await.expect("sent");
     }
 
+    /// The next control frame: one held while it waited on data, or the next one read.
+    async fn next_control(&mut self) -> Result<Option<ControlToShell>, frame::FrameError> {
+        match self.held.pop_front() {
+            Some(held) => Ok(Some(held)),
+            None => ipc::read(&mut self.control_in, Pipe::Control).await,
+        }
+    }
+
     /// The next control frame, answering pings on the way; `None` once the brain hangs up.
     async fn control(&mut self) -> Option<ControlToShell> {
         loop {
-            let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
-            match timeout(PATIENCE, next)
+            match timeout(PATIENCE, self.next_control())
                 .await
                 .expect("in time")
                 .expect("readable")
@@ -178,10 +190,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     /// The next run state, answering pings on the way.
     async fn state(&mut self) -> (RunId, Phase) {
         loop {
-            let message = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control)
-                .await
-                .expect("readable")
-                .expect("open");
+            let message = self.next_control().await.expect("readable").expect("open");
             match message {
                 ControlToShell::RunState { run, thread, phase } => {
                     self.thread = Some(thread);
@@ -199,9 +208,47 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         }
     }
 
+    /// The next data frame. Meanwhile it answers pings, as a shell's control reader does, so a
+    /// slow store never reads as a shell that stopped answering; other control frames are held.
     async fn data(&mut self) -> DataToShell {
-        let next = ipc::read::<DataToShell>(&mut self.data_in, Pipe::Data);
-        timeout(PATIENCE, next)
+        let Self {
+            control_in,
+            control_out,
+            data_in,
+            held,
+            ..
+        } = self;
+        let next = ipc::read::<DataToShell>(data_in, Pipe::Data);
+        tokio::pin!(next);
+        let mut control_open = true;
+        let mut first = [0; 1];
+        let frame = async {
+            loop {
+                tokio::select! {
+                    biased;
+                    frame = &mut next => return frame,
+                    // One byte, so a control frame is never cut short when the data frame wins.
+                    read = control_in.read(&mut first), if control_open => {
+                        if !matches!(read, Ok(1)) {
+                            control_open = false;
+                            continue;
+                        }
+                        let mut rest = first.as_slice().chain(&mut *control_in);
+                        let read = ipc::read::<ControlToShell>(&mut rest, Pipe::Control).await;
+                        match read.expect("readable") {
+                            Some(ControlToShell::Ping) => {
+                                let pong = frame::encode(&ControlToBrain::Pong, Pipe::Control)
+                                    .expect("encodes");
+                                control_out.write_all(&pong).await.expect("sent");
+                            }
+                            Some(other) => held.push_back(other),
+                            None => control_open = false,
+                        }
+                    }
+                }
+            }
+        };
+        timeout(PATIENCE, frame)
             .await
             .expect("data arrives")
             .expect("readable")
