@@ -133,8 +133,24 @@ async fn settle<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) {
     shell.state().await;
 }
 
+/// Lets the last connection's store writes land, as they would while no shell is connected, so
+/// the next connection's barrier never times a slow disk.
+async fn landed(brain: &mut Brain) {
+    let landing = async {
+        while brain.coordinator.ending_runs() > 0
+            || brain.coordinator.clears_in_flight()
+            || brain.coordinator.drawing_in_flight()
+        {
+            let input = brain.inputs.recv().await.expect("open");
+            brain.offline(input);
+        }
+    };
+    timeout(PATIENCE, landing).await.expect("the store answers");
+}
+
 /// Serves one connection whose shell only takes `Scenes`, then leaves.
 async fn scenes_on_reconnect(brain: &mut Brain) -> Vec<SceneDescriptor> {
+    landed(brain).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -206,6 +222,7 @@ async fn a_held_first_step_holds_back_scenes_and_turns_and_the_connection_ends_u
     assert_eq!(ended, Ended::Unavailable);
     assert!(started.elapsed() >= SCENES_WAIT);
     lock.execute_batch("ROLLBACK").expect("unlocked");
+    landed(&mut brain).await;
     // The shell kept its clear intent across the loss and spends it on the complete list.
     let ((control, data), mut shell) = duplex();
     let client = async {
@@ -332,6 +349,7 @@ async fn a_stop_that_kept_nothing_brings_no_scene_back_once_its_late_ack_lands()
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
+    landed(&mut brain).await;
     // A later scene, drawn normally.
     let ((control, data), mut shell) = duplex();
     let client = async {
@@ -1237,6 +1255,9 @@ async fn foreign_stop(
     if matches!(when, Foreign::Reopened) {
         brain.close().await;
         brain = patient_brain(scratch, LOST_AFTER_THREE);
+    }
+    if lock.is_none() {
+        landed(&mut brain).await;
     }
     let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
