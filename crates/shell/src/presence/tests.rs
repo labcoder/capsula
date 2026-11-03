@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use kumochi_protocol::message::{DataToShell, RunId, SceneHeader, SceneId};
 use kumochi_scene::{Record, layout::SurfaceGeometry, parse_record, text::Bounded, theme::Theme};
 
-use super::{EscapePanel, Runs, escape_activity};
+use super::{EscapePanel, Presence, Runs};
 use crate::presenter::Presenter;
 
 fn mirrored_presenter() -> Presenter {
@@ -66,7 +66,7 @@ fn a_first_mirrored_v1_step_without_paint_does_not_hold_global_escape() {
     assert!(!runs.working());
     assert!(!runs.drawing());
     for panel in [EscapePanel::Closed, EscapePanel::Open] {
-        let activity = escape_activity(&runs, panel);
+        let activity = Presence::activity(&runs, panel, &presenter);
         assert!(!activity.drawing);
         assert!(!activity.holds_global_escape());
     }
@@ -77,7 +77,7 @@ fn focused_text_panel_escape_clears_idle_mirrored_scenes_without_a_global_hold()
     use super::{Escape, escape::local_decision};
 
     let presenter = mirrored_presenter();
-    let activity = escape_activity(&Runs::default(), EscapePanel::Open);
+    let activity = Presence::activity(&Runs::default(), EscapePanel::Open, &presenter);
     assert!(!activity.holds_global_escape());
     assert_eq!(
         local_decision(activity, EscapePanel::Open, &presenter),
