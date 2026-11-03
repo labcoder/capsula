@@ -92,7 +92,7 @@ impl Silhouette {
 }
 
 /// Three octaves of smooth value noise in -1..=1.
-fn fbm(p: Vec3) -> f32 {
+pub(crate) fn fbm(p: Vec3) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut q = p;
@@ -153,8 +153,20 @@ impl Framing {
         )
     }
 
+    /// The fractional pixel of a cloud-space point: the inverse of [`Self::to_cloud`].
+    pub(crate) fn to_pixel(self, size: u16, p: Vec2) -> Vec2 {
+        let half = f32::from(size) * 0.5;
+        let s = f32::from(size) / self.span;
+        v2(
+            (p.x - self.center.x) * s + half,
+            (self.center.y - p.y) * s + half,
+        )
+    }
+
+    /// Cloud units per pixel. A zero-sized square is treated as one pixel, so no caller sees
+    /// an infinity.
     pub(crate) fn units_per_pixel(self, size: u16) -> f32 {
-        self.span / f32::from(size)
+        self.span / f32::from(size.max(1))
     }
 }
 
@@ -259,14 +271,28 @@ mod tests {
     }
 
     #[test]
+    fn the_crown_top_is_on_the_surface() {
+        // The crown lobe is centred at (-0.05, 0.16) with radius 0.43, and nothing else is
+        // within a fillet of its top.
+        let shape = Silhouette::emoji();
+        assert!(shape.sdf(v3(-0.05, 0.59, 0.0)).abs() < 1e-5, "on the edge");
+        assert!(shape.sdf(v3(-0.05, 0.58, 0.0)) < 0.0, "just inside");
+        assert!(shape.sdf(v3(-0.05, 0.60, 0.0)) > 0.0, "just outside");
+    }
+
+    #[test]
     fn the_framing_centres_the_cloud_in_the_square() {
         let f = Framing::CARD;
-        assert_eq!(f.to_cloud(64, 32.0, 32.0), f.center);
+        assert_eq!(f.to_cloud(64, 32.0, 32.0), v2(0.0, 0.06));
         let corner = f.to_cloud(64, 0.0, 0.0);
-        let expected = v2(f.center.x - f.span / 2.0, f.center.y + f.span / 2.0);
         assert!(
-            (corner.x - expected.x).abs() < 1e-6 && (corner.y - expected.y).abs() < 1e-6,
+            (corner.x + 1.1).abs() < 1e-5 && (corner.y - 1.16).abs() < 1e-5,
             "the top-left corner: {corner:?}"
+        );
+        let back = f.to_pixel(64, corner);
+        assert!(
+            back.x.abs() < 1e-4 && back.y.abs() < 1e-4,
+            "to_pixel inverts to_cloud: {back:?}"
         );
     }
 
@@ -314,6 +340,38 @@ mod tests {
             GBuffer::bake(&shape, 24, Framing::CARD),
             GBuffer::bake(&shape, 24, Framing::CARD)
         );
+    }
+
+    #[test]
+    fn the_outer_strips_are_empty_and_every_channel_is_finite() {
+        let bake = GBuffer::bake(&Silhouette::emoji(), 32, Framing::CARD);
+        for k in 0..32 {
+            for (i, j) in [(k, 0), (k, 31), (0, k), (31, k)] {
+                assert_eq!(
+                    bake.texels[j * 32 + i],
+                    Texel::default(),
+                    "edge texel {i},{j}"
+                );
+            }
+        }
+        for t in &GBuffer::bake(&Silhouette::emoji(), 64, Framing::CARD).texels {
+            let channels = [
+                t.coverage,
+                t.normal.x,
+                t.normal.y,
+                t.normal.z,
+                t.thickness,
+                t.occlusion,
+            ];
+            assert!(channels.iter().all(|c| c.is_finite()), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_zero_size_has_a_finite_scale() {
+        assert!((Framing::CARD.units_per_pixel(0) - 2.2).abs() < 1e-6);
+        let p = Framing::CARD.to_cloud(0, 0.0, 0.0);
+        assert!(p.x.is_finite() && p.y.is_finite(), "{p:?}");
     }
 
     #[test]
