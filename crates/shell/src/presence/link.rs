@@ -3,7 +3,9 @@
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
-use kumochi_protocol::message::{ControlToBrain, DataToShell};
+use crate::strings::Strings;
+use gpui_kit::SharedString;
+use kumochi_protocol::message::{ControlToBrain, DataToShell, UserError};
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.
@@ -102,9 +104,23 @@ impl Presence {
                     self.runs.refused();
                     self.sync_deletes(cx);
                 }
+                LinkEvent::Error(error) => self.show_error(&error, cx),
             }
         }
         self.runs_changed(cx)
+    }
+
+    /// Shows the brain's error in the typing panel and on the dock.
+    fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
+        let text: SharedString = cx.global::<Strings>().error(error).into();
+        if let Some(panel) = &self.text {
+            panel.view.update(cx, |view, cx| {
+                view.notice = Some(text.clone());
+                cx.notify();
+            });
+        }
+        self.error = Some(text);
+        self.refresh_dock(cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.

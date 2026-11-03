@@ -3,7 +3,7 @@
 //! connection: it's still written while no shell is connected and during Quit, and a later
 //! connection only hears the settled settings, never an answer meant for another shell.
 
-use kumochi_protocol::message::{ControlToShell, SettingsOp};
+use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp};
 use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
@@ -33,11 +33,11 @@ pub(crate) enum Gate {
     Panic,
 }
 
-/// Whether a change became the settings.
+/// Whether a change became the settings, and why not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     Applied,
-    Refused,
+    Refused(ErrorKey),
 }
 
 /// How a write ended, and the connection whose change it was.
@@ -53,8 +53,8 @@ impl Brain {
     }
 
     /// Tells the connected shell how a change from connection `epoch` went: its own change gets
-    /// its answer; another connection's gets nothing, unless it changed the settings, and then
-    /// only the settled settings.
+    /// its answer, after the refusal's `Error` if it was refused; another connection's gets
+    /// nothing, unless it changed the settings, and then only the settled settings.
     fn settled(
         &self,
         epoch: u64,
@@ -65,6 +65,9 @@ impl Brain {
             return Ok(());
         };
         if epoch == self.epoch {
+            if let Outcome::Refused(key) = outcome {
+                link.control(&ControlToShell::Error(key.into()))?;
+            }
             link.control(&ControlToShell::Settings {
                 view: self.config.view().clone(),
                 answer: true,
@@ -100,7 +103,7 @@ impl Brain {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
-                    self.settled(epoch, Outcome::Refused, link.as_deref_mut())?;
+                    self.settled(epoch, Outcome::Refused(error.key()), link.as_deref_mut())?;
                 }
             }
         }
@@ -120,7 +123,7 @@ impl Brain {
             }
             Ok((_, Err(error))) => {
                 tracing::warn!(%error, "settings change refused");
-                Outcome::Refused
+                Outcome::Refused(error.key())
             }
             Err(error) => {
                 // A panic's message could quote the settings, so only its kind is logged.
@@ -129,7 +132,7 @@ impl Brain {
                     cancelled = error.is_cancelled(),
                     "the settings write didn't finish"
                 );
-                Outcome::Refused
+                Outcome::Refused(ErrorKey::SettingsRefused)
             }
         };
         self.settled(epoch, outcome, link.as_deref_mut())?;
