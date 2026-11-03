@@ -6,6 +6,7 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
+mod drawing;
 mod pages;
 mod purge;
 mod scenes;
@@ -74,6 +75,10 @@ pub enum StoreError {
     #[error("can't read the store page")]
     Read,
 
+    /// A drawing write or recovery failed; no database or drawing content is exposed.
+    #[error("can't store or recover the drawing")]
+    Drawing,
+
     /// A swap's reopen failed, or the store's thread ended, so the file is closed to reads.
     #[error("the store's file isn't open")]
     Closed,
@@ -103,6 +108,8 @@ pub enum EventKind {
     SceneBegin,
     /// A scene left the visible set; the body names it.
     SceneCleared,
+    /// An authoritative cut in a typed scene's lifetime log.
+    SceneCut,
 }
 
 impl EventKind {
@@ -114,6 +121,7 @@ impl EventKind {
             Self::Revealed => "revealed",
             Self::SceneBegin => "scene_begin",
             Self::SceneCleared => "scene_cleared",
+            Self::SceneCut => "scene_cut",
         }
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{DataToShell, SceneId, Step};
+use kumochi_protocol::message::{DataToShell, SceneId, SceneSnapshotChunk, Step};
 
 use crate::store::SceneState;
 
@@ -16,6 +16,7 @@ const STEP_OVERHEAD: usize = 2;
 
 #[derive(Debug)]
 pub(super) struct Recovery {
+    drawings: VecDeque<SceneSnapshotChunk>,
     /// Each scene with the revision its descriptor named, oldest first.
     scenes: VecDeque<(SceneId, u32, Vec<Step>)>,
     /// How many of the front scene's steps have gone out.
@@ -30,6 +31,7 @@ impl Recovery {
             "a settled visible scene keeps at least one step"
         );
         Self {
+            drawings: VecDeque::new(),
             scenes: visible
                 .iter()
                 .map(|state| (state.scene, state.revision, state.kept.clone()))
@@ -39,13 +41,25 @@ impl Recovery {
         }
     }
 
+    pub(super) fn drawings(chunks: Vec<SceneSnapshotChunk>) -> Self {
+        Self {
+            drawings: chunks.into(),
+            scenes: VecDeque::new(),
+            sent: 0,
+            target: CHUNK_TARGET,
+        }
+    }
+
     /// Chunks are still to go out.
     pub(super) fn pending(&self) -> bool {
-        !self.scenes.is_empty()
+        !self.scenes.is_empty() || !self.drawings.is_empty()
     }
 
     /// The next chunk: whole steps up to the target, never empty.
     pub(super) fn next_chunk(&mut self) -> Option<DataToShell> {
+        if let Some(chunk) = self.drawings.pop_front() {
+            return Some(DataToShell::SceneSnapshotV1 { chunk });
+        }
         let (scene, revision, steps) = self.scenes.front()?;
         let (scene, revision) = (*scene, *revision);
         let mut bytes = 0;
@@ -80,6 +94,8 @@ impl Recovery {
 
     /// The shell cleared these scenes, so nothing more of them goes out.
     pub(super) fn drop_scenes(&mut self, cleared: &[SceneId]) {
+        self.drawings
+            .retain(|chunk| !cleared.contains(&chunk.scene));
         if self
             .scenes
             .front()

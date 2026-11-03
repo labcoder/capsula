@@ -38,6 +38,32 @@ after an explicit switch still answers its own turn but doesn't move input. Esc 
 not the target or revision. Settings updates replace names and the main id without changing
 the input draft, keyboard focus, viewed history, target or revision.
 
+## Typed drawing admission
+
+`drawing/` is a deterministic reducer beside the coordinator. Direct complete calls and
+closed records share validation, repair and per-run step budgets. It owns one global scene
+budget and serializes store lookups, step transactions and effective cuts. A step is admitted
+without mutation, written, then committed to the canonical state only after its store reply;
+only then do `SceneBegin` and `SceneStepCommit` leave on the scene-owned data FIFO. A failed
+step write leaves no handles, revision or reserved scene name behind. Call outcomes contain
+model-visible ids and fixed error codes, never diagnostic drawing content.
+
+Provider completion drains the accepted drawing prefix before ending its run. Stop closes
+queued records but still drains an accepted step transaction before acknowledging its cut.
+An empty Stop received before the first scene id arrives cuts that run's unseen, unactivated
+scene to zero after the step commits. Effective cuts are durable before acknowledgement;
+failed cuts remain owed and block subsequent step writes. A no-op cut is acknowledged without
+adding a log entry. A fifth scene clears the oldest before attempting the new admission, and
+the clear remains owed even if the new step fails. Replacement alone does not cut old scenes.
+
+`StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
+Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
+thread deletion holds late drawing frames until the outcome: a refusal releases them in
+order, while a hide or removal discards them and retires the canonical scenes. Reconnect
+waits for pending writes and clear debt before freezing checked descriptors and whole-event
+chunks. During staging, a v1 recovery is sent only when typed scenes exist; the production
+fixture and an empty placeholder-only recovery remain legacy until B3 switches both ends.
+
 ## Ids and staleness
 
 The coordinator hands out thread and run ids, starting above the store's high-water marks, so an

@@ -21,7 +21,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 |---|---|
 | `threads` | Title, timestamps, `state` (`live` or `deleting`), `deletion_generation`, `kind` (`main` or `thread`), `title_source` (`words`, `model` or `user`), and the nullable `model` and `effort`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
-| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; only a scene's `scene_cleared`, and the `revealed` of a Stop that came after its run ended, are written without one |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 
@@ -44,6 +44,24 @@ content. The threads panel's pages leave `scene_begin` and `scene_cleared` out.
 
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
 and never returns a thread being deleted.
+
+### Typed v1 drawings
+
+`store/drawing.rs` keeps typed drawings separate from the staged labelled placeholders above.
+A typed `scene_begin` stores the immutable header and layout version in `body`; its first
+`scene_step` is in the same transaction. Later steps carry the scene id, lifetime revision,
+layout version and original typed step. An effective `scene_cut` stores the authoritative
+activated bound and finished handles. Identical cut retries are idempotent. All these rows
+have NULL `text`: drawing content never enters FTS or a page's text, and pages omit cut metadata.
+Every drawing SQL or JSON failure becomes a fixed, source-free error, never a parser diagnostic.
+
+Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
+then replays the four together against one global budget. A durable zero cut excludes its
+scene even if a crash prevented the following clear transaction. Names remain reserved in
+the thread's history after a clear or eviction. Reads cap each body at 8 MiB, each lifetime
+log at 128 entries and its aggregate bodies at 32 MiB before loading them. Typed storage is
+decoded directly rather than through the model's 32 KiB record parser: canonical JSON can
+expand a legal record. Numeric decoding preserves exact f64 round trips.
 
 ## The main thread, titles and model choices
 

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 kumochi-protocol.workspace = true
+kumochi-scene.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 # hooks: the progress handler that stops a purge's copy.

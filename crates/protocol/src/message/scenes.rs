@@ -58,6 +58,26 @@ struct DescriptorWire {
     log_entries: u16,
 }
 
+impl SceneDescriptorV1 {
+    /// Checks producer-built counts with the same rules used by the decoder.
+    /// # Errors
+    /// Returns `Descriptor` for inconsistent lifetime, retained or log counts.
+    pub fn new(
+        scene: SceneId,
+        revision: u32,
+        committed: u32,
+        log_entries: u16,
+    ) -> Result<Self, SceneDataError> {
+        DescriptorWire {
+            scene,
+            revision,
+            committed,
+            log_entries,
+        }
+        .try_into()
+    }
+}
+
 impl TryFrom<DescriptorWire> for SceneDescriptorV1 {
     type Error = SceneDataError;
 
@@ -166,6 +186,23 @@ struct ChunkWire {
     header: Option<SceneHeader>,
     events: Bounded<SceneEvent, MAX_SCENE_LOG_ENTRIES>,
     last: bool,
+}
+
+impl SceneSnapshotChunk {
+    /// Checks producer-built chunk shape with the same rules used by the decoder.
+    /// # Errors
+    /// Returns `Chunk` for invalid header placement, counts or revisions.
+    pub fn checked(self) -> Result<Self, SceneDataError> {
+        ChunkWire {
+            scene: self.scene,
+            revision: self.revision,
+            ordinal: self.ordinal,
+            header: self.header,
+            events: self.events,
+            last: self.last,
+        }
+        .try_into()
+    }
 }
 
 impl TryFrom<ChunkWire> for SceneSnapshotChunk {

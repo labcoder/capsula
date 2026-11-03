@@ -3366,6 +3366,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "kumochi-protocol",
+ "kumochi-scene",
  "rusqlite",
  "serde",
  "serde_json",
