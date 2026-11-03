@@ -8,7 +8,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey};
 use zeroize::Zeroizing;
 
-use super::{AccountState, Done, Effect, Job, Live, Step, Why, error};
+use super::{AccountState, Done, Effect, Job, Live, Step, Why, error, exchanges};
 use crate::connections::error::VaultError;
 use crate::connections::marker::MarkerUpdate;
 use crate::connections::oauth::{Authorization, Intent};
@@ -173,6 +173,7 @@ impl AccountState {
                         if leftovers {
                             tracing::warn!("old revocation chunks remain until the next sweep");
                         }
+                        self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
                         // An entry was added: revoke it now (design §2).
                         self.revoke(entries, effects);

@@ -311,6 +311,7 @@ impl AccountState {
             }
             return;
         }
+        self.admitting = None;
         self.attempt += 1;
         self.live = Some(Live {
             intent,
@@ -341,6 +342,8 @@ impl AccountState {
     }
 
     fn cancel(&mut self, effects: &mut Vec<Effect>) {
+        // A sign-in waiting for its age check is cancelled too, before it can start.
+        self.admitting = None;
         if self.saving_current() {
             self.deferred = Some(Deferred::Cancel);
             return;

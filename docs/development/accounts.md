@@ -267,7 +267,9 @@ a later success never clears it.
 rewrites the list without the ones an empty 200 confirmed. Passes run at startup, when an entry
 is added and on `Retry`, never on a timer, one at a time: a request during a pass becomes one more
 pass after it. None runs while the lock is Busy or a sign-out is pending. When the list empties,
-the empty list is saved, its names are deleted and checked, and `sweep` clears.
+the empty list is saved, its names are deleted and checked, and `sweep` clears. The manifest is
+deleted before its chunks, so a crash or refusal at any step leaves either the readable empty
+list or chunks with no manifest, and the next start or Retry finishes the job.
 
 `oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
 passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
@@ -277,9 +279,11 @@ document that fails a check sends no token anywhere.
 
 **Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
 30-day refresh-token lifetime plus a 2-day margin [local policy]. It's checked at startup, and
-when a full list would refuse a sign-in, so a full list frees what expired since. While the brain
-runs, wall time moving more than an hour [local policy] further than monotonic time is a clock
-jump: age-out waits for the next start.
+when a full list would refuse a sign-in, so a full list frees what expired since, except entries
+stamped `u64::MAX`, which never age out. While the brain runs, wall time moving more than an hour
+[local policy] further than monotonic time is a clock jump: age-out waits for the next start. An
+entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
+set back while it's listed only delays its age-out.
 
 Sign-out lands in the next PR. Until then `SignOut` is answered with the view, and a pending
 sign-out found at startup keeps the account fenced (`SigningOut`, `Cleanup::Refused`).

@@ -102,6 +102,39 @@ fn serialized_escaping_cannot_grow_a_record_past_48_kib() {
     assert_eq!(format!("{buffer:?}"), "JsonBuffer(***)");
 }
 
+/// The 48 KiB serialized bound on an account, at exactly 49,152 bytes and one over. The JSON
+/// around the 32,768 escaped access-token bytes and the ID token is 143 bytes, counted by hand.
+#[test]
+fn an_account_of_exactly_48_kib_serialized_is_saved_and_one_byte_more_is_refused() {
+    let sized = |id_token: usize| Account {
+        client_id: Zeroizing::new("c".to_owned()),
+        subject: None,
+        email: None,
+        plan_enabled: false,
+        tokens: Some(Tokens {
+            access_token: Zeroizing::new("\\".repeat(MAX_TOKEN_BYTES)),
+            refresh_token: Zeroizing::new("r".to_owned()),
+            id_token: Some(Zeroizing::new("x".repeat(id_token))),
+            scope: Zeroizing::new("s".to_owned()),
+            expires_at: 0,
+            pending_identity_validation: false,
+        }),
+    };
+    let (exact, over) = (sized(16_241), sized(16_242));
+    assert_eq!(serde_json::to_vec(&exact).expect("JSON").len(), 49_152);
+    assert_eq!(serde_json::to_vec(&over).expect("JSON").len(), 49_153);
+    assert!(matches!(exact.validate(), Ok(())), "exactly the bound");
+    assert!(matches!(over.validate(), Err(VaultError::Bounds)));
+    let (_scratch, path, service, store) = setup("account-exact-bound");
+    let mut vault = open(&store, &service, &path);
+    assert!(matches!(
+        vault.save_account(&Secret::new(over)),
+        SaveResult::NotCommitted(VaultError::Bounds)
+    ));
+    assert!(store.names().is_empty(), "refused before any write");
+    committed(vault.save_account(&Secret::new(exact)));
+}
+
 #[test]
 fn revocation_count_field_and_serialized_bounds_precede_marker_writes() {
     for case in 0..5 {

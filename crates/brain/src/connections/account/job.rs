@@ -158,6 +158,7 @@ impl<S: CredentialStore> Worker<S> {
         let aged = matches!(job, Job::Relist { age_out: true, .. })
             .then(|| self.now_for_age_out())
             .flatten();
+        let ran = self.ran();
         let Some(vault) = self.vault.as_mut() else {
             let refused = || SaveResult::NotCommitted(VaultError::Busy);
             return match job {
@@ -197,13 +198,18 @@ impl<S: CredentialStore> Worker<S> {
                 }
             }
             Job::List(entry) => {
-                let added_at = self.clock.unix_seconds();
+                // Never before this process's own time, so a clock set back then corrected
+                // can't age the entry out early (CAPS-130).
+                let added_at = self
+                    .clock
+                    .unix_seconds()
+                    .max(self.started.0.map(|wall| wall.saturating_add(ran)));
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
                         list.map_or_else(RevocationList::default, |list| list.expose().clone());
                     let mut entry = entry.expose().clone();
-                    // shortcut: a clock before 1970 keeps the entry until a later start sees a
-                    // real time; age-out (slice 3 PR 9b part 2) can't evict it early.
+                    // shortcut: with no wall time the entry never ages out; only a confirmed
+                    // revocation or a sign-out removes it.
                     entry.added_at = added_at.unwrap_or(u64::MAX);
                     list.entries.push(entry);
                     list
@@ -237,13 +243,11 @@ impl<S: CredentialStore> Worker<S> {
     /// jumped forward since this worker started.
     fn now_for_age_out(&mut self) -> Option<u64> {
         let now = self.clock.unix_seconds()?;
-        let (wall, monotonic) = self.started;
-        let ran = self
-            .clock
-            .monotonic()
-            .saturating_duration_since(monotonic)
-            .as_secs();
-        if wall.is_none_or(|wall| now.saturating_sub(wall) > ran.saturating_add(CLOCK_JUMP_SECONDS))
+        let ran = self.ran();
+        if self
+            .started
+            .0
+            .is_none_or(|wall| now.saturating_sub(wall) > ran.saturating_add(CLOCK_JUMP_SECONDS))
         {
             if !self.jumped {
                 tracing::warn!("the wall clock jumped; age-out waits for the next start");
@@ -251,6 +255,14 @@ impl<S: CredentialStore> Worker<S> {
             self.jumped = true;
         }
         (!self.jumped).then_some(now)
+    }
+
+    /// Monotonic seconds since this worker started.
+    fn ran(&self) -> u64 {
+        self.clock
+            .monotonic()
+            .saturating_duration_since(self.started.1)
+            .as_secs()
     }
 
     fn load(&mut self, mut tries: u32) -> Result<Snapshot, VaultError> {
