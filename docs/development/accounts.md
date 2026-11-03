@@ -116,7 +116,8 @@ header is retained only as at most 256 graphic ASCII bytes. The root loader keep
 Proxied networks cannot sign in until a user-set proxy setting exists. A root Windows hasn't
 installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
 ROOT entries present in Windows' Disallowed store or carrying a due disallowed-time property
-are excluded. Distrusted server-supplied intermediates, root not-before/usage policies and revocation
+are excluded. A Disallowed store that doesn't exist (`ERROR_FILE_NOT_FOUND`) counts as empty;
+any other failure to open it fails closed. Distrusted server-supplied intermediates, root not-before/usage policies and revocation
 checking remain outside this offline verifier. Client construction logs only root counts
 and the loader's typed OS error, never certificate data; counts are unavailable on loader failure.
 

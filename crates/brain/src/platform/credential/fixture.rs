@@ -2,7 +2,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{CredentialStore, WindowsCredentialStore};
 
-/// Serial native fixture access; see `runs/CAPS-63/logs/pr9a-native-repro.log`.
+/// Serial native fixture access; `docs/development/accounts.md` says why the store needs it.
 static STORE: Mutex<()> = Mutex::new(());
 
 #[must_use]

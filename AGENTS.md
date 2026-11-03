@@ -47,7 +47,7 @@ locales/en/        every user-facing string (Fluent)
   environment. Hold them in `Secret`, which prints `***`.
 - Never log prompts, transcripts, screen text, images or tool arguments.
 - Screenshots go only to the model the user chose.
-- Never read or store Claude Code's credentials.
+- Use only the connections the user sets up inside Kumochi. Never read, copy or depend on credentials, tokens, sessions or config that other apps or the developer's machine hold (Claude Code, Codex, gh, browsers and the like).
 - Clean room: nothing from HeyClicky's code, protocol, schemas, prompts, assets or identifiers.
 - Kumochi is `AGPL-3.0-only`, but no one else's GPL, LGPL or AGPL code ships in it: new
   dependencies must pass `deny.toml`'s license list.

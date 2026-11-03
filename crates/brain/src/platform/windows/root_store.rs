@@ -9,7 +9,7 @@ use std::slice;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    CRYPT_E_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, SetLastError,
+    CRYPT_E_NOT_FOUND, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, SetLastError,
 };
 use windows_sys::Win32::Security::Cryptography::{
     CERT_CONTEXT, CERT_DISALLOWED_FILETIME_PROP_ID, CERT_FIND_EXISTING,
@@ -43,7 +43,7 @@ const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 /// Fails when a store can't be opened or walked to its end, or when no root is kept.
 pub fn trust_roots() -> Result<TrustRoots, TrustRootsError> {
     let store = Store::open("ROOT")?;
-    let disallowed = Store::open("Disallowed")?;
+    let disallowed = missing_is_empty(Store::open("Disallowed"))?;
     let now = filetime(SystemTime::now().duration_since(UNIX_EPOCH).ok());
     let mut roots = TrustRoots {
         certificates: Vec::new(),
@@ -53,7 +53,7 @@ pub fn trust_roots() -> Result<TrustRoots, TrustRootsError> {
     let mut current = store.next(None)?;
     while let Some(context) = current {
         let outcome = if roots.certificates.len() < MAX_ROOTS {
-            kept(&context, &disallowed, now)
+            kept(&context, disallowed.as_ref(), now)
         } else {
             Err(Skip::Filtered)
         };
@@ -89,9 +89,10 @@ fn count(roots: &mut TrustRoots, outcome: Result<Vec<u8>, Skip>) {
 }
 
 /// The certificate's DER when it's admitted and not distrusted by Windows.
-fn kept(context: &Context<'_>, disallowed: &Store, now: u64) -> Result<Vec<u8>, Skip> {
+fn kept(context: &Context<'_>, disallowed: Option<&Store>, now: u64) -> Result<Vec<u8>, Skip> {
     let der = admitted(context)?;
-    distrust(disallowed.contains(context), disallowed_after(context), now)?;
+    let listed = disallowed.map_or(Probe::Absent, |store| store.contains(context));
+    distrust(listed, disallowed_after(context), now)?;
     Ok(der)
 }
 
@@ -231,6 +232,15 @@ fn failed<T>(last_error: i32) -> Probe<T> {
         Probe::Absent
     } else {
         Probe::Unreadable
+    }
+}
+
+/// A Disallowed store that doesn't exist distrusts nothing; any other open failure stays fatal.
+fn missing_is_empty<T>(opened: Result<T, TrustRootsError>) -> Result<Option<T>, TrustRootsError> {
+    match opened {
+        Ok(store) => Ok(Some(store)),
+        Err(TrustRootsError::Open(code)) if code == ERROR_FILE_NOT_FOUND.cast_signed() => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -547,6 +557,34 @@ mod tests {
     }
 
     #[test]
+    fn only_a_missing_disallowed_store_reads_as_empty() {
+        assert_eq!(missing_is_empty(Ok(7)), Ok(Some(7)));
+        assert_eq!(
+            missing_is_empty::<()>(Err(TrustRootsError::Open(
+                ERROR_FILE_NOT_FOUND.cast_signed()
+            ))),
+            Ok(None)
+        );
+        for error in [
+            TrustRootsError::Open(5),
+            TrustRootsError::Open(CRYPT_E_NOT_FOUND),
+            TrustRootsError::Enumerate(ERROR_FILE_NOT_FOUND.cast_signed()),
+            TrustRootsError::Empty,
+        ] {
+            assert_eq!(missing_is_empty::<()>(Err(error)), Err(error), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_store_that_does_not_exist_fails_to_open_as_missing() {
+        let opened = Store::open("KumochiTestNoSuchStore").map(|_| ());
+        assert_eq!(
+            opened,
+            Err(TrustRootsError::Open(ERROR_FILE_NOT_FOUND.cast_signed()))
+        );
+    }
+
+    #[test]
     fn no_kept_root_is_distrusted_by_windows() {
         let store = Store::open("ROOT").expect("the current user's ROOT store opens");
         let disallowed = Store::open("Disallowed").expect("the Disallowed store opens");
@@ -560,7 +598,7 @@ mod tests {
                 || matches!(disallowed_after(&context), Probe::Present(after) if after <= now);
             due += usize::from(distrusted);
             otherwise_kept += usize::from(distrusted && admitted(&context).is_ok());
-            if kept(&context, &disallowed, now).is_ok() {
+            if kept(&context, Some(&disallowed), now).is_ok() {
                 kept_roots += 1;
                 kept_due += usize::from(distrusted);
             }
