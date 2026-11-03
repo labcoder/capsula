@@ -20,7 +20,8 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
-    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SettingsView, ThreadId, UserError,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor, SceneDescriptorV1,
+    SettingsView, ThreadId, UserError,
 };
 
 use crate::credential::{self, CredentialError};
@@ -84,6 +85,10 @@ pub(crate) enum LinkEvent {
     },
     /// The connection's visible scenes, from the control pipe.
     Scenes(Vec<SceneDescriptor>),
+    ScenesV1 {
+        generation: u64,
+        scenes: kumochi_scene::text::Bounded<SceneDescriptorV1, MAX_VISIBLE_SCENES>,
+    },
     /// A delete's answer, from the control pipe.
     ThreadDeleted {
         thread: ThreadId,
@@ -763,6 +768,14 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::ScenesV1 { scenes })) => {
+                if events
+                    .send_blocking(LinkEvent::ScenesV1 { generation, scenes })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::ThreadDeleted {
                 thread,
                 outcome,
@@ -789,8 +802,8 @@ fn watch(
             }
             // shortcut: the account view has no consumer until Settings → Accounts (slice 3 PR 19).
             Ok(Some(ControlToShell::Account(_))) => {}
-            // shortcut: B4 consumes v1 membership, B8 NoVisual; B3 switches production to v1.
-            Ok(Some(ControlToShell::ScenesV1 { .. } | ControlToShell::NoVisual { .. })) => {
+            // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
+            Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");
                 return;
             }
@@ -831,17 +844,6 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
     loop {
         reader.bytes = 0;
         match frame::read::<DataToShell>(&mut reader, Pipe::Data) {
-            // shortcut: B4 consumes v1 data; B3 switches the production fixture to v1.
-            Ok(Some(
-                DataToShell::SceneBegin { .. }
-                | DataToShell::SceneStepCommit { .. }
-                | DataToShell::SceneSnapshotV1 { .. }
-                | DataToShell::SceneCutApplied { .. }
-                | DataToShell::SceneEnd { .. },
-            )) => {
-                tracing::warn!("scene v1 data before its consumer; ending the connection");
-                break;
-            }
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);

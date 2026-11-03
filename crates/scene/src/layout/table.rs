@@ -1,6 +1,6 @@
 use super::{
     PrepareError,
-    primitives::{Build, rect},
+    primitives::{Build, invariant, rect},
     state::{LayoutState, Placed},
 };
 use crate::{
@@ -447,7 +447,7 @@ pub(super) fn place(
                         .parent
                         .as_ref()
                         .and_then(|id| state.handle(id))
-                        .ok_or(PrepareError::Stale)?;
+                        .ok_or_else(invariant)?;
                     dirty.insert(parent);
                 }
             }
@@ -479,15 +479,11 @@ fn place_table(
     build: &mut Build<'_>,
 ) -> Result<(), PrepareError> {
     build.check_cancel()?;
-    let id = state
-        .handles
-        .get(&handle)
-        .ok_or(PrepareError::Stale)?
-        .clone();
-    let old = state.objects.get(&id).ok_or(PrepareError::Stale)?;
+    let id = state.handles.get(&handle).ok_or_else(invariant)?.clone();
+    let old = state.objects.get(&id).ok_or_else(invariant)?;
     let source = Arc::clone(sources.get(&id).map_or(&old.source, |(_, source)| source));
     let Op::Table(table) = &*source else {
-        return Err(PrepareError::Stale);
+        return Err(invariant());
     };
     let parent = old.item.parent;
     let viewport = table.bounds.map_or(build.viewport, rect);
