@@ -6,12 +6,12 @@
 use crate::{
     Budget, ErrorCode,
     geom::{Rect, Vec2},
-    limits::{MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES, MAX_LIVE_OBJECTS},
+    limits::{MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES},
     record::Direction,
 };
 
 /// Smallest gap between ranks.
-// shortcut: edge labels do not widen ranks; revisit in A8's visual gate.
+// shortcut: edge labels do not widen ranks; revisit in A9's visual gate.
 pub(super) const RANK_GAP: f32 = 72.0;
 const NODE_GAP: f32 = 30.0;
 const SWEEPS: usize = 4;
@@ -28,10 +28,10 @@ pub(super) struct Placement {
 }
 
 /// Lays out members of the given sizes: `nodes` of them are nodes and the rest are nested
-/// clusters, which count toward the live-object cap instead of the node cap. Edges index into
-/// `sizes`; edges out of range or self-loops are ignored.
+/// clusters, which don't count toward the node cap. Edges index into `sizes`; edges out of
+/// range or self-loops are ignored.
 /// # Errors
-/// Rejects excess nodes/members/edges, invalid dimensions or out-of-cap generated coordinates.
+/// Rejects excess nodes/edges, invalid dimensions or out-of-cap generated coordinates.
 pub(super) fn layout(
     sizes: &[Vec2],
     nodes: usize,
@@ -41,9 +41,6 @@ pub(super) fn layout(
 ) -> Result<Placement, ErrorCode> {
     if nodes > MAX_DIAGRAM_NODES {
         return Err(ErrorCode::OverBudget(Budget::DiagramNodes));
-    }
-    if sizes.len() > MAX_LIVE_OBJECTS {
-        return Err(ErrorCode::OverBudget(Budget::LiveObjects));
     }
     if edges.len() > MAX_DIAGRAM_EDGES {
         return Err(ErrorCode::OverBudget(Budget::DiagramEdges));
@@ -306,35 +303,6 @@ mod boundary_tests {
         assert_eq!(
             layout(&sizes, 48, &vec![(0, 1); 97], Direction::Down, RANK_GAP).expect_err("edge cap"),
             ErrorCode::OverBudget(Budget::DiagramEdges)
-        );
-    }
-    #[test]
-    fn clusters_beyond_the_node_cap_count_only_as_members() {
-        let sizes = vec![Vec2::new(80.0, 40.0); MAX_DIAGRAM_NODES + 2];
-        let placement = layout(&sizes, MAX_DIAGRAM_NODES, &[], Direction::Down, RANK_GAP)
-            .expect("48 nodes and two clusters");
-        assert_eq!(placement.rects.len(), MAX_DIAGRAM_NODES + 2);
-        assert_eq!(
-            layout(
-                &sizes,
-                MAX_DIAGRAM_NODES + 1,
-                &[],
-                Direction::Down,
-                RANK_GAP
-            )
-            .expect_err("node cap"),
-            ErrorCode::OverBudget(Budget::DiagramNodes)
-        );
-        assert_eq!(
-            layout(
-                &vec![Vec2::new(1.0, 1.0); MAX_LIVE_OBJECTS + 1],
-                0,
-                &[],
-                Direction::Down,
-                RANK_GAP
-            )
-            .expect_err("member cap"),
-            ErrorCode::OverBudget(Budget::LiveObjects)
         );
     }
     #[test]

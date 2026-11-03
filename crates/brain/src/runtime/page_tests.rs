@@ -440,7 +440,12 @@ async fn read_pages_and_text(
             other @ (DataToShell::StepCommit { .. }
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
-            | DataToShell::ScenesRemoved { .. }) => {
+            | DataToShell::ScenesRemoved { .. }
+            | DataToShell::SceneBegin { .. }
+            | DataToShell::SceneStepCommit { .. }
+            | DataToShell::SceneSnapshotV1 { .. }
+            | DataToShell::SceneCutApplied { .. }
+            | DataToShell::SceneEnd { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }

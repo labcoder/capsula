@@ -19,8 +19,7 @@ pub(crate) enum Owner {
     Run(RunId),
     /// A page reply, which counts against the unanswered page requests until it's written.
     Page,
-    /// A recovery snapshot chunk of a scene: no run's, so a Stop never drops it, but a clear of
-    /// its scene does.
+    /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
     /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete.
     Marker,

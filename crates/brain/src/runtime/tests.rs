@@ -34,6 +34,38 @@ mod settings;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
 
+#[test]
+fn scene_v1_control_is_broken_until_b2_installs_its_consumer() {
+    use kumochi_protocol::message::{SceneCuts, SceneFailure};
+    let cut = kumochi_protocol::message::SceneCut {
+        scene: SceneId(1),
+        cut: serde_json::from_str(r#"{"activated":0,"revealed":[]}"#).expect("empty cut"),
+    };
+    for message in [
+        ControlToBrain::StopScenes {
+            run: RunId(1),
+            cuts: SceneCuts::new(vec![cut.clone()]).expect("one cut"),
+        },
+        ControlToBrain::StepShown {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+        },
+        ControlToBrain::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            reason: SceneFailure::Timeout,
+            cut: cut.cut,
+        },
+    ] {
+        assert_eq!(
+            super::control_input(message),
+            Err(Ended::Broken("scene v1 control before its consumer"))
+        );
+    }
+}
+
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
 /// What a duplex pipe holds before its writer blocks.

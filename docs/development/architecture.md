@@ -62,6 +62,7 @@ flowchart TD
   shell --> scene
   xtask --> protocol
   xtask --> scene
+  protocol --> scene
 ```
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.
@@ -217,4 +218,4 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 ## Where to read next
 
-`processes.md`, `ipc.md`, `settings.md`, `scene.md`, `engines.md`, `store.md`, `voice.md`, `screen.md`, each added with its module.
+`processes.md`, `ipc.md`, `settings.md`, `scene.md`, `engines.md`, `store.md`, [accounts.md](accounts.md), `voice.md`, `screen.md`, each added with its module.

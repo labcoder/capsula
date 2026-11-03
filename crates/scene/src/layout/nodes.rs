@@ -129,6 +129,8 @@ pub(super) fn place(
                 .entry(object.item.parent)
                 .or_default()
                 .push(id.clone());
+            // Its own pass measures contents that aren't new nodes, such as a table.
+            groups.entry(Some(object.item.handle)).or_default();
         }
     }
     let mut owned_by = BTreeMap::<Handle, Vec<&crate::WireId>>::new();
@@ -235,7 +237,7 @@ pub(super) fn place(
                 }
             }
         }
-        // shortcut: wide initial batches stay unscaled until A8's visual gate.
+        // shortcut: wide initial batches stay unscaled until A9's visual gate.
         let initial = !initialized && all.iter().all(|(_, id, _)| new_ids.contains(id));
         let translate = Vec2::new(
             viewport.center().x - placement.bounds.center().x,
@@ -264,11 +266,12 @@ pub(super) fn place(
                         placement.rects[slot].center() + translate,
                     )?
                 };
-                let member = state.objects.get_mut(&id).ok_or(PrepareError::Stale)?;
-                let pad = Vec2::new(compound::PAD, compound::PAD);
-                let offset = target.origin + pad - member.item.bounds.origin;
-                member.item.transform = Affine::pose(1.0, 0.0, offset);
-                member.rank = Some(rank);
+                state.objects.entry(id).and_modify(|member| {
+                    let pad = Vec2::new(compound::PAD, compound::PAD);
+                    let offset = target.origin + pad - member.item.bounds.origin;
+                    member.item.transform = Affine::pose(1.0, 0.0, offset);
+                    member.rank = Some(rank);
+                });
                 focus = Some(focus.map_or(target, |previous: Rect| previous.union(target)));
                 continue;
             };
@@ -338,6 +341,8 @@ pub(super) fn place(
         }
         if let Some(group_id) = group_id {
             // A cluster's parent ranks its contents, so they must be measured before it.
+            // shortcut: text, shapes and callouts in a cluster are placed after its parent ranks
+            // it, so they don't widen it; the parser/compiler PR measures them first.
             let contents = parent
                 .filter(|_| cluster)
                 .and_then(|handle| compound::contents(state, handle));
@@ -345,11 +350,12 @@ pub(super) fn place(
                 .objects
                 .get_mut(&group_id)
                 .expect("group was resolved above");
-            group.initialized = true;
+            group.initialized |= focus.is_some();
             if let Some(contents) = contents {
                 group.item.bounds = contents;
             }
-            // shortcut: clusters never glide or move as they grow; revisit if build-ups overlap.
+            // shortcut: a cluster growing on a later step never glides or moves, so it can overlap
+            // a sibling or end off-screen with nothing bringing it into view; revisit in A9.
             if !cluster && let Some(focus) = focus {
                 let current = group.rest.pos;
                 let shifted = Rect {
@@ -388,7 +394,7 @@ fn free_slot(
     viewport: Rect,
     fallback: Vec2,
 ) -> Result<Rect, PrepareError> {
-    // shortcut: slots ignore edge alignment and the resting glide; revisit in A8.
+    // shortcut: slots ignore edge alignment and the resting glide; revisit in A9.
     let mut same_rank: Vec<_> = state
         .objects
         .values()

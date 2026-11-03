@@ -80,7 +80,9 @@ field name to its path. `UnknownOp` denotes only an unknown record/op tag;
 unknown vocabulary values and invalid numeric values are `OutOfRange`.
 `StepError`'s `Display` and `Debug` contain only the path and code. `tool_text` may include a
 known step id when replying to its model, but never the rejected field value.
-`Text` and `WireId` debug formatting exposes lengths only. Do not trace records,
+`Text`, `Source` and `WireId` expose lengths only; `Finite`, `Number`, `Rgb`, `Ms`, `Cell` and
+`Point` redact values, while `Step`, `Frame` and `FrameItem` summarize counts, hiding
+timings, repeat counts and word offsets along with drawing values. Do not trace records,
 serialize drawing content into logs, or trace a model-facing tool reply.
 
 ## Admission and identity
@@ -320,6 +322,8 @@ flowchart LR
 
 The ignored `frame_four_views_max` and `activation_at_caps` tests measure CPU sampling
 and activation with deterministic text measurement, not a painter or real fonts.
+`prepare_four_views_at_caps` measures four-scene initial preparation at the global
+object cap, with a common local-edge control and a separate cross-group-edge workload.
 Run their release binaries at normal priority on a quiet machine with no other
 builds running, and record the machine, workload, priority and sample counts.
 The original frame numbers are after-only because main then had no sampler; follow-up
@@ -335,17 +339,24 @@ default); overlay defaults to rightwards flow. Explicit diagram direction and bo
 win. Inline `begin.size` overrides host dimensions when present.
 
 A boxless diagram directly inside another diagram is a ranked cluster. Preparation
-measures its contents before placing it among its parent's nodes and other clusters;
+measures its nodes, edges, child clusters and preplaced containers before placing it
+among its parent's nodes and other clusters;
 boxed nested diagrams keep their explicit placement. Unspecified directions inherit
 from the nearest diagram ancestor. An edge joins nodes in its exact least common
 diagram, which ranks their containing clusters and routes the edge in that diagram's
 coordinate space. Tables and charts are not implicit graph clusters.
+An edge's `in` must be exactly that least common diagram, or admission returns
+`OutOfRange` at `from` or `to`; that endpoint blame is a deterministic heuristic.
 
 The 48-node and 96-edge limits apply per diagram, not per nested drawing. Clusters
 consume the scene's existing object and depth budgets rather than its direct-node
 budget. Incremental additions keep earlier node rectangles and cluster placements
-stable; a cluster can grow into its siblings on a later step instead of moving them.
+stable; a cluster can grow into its siblings or off-screen on a later step because
+it neither moves nor glides to bring new contents into view; A9 revisits this limit.
 Groups have no frame or label in the plain diagram vocabulary.
+Text, shapes and callouts inside a cluster are placed after its parent ranks it,
+so they do not yet contribute to its ranked size; the parser/compiler PR measures
+them before ranking together with private Mermaid group labels.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
