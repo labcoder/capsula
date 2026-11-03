@@ -667,7 +667,8 @@ impl Link {
                 | ControlToShell::Settings { .. }
                 | ControlToShell::Error(_)
                 | ControlToShell::ScenesV1 { .. }
-                | ControlToShell::NoVisual { .. },
+                | ControlToShell::NoVisual { .. }
+                | ControlToShell::Account(_),
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -796,6 +797,8 @@ fn watch(
                     return;
                 }
             }
+            // shortcut: the account view has no consumer until Settings → Accounts (slice 3 PR 19).
+            Ok(Some(ControlToShell::Account(_))) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");

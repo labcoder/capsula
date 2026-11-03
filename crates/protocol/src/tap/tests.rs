@@ -2,8 +2,9 @@ use super::{Direction, MAGIC, Record, Tapped, dump, read, read_header, write, wr
 use crate::Secret;
 use crate::frame::{FrameError, HEADER_LEN, Pipe, encode};
 use crate::message::{
-    AssistantName, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation, SettingsOp,
-    SettingsView, ThreadId, ThreadOp, ThreadTitle, UserName,
+    AccountEmail, AccountOp, AccountView, AssistantName, ControlToBrain, ControlToShell,
+    DataToBrain, Hello, Incarnation, PlanState, SettingsOp, SettingsView, ThreadId, ThreadOp,
+    ThreadTitle, UserName,
 };
 
 const NAME: &str = "Zqxassistant";
@@ -134,6 +135,34 @@ fn a_rename_keeps_only_its_op_name_and_length() {
         format!(
             "    0 Control shell -> brain  ThreadOp ({} bytes)\n1 frames\n",
             wire_len(&rename, Pipe::Control)
+        )
+    );
+}
+
+#[test]
+fn an_account_op_keeps_its_fields_and_the_account_view_only_its_name() {
+    const EMAIL: &str = "zqxperson@example.invalid";
+    let op = ControlToBrain::AccountOp(AccountOp::SignIn);
+    let view = ControlToShell::Account(AccountView::SignedIn {
+        email: Some(AccountEmail::new(EMAIL).expect("valid")),
+        plan: PlanState::Enabled,
+        recovery: None,
+    });
+    let records = [
+        record(Direction::ToBrain, &op),
+        record(Direction::ToShell, &view),
+    ];
+    assert!(records[0].payload.is_some(), "the op is content-free");
+    assert_eq!(records[1].payload, None);
+    let file = recording(&records);
+    assert!(!contains(&file, EMAIL.as_bytes()), "the email was recorded");
+    let mut out = Vec::new();
+    dump(&mut file.as_slice(), &mut out).expect("dumps");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        format!(
+            "    0 Control shell -> brain  AccountOp(SignIn)\n    1 Control brain -> shell  Account ({} bytes)\n2 frames\n",
+            wire_len(&view, Pipe::Control)
         )
     );
 }
