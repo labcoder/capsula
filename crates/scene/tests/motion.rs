@@ -1,6 +1,10 @@
 //! Activation, sampling, the host loop and cuts over prepared steps.
 #[path = "support/allocation.rs"]
 mod allocation;
+#[path = "support/motion.rs"]
+mod fixtures;
+
+use fixtures::{Fixture, four_views, gliding_scene, mixed_track};
 
 use kumochi_scene::{
     Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
@@ -134,7 +138,7 @@ fn rect(name: &str) -> Value {
 }
 
 #[test]
-fn review_delayed_parent_shifts_the_child_entrance_without_shortening_it() {
+fn a_child_entrance_waits_for_its_delayed_parent_without_shortening() {
     let (mut scene, mut budget, mut view) = fresh();
     activate(
         &mut scene,
@@ -166,7 +170,7 @@ fn review_delayed_parent_shifts_the_child_entrance_without_shortening_it() {
 }
 
 #[test]
-fn review_frame_never_frees_replaced_geometry_after_activation() {
+fn frame_never_frees_geometry_replaced_by_an_activation() {
     let (mut scene, mut budget, mut view) = fresh();
     activate(
         &mut scene,
@@ -193,6 +197,146 @@ fn review_frame_never_frees_replaced_geometry_after_activation() {
         "sampling neither allocates nor frees the replaced primitives"
     );
     assert_eq!(frame.items().len(), 0);
+}
+
+#[test]
+fn a_three_level_entrance_chain_keeps_its_start_when_a_child_is_added_later() {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"pending","say":"one two three four five six seven eight nine ten","put":[
+            {"diagram":{"id":"d","at_word":5,"delay":200}},
+            {"table":{"id":"t","in":"d","cols":["V"],"enter":"fade","dur":400}},
+            {"row":{"id":"first","in":"t","cells":[1],"enter":"fade","dur":400}}
+        ]}),
+        0,
+    );
+    assert_eq!(item(&view, 2017, "first"), None);
+    assert_eq!(opacity(&view, 2018, "first"), 0.0_f32.to_bits());
+    assert_eq!(opacity(&view, 2218, "first"), 0.25_f32.to_bits());
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"later","put":[
+            {"row":{"id":"later","in":"t","cells":[2],"enter":"fade","dur":400}}
+        ]}),
+        1000,
+    );
+    assert_eq!(view.next_wake(1000), Some(2018));
+    assert_eq!(item(&view, 2017, "later"), None);
+    assert_eq!(opacity(&view, 2018, "later"), 0.0_f32.to_bits());
+    assert_eq!(opacity(&view, 2218, "first"), 0.25_f32.to_bits());
+    assert_eq!(opacity(&view, 2218, "later"), 0.25_f32.to_bits());
+    assert_eq!(view.stop(2417), vec![handle(&view, "d")]);
+    assert_eq!(
+        view.stop(2418),
+        vec![
+            handle(&view, "d"),
+            handle(&view, "t"),
+            handle(&view, "first"),
+            handle(&view, "later"),
+        ]
+    );
+}
+
+#[test]
+fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"text","put":[
+            {"text":{"id":"label","at":[12,34],"text":"drawing marker"}}
+        ]}),
+        0,
+    );
+    let frame = sample(&view, 0);
+    assert_eq!(format!("{frame:?}"), "Frame { items: 1, .. }");
+    assert_eq!(
+        format!("{:?}", frame.items()[0]),
+        "FrameItem { primitives: 1, .. }"
+    );
+}
+
+#[test]
+fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
+    let value = json!({"id":"sentinels","start":{"after":"earlier","ms":54321},"put":[
+        {"table":{"id":"table","cols":["Value","Flag"]}},
+        {"row":{"id":"row","in":"table","cells":[123_456.5,true]}},
+        {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":123_456.5}}},
+        {"series":{"id":"series","in":"chart","data":[123_456.5]}},
+        {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
+        {"series":{"id":"points","in":"scatter","data":[[1234.5,123_456.5]]}},
+        {"line":{"id":"line","from":[1234.5,0],"to":[1234.5,10],"color":"#abcdef","delay":34567,"dur":45678,"at_word":23456}},
+        {"anim":{"target":"line","track":"x","keys":[[0,1234.5]],"repeat":56789}},
+        {"anim":{"target":"line","track":"color","keys":[[0,"#abcdef"]]}}
+    ]});
+    let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
+    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+        panic!("step fixture");
+    };
+    let kumochi_scene::Op::Chart(chart) = &step.put[2] else {
+        panic!("chart fixture");
+    };
+    assert_eq!(
+        chart.y.min.expect("axis numeric sentinel").get().to_bits(),
+        123_456.5_f64.to_bits()
+    );
+    let kumochi_scene::Op::Line(line) = &step.put[6] else {
+        panic!("line fixture");
+    };
+    let kumochi_scene::record::Anchor::At(from) = &line.from else {
+        panic!("coordinate sentinel");
+    };
+    assert_eq!(from[0].get().to_bits(), 1234.5_f32.to_bits());
+    assert_eq!(line.delay.expect("timing sentinel").get(), 34567);
+    for output in [
+        format!("{step:?}"),
+        format!("{:?}", chart.y),
+        format!("{:?}", line.from),
+        format!("{:?}", line.color),
+        format!("{:?}", line.delay),
+    ] {
+        for sentinel in [
+            "123456.5", "1234.5", "#abcdef", "abcdef", "11259375", "34567", "45678", "23456",
+            "56789", "54321",
+        ] {
+            assert!(
+                !output.contains(sentinel),
+                "Debug must not expose drawing values"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_infinite_track_samples_the_last_tick_then_rests_at_the_deadline() {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"repeat","put":[rect("s"),
+            {"anim":{"target":"s","track":"x","ease":"linear","repeat":-1,
+                "keys":[[0,0],[100,100]]}}
+        ]}),
+        0,
+    );
+    assert_eq!(
+        transform(&view, 59_999, "s"),
+        Affine([1.0, 0.0, 0.0, 1.0, 99.0, 0.0])
+    );
+    assert!(view.animating(59_999));
+    assert_eq!(
+        transform(&view, 60_000, "s"),
+        Affine([1.0, 0.0, 0.0, 1.0, 100.0, 0.0])
+    );
+    assert!(!view.animating(60_000));
+    assert_eq!(view.next_wake(60_000), None);
 }
 
 #[test]
@@ -993,205 +1137,11 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
     );
 }
 
-fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView {
-    let enters = ["fade", "draw", "pop", "slide", "grow", "fly"];
-    let mut scene = new_scene(name);
-    let mut view = SceneView::new(&LayoutState::new(&scene), 0);
-    activate(
-        &mut scene,
-        budget,
-        &mut view,
-        json!({"id":"groups","put":[
-            {"diagram":{"id":"g0","box":[0,0,260,300],"enter":"pop","dur":1000}},
-            {"diagram":{"id":"g1","in":"g0","box":[0,0,260,300],"enter":"grow","dur":1000}},
-            {"diagram":{"id":"g2","in":"g1","box":[0,0,260,300],"dir":"down","enter":"slide","dur":1000}},
-            {"node":{"id":"root","in":"g2","label":"Root","enter":"fly","dur":1000}},
-            {"node":{"id":"a","in":"g2","label":"A","enter":"pop","dur":1000}},
-            {"node":{"id":"b","in":"g2","label":"B","enter":"grow","dur":1000}},
-            {"edge":{"id":"ra","in":"g2","from":"root","to":"a","flow":500,"enter":"draw","dur":1000}},
-            {"edge":{"id":"rb","in":"g2","from":"root","to":"b","flow":500,"enter":"draw","dur":1000}}
-        ]}),
-        0,
-    );
-    let step = prepared(
-        &mut scene,
-        budget,
-        view.layout(),
-        json!({"id":"glide","put":[
-            {"node":{"id":"c","in":"g2","label":"C","enter":"fly","dur":1000}},
-            {"edge":{"id":"rc","in":"g2","from":"root","to":"c","flow":500,"enter":"draw","dur":1000}}
-        ]}),
-    );
-    assert_eq!(step.glides.len(), 1, "each view includes a generated glide");
-    view.activate(step, 0, 800, &mut Frame::new())
-        .expect("glide activation");
-    let shapes = count - 10;
-    for start in (0..shapes).step_by(150) {
-        let put: Vec<Value> = (start..(start + 150).min(shapes))
-            .map(|n| {
-                json!({"shape":{
-                    "id":format!("s{n}"),"in":"g2","kind":"polygon","points":[[0,0],[8,0],[8,8],[0,8]],
-                    "enter":enters[n % enters.len()],"dur":1000
-                }})
-            })
-            .collect();
-        activate(
-            &mut scene,
-            budget,
-            &mut view,
-            json!({"id":format!("shapes{start}"),"put":put}),
-            0,
-        );
-    }
-    for chunk in 0..4 {
-        let put: Vec<Value> = (chunk * 64..chunk * 64 + 64)
-            .map(|n| {
-                json!({"anim":{
-                    "target":format!("s{}",n / 2),"track":if n % 2 == 0 { "x" } else { "y" },
-                    "ease":"spring","yoyo":true,"repeat":-1,
-                    "keys":(0..32).map(|k| json!([k * 900, k % 2 * 4])).collect::<Vec<_>>()
-                }})
-            })
-            .collect();
-        activate(
-            &mut scene,
-            budget,
-            &mut view,
-            json!({"id":format!("tracks{chunk}"),"put":put}),
-            0,
-        );
-    }
-    assert_eq!(
-        (
-            scene.usage().objects,
-            scene.usage().tracks,
-            scene.usage().keys
-        ),
-        (count, 256, 8192),
-        "each view reaches its legal object, track and key counts"
-    );
-    view
-}
-
-fn capped_views() -> Vec<SceneView> {
-    let mut budget = GlobalBudget::default();
-    let views: Vec<_> = [600, 600, 150, 150]
-        .into_iter()
-        .enumerate()
-        .map(|(index, count)| capped_view(&format!("view{index}"), count, &mut budget))
-        .collect();
-    assert_eq!(
-        (
-            budget.usage().scenes,
-            budget.usage().objects,
-            budget.usage().tracks
-        ),
-        (4, 1500, 1024),
-        "all four scenes share one global budget at the legal caps"
-    );
-    views
-}
-
-fn mixed_track(index: usize, key_count: usize, word: Option<usize>) -> Value {
-    let property = ["scale", "color", "rotate", "pos"][index % 4];
-    let keys: Vec<_> = (0..key_count)
-        .map(|key| {
-            let high = key % 2 == 1;
-            let value = match property {
-                "scale" => json!(if high { 4 } else { 1 }),
-                "color" => json!(if high { "#0000ff" } else { "#ff0000" }),
-                "rotate" => json!(if high { 45 } else { 0 }),
-                _ => json!(if high { [4, 4] } else { [0, 0] }),
-            };
-            json!([key * (800 + index % 61), value])
-        })
-        .collect();
-    json!({"anim":{"target":format!("n{}",index / 4),"track":property,
-        "ease":"spring","repeat":-1,"yoyo":true,"at_word":word,"keys":keys}})
-}
-
-fn gliding_scene(name: &str, count: usize, budget: &mut GlobalBudget) -> (SceneState, SceneView) {
-    let mut scene = new_scene(name);
-    let mut view = SceneView::new(&LayoutState::new(&scene), 0);
-    let groups = count / 2;
-    for start in (0..groups).step_by(80) {
-        let end = (start + 80).min(groups);
-        let put: Vec<_> = (start..end)
-            .flat_map(|index| {
-                let parent = match index {
-                    1 => Some("g0"),
-                    2 => Some("g1"),
-                    _ => None,
-                };
-                [
-                    json!({"diagram":{"id":format!("g{index}"),"in":parent,"box":[0,0,1,1],
-                "enter":(["pop","grow","slide","fly"][index % 4]),"dur":1000}}),
-                    json!({"node":{"id":format!("n{index}"),"in":format!("g{index}"),"label":"Node",
-                "enter":(["fade","draw","pop","slide","grow","fly"][index % 6]),"dur":1000}}),
-                ]
-            })
-            .collect();
-        let step = prepared(
-            &mut scene,
-            budget,
-            view.layout(),
-            json!({"id":format!("groups{start}"),"put":put}),
-        );
-        assert_eq!(
-            step.glides.len(),
-            end - start,
-            "every one-node diagram overflows its narrow viewport and glides"
-        );
-        view.activate(step, 0, 800, &mut Frame::new())
-            .expect("glide batch");
-    }
-    for chunk in 0..8 {
-        let put: Vec<_> = (chunk * 32..chunk * 32 + 32)
-            .map(|index| mixed_track(index, 32, None))
-            .collect();
-        activate(
-            &mut scene,
-            budget,
-            &mut view,
-            json!({"id":format!("tracks{chunk}"),"put":put}),
-            0,
-        );
-    }
-    assert_eq!(
-        (
-            scene.usage().objects,
-            scene.usage().tracks,
-            scene.usage().keys
-        ),
-        (count, 256, 8192),
-        "the mixed fixture reaches its admitted caps"
-    );
-    (scene, view)
-}
-
-fn glide_views() -> Vec<SceneView> {
-    let mut budget = GlobalBudget::default();
-    let views: Vec<_> = [600, 600, 150, 150]
-        .into_iter()
-        .enumerate()
-        .map(|(index, count)| gliding_scene(&format!("glide{index}"), count, &mut budget).1)
-        .collect();
-    assert_eq!(
-        (
-            budget.usage().scenes,
-            budget.usage().objects,
-            budget.usage().tracks
-        ),
-        (4, 1500, 1024),
-        "the glide-heavy views share the legal global caps"
-    );
-    views
-}
-
 #[test]
 fn four_views_reach_the_legal_caps_without_frame_allocations() {
-    for mixed in [false, true] {
-        let views = if mixed { glide_views() } else { capped_views() };
+    for fixture in [Fixture::Control, Fixture::Glide] {
+        let mixed = matches!(fixture, Fixture::Glide);
+        let views = four_views(fixture);
         let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
         for now in [100, 2000, 59_999, 60_000] {
             let ((), counts) = allocation::activity(|| {
@@ -1217,11 +1167,12 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
 }
 
 #[test]
-#[ignore = "exclusive Rez timing: release, measuring.lock, no concurrent cargo/rustc"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn frame_four_views_max() {
     use std::{hint::black_box, time::Instant};
-    for mixed in [false, true] {
-        let views = if mixed { glide_views() } else { capped_views() };
+    for fixture in [Fixture::Control, Fixture::Glide] {
+        let mixed = matches!(fixture, Fixture::Glide);
+        let views = four_views(fixture);
         let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
         for early in [true, false] {
             for tick in 0..64 {
@@ -1281,7 +1232,7 @@ fn frame_four_views_max() {
 }
 
 #[test]
-#[ignore = "exclusive Rez timing: release, measuring.lock, no concurrent cargo/rustc"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn activation_at_caps() {
     use std::{hint::black_box, time::Instant};
     let mut samples = Vec::with_capacity(64);
