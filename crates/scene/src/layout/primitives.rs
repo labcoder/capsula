@@ -22,6 +22,11 @@ use std::{
 pub(super) fn layout_error(code: ErrorCode) -> PrepareError {
     PrepareError::Layout(StepError::new(code))
 }
+/// An internal invariant failure: the layout prefix lacks, or holds another kind of, what
+/// admission guarantees. It fails the step, where `Stale` would invite a retry.
+pub(super) fn invariant() -> PrepareError {
+    layout_error(ErrorCode::UnknownRef)
+}
 pub(super) struct Build<'a> {
     pub viewport: Rect,
     pub theme: &'a Theme,
@@ -213,7 +218,7 @@ impl Build<'_> {
                 }
                 point_bounds(&all)?
             } else {
-                let previous = cached.ok_or(PrepareError::Stale)?;
+                let previous = cached.ok_or_else(invariant)?;
                 output.extend(
                     previous
                         .item

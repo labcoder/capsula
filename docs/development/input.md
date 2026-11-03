@@ -148,10 +148,12 @@ The local effect always happens first, and nothing waits on the brain:
   happens and the unsent message is logged, without content.
 
 Esc is held system-wide with `RegisterHotKey` only while Kumochi speaks or shows a drawing.
-Listening and an open status panel never hold it. Until slice 4 draws on the overlay, the
-placeholder steps count as a drawing only while the typing panel shows them, and there's no
-speech yet, so Esc is held only then. If registration is refused, the status panel shows Stop
-instead, and the refusal is logged without key or text content. An ignored fixture,
+Listening and an open status panel never hold it. Until B5 paints v1 scenes on the overlay,
+only placeholder steps shown in the typing panel count as a drawing; mirrored, preparing and
+recovering v1 scenes do not hold global Esc. Panel Esc still reaches the presenter. There's no
+speech yet, so Esc is held only for those shown placeholder steps. If registration is refused,
+the status panel shows Stop instead, and the refusal is logged without key or text content.
+An ignored fixture,
 `cargo test -p kumochi-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.

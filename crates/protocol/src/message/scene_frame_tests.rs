@@ -30,7 +30,7 @@ fn header() -> SceneHeader {
 
 fn step() -> Step {
     let Record::Step(step) = parse_record(
-        br#"{"step":{"id":"secret_step","say":"secret speech","put":[{"text":{"id":"secret_object","at":[0,0],"text":"secret pixels"}}]}}"#,
+        br#"{"step":{"id":"secret_step","say":"secret speech","put":[{"text":{"id":"secret_object","at":[13337.25,0],"text":"secret pixels"}}]}}"#,
     )
     .expect("valid step") else {
         panic!("step record")
@@ -303,6 +303,7 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
             "secret speech",
             "secret_object",
             "secret pixels",
+            "13337.25",
         ] {
             assert!(!file.windows(secret.len()).any(|w| w == secret.as_bytes()));
             assert!(!dump.contains(secret));
