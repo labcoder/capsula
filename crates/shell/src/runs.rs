@@ -527,9 +527,8 @@ mod tests {
         SceneDescriptor, SceneId, Step, ThreadId,
     };
 
-    use kumochi_brain::coordinator::{
-        Coordinator, Effect as BrainEffect, EngineEvent, Input, StoreOp,
-    };
+    use kumochi_brain::coordinator::{Coordinator, Effect as BrainEffect, Input, StoreOp};
+    use kumochi_brain::engines::TurnEvent;
     use kumochi_brain::store::Store;
     use kumochi_protocol::message::ControlToShell;
 
@@ -704,7 +703,7 @@ mod tests {
         deliver(&mut runs, Some(&mut store), effects);
         let answer = Input::Engine {
             run,
-            event: EngineEvent::Text("answered".to_owned()),
+            event: TurnEvent::TextDelta("answered".to_owned()),
         };
         let effects = brain.handle(answer).expect("text");
         deliver(&mut runs, Some(&mut store), effects);

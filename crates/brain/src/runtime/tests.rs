@@ -13,9 +13,9 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
 use super::data::DataQueue;
-use super::fixture::Fixture;
 use super::{Brain, Ended, Link, MAX_ENDING, window};
 use crate::coordinator::Input;
+use crate::engines::fixture::Fixture;
 use crate::ipc;
 #[cfg(windows)]
 use crate::platform::{self, PipeClient, PipeServer};
@@ -227,7 +227,7 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         main_thread,
         high_water,
         scenes,
-        fixture,
+        Box::new(fixture),
         scratch.config(),
     )
     .expect("brain")

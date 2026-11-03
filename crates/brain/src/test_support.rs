@@ -10,8 +10,8 @@ use kumochi_protocol::constants;
 use kumochi_protocol::message::ThreadId;
 
 use crate::config::Config;
+use crate::engines::fixture::Fixture;
 use crate::runtime::Brain;
-use crate::runtime::fixture::Fixture;
 use crate::store::Store;
 
 /// A store file in its own temp folder, removed afterwards.
@@ -72,7 +72,15 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let scenes = store.scenes().expect("scenes");
     let fixture = Fixture::parse(script).expect("script");
     let config = Config::load(Some(scratch.0.clone()), main_thread);
-    Brain::new(store, main_thread, high_water, scenes, fixture, config).expect("brain")
+    Brain::new(
+        store,
+        main_thread,
+        high_water,
+        scenes,
+        Box::new(fixture),
+        config,
+    )
+    .expect("brain")
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.
