@@ -66,7 +66,10 @@ enforces the 512-command path limit. Source Debug exposes byte length only.
 
 The bounded Mermaid lexical reader is exercised in unit tests: a UTF-8-safe cursor
 reads ids, labels, shapes and links, with typed refusals for unsupported syntax.
-Admission still rejects Mermaid; this reader layer alone does not enable it.
+The grammar builds ordered nodes, parent-first groups and links, assigning node
+membership to the first closing group. Its tests cover complete-input parsing,
+direction, metadata and refusal boundaries. Admission still rejects Mermaid;
+this grammar layer alone does not enable it.
 
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary

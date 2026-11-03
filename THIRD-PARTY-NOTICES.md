@@ -29,7 +29,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Mermaid-derived regression input
+## Mermaid-derived regression inputs
 
 The input in `crates/scene/src/mermaid/read.rs`'s
 `a_trailing_hyphen_belongs_to_the_id_before_an_odd_shape` test is reduced from
@@ -37,6 +37,14 @@ Pele's `tests/compat/flowchart/flow-text.spec.js:374` (the odd vertex whose id
 ends in a minus). Pele records that input's source as
 [Mermaid](https://github.com/mermaid-js/mermaid), version 12.1.0,
 revision `21f72f07ea`.
+
+In `crates/scene/src/mermaid/parse.rs`,
+`bare_membership_mentions_reference_prior_explicit_nodes` combines the inputs
+from `subgraph.spec.js:78` (the numeric-leading group id) and
+`subgraph.spec.js:115` (the old-style group title). The class-suffix row in
+`invalid_and_refused_sources_keep_their_codes` is minimized from
+`flow-style.spec.js:181` (a class applied directly to a vertex). These are
+regression strings embedded in the Rust tests, not vendored upstream suites.
 
 No upstream fixture directory or fixture inventory is vendored. The separate
 offline compatibility audit is not shipped and is not a claim of full compatibility.
