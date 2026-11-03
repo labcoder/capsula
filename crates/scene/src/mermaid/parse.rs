@@ -3,7 +3,9 @@
 //! A reduced port of Pele's flowchart parser (MIT; the notice is in THIRD-PARTY-NOTICES.md),
 //! over the forms `Reader` scans. It keeps Pele's membership rule, where a node belongs to
 //! the first group that closes naming it, and refuses recognised syntax outside scene v1's subset
-//! as `Unsupported` instead of dropping it. Anything that isn't such a flowchart is `Malformed`.
+//! as `Unsupported` instead of dropping it. Unknown header words and refused leading bytes are
+//! also `Unsupported`; D1 does not distinguish another diagram kind from a misspelling.
+//! Malformed or truncated D1 forms return `Malformed`.
 
 use super::read::{Reader, Stroke, is_word, source_id, text};
 use crate::{
@@ -143,7 +145,6 @@ impl<'a> Parser<'a> {
         match &self.read.rest()[..kind] {
             "flowchart" | "graph" => self.read.pos += kind,
             "" => return Err(ErrorCode::Malformed),
-            // Another diagram kind or renderer, such as `sequenceDiagram` or `flowchart-elk`.
             _ => return Err(ErrorCode::Unsupported),
         }
         self.read.spaces();
@@ -534,6 +535,11 @@ mod tests {
             ("flowchart LR\nA -->\n", ErrorCode::Malformed),
             ("flowchart LR\nsubgraph g\nA\n", ErrorCode::Malformed),
             ("flowchart BR\nA\n", ErrorCode::Unsupported),
+            ("flowchat LR\nA\n", ErrorCode::Unsupported),
+            ("flowchartLR\nA\n", ErrorCode::Unsupported),
+            ("hello\n", ErrorCode::Unsupported),
+            ("flowchart LR\n& A\n", ErrorCode::Unsupported),
+            ("flowchart LR\nA;%% note\n", ErrorCode::Unsupported),
             (
                 "flowchart TB\nsubgraph g\ndirection BR\nA\nend\n",
                 ErrorCode::Unsupported,
@@ -563,6 +569,45 @@ mod tests {
         ] {
             assert_eq!(parse(source, 100).err(), Some(code), "source {source:?}");
         }
+    }
+
+    #[test]
+    fn sixteen_closed_nested_groups_parse_and_seventeen_are_too_deep() {
+        let nested = |depth: usize| {
+            format!(
+                "flowchart TB\n{}A\n{}",
+                "subgraph\n".repeat(depth),
+                "end\n".repeat(depth)
+            )
+        };
+        let source = nested(16);
+        let chart = parse(&source, 100).expect("sixteen nested groups");
+        let parents: Vec<_> = chart.groups.iter().map(|group| group.parent).collect();
+        let expected = vec![
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(6),
+            Some(7),
+            Some(8),
+            Some(9),
+            Some(10),
+            Some(11),
+            Some(12),
+            Some(13),
+            Some(14),
+        ];
+        assert_eq!(parents, expected, "each group nests in the one before it");
+        assert_eq!(
+            chart.nodes[0].owner,
+            Some(15),
+            "the innermost group owns the node"
+        );
+        assert_eq!(parse(&nested(17), 100).err(), Some(ErrorCode::TooDeep));
     }
 
     #[test]
