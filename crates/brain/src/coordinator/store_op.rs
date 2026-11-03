@@ -8,8 +8,15 @@ use super::Input;
 use crate::store::{RunEnd, SceneTarget, TitleSource};
 
 /// A store operation: an autocommit read, or a write in one transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum StoreOp {
+    /// A v1 drawing read or durable transition; its arguments never enter logs.
+    Drawing {
+        /// The drawing reducer's outstanding operation identity.
+        serial: u64,
+        /// Typed data with content-free diagnostics.
+        write: crate::drawing::Write,
+    },
     /// An autocommit read that neither stops nor postpones a purge.
     ReadPage {
         /// The connection that requested the page.
@@ -100,21 +107,30 @@ impl StoreOp {
     /// The run a write belongs to; page reads and clears have none.
     pub fn run(&self) -> Option<RunId> {
         match self {
-            Self::ReadPage { .. }
+            Self::Drawing {
+                write: crate::drawing::Write::Step { run, .. },
+                ..
+            }
+            | Self::BeginTurn { run, .. }
+            | Self::CommitStep { run, .. }
+            | Self::EndRun { run, .. } => Some(*run),
+            Self::Drawing { .. }
+            | Self::ReadPage { .. }
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
             | Self::SetTitle { .. }
             | Self::SetModel { .. } => None,
-            Self::BeginTurn { run, .. }
-            | Self::CommitStep { run, .. }
-            | Self::EndRun { run, .. } => Some(*run),
         }
     }
 
     /// Answers an operation that couldn't reach the store; `None` for one nothing waits on.
     pub fn failed(&self) -> Option<Input> {
         Some(match self {
+            Self::Drawing { serial, .. } => Input::DrawingWritten {
+                serial: *serial,
+                reply: Err(()),
+            },
             Self::ReadPage { epoch, request, .. } => Input::PageRead {
                 epoch: *epoch,
                 request: *request,

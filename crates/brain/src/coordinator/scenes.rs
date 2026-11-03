@@ -23,7 +23,10 @@ impl Coordinator {
     /// Nothing can still move the visible set: no ended run waits on the store, so every first
     /// step and fifth-scene write is answered, and every clear is durable.
     pub fn settled(&self) -> bool {
-        self.ending.is_empty() && self.clearing.is_empty() && self.keeping.is_empty()
+        self.ending.is_empty()
+            && self.clearing.is_empty()
+            && self.keeping.is_empty()
+            && self.drawing.settled()
     }
 
     /// A clear's or a kept selection's write is in the store.
@@ -32,12 +35,18 @@ impl Coordinator {
             || self.keeping.iter().any(|(_, _, writing)| *writing)
     }
 
+    pub(crate) fn drawing_in_flight(&self) -> bool {
+        self.drawing.in_flight()
+    }
+
     /// Writes again every clear whose write failed. A timer armed before is forgotten: the
     /// connection that would have heard it is gone.
     pub fn retry_clears(&mut self) -> Vec<Effect> {
         self.retry_armed = None;
         let mut effects = Vec::new();
         self.retry(&mut effects);
+        self.drawing_retry(&mut effects);
+        self.drawing_settle(&mut effects);
         self.arm_retry(&mut effects);
         effects
     }
@@ -49,7 +58,7 @@ impl Coordinator {
             .keeping
             .iter()
             .filter(|(scene, _, _)| !self.clearing.iter().any(|(cleared, _)| cleared == scene));
-        self.clearing.len() + kept_only.count()
+        self.clearing.len() + kept_only.count() + usize::from(self.drawing.needs_retry())
     }
 
     /// The retry timer fired: owed writes go out again, and if they fail the next wait is
@@ -58,17 +67,19 @@ impl Coordinator {
         self.retry_armed = None;
         self.retry_after = (self.retry_after * 2).min(LAST_RETRY);
         self.retry(effects);
+        self.drawing_retry(effects);
     }
 
     /// Keeps the retry timer armed exactly while an owed write has none in flight, so a failure
     /// is tried again even when nothing else reaches the store, such as while turns wait on the
     /// debt. A deadline longer than the current wait, armed before a commit reset it, is replaced.
     pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
-        if self.clearing.is_empty() && self.keeping.is_empty() {
+        if self.clearing.is_empty() && self.keeping.is_empty() && !self.drawing.cut_pending() {
             self.retry_after = FIRST_RETRY;
         }
         let unwritten = self.clearing.iter().any(|(_, writing)| !writing)
-            || self.keeping.iter().any(|(_, _, writing)| !writing);
+            || self.keeping.iter().any(|(_, _, writing)| !writing)
+            || self.drawing.needs_retry();
         if !unwritten {
             if self.retry_armed.take().is_some() {
                 effects.push(Effect::CancelRetry);

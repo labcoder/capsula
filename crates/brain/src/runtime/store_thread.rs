@@ -517,6 +517,18 @@ impl StoreThread {
 #[expect(clippy::too_many_lines, reason = "one short arm per store op")]
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
     match op {
+        StoreOp::Drawing { serial, write } => {
+            purger.op_arriving();
+            let reply = store
+                .reconnect()
+                .and_then(|()| store.drawing_write(&write))
+                .map_err(|_| ());
+            if reply.is_err() {
+                tracing::warn!("a drawing store operation failed");
+            }
+            answer(acks, Input::DrawingWritten { serial, reply });
+            purger.op_arrived(store);
+        }
         StoreOp::ReadPage { .. } => unreachable!("StoreThread::send hands reads to the reader"),
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();

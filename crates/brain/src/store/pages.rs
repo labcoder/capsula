@@ -281,7 +281,7 @@ impl Pages<'_> {
                 "SELECT e.id, e.run, e.kind, substr(CAST(e.text AS BLOB), 1, ?4) FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
-             AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'revealed')
+             AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'scene_cut', 'revealed')
              ORDER BY e.id DESC LIMIT ?3",
             )
             .map_err(|_| StoreError::Read)?;

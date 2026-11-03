@@ -195,7 +195,7 @@ impl Store {
             .prepare(
                 "SELECT b.id, b.thread, b.run FROM events b
                  JOIN threads t ON t.id = b.thread AND t.state = 'live'
-                 WHERE b.kind = 'scene_begin' AND NOT EXISTS (
+                 WHERE b.kind = 'scene_begin' AND b.body IS NULL AND NOT EXISTS (
                      SELECT 1 FROM events c
                      WHERE c.thread = b.thread AND c.id > b.id AND c.kind = 'scene_cleared'
                      AND CASE WHEN json_valid(c.body) THEN json_extract(c.body, '$.scene') END = b.id

@@ -7,6 +7,7 @@ mod config;
 pub mod connections;
 pub mod coordinator;
 pub mod credential;
+pub mod drawing;
 pub mod engines;
 pub mod ipc;
 pub mod logging;

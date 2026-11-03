@@ -42,6 +42,7 @@ impl Coordinator {
         event: TurnEvent,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        let drawing_pending = self.drawing.pending_for(run);
         let current = self.current(run)?;
         // The engine hasn't started before its turn is stored, and has nothing more after Done.
         if !current.turn_stored || current.finishing {
@@ -73,7 +74,9 @@ impl Coordinator {
             TurnEvent::OutputItem(_) => {}
             // shortcut: a completed round ends the run, draw call and all, which only the fixture
             // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
-            TurnEvent::Finished(Finish::Completed) if current.acked < current.steps => {
+            TurnEvent::Finished(Finish::Completed)
+                if current.acked < current.steps || drawing_pending =>
+            {
                 current.finishing = true;
             }
             TurnEvent::Finished(Finish::Completed) => {
@@ -325,7 +328,7 @@ impl Coordinator {
                 step,
             }));
         }
-        if found.finishing && found.acked == found.steps {
+        if found.finishing && found.acked == found.steps && !self.drawing.pending_for(run) {
             let done = self.take(run)?;
             self.end(done, RunEnd::Done, None, Notify::Shell, effects);
         }

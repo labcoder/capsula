@@ -25,6 +25,8 @@ use crate::test_support::{self, Scratch};
 
 #[path = "delete_tests.rs"]
 mod deletes;
+#[path = "drawing_tests.rs"]
+mod drawings;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
@@ -35,13 +37,13 @@ mod settings;
 mod thread_ops;
 
 #[test]
-fn scene_v1_control_is_broken_until_b2_installs_its_consumer() {
+fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
     use kumochi_protocol::message::{SceneCuts, SceneFailure};
     let cut = kumochi_protocol::message::SceneCut {
         scene: SceneId(1),
         cut: serde_json::from_str(r#"{"activated":0,"revealed":[]}"#).expect("empty cut"),
     };
-    for message in [
+    let messages = [
         ControlToBrain::StopScenes {
             run: RunId(1),
             cuts: SceneCuts::new(vec![cut.clone()]).expect("one cut"),
@@ -56,13 +58,28 @@ fn scene_v1_control_is_broken_until_b2_installs_its_consumer() {
             scene: SceneId(1),
             index: 0,
             reason: SceneFailure::Timeout,
-            cut: cut.cut,
+            cut: cut.cut.clone(),
         },
-    ] {
-        assert_eq!(
-            super::control_input(message),
-            Err(Ended::Broken("scene v1 control before its consumer"))
-        );
+    ];
+    let expected = [
+        Input::StopScenes {
+            run: RunId(1),
+            cuts: SceneCuts::new(vec![cut.clone()]).expect("one cut"),
+        },
+        Input::Drawing(crate::drawing::Input::StepShown {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+        }),
+        Input::Drawing(crate::drawing::Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            cut: cut.cut,
+        }),
+    ];
+    for (message, expected) in messages.into_iter().zip(expected) {
+        assert_eq!(super::control_input(message), Ok(Some(expected)));
     }
 }
 

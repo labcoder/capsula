@@ -262,10 +262,7 @@ fn global_handle_cut_fits_the_control_cap() {
         cuts: SceneCuts::new(cuts).expect("global cap"),
     };
     let bytes = frame::encode(&message, Pipe::Control).expect("fits");
-    assert!(
-        bytes.len() < 8 * 1024,
-        "bounded handles stay far below 64 KiB"
-    );
+    assert_eq!(bytes.len(), 4567);
     round_trip(&message, Pipe::Control);
 }
 

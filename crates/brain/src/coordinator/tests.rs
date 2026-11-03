@@ -8,6 +8,8 @@ use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
 #[path = "delete_tests.rs"]
 mod deletes;
+#[path = "drawing_tests.rs"]
+mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
 #[path = "scene_tests.rs"]
