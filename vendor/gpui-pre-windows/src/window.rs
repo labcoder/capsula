@@ -990,8 +990,9 @@ impl PlatformWindow for WindowsWindow {
         // keeps this window's frames coming for at least as long.
         let frame_request = self.state.frame_request.clone();
         self.state.callbacks.input.set(Some(Box::new(move |input| {
+            let result = callback(input);
             frame_request.sustain_after_input();
-            callback(input)
+            result
         })));
     }
 
@@ -1059,11 +1060,13 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+        // A failed forced draw is served too; device-lost recovery latches a fresh one.
+        if self.state.serving_forced_frame.get() {
+            self.state.force_render_pending.set(false);
+        }
         if drawn.is_none() {
             // The device may be lost, and the vsync thread checks only while a frame is wanted.
             self.state.frame_request.request();
-        } else if self.state.serving_forced_frame.get() {
-            self.state.force_render_pending.set(false);
         }
     }
 

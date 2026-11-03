@@ -27,7 +27,7 @@ A window asks for a frame when:
   window dirty, which also retries a frame skipped because the window was already drawing);
 - a forced render is pending (after a device-lost recovery, or one GPUI deferred because another
   draw was on the stack or the window was throttled): the window asks again every vblank until
-  GPUI actually draws a forced frame, so repeated deferrals can't strand it;
+  GPUI attempts a forced draw, so repeated deferrals can't strand it;
 - GPUI receives any input for it, by any route (window messages, accelerators, DirectManipulation,
   drag and drop): the window then keeps drawing every vblank for one second (`INPUT_SUSTAIN`);
 - DirectManipulation is active (touchpad pan and inertia).
@@ -37,8 +37,8 @@ wants a frame; a device lost while everything is idle is noticed on the next fra
 
 Two of these stand in for core behaviour that relies on being woken every vblank: GPUI retries
 a re-entrant skip, and keeps presenting for a second after input that changed something. The
-backend can't see either, so it errs on the side of drawing: it retries forced frames until one
-is drawn, and sustains after every input, changed or not. That keeps the fix in the backend, so
+backend can't see either, so it errs on the side of drawing: it retries forced frames until GPUI
+tries one, and sustains after every input, changed or not. That keeps the fix in the backend, so
 `gpui-pre` stays a registry crate.
 Each modified file says so in its first line, as Apache-2.0 4(b) asks; the license text is
 `vendor/gpui-pre-windows/LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` lists the crate.
