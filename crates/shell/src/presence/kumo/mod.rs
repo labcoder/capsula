@@ -8,5 +8,9 @@
     )
 )]
 
+mod coverage;
+mod frame;
+mod look;
 mod math;
+mod raster;
 mod shape;
