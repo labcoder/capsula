@@ -5,9 +5,17 @@
 
 use tracing::Level;
 use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt as _;
 
 /// Daily files kept before the oldest is deleted.
 const KEEP_DAYS: usize = 7;
+
+pub(crate) fn filter(level: Level) -> Targets {
+    Targets::new()
+        .with_default(level)
+        .with_target("hyper_util", LevelFilter::OFF)
+}
 
 /// Why logging couldn't start.
 #[derive(Debug, thiserror::Error)]
@@ -45,10 +53,9 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
     } else {
         Level::INFO
     };
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(appender)
-        .with_max_level(level)
-        .finish();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(appender))
+        .with(filter(level));
     tracing::subscriber::set_global_default(subscriber)?;
     // The payload can hold any value an assertion printed, so only the location is logged.
     std::panic::set_hook(Box::new(|info| {

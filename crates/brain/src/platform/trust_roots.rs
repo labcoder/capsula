@@ -7,9 +7,12 @@ use std::fmt;
 pub struct TrustRoots {
     /// Each kept root's DER encoding.
     pub certificates: Vec<Vec<u8>>,
-    /// Roots left out: not valid now, not for server authentication, unreadable, oversized or
-    /// past the cap.
+    /// Roots left out: not valid now, not for server authentication, distrusted by Windows,
+    /// unreadable, oversized or past the cap.
     pub skipped: usize,
+    /// The skipped roots whose validity, key usage or distrust data couldn't be read; a healthy
+    /// store has none.
+    pub unreadable: usize,
 }
 
 impl fmt::Debug for TrustRoots {
@@ -17,6 +20,7 @@ impl fmt::Debug for TrustRoots {
         f.debug_struct("TrustRoots")
             .field("certificates", &self.certificates.len())
             .field("skipped", &self.skipped)
+            .field("unreadable", &self.unreadable)
             .finish()
     }
 }
@@ -24,7 +28,7 @@ impl fmt::Debug for TrustRoots {
 /// The roots couldn't be loaded. Carries OS error codes only, never certificate data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TrustRootsError {
-    /// The OS refused to open the root store with this error code.
+    /// The OS refused to open the ROOT or Disallowed store with this error code.
     #[error("root store open failed ({0})")]
     Open(i32),
     /// Walking the store stopped early with this error code.
@@ -44,10 +48,11 @@ mod tests {
         let roots = TrustRoots {
             certificates: vec![vec![0x30, 0x03, 0x02, 0x01, 0x07]; 2],
             skipped: 3,
+            unreadable: 1,
         };
         assert_eq!(
             format!("{roots:?}"),
-            "TrustRoots { certificates: 2, skipped: 3 }"
+            "TrustRoots { certificates: 2, skipped: 3, unreadable: 1 }"
         );
     }
 }

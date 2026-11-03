@@ -2,7 +2,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{CredentialStore, WindowsCredentialStore};
 
-/// Rez's `disjoint_native_writes_then_cross_thread_reads` missed reads under overlapping writes: 2/200 (2 workers), 10/400 (4).
+/// Serial native fixture access; see `runs/CAPS-63/logs/pr9a-native-repro.log`.
 static STORE: Mutex<()> = Mutex::new(());
 
 #[must_use]

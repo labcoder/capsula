@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -12,18 +13,32 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsage
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
-use super::{Client, Endpoint, HttpError, MAX_BODY_BYTES, Request, from_roots};
+use super::{
+    Client, Endpoint, HttpError, JwksUrl, MAX_BODY_BYTES, Request, body_buffer, from_roots,
+    read_response,
+};
+use crate::platform::{TrustRoots, TrustRootsError};
 use crate::test_support::{Captured, SENTINEL};
 
 struct Server {
     address: SocketAddr,
     root: Vec<u8>,
     config: Arc<rustls::ServerConfig>,
-    task: Option<JoinHandle<io::Result<()>>>,
+    task: Option<JoinHandle<io::Result<WireRequest>>>,
+}
+
+struct WireRequest {
+    line: Zeroizing<String>,
+    content_type: Option<String>,
+    body: Secret<Zeroizing<Vec<u8>>>,
 }
 
 impl Server {
     fn start(reply: Vec<u8>) -> Self {
+        Self::start_delayed(reply, Duration::ZERO)
+    }
+
+    fn start_delayed(reply: Vec<u8>, delay: Duration) -> Self {
         static NEXT_CA: AtomicUsize = AtomicUsize::new(0);
         let key = KeyPair::generate().expect("in-memory CA key");
         let mut ca = CertificateParams::new(Vec::new()).expect("CA parameters");
@@ -57,10 +72,15 @@ impl Server {
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
         )
         .expect("test TLS key");
-        Self::with_config(reply, root, Arc::new(config))
+        Self::with_config(reply, root, Arc::new(config), delay)
     }
 
-    fn with_config(reply: Vec<u8>, root: Vec<u8>, config: Arc<rustls::ServerConfig>) -> Self {
+    fn with_config(
+        reply: Vec<u8>,
+        root: Vec<u8>,
+        config: Arc<rustls::ServerConfig>,
+        delay: Duration,
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback port 0");
         let address = listener.local_addr().expect("bound address");
         let worker_config = Arc::clone(&config);
@@ -93,8 +113,28 @@ impl Server {
             }
             let mut body = Zeroizing::new(vec![0; length]);
             tls.read_exact(&mut body)?;
+            let wire = WireRequest {
+                line: Zeroizing::new(
+                    header
+                        .lines()
+                        .next()
+                        .ok_or_else(|| io::Error::other("missing request line"))?
+                        .to_owned(),
+                ),
+                content_type: header
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, value)| value.trim().to_owned()),
+                body: Secret::new(body),
+            };
             tls.write_all(&reply)?;
-            tls.flush()
+            if delay.is_zero() {
+                tls.conn.send_close_notify();
+            }
+            tls.flush()?;
+            thread::sleep(delay);
+            Ok(wire)
         });
         Self {
             address,
@@ -109,10 +149,17 @@ impl Server {
     }
 
     fn client(&self) -> Client {
-        Client(from_roots(vec![self.root.clone()]).expect("supplied test CA"))
+        Client(
+            from_roots(Ok(TrustRoots {
+                certificates: vec![self.root.clone()],
+                skipped: 0,
+                unreadable: 0,
+            }))
+            .expect("supplied test CA"),
+        )
     }
 
-    fn finish(mut self) -> io::Result<()> {
+    fn finish(mut self) -> io::Result<WireRequest> {
         self.task
             .take()
             .expect("fixture task")
@@ -180,7 +227,14 @@ fn unknown_issuer(error: &reqwest::Error) -> bool {
 fn empty_and_unparsable_root_sets_fail_closed() {
     for roots in [Vec::new(), vec![vec![0, 1, 2]]] {
         assert!(
-            matches!(from_roots(roots), Err(HttpError::TrustStoreUnavailable)),
+            matches!(
+                from_roots(Ok(TrustRoots {
+                    certificates: roots,
+                    skipped: 0,
+                    unreadable: 0
+                })),
+                Err(HttpError::TrustStoreUnavailable)
+            ),
             "no fallback trust roots"
         );
     }
@@ -190,7 +244,12 @@ fn empty_and_unparsable_root_sets_fail_closed() {
 async fn unknown_issuer_is_rejected_and_the_same_ca_is_a_positive_control() {
     let untrusted = Server::start(reply("200 OK", b"{}", ""));
     let unrelated = Server::start(reply("200 OK", b"{}", ""));
-    let client = from_roots(vec![unrelated.root.clone()]).expect("unrelated valid CA");
+    let client = from_roots(Ok(TrustRoots {
+        certificates: vec![unrelated.root.clone()],
+        skipped: 0,
+        unreadable: 0,
+    }))
+    .expect("unrelated valid CA");
     let root = untrusted.root.clone();
     let config = Arc::clone(&untrusted.config);
     let Err(error) = client.get(untrusted.url()).send().await else {
@@ -205,7 +264,7 @@ async fn unknown_issuer_is_rejected_and_the_same_ca_is_a_positive_control() {
         "server observes the rejected handshake"
     );
     drop(unrelated);
-    let trusted = Server::with_config(reply("200 OK", b"{}", ""), root, config);
+    let trusted = Server::with_config(reply("200 OK", b"{}", ""), root, config, Duration::ZERO);
     let response = trusted
         .client()
         .send_to(&trusted.url(), request(Endpoint::Discovery))
@@ -261,7 +320,7 @@ async fn auth_discovery_and_error_bodies_all_have_the_same_byte_cap() {
         let server = Server::start(reply(status, &vec![b'x'; MAX_BODY_BYTES + 1], ""));
         let response = server
             .client()
-            .send_to(&server.url(), request(endpoint))
+            .send_to(&server.url(), super::tests::request(endpoint))
             .await;
         assert_eq!(response.unwrap_err(), HttpError::BodyTooLarge);
         server
@@ -270,10 +329,209 @@ async fn auth_discovery_and_error_bodies_all_have_the_same_byte_cap() {
     }
 }
 
+#[test]
+fn allocation_hints_are_bounded_and_optional() {
+    assert_eq!(body_buffer(None).capacity(), 0);
+    for (length, minimum) in [(333, 333), (u64::MAX, MAX_BODY_BYTES)] {
+        let bytes = body_buffer(Some(length));
+        assert!(bytes.is_empty());
+        assert!(bytes.capacity() >= minimum);
+        assert!(bytes.capacity() <= MAX_BODY_BYTES);
+    }
+}
+
 #[tokio::test]
-async fn forms_and_responses_do_not_enter_logs_or_debug() {
+async fn trust_root_diagnostics_log_counts_and_loader_codes_only() {
     let captured = Captured::default();
     let _logging = captured.install();
+    let server = Server::start(reply("200 OK", b"{}", ""));
+    let roots = TrustRoots {
+        certificates: vec![server.root.clone(), SENTINEL.as_bytes().to_vec()],
+        skipped: 7,
+        unreadable: 2,
+    };
+    let client = Client(from_roots(Ok(roots)).expect("one parseable CA"));
+    client
+        .send_to(&server.url(), request(Endpoint::Discovery))
+        .await
+        .expect("trusted fixture");
+    server.finish().expect("complete request");
+    assert!(matches!(
+        from_roots(Err(TrustRootsError::Open(5))),
+        Err(HttpError::TrustStoreUnavailable)
+    ));
+    let text = captured.text();
+    assert_eq!(text.matches("account trust roots").count(), 2);
+    for expected in [
+        "kept=1",
+        "skipped=7",
+        "unreadable=2",
+        "unparsable=1",
+        "loader_error=Open(5)",
+    ] {
+        assert!(
+            text.contains(expected),
+            "missing safe root diagnostic {expected}"
+        );
+    }
+    assert!(!text.contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn exact_body_limit_is_accepted_and_missing_length_grows() {
+    let expected = vec![b'x'; MAX_BODY_BYTES];
+    let server = Server::start(reply("200 OK", &expected, ""));
+    let response = server
+        .client()
+        .send_to(&server.url(), request(Endpoint::Discovery))
+        .await
+        .expect("exact cap accepted");
+    assert_eq!(response.body.expose().as_slice(), expected);
+    server.finish().expect("complete request");
+    let server = Server::start(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nsmall".to_vec());
+    let response = server
+        .client()
+        .send_to(&server.url(), request(Endpoint::Discovery))
+        .await
+        .expect("body without a length");
+    assert_eq!(response.body.expose().as_slice(), b"small");
+    server.finish().expect("complete request");
+}
+
+#[tokio::test]
+async fn a_truncated_body_is_transport_and_a_stalled_body_is_timeout() {
+    let server = Server::start(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nx".to_vec(),
+    );
+    assert_eq!(
+        server
+            .client()
+            .send_to(&server.url(), request(Endpoint::Discovery))
+            .await
+            .unwrap_err(),
+        HttpError::Transport
+    );
+    server
+        .finish()
+        .expect("request read before truncated reply");
+    let server = Server::start_delayed(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n".to_vec(),
+        Duration::from_secs(2),
+    );
+    let builder = server
+        .client()
+        .0
+        .get(server.url())
+        .timeout(Duration::from_secs(1));
+    let response = builder
+        .send()
+        .await
+        .expect("headers arrive before the body stalls");
+    assert_eq!(
+        read_response(response).await.unwrap_err(),
+        HttpError::Timeout
+    );
+    server.finish().expect("request read before body stalled");
+}
+
+#[tokio::test]
+async fn token_posts_are_form_encoded_and_public_gets_have_no_body() {
+    let pairs = [
+        ("grant_type", "authorization_code"),
+        ("client_id", "issued-client"),
+        ("code", "one +&=/é"),
+        ("code_verifier", "v_v-v.v~v"),
+        ("redirect_uri", "http://127.0.0.1:1455/auth/callback"),
+        ("resource", "https://api.openai.com/v1"),
+    ];
+    let server = Server::start(reply("200 OK", b"{}", ""));
+    let token_request = Request {
+        endpoint: Endpoint::Token,
+        fields: pairs
+            .iter()
+            .map(|(key, value)| (*key, Secret::new(Zeroizing::new((*value).to_owned()))))
+            .collect(),
+    };
+    server
+        .client()
+        .send_to(&server.url(), token_request)
+        .await
+        .expect("POST");
+    let wire = server.finish().expect("captured POST");
+    assert_eq!(wire.line.as_str(), "POST /fixture HTTP/1.1");
+    assert_eq!(
+        wire.content_type.as_deref(),
+        Some("application/x-www-form-urlencoded")
+    );
+    let decoded: Vec<_> = url::form_urlencoded::parse(wire.body.expose())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    assert_eq!(decoded.len(), pairs.len());
+    assert_eq!(
+        decoded.into_iter().collect::<BTreeMap<_, _>>(),
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect()
+    );
+    for endpoint in [
+        Endpoint::Discovery,
+        Endpoint::Jwks(JwksUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+    ] {
+        let server = Server::start(reply("200 OK", b"{}", ""));
+        server
+            .client()
+            .send_to(&server.url(), request(endpoint))
+            .await
+            .expect("public GET");
+        let wire = server.finish().expect("captured GET");
+        assert_eq!(wire.line.as_str(), "GET /fixture HTTP/1.1");
+        assert_eq!(wire.content_type, None);
+        assert!(wire.body.expose().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn public_endpoints_refuse_fields_before_connecting() {
+    for endpoint in [
+        Endpoint::Discovery,
+        Endpoint::Jwks(JwksUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+    ] {
+        let server = Server::start(reply("200 OK", b"{}", ""));
+        let client = server.client();
+        let with_fields = Request {
+            endpoint,
+            fields: vec![("code", Secret::new(Zeroizing::new(SENTINEL.to_owned())))],
+        };
+        assert_eq!(
+            client
+                .send_to(&server.url(), with_fields)
+                .await
+                .unwrap_err(),
+            HttpError::Request
+        );
+        client
+            .send_to(&server.url(), request(Endpoint::Discovery))
+            .await
+            .expect("listener untouched");
+        server.finish().expect("only the public request arrived");
+    }
+}
+
+#[tokio::test]
+async fn forms_and_responses_do_not_enter_logs_or_debug() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone()),
+        )
+        .with(crate::logging::filter(tracing::Level::TRACE));
+    let _logging = tracing::subscriber::set_default(subscriber);
     tracing::info!("capture-control");
     let server = Server::start(reply(
         "200 OK",
@@ -288,8 +546,8 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         !format!("{request:?}").contains(SENTINEL),
         "form values redacted"
     );
-    let response = server
-        .client()
+    let client = server.client();
+    let response = client
         .send_to(&format!("{}?query={SENTINEL}", server.url()), request)
         .await
         .expect("bounded fixture");
@@ -303,6 +561,20 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         !format!("{response:?}").contains(SENTINEL),
         "response body redacted"
     );
+    let unavailable = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("unused loopback port");
+    let address = unavailable.local_addr().expect("unused address");
+    drop(unavailable);
+    let error = client
+        .send_to(
+            &format!("https://{address}/failed?query={SENTINEL}"),
+            Request {
+                endpoint: Endpoint::Discovery,
+                fields: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("the loopback listener was closed");
+    assert_eq!(error, HttpError::Transport);
     assert!(
         captured.text().contains("capture-control"),
         "capture active"
@@ -310,6 +582,10 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
     assert!(
         !captured.text().contains(SENTINEL),
         "query, form and body never logged"
+    );
+    assert!(
+        !captured.text().contains("127.0.0.1") && !captured.text().contains(&address.to_string()),
+        "connection hosts and addresses never logged"
     );
     server.finish().expect("fixture completed");
 }

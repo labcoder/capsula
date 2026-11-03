@@ -3,7 +3,9 @@
 #[cfg(test)]
 mod tests;
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
+use std::collections::HashSet;
+
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::Jwk};
 use kumochi_protocol::Secret;
 use serde::{Deserialize, de::DeserializeOwned};
 use subtle::ConstantTimeEq;
@@ -68,6 +70,11 @@ struct Discovery {
 }
 
 #[derive(Deserialize)]
+struct KeySet {
+    keys: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum Audience {
     One(Zeroizing<String>),
@@ -110,7 +117,7 @@ pub async fn verify(
         return Err(IdentityError::Discovery);
     }
     let url = JwksUrl::parse(&discovery.jwks_uri).map_err(|_| IdentityError::Discovery)?;
-    let keys: JwkSet = document(
+    let keys: KeySet = document(
         &http
             .execute(Request {
                 endpoint: Endpoint::Jwks(url),
@@ -147,7 +154,7 @@ fn check_inputs(token: &str, client: &str, nonce: &str) -> Result<(), IdentityEr
 
 fn verify_signed(
     token: &str,
-    keys: &JwkSet,
+    keys: &KeySet,
     client: &str,
     nonce: &str,
     now: u64,
@@ -165,11 +172,31 @@ fn verify_signed(
     if kid.len() > MAX_ID_BYTES || keys.keys.len() > MAX_JWKS_KEYS {
         return Err(IdentityError::Bounds);
     }
-    let key = keys.find(kid).ok_or(IdentityError::Token)?;
-    let decoding_key = DecodingKey::from_jwk(key).map_err(|_| IdentityError::Token)?;
+    let mut seen = HashSet::new();
+    let mut selected = None;
+    for key in &keys.keys {
+        let Some(key_id) = key.get("kid").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !seen.insert(key_id) {
+            return Err(IdentityError::Discovery);
+        }
+        if key_id == kid {
+            selected = Some(key);
+        }
+    }
+    let key = selected.ok_or(IdentityError::Token)?;
+    if key.get("use").is_some_and(|usage| usage != "sig")
+        || key.get("alg").is_some_and(|algorithm| algorithm != "RS256")
+    {
+        return Err(IdentityError::Token);
+    }
+    let key: Jwk = serde_json::from_value(key.clone()).map_err(|_| IdentityError::Token)?;
+    let decoding_key = DecodingKey::from_jwk(&key).map_err(|_| IdentityError::Token)?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[ISSUER]);
     validation.set_audience(&[client]);
+    // GHSA-h395-gr6q-cpjc: require iss/aud/sub; validate our own Claims.exp: u64.
     validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
     validation.validate_exp = false;
     let claims = decode::<Claims>(token, &decoding_key, &validation)

@@ -141,13 +141,26 @@ impl fmt::Debug for Client {
 /// # Errors
 /// Refuses an unreadable/empty trust store or a failed TLS/HTTP configuration.
 pub fn build() -> Result<Client, HttpError> {
-    let roots = crate::platform::trust_roots().map_err(|_| HttpError::TrustStoreUnavailable)?;
-    from_roots(roots.certificates).map(Client)
+    from_roots(crate::platform::trust_roots()).map(Client)
 }
 
-fn from_roots(roots: Vec<Vec<u8>>) -> Result<reqwest::Client, HttpError> {
+fn from_roots(
+    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
+) -> Result<reqwest::Client, HttpError> {
+    let roots = roots.map_err(|error| {
+        tracing::warn!(loader_error = ?error, "account trust roots unavailable");
+        HttpError::TrustStoreUnavailable
+    })?;
     let mut store = rustls::RootCertStore::empty();
-    let (usable, _) = store.add_parsable_certificates(roots.into_iter().map(CertificateDer::from));
+    let (usable, unparsable) =
+        store.add_parsable_certificates(roots.certificates.into_iter().map(CertificateDer::from));
+    tracing::info!(
+        kept = usable,
+        skipped = roots.skipped,
+        unreadable = roots.unreadable,
+        unparsable,
+        "account trust roots"
+    );
     if usable == 0 {
         return Err(HttpError::TrustStoreUnavailable);
     }
@@ -160,6 +173,7 @@ fn from_roots(roots: Vec<Vec<u8>>) -> Result<reqwest::Client, HttpError> {
     .with_no_client_auth();
     // shortcut: proxied networks can't sign in, until there's a user-set proxy setting
     // shortcut: a root Windows hasn't fetched yet fails as UnknownIssuer; revisit if users hit it
+    // shortcut: server-supplied intermediate distrust, usage-specific not-before and revocation aren't checked; revisit before broad release
     reqwest::Client::builder()
         .use_preconfigured_tls(tls)
         .https_only(true)
@@ -197,37 +211,50 @@ impl Client {
             }
             self.0.get(url).timeout(Duration::from_secs(10))
         };
-        let mut response = builder
+        let response = builder
             .send()
             .await
             .map_err(|error| transport_error(&error))?;
-        if response.status().is_redirection() {
-            return Err(HttpError::Redirect);
-        }
-        let status = response.status().as_u16();
-        let request_id = response
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|v| v.len() <= 256 && v.bytes().all(|b| b.is_ascii_graphic()))
-            .map(str::to_owned);
-        let mut bytes = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| transport_error(&error))?
-        {
-            if chunk.len() > MAX_BODY_BYTES - bytes.len() {
-                return Err(HttpError::BodyTooLarge);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(Response {
-            status,
-            request_id,
-            body: Secret::new(bytes),
-        })
+        read_response(response).await
     }
+}
+
+fn body_buffer(length: Option<u64>) -> Zeroizing<Vec<u8>> {
+    let capacity = length.map_or(0, |length| {
+        usize::try_from(length)
+            .unwrap_or(MAX_BODY_BYTES)
+            .min(MAX_BODY_BYTES)
+    });
+    Zeroizing::new(Vec::with_capacity(capacity))
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<Response, HttpError> {
+    if response.status().is_redirection() {
+        return Err(HttpError::Redirect);
+    }
+    let status = response.status().as_u16();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.len() <= 256 && v.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_owned);
+    let mut bytes = body_buffer(response.content_length());
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| transport_error(&error))?
+    {
+        if chunk.len() > MAX_BODY_BYTES - bytes.len() {
+            return Err(HttpError::BodyTooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Response {
+        status,
+        request_id,
+        body: Secret::new(bytes),
+    })
 }
 
 fn transport_error(error: &reqwest::Error) -> HttpError {

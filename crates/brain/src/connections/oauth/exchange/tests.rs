@@ -91,6 +91,60 @@ async fn a_missing_id_token_keeps_the_received_refresh_token_for_revocation() {
 }
 
 #[tokio::test]
+async fn malformed_sibling_fields_keep_the_received_refresh_token() {
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("expires_in", json!("3600")),
+        ("expires_in", json!(3600.5)),
+        ("scope", json!(["openid"])),
+        ("access_token", json!(5)),
+        ("access_token", Value::Null),
+    ] {
+        let mut body = tokens();
+        body[field] = value;
+        cases.push(serde_json::to_vec(&body).expect("fixture"));
+    }
+    let mut duplicate = serde_json::to_string(&tokens()).expect("fixture");
+    duplicate.pop();
+    duplicate.push_str(",\"scope\":\"openid\"}");
+    cases.push(duplicate.into_bytes());
+    for body in cases {
+        let fixture = Scripted::new(200, body);
+        assert_eq!(
+            exchange(&fixture, &authorization()).await.unwrap_err(),
+            unusable("fixture-refresh")
+        );
+    }
+}
+
+#[tokio::test]
+async fn zero_lifetime_is_already_expired_and_exact_limits_are_accepted() {
+    let mut body = tokens();
+    body["expires_in"] = json!(0);
+    body["access_token"] = json!("t".repeat(16 * 1024));
+    let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
+    let mut authorization = authorization();
+    authorization.client_id = Secret::new(Zeroizing::new("c".repeat(256)));
+    let issued = exchange(&fixture, &authorization)
+        .await
+        .expect("exact field limits");
+    assert_eq!(issued.access_token.expose().len(), 16 * 1024);
+    assert_eq!(issued.expires_in, 0);
+    assert_eq!(issued.expires_at(&FixedClock(100)), Some(100));
+    let fixture = Scripted::new(
+        400,
+        serde_json::to_vec(&json!({"error":"e".repeat(256)})).expect("fixture"),
+    );
+    assert_eq!(
+        exchange(&fixture, &authorization).await.unwrap_err(),
+        ExchangeError::OAuth {
+            status: 400,
+            code: OAuthCode::Other
+        }
+    );
+}
+
+#[tokio::test]
 async fn exchange_sends_the_exact_grant_and_retains_the_issued_tokens() {
     let captured = Captured::default();
     let _logging = captured.install();
@@ -312,7 +366,7 @@ async fn only_typed_oauth_4xx_responses_report_a_conclusive_refusal() {
             json!({"error":"invalid_grant"}),
             ExchangeError::Response { status: 503 },
         ),
-        (201, tokens(), ExchangeError::Response { status: 201 }),
+        (201, tokens(), unusable("fixture-refresh")),
     ] {
         let fixture = Scripted::new(status, serde_json::to_vec(&body).expect("fixture"));
         assert_eq!(

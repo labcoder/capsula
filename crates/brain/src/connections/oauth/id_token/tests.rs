@@ -3,7 +3,6 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use kumochi_protocol::Secret;
 use rustls::SignatureScheme;
@@ -12,7 +11,9 @@ use rustls::pki_types::PrivateKeyDer;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::{IdentityError, VerifiedIdentity, check_subject, permits_plan, verify, verify_signed};
+use super::{
+    IdentityError, KeySet, VerifiedIdentity, check_subject, permits_plan, verify, verify_signed,
+};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{
     Endpoint, Http, HttpError, ISSUER, MAX_BODY_BYTES, Request, Response,
@@ -157,7 +158,7 @@ fn jwks() -> Value {
     json!({ "keys": [jwk(KID, &SIGNER), { "kty": "oct", "kid": "shared", "k": secret }] })
 }
 
-fn keys(document: Value) -> JwkSet {
+fn keys(document: Value) -> KeySet {
     serde_json::from_value(document).expect("a JWK set")
 }
 
@@ -185,15 +186,20 @@ fn a_valid_token_yields_its_redacted_identity() {
 
 #[test]
 fn accepted_claim_edges() {
-    let at_limit = |len| "x".repeat(len);
+    let longest_subject = "x".repeat(256);
+    let longest_email = "x".repeat(254);
     let cases = [
         (
             "expiry inside the 30 s leeway",
             with(&[("exp", Some(json!(NOW - 30)))]),
+            SUBJECT,
+            Some(EMAIL),
         ),
         (
             "azp equal to the client",
             with(&[("azp", Some(json!(CLIENT)))]),
+            SUBJECT,
+            Some(EMAIL),
         ),
         (
             "several audiences with the client as azp",
@@ -201,25 +207,68 @@ fn accepted_claim_edges() {
                 ("aud", Some(json!([CLIENT, "app_other"]))),
                 ("azp", Some(json!(CLIENT))),
             ]),
+            SUBJECT,
+            Some(EMAIL),
         ),
-        ("no email", with(&[("email", None)])),
+        ("no email", with(&[("email", None)]), SUBJECT, None),
         (
             "longest subject",
-            with(&[("sub", Some(json!(at_limit(256))))]),
+            with(&[("sub", Some(json!(longest_subject)))]),
+            longest_subject.as_str(),
+            Some(EMAIL),
         ),
         (
             "longest email",
-            with(&[("email", Some(json!(at_limit(254))))]),
+            with(&[("email", Some(json!(longest_email)))]),
+            SUBJECT,
+            Some(longest_email.as_str()),
         ),
     ];
-    for (name, claims) in cases {
-        assert!(check(&token(&claims)).is_ok(), "{name}");
+    for (name, claims, subject, email) in cases {
+        let identity = check(&token(&claims)).expect(name);
+        assert_eq!(identity.subject.expose().as_str(), subject, "{name}");
+        assert_eq!(
+            identity.email.as_ref().map(|email| email.expose().as_str()),
+            email,
+            "{name}"
+        );
     }
     let nonce = "n".repeat(128);
     let token = token(&with(&[("nonce", Some(json!(nonce)))]));
-    assert!(
-        verify_signed(&token, &keys(jwks()), CLIENT, &nonce, NOW).is_ok(),
-        "longest nonce"
+    let identity =
+        verify_signed(&token, &keys(jwks()), CLIENT, &nonce, NOW).expect("longest nonce");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
+    );
+}
+
+#[test]
+fn exact_token_and_client_byte_limits_are_accepted() {
+    let mut header = header(Algorithm::RS256, Some(KID));
+    header.cty = Some("application/json".to_owned());
+    let padded_token = signed(
+        &header,
+        &with(&[("padding", Some(json!("x".repeat(11_794))))]),
+        &SIGNER,
+    );
+    assert_eq!(padded_token.len(), 16 * 1024);
+    let identity = check(&padded_token).expect("a valid token of exactly 16 KiB");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
+    );
+
+    let client = "c".repeat(256);
+    let token = token(&with(&[("aud", Some(json!(client)))]));
+    let identity = verify_signed(&token, &keys(jwks()), &client, NONCE, NOW)
+        .expect("a valid token bound to a 256-byte client");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
     );
 }
 
@@ -641,6 +690,170 @@ async fn verify_refuses_bad_discovery_before_fetching_keys() {
         assert_eq!(result.map(|_| ()), Err(expected), "{name}");
         assert_eq!(http.requests().len(), 1, "{name}: no JWKS request");
     }
+}
+
+#[tokio::test]
+async fn verify_ignores_unusable_unselected_keys() {
+    let valid = token(&claims());
+    let cases = [
+        ("not an object", Value::Null),
+        (
+            "unknown key type",
+            json!({ "kty": "future", "kid": "future-key" }),
+        ),
+        (
+            "unknown EC curve",
+            json!({ "kty": "EC", "kid": "future-curve", "crv": "future", "x": "AQAB", "y": "AQAB" }),
+        ),
+        (
+            "malformed RSA key",
+            json!({ "kty": "RSA", "kid": "broken-key", "n": 23, "e": "AQAB" }),
+        ),
+    ];
+    for (name, unusable) in cases {
+        let http = Scripted::new([
+            discovery(ISSUER, JWKS_URI),
+            response(
+                200,
+                json!({ "keys": [unusable, jwk(KID, &SIGNER)] }).to_string(),
+            ),
+        ]);
+        let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
+            .await
+            .expect(name);
+        assert_eq!(identity.subject.expose().as_str(), SUBJECT, "{name}");
+        assert_eq!(
+            identity.email.as_ref().map(|email| email.expose().as_str()),
+            Some(EMAIL),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn verify_accepts_missing_key_metadata() {
+    let valid = token(&claims());
+    for omitted in [&["use"][..], &["alg"][..], &["use", "alg"][..]] {
+        let mut key = jwk(KID, &SIGNER);
+        for field in omitted {
+            key.as_object_mut().expect("JWK object").remove(*field);
+        }
+        let http = Scripted::new([
+            discovery(ISSUER, JWKS_URI),
+            response(200, json!({ "keys": [key] }).to_string()),
+        ]);
+        let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
+            .await
+            .expect("use and alg are optional");
+        assert_eq!(identity.subject.expose().as_str(), SUBJECT, "{omitted:?}");
+        assert_eq!(
+            identity.email.as_ref().map(|email| email.expose().as_str()),
+            Some(EMAIL),
+            "{omitted:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn verify_selects_the_second_rsa_key() {
+    let valid = signed(
+        &header(Algorithm::RS256, Some("second-key")),
+        &claims(),
+        &OTHER,
+    );
+    let http = Scripted::new([
+        discovery(ISSUER, JWKS_URI),
+        response(
+            200,
+            json!({ "keys": [jwk("first-key", &SIGNER), jwk("second-key", &OTHER)] }).to_string(),
+        ),
+    ]);
+    let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
+        .await
+        .expect("kid selects the second RSA key and its matching signature");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
+    );
+}
+
+#[tokio::test]
+async fn verify_rejects_conflicting_selected_key_metadata() {
+    let valid = token(&claims());
+    let cases = [
+        ("encryption use", "use", json!("enc")),
+        ("unknown use", "use", json!("other")),
+        ("null use", "use", Value::Null),
+        ("other algorithm", "alg", json!("RS512")),
+        ("unknown algorithm", "alg", json!("future")),
+        ("null algorithm", "alg", Value::Null),
+    ];
+    for (name, field, value) in cases {
+        let mut key = jwk(KID, &SIGNER);
+        key[field] = value;
+        let http = Scripted::new([
+            discovery(ISSUER, JWKS_URI),
+            response(200, json!({ "keys": [key] }).to_string()),
+        ]);
+        let result = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW)).await;
+        assert_eq!(result.map(|_| ()), Err(IdentityError::Token), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn verify_refuses_duplicate_string_key_ids() {
+    let valid = token(&claims());
+    let cases = [
+        ("selected kid", vec![jwk(KID, &SIGNER), jwk(KID, &OTHER)]),
+        (
+            "unknown key type with the selected kid",
+            vec![jwk(KID, &SIGNER), json!({ "kty": "future", "kid": KID })],
+        ),
+        (
+            "unrelated malformed keys",
+            vec![
+                jwk(KID, &SIGNER),
+                json!({ "kid": "duplicate" }),
+                json!({ "kid": "duplicate" }),
+            ],
+        ),
+    ];
+    for (name, entries) in cases {
+        let http = Scripted::new([
+            discovery(ISSUER, JWKS_URI),
+            response(200, json!({ "keys": entries }).to_string()),
+        ]);
+        let result = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW)).await;
+        assert_eq!(result.map(|_| ()), Err(IdentityError::Discovery), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn verify_counts_raw_keys_before_ignoring_unusable_entries() {
+    let valid = token(&claims());
+    let mut entries = vec![Value::Null; 63];
+    entries.push(jwk(KID, &SIGNER));
+    let http = Scripted::new([
+        discovery(ISSUER, JWKS_URI),
+        response(200, json!({ "keys": entries }).to_string()),
+    ]);
+    let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
+        .await
+        .expect("64 raw keys with only one usable key");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
+    );
+
+    entries.push(Value::Null);
+    let http = Scripted::new([
+        discovery(ISSUER, JWKS_URI),
+        response(200, json!({ "keys": entries }).to_string()),
+    ]);
+    let result = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW)).await;
+    assert_eq!(result.map(|_| ()), Err(IdentityError::Bounds));
 }
 
 #[tokio::test]

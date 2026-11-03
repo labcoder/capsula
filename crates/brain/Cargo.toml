@@ -19,7 +19,7 @@ kumochi-scene.workspace = true
 getrandom.workspace = true
 jsonwebtoken = { version = "9", default-features = false }
 keyring.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # hooks: the progress handler that stops a purge's copy.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks"] }

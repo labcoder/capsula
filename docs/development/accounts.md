@@ -112,9 +112,13 @@ only `127.0.0.1:0`, generate CA and leaf keys in memory, and never install a cer
 **Local policies:** 15 s connect, 60 s read and 120 s total request limits; discovery and JWKS
 requests have a 10 s limit. All success and error bodies are capped at 1 MiB, and a request-id
 header is retained only as at most 256 graphic ASCII bytes. The root loader keeps at most
-1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped entries.
+1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped and unreadable entries separately.
 Proxied networks cannot sign in until a user-set proxy setting exists. A root Windows hasn't
 installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
+ROOT entries present in Windows' Disallowed store or carrying a due disallowed-time property
+are excluded. Distrusted server-supplied intermediates, root not-before/usage policies and revocation
+checking remain outside this offline verifier. Client construction logs only root counts
+and the loader's typed OS error, never certificate data; counts are unavailable on loader failure.
 
 ### Stateless code exchange
 
@@ -129,9 +133,11 @@ computes expiry through `Clock`; failed wall-time conversion doesn't consume the
 fields. Access and ID tokens are at most 16 KiB each, refresh tokens 8 KiB, granted scope 1 KiB,
 and client ids and subjects 256 bytes. The code is capped at 16 KiB, the redirect at 256 bytes,
 and the verifier must fit PKCE's 43–128 unreserved ASCII characters. `expires_in` is clipped to
-86,400 seconds as in the spike. `earliest_refresh_at` is ignored. A parsed but unusable HTTP 200
+86,400 seconds as in the spike; a zero lifetime is already expired, so 9b must refresh before use.
+`earliest_refresh_at` is ignored. A parsed but unusable HTTP 200, or another 2xx,
 returns its received refresh token in a redacted, zeroizing error for the caller to revoke,
-including when a field or record exceeds its storage bound. Only an OAuth error object with a
+including a mistyped sibling, duplicate key, or a field or record over its storage bound.
+Only an OAuth error object with a
 string `error` on a 4xx response conclusively reports refusal; transport failures, malformed
 replies, oversized data and other statuses leave issuance uncertain for the later token lane.
 No provider message or body enters an error.
@@ -140,7 +146,9 @@ No provider message or body enters an error.
 
 `oauth::id_token::verify` checks discovery's exact issuer and allows JWKS only on
 `https://auth.openai.com:443`, without userinfo or a fragment. It selects the declared `kid`
-from that key set, allows only RS256, and verifies the signature before trusting claims.
+from that key set, skips unparseable keys and rejects duplicate key identifiers. A selected key
+must permit signatures and RS256 when those metadata fields are present. It verifies the
+signature before trusting claims.
 Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
 wall `Clock`, not the JWT library's hidden clock; nonce comparison is constant-time.
 `check_subject` rejects a different saved subject, and `permits_plan` requires the exact
@@ -153,7 +161,8 @@ multi-audience token; this is a validation policy, not a claim that OpenAI alway
 Email remains signed display data, not identity or a workspace identifier.
 
 Application-owned token/code strings and response buffers are zeroizing and redact Debug.
-HTTP/TLS library buffers and serde's internal parsing scratch allocations remain outside
+The body buffer is pre-sized from bounded `Content-Length` when present, otherwise it grows;
+earlier allocations released during growth aren't zeroed. HTTP/TLS library buffers and serde's internal parsing scratch allocations remain outside
 that wipe boundary. Requests, URLs with queries, tokens and response bodies are never logged.
 The JWT fixtures use public throwaway test keys through rustls's ring signer; they aren't
 credentials for any account or service.
@@ -169,9 +178,11 @@ credentials for any account or service.
 
 ## Credential storage
 
-Store access must be serialized: Credential Manager can miss a cross-thread read while writes
-to other names overlap. At this head only the tests serialize real-store access; 9b wires
-production reads and writes to one lane.
+Store access must be serialized: Rez's clean-store reproduction with two and four concurrent
+workers still missed cross-thread reads after successful writes to disjoint names, even with
+a barrier before reads and no deletes until all reads finished. A successful parallel delete
+also left an entry, so tests verify cleanup by exact name. At this head only the tests serialize
+real-store access; 9b wires production reads and writes to one lane.
 
 The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
 credential by exact target name. Windows uses `CredWriteW` with

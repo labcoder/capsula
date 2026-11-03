@@ -89,9 +89,13 @@ impl TokenSet {
 }
 
 #[derive(Deserialize)]
+struct RefreshOnly {
+    refresh_token: Option<Zeroizing<String>>,
+}
+
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: Option<Zeroizing<String>>,
-    refresh_token: Option<Zeroizing<String>>,
     id_token: Option<Zeroizing<String>>,
     scope: Option<Zeroizing<String>>,
     token_type: Option<Zeroizing<String>>,
@@ -172,7 +176,21 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     let invalid = ExchangeError::Response {
         status: response.status,
     };
+    let refresh_token = if (200..300).contains(&response.status) {
+        match serde_json::from_slice::<RefreshOnly>(bytes) {
+            Ok(data) => data.refresh_token,
+            Err(_) if bytes.len() > MAX_RECORD_BYTES => return Err(ExchangeError::Bounds),
+            Err(_) => return Err(invalid),
+        }
+    } else {
+        None
+    };
     if response.status != 200 {
+        if (200..300).contains(&response.status) {
+            return Err(ExchangeError::Unusable {
+                refresh_token: refresh_token.map(Secret::new),
+            });
+        }
         if (400..500).contains(&response.status)
             && let Ok(body) = serde_json::from_slice::<ErrorBody>(bytes)
         {
@@ -195,10 +213,12 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     }
     let data: TokenResponse = match serde_json::from_slice(bytes) {
         Ok(data) => data,
-        Err(_) if bytes.len() > MAX_RECORD_BYTES => return Err(ExchangeError::Bounds),
-        Err(_) => return Err(invalid),
+        Err(_) => {
+            return Err(ExchangeError::Unusable {
+                refresh_token: refresh_token.map(Secret::new),
+            });
+        }
     };
-    let refresh_token = data.refresh_token;
     let (Some(access_token), Some(id_token), Some(scope), Some(token_type), Some(expires_in)) = (
         data.access_token,
         data.id_token,
