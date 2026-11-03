@@ -3,7 +3,7 @@
 Kumochi carries GPUI's Windows backend, `gpui-pre-windows` 0.3.10, in `vendor/gpui-pre-windows/`
 with one change: an idle window no longer wakes on every vblank. `[patch.crates-io]` in
 `Cargo.toml` points the crate at the vendored copy, and `cargo xtask check-vendor` (run by CI)
-fails if `Cargo.lock` ever builds a different copy. Upstream tracking: zed-industries/zed#66221.
+fails unless Cargo resolves the crate to that directory at the vendored version. Upstream tracking: zed-industries/zed#66221.
 The core crate, `gpui-pre`, is not vendored.
 
 ## Why
@@ -25,17 +25,21 @@ A window asks for a frame when:
 
 - GPUI schedules one (`schedule_frame`, called by the core after every update that leaves a
   window dirty, which also retries a frame skipped because the window was already drawing);
-- a `force_render` draw finishes, so the follow-up frame isn't lost;
-- it receives mouse or keyboard input (`WM_MOUSEFIRST..=WM_MOUSELAST`,
-  `WM_KEYFIRST..=WM_KEYLAST`): the window then keeps drawing every vblank for one second
-  (`INPUT_SUSTAIN`), which replaces the core's high-rate-input tracker;
+- a forced render is pending (after a device-lost recovery, or one GPUI deferred because another
+  draw was on the stack or the window was throttled): the window asks again every vblank until
+  GPUI actually draws a forced frame, so repeated deferrals can't strand it;
+- GPUI receives any input for it, by any route (window messages, accelerators, DirectManipulation,
+  drag and drop): the window then keeps drawing every vblank for one second (`INPUT_SUSTAIN`);
 - DirectManipulation is active (touchpad pan and inertia).
 
 The vsync thread also checks for a lost GPU device, and it now does so only when some window
 wants a frame; a device lost while everything is idle is noticed on the next frame instead.
 
-The two core behaviours above (retrying a re-entrant skip, sustaining after input) are why the
-fix fits in the backend: both are reproduced there, so `gpui-pre` stays a registry crate.
+Two of these stand in for core behaviour that relies on being woken every vblank: GPUI retries
+a re-entrant skip, and keeps presenting for a second after input that changed something. The
+backend can't see either, so it errs on the side of drawing: it retries forced frames until one
+is drawn, and sustains after every input, changed or not. That keeps the fix in the backend, so
+`gpui-pre` stays a registry crate.
 Each modified file says so in its first line, as Apache-2.0 4(b) asks; the license text is
 `vendor/gpui-pre-windows/LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` lists the crate.
 
@@ -64,7 +68,9 @@ done by hand at the desk (OSC-132); none of them is automated.
 ## Re-vendoring on a GPUI bump
 
 1. Check whether upstream fixed #66221. If it did, delete `vendor/gpui-pre-windows`, its
-   `[patch.crates-io]` line and its `THIRD-PARTY-NOTICES.md` entry, and stop.
+   `[patch.crates-io]` line, its `THIRD-PARTY-NOTICES.md` entry, `xtask/src/vendor.rs` with
+   its `check-vendor` task and CI step, and `exclude = ["vendor"]`; let Cargo update the lock,
+   and stop.
 2. Bump `gpui-pre`/`gpui-pre-windows` (and gpui-kit's rev) as usual; `check-vendor` now fails.
 3. Replace `vendor/gpui-pre-windows` with the new release's `.crate` contents, unchanged, minus
    `.cargo-ok`, and commit that alone; `diff -r` it against the registry source first.
