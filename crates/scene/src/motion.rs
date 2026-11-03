@@ -12,6 +12,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::Arc,
 };
 
@@ -145,7 +146,7 @@ pub(crate) fn final_key(anim: &Anim) -> &KeyValue {
 /// Synthetic narration length until speech timing exists: 2.75 words per second, at least
 /// 800 ms, and never capped, so long narration is not truncated.
 pub fn synthetic_duration_ms(say: Option<&Text>) -> u64 {
-    let words = say.map_or(0, |say| say.as_str().split_whitespace().count());
+    let words = say.map_or(0, |say| word_count(say.as_str()));
     u64::try_from(words)
         .map_or(u64::MAX, |words| words.saturating_mul(4000).div_ceil(11))
         .max(MIN_SYNTHETIC_MS)
@@ -153,7 +154,13 @@ pub fn synthetic_duration_ms(say: Option<&Text>) -> u64 {
 
 /// Offset of word `word` within a narration segment of `segment_ms`, proportional to its index.
 pub fn at_word_offset_ms(say: &str, word: u16, segment_ms: u64) -> u64 {
-    let words = u128::try_from(say.split_whitespace().count()).unwrap_or(u128::MAX);
+    word_offset_ms(word_count(say), word, segment_ms)
+}
+fn word_count(say: &str) -> usize {
+    say.split_whitespace().count()
+}
+fn word_offset_ms(words: usize, word: u16, segment_ms: u64) -> u64 {
+    let words = u128::try_from(words).unwrap_or(u128::MAX);
     let offset = u128::from(segment_ms) * u128::from(word).min(words) / words.max(1);
     u64::try_from(offset).unwrap_or(u64::MAX)
 }
@@ -449,11 +456,18 @@ const HIDDEN: World = World {
 };
 
 /// Reusable frame output, reserved for a full scene once so sampling never allocates.
-/// Clear it when its scene clears, so it holds no geometry past the scene's residency.
+///
+/// A frame binds to the view generation it first samples after it was created or cleared.
+/// Its items share geometry with that generation's objects, so [`SceneView::frame`] never
+/// drops the last reference to any primitives and never frees. [`SceneView::activate`] clears
+/// the frame it is handed. After [`SceneView::new`], or an activation handed another frame,
+/// call [`Frame::clear`] outside paint before sampling again, and clear it when its scene
+/// clears so it keeps no geometry resident past the scene.
 #[derive(Debug)]
 pub struct Frame {
     items: Vec<FrameItem>,
     world: Vec<World>,
+    generation: Option<Arc<()>>,
 }
 impl Default for Frame {
     fn default() -> Self {
@@ -466,23 +480,25 @@ impl Frame {
         Self {
             items: Vec::with_capacity(MAX_LIVE_OBJECTS),
             world: Vec::with_capacity(MAX_LIVE_OBJECTS),
+            generation: None,
         }
     }
     /// Items in handle order, the same paint order as prepared display lists.
     pub fn items(&self) -> &[FrameItem] {
         &self.items
     }
-    /// Releases shared geometry while keeping the reserved capacity.
+    /// Releases shared geometry and the view binding while keeping the reserved capacity.
+    /// It may free the last references to replaced primitives, so call it outside paint.
     pub fn clear(&mut self) {
         self.items.clear();
         self.world.clear();
+        self.generation = None;
     }
 }
 
 /// The activated picture of one scene: layout at rest plus the motion it still owes.
 ///
 /// The host supplies a monotonic clock in milliseconds; the view never reads one.
-#[derive(Debug)]
 pub struct SceneView {
     layout: LayoutState,
     activated: u32,
@@ -490,11 +506,24 @@ pub struct SceneView {
     nodes: Vec<Node>,
     paint: Vec<usize>,
     tracks: Vec<Live>,
+    generation: Arc<()>,
+}
+impl fmt::Debug for SceneView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SceneView")
+            .field("activated", &self.activated)
+            .field("objects", &self.nodes.len())
+            .field("tracks", &self.tracks.len())
+            .finish_non_exhaustive()
+    }
 }
 impl SceneView {
     /// Installs a layout at rest with no live motion: recovery and every post-cut tip.
     /// Pass `scene.activated()`, never the layout's revision, which counts dropped commits:
     /// `SceneView::new(&view.layout().cut(&scene)?, scene.activated())`.
+    ///
+    /// The view starts a new generation, so a [`Frame`] bound to an earlier view must be
+    /// cleared outside paint before [`SceneView::frame`] accepts it.
     pub fn new(at_rest: &LayoutState, activated: u32) -> Self {
         let nodes = build_nodes(at_rest, |_| DONE);
         Self {
@@ -504,6 +533,7 @@ impl SceneView {
             activated,
             deadline: 0,
             tracks: Vec::new(),
+            generation: Arc::new(()),
         }
     }
     /// The revision a host `StopCut` must name.
@@ -517,21 +547,30 @@ impl SceneView {
 
     /// Activates a prepared step at `now`, scheduling its objects and tracks against the
     /// narration segment; a later step takes over a property only from this instant.
+    ///
+    /// `out` is the host's paint frame. Once the step is accepted it is cleared here, while
+    /// the outgoing objects still own its geometry, and the view starts a new generation that
+    /// the cleared frame binds to on its next [`SceneView::frame`]. Any other frame bound to
+    /// this view must then be cleared outside paint before it is sampled again.
     /// # Errors
-    /// Returns `Stale` unless the step was prepared on this view's layout.
+    /// Returns `Stale`, leaving the view and `out` untouched, unless the step was prepared
+    /// on this view's layout.
     pub fn activate(
         &mut self,
         step: PreparedStep,
         now: u64,
         segment_ms: u64,
+        out: &mut Frame,
     ) -> Result<(), PrepareError> {
         if !step.is_based_on(&self.layout) {
             return Err(PrepareError::Stale);
         }
+        out.clear();
         let source = step.step();
         let say = source.say.as_ref().map_or("", Text::as_str);
+        let words = word_count(say);
         let origin = |word: Option<u16>, delay: Option<Ms>| {
-            now.saturating_add(at_word_offset_ms(say, word.unwrap_or(0), segment_ms))
+            now.saturating_add(word_offset_ms(words, word.unwrap_or(0), segment_ms))
                 .saturating_add(u64::from(delay.map_or(0, Ms::get)))
         };
         let born = births(&step, origin);
@@ -586,12 +625,24 @@ impl SceneView {
                 .copied()
                 .unwrap_or(DONE)
         });
+        let mut starts: Vec<u64> = Vec::with_capacity(nodes.len());
+        for node in &mut nodes {
+            if let Some(parent) = node.parent
+                && born.contains_key(&node.handle)
+            {
+                let wait = starts[parent].saturating_sub(node.timing.start);
+                node.timing.start = node.timing.start.saturating_add(wait);
+                node.timing.end = node.timing.end.saturating_add(wait);
+            }
+            starts.push(node.timing.start);
+        }
         self.tracks = own(&mut nodes, candidates);
         self.paint = paint_order(&nodes);
         self.nodes = nodes;
         self.activated = step.index + 1;
         self.deadline = now.saturating_add(u64::from(MAX_MOTION_MS));
         self.layout = step.after;
+        self.generation = Arc::new(());
         Ok(())
     }
 
@@ -660,6 +711,8 @@ impl SceneView {
 
     /// Handles whose own entrance and every ancestor's entrance finished by `now`, each
     /// clipped at the scene deadline; objects scheduled later are not revealed.
+    // shortcut: only entrances gate a reveal, so Esc during an explicit opacity fade-in with no
+    // `enter` shows its final opacity; fix once the recovery log records activation times.
     pub fn stop(&self, now: u64) -> Vec<Handle> {
         let mut finished = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
@@ -677,9 +730,22 @@ impl SceneView {
         handles
     }
 
-    /// Samples every object at `now` into `out` without allocating or locking.
-    pub fn frame(&self, now: u64, out: &mut Frame) {
-        out.clear();
+    /// Samples every object at `now` into `out` without allocating, freeing or locking.
+    ///
+    /// A fresh or cleared frame binds to this view's current generation. Reusing a bound frame
+    /// drops only references this view's objects still hold, so nothing is freed here.
+    /// # Errors
+    /// Returns `Stale`, leaving `out` untouched, when `out` is bound to an earlier view or
+    /// generation; clear it outside paint first.
+    pub fn frame(&self, now: u64, out: &mut Frame) -> Result<(), PrepareError> {
+        let bound = out
+            .generation
+            .get_or_insert_with(|| Arc::clone(&self.generation));
+        if !Arc::ptr_eq(bound, &self.generation) {
+            return Err(PrepareError::Stale);
+        }
+        out.items.clear();
+        out.world.clear();
         let settled = now >= self.deadline;
         for node in &self.nodes {
             let parent = node.parent.map(|parent| out.world[parent]);
@@ -761,6 +827,7 @@ impl SceneView {
                 flow: world.flow,
             });
         }
+        Ok(())
     }
 }
 
@@ -911,6 +978,206 @@ mod tests {
                     "round {round} at {now}: {value} outside {envelope:?}"
                 );
             }
+        }
+    }
+
+    fn live(track: Track, ease: Ease, keys: &[(u32, Value)], plays: u32) -> Live {
+        Live {
+            target: Handle::new(1, 0).expect("fixture handle"),
+            track,
+            origin: 0,
+            keys: keys.into(),
+            ease,
+            plays,
+            yoyo: false,
+        }
+    }
+
+    #[test]
+    fn tracks_sample_exact_values_at_keys_laps_and_eases() {
+        let num = |keys: &[(u32, f32)]| -> Vec<(u32, Value)> {
+            keys.iter()
+                .map(|&(time, value)| (time, Value::Num(value)))
+                .collect()
+        };
+        let check = |name: &str, live: Live, samples: &[(u64, f32)]| {
+            for &(now, expected) in samples {
+                assert_eq!(live.sample(now), Value::Num(expected), "{name} at {now}");
+            }
+        };
+        let unit = num(&[(0, 0.0), (100, 1.0)]);
+        let ramp = num(&[(0, 0.0), (100, 10.0)]);
+        check(
+            "linear",
+            live(Track::X, Ease::Linear, &unit, 1),
+            &[(50, 0.5)],
+        );
+        check("in", live(Track::X, Ease::In, &unit, 1), &[(50, 0.125)]);
+        check("out", live(Track::X, Ease::Out, &unit, 1), &[(50, 0.875)]);
+        check(
+            "in-out",
+            live(Track::X, Ease::InOut, &unit, 1),
+            &[(25, 0.0625), (50, 0.5), (75, 0.9375)],
+        );
+        let three = num(&[(0, 0.0), (100, 10.0), (300, 30.0)]);
+        check(
+            "three keys",
+            live(Track::X, Ease::Linear, &three, 1),
+            &[
+                (0, 0.0),
+                (50, 5.0),
+                (100, 10.0),
+                (200, 20.0),
+                (300, 30.0),
+                (400, 30.0),
+            ],
+        );
+        let late = num(&[(100, 4.0), (200, 8.0)]);
+        check(
+            "late first key",
+            live(Track::X, Ease::Linear, &late, 1),
+            &[(0, 4.0), (100, 4.0), (150, 6.0), (200, 8.0)],
+        );
+        check(
+            "repeat",
+            live(Track::X, Ease::Linear, &ramp, 2),
+            &[(25, 2.5), (100, 0.0), (125, 2.5), (200, 10.0)],
+        );
+        check(
+            "yoyo, repeat 2",
+            Live {
+                yoyo: true,
+                ..live(Track::X, Ease::Linear, &ramp, 3)
+            },
+            &[
+                (25, 2.5),
+                (100, 10.0),
+                (125, 7.5),
+                (200, 0.0),
+                (225, 2.5),
+                (300, 10.0),
+            ],
+        );
+        check(
+            "yoyo, two plays",
+            Live {
+                yoyo: true,
+                ..live(Track::X, Ease::Linear, &ramp, 2)
+            },
+            &[(175, 2.5), (200, 0.0)],
+        );
+        let scale = num(&[(0, 1.0), (100, 4.0)]);
+        check(
+            "scale",
+            live(Track::Scale, Ease::Linear, &scale, 1),
+            &[(50, 2.0)],
+        );
+        let color = [
+            (0, Value::Color([1.0, 0.0, 0.0])),
+            (100, Value::Color([0.0, 0.0, 1.0])),
+        ];
+        let Value::Color(channels) = live(Track::Color, Ease::Linear, &color, 1).sample(50) else {
+            panic!("color track");
+        };
+        assert_eq!(
+            rgb(channels).get(),
+            0x80_00_80,
+            "red to blue rounds to (128, 0, 128)"
+        );
+    }
+
+    #[test]
+    fn entrance_effects_stay_inside_their_admission_envelopes() {
+        let alphas = [
+            (Enter::None, [1.0, 1.0, 1.0]),
+            (Enter::Fade, [0.0, 0.5, 1.0]),
+            (Enter::Draw, [1.0, 1.0, 1.0]),
+            (Enter::Pop, [0.0, 1.0, 1.0]),
+            (Enter::Slide, [0.0, 0.875, 1.0]),
+            (Enter::Grow, [0.0, 0.5, 1.0]),
+            (Enter::Fly, [0.0, 1.0, 1.0]),
+        ];
+        for (enter, expected) in alphas {
+            let alpha = [0.0, 0.5, 1.0].map(|progress| effect(enter, progress).alpha.to_bits());
+            assert_eq!(
+                alpha,
+                expected.map(f32::to_bits),
+                "{enter:?} alpha at 0, 0.5 and 1"
+            );
+            let rest = effect(enter, 1.0);
+            assert_eq!(
+                [rest.scale, rest.offset, rest.draw].map(f32::to_bits),
+                [1.0_f32, 0.0, 1.0].map(f32::to_bits),
+                "{enter:?} ends exactly at rest"
+            );
+            let (lo, hi, offset) = entrance_envelope(enter);
+            for step in 0..=1000_u16 {
+                let progress = f32::from(step) / 1000.0;
+                let sampled = effect(enter, progress);
+                assert!(
+                    lo <= sampled.scale
+                        && sampled.scale <= hi
+                        && (0.0..=offset).contains(&sampled.offset),
+                    "{enter:?} at {progress}: {sampled:?} outside ({lo}, {hi}, {offset})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_entrance_durations_follow_each_kind() {
+        let cases = [
+            (
+                serde_json::json!({"arrow":{"id":"a","from":[0,0],"to":[1,1]}}),
+                600,
+            ),
+            (
+                serde_json::json!({"edge":{"id":"e","in":"d","from":"n","to":"m"}}),
+                500,
+            ),
+            (
+                serde_json::json!({"shape":{"id":"s","kind":"rect","box":[0,0,1,1]}}),
+                350,
+            ),
+            (
+                serde_json::json!({"node":{"id":"n","in":"d","label":"N"}}),
+                350,
+            ),
+            (
+                serde_json::json!({"callout":{"id":"c","target":[0,0],"text":""}}),
+                350,
+            ),
+            (
+                serde_json::json!({"row":{"id":"r","in":"t","cells":[1]}}),
+                350,
+            ),
+            (
+                serde_json::json!({"series":{"id":"p","in":"c","data":[]}}),
+                800,
+            ),
+            (
+                serde_json::json!({"text":{"id":"t0","at":[0,0],"text":""}}),
+                250,
+            ),
+            (
+                serde_json::json!({"text":{"id":"t1","at":[0,0],"text":"a".repeat(20)}}),
+                444,
+            ),
+            (
+                serde_json::json!({"text":{"id":"t2","at":[0,0],"text":"a".repeat(60)}}),
+                1200,
+            ),
+            (serde_json::json!({"diagram":{"id":"d"}}), 250),
+            (serde_json::json!({"table":{"id":"t","cols":["V"]}}), 250),
+        ];
+        let put: Vec<serde_json::Value> = cases.iter().map(|(op, _)| op.clone()).collect();
+        let record = serde_json::json!({"step":{"id":"s","put":put}});
+        let bytes = serde_json::to_vec(&record).expect("fixture JSON");
+        let Ok(Record::Step(step)) = parse_record(&bytes) else {
+            panic!("typed fixture");
+        };
+        for (op, (fixture, expected)) in step.put.iter().zip(&cases) {
+            assert_eq!(default_duration(op), *expected, "{fixture}");
         }
     }
 }
