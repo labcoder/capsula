@@ -16,6 +16,8 @@ mod panels;
 mod settings;
 mod settings_view;
 mod stretch;
+#[cfg(test)]
+mod tests;
 mod text;
 mod thread_selection;
 mod thread_view;
@@ -331,13 +333,14 @@ impl Presence {
         }
     }
 
-    /// Recovery and mirrored scenes remain clearable even before a renderer is attached.
     fn activity(&self) -> Activity {
-        Activity {
-            working: self.runs.working(),
-            speaking: false,
-            drawing: self.presenter.holds_scenes() || (self.runs.drawing() && self.text_open()),
-        }
+        // shortcut: B5 adds painted v1 scenes to global Esc activity; mirrored scenes aren't visible.
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        escape_activity(&self.runs, panel)
     }
 
     /// Follows a change in the runs or the typing panel: holds or releases Esc if what Esc sees
@@ -661,8 +664,6 @@ fn dock_label(state: LinkState, cx: &App) -> SharedString {
 /// A native surface or GPUI window couldn't be initialized or placed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OpenError {
-    #[error("GPUI has no display for scene preparation")]
-    DisplayUnavailable,
     #[error("GPUI couldn't create or update a presence surface")]
     Gpui(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
@@ -797,12 +798,13 @@ pub(crate) fn open(
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
-    let display = cx.primary_display().ok_or(OpenError::DisplayUnavailable)?;
-    let display_size = display.bounds().size;
+    // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
+    let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
+        let display_size = display.bounds().size;
+        [display_size.width.into(), display_size.height.into()]
+    });
     let presenter = crate::presenter::Presenter::new(
-        kumochi_scene::layout::SurfaceGeometry::Overlay {
-            logical_size: [display_size.width.into(), display_size.height.into()],
-        },
+        kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
     );
     let owner = cx.new(|cx| {
@@ -888,6 +890,14 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
 /// Link events applied in one update at most [guess]: a fast stream is applied in batches
 /// rather than one UI update per frame.
 const EVENT_BATCH: usize = 256;
+
+fn escape_activity(runs: &Runs, panel: EscapePanel) -> Activity {
+    Activity {
+        working: runs.working(),
+        speaking: false,
+        drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+    }
+}
 
 fn listen(
     states: Receiver<LinkEvent>,

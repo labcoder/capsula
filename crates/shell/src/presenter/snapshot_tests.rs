@@ -325,6 +325,10 @@ fn headers_only_appear_in_chunk_zero_and_revision_matches_membership() {
     assembler
         .chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100)
         .expect("first");
+    assert_eq!(
+        assembler.chunk(1, chunk(1, 3, 1, vec![event(2)], true), 100),
+        Err(Broken::Sequence)
+    );
     let mut extra = chunk(1, 2, 1, vec![event(2)], true);
     extra.header = Some(header());
     assert_eq!(assembler.chunk(1, extra, 100), Err(Broken::Sequence));

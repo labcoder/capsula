@@ -23,6 +23,9 @@ const RUN: RunId = RunId(5);
 const LIVE: SceneId = SceneId(20);
 const FRAME: u32 = 40;
 
+#[path = "measure_tests.rs"]
+mod measurements;
+
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
 #[expect(
@@ -791,8 +794,51 @@ fn a_freed_worker_slot_starts_the_waiting_step() {
 }
 
 #[test]
-fn a_recovery_that_finds_every_worker_slot_held_clears_its_batch() {
-    let (mut presenter, now, _zombies) = exhausted();
+fn a_slot_freed_after_the_waiting_step_s_deadline_fails_it_instead_of_starting_it() {
+    for at in [250, 251] {
+        let (mut presenter, now, mut zombies) = exhausted();
+        begin(&mut presenter, LIVE, now);
+        commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step");
+        let zombie = zombies.pop().expect("a held slot");
+        let effects = presenter
+            .completed(zombie.run(&mut Shaper), ms(now, at))
+            .expect("a stale answer");
+        assert_eq!(
+            controls(&effects),
+            [&failed(LIVE, 0, SceneFailure::Timeout)],
+            "a slot freed at {at} ms"
+        );
+        assert!(jobs(effects).is_empty(), "a slot freed at {at} ms");
+        assert_eq!(presenter.deadline(), None, "a slot freed at {at} ms");
+    }
+}
+
+#[test]
+fn a_step_s_deadline_excludes_the_time_it_waited_for_its_predecessors() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    for (index, id) in [(1, "b"), (2, "c")] {
+        let effects = commit(&mut presenter, LIVE, index, rect(id), now).expect("a step");
+        assert!(jobs(effects).is_empty());
+    }
+    let second = only_job(
+        presenter
+            .completed(first.run(&mut Shaper), ms(now, 200))
+            .expect("an answer"),
+    );
+    let third = only_job(
+        presenter
+            .completed(second.run(&mut Shaper), ms(now, 400))
+            .expect("an answer"),
+    );
+    assert_eq!(third.scene(), LIVE);
+    assert_eq!(presenter.deadline(), Some(ms(now, 650)));
+}
+
+/// A reconnect whose one-scene batch is assembled while eight zombie jobs hold every slot.
+fn recovering_exhausted() -> (Presenter, Instant, Vec<PrepareJob>, SceneId) {
+    let (mut presenter, now, zombies) = exhausted();
     let recovered = SceneId(10);
     presenter.connected(GENERATION + 1);
     let descriptor = SceneDescriptorV1::new(recovered, 1, 1, 1).expect("counts");
@@ -803,6 +849,80 @@ fn a_recovery_that_finds_every_worker_slot_held_clears_its_batch() {
     let effects = presenter
         .data(GENERATION + 1, snapshot(recovered, rect("r")), FRAME, now)
         .expect("a chunk");
+    assert!(controls(&effects).is_empty());
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Recover(_)))
+    );
+    assert!(presenter.holds_scenes());
+    assert_eq!(presenter.deadline(), Some(ms(now, 2_000)));
+    (presenter, now, zombies, recovered)
+}
+
+#[test]
+fn a_recovery_waiting_for_a_worker_slot_starts_when_one_frees_before_its_deadline() {
+    let (mut presenter, now, mut zombies, recovered) = recovering_exhausted();
+    let zombie = zombies.pop().expect("a held slot");
+    let effects = presenter
+        .completed(zombie.run(&mut Shaper), ms(now, 1_000))
+        .expect("a stale answer");
+    assert!(controls(&effects).is_empty());
+    let job = recovery(effects);
+    assert_eq!(presenter.deadline(), Some(ms(now, 2_000)));
+    let effects = presenter
+        .completed(job.run(&mut Shaper), ms(now, 1_100))
+        .expect("the batch");
+    assert!(controls(&effects).is_empty());
+    let effects = presenter.stop(RUN, ms(now, 1_200)).expect("a stop");
+    assert_eq!(controls(&effects), [&stop_scenes(vec![kept(recovered)])]);
+}
+
+#[test]
+fn a_slot_freed_at_or_after_a_waiting_recovery_s_deadline_clears_its_batch() {
+    for at in [2_000, 2_001] {
+        let (mut presenter, now, mut zombies, recovered) = recovering_exhausted();
+        let zombie = zombies.pop().expect("a held slot");
+        let effects = presenter
+            .completed(zombie.run(&mut Shaper), ms(now, at))
+            .expect("a stale answer");
+        assert_eq!(
+            controls(&effects),
+            [&clear_drawing(vec![recovered])],
+            "a slot freed at {at} ms"
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Recover(_))),
+            "a slot freed at {at} ms"
+        );
+        assert!(!presenter.holds_scenes(), "a slot freed at {at} ms");
+        assert_eq!(presenter.deadline(), None, "a slot freed at {at} ms");
+    }
+}
+
+#[test]
+fn a_recovery_answer_at_or_after_its_deadline_installs_nothing_even_before_the_watchdog() {
+    for at in [2_000, 2_001] {
+        let recovered = SceneId(10);
+        let (mut presenter, now, job) = recovering(vec![(recovered, rect("r"))]);
+        let effects = presenter
+            .completed(job.run(&mut Shaper), ms(now, at))
+            .expect("a late batch");
+        assert_eq!(
+            controls(&effects),
+            [&clear_drawing(vec![recovered])],
+            "an answer at {at} ms"
+        );
+        assert!(!presenter.holds_scenes(), "an answer at {at} ms");
+    }
+}
+
+#[test]
+fn a_recovery_still_waiting_for_a_worker_slot_at_its_deadline_clears_its_batch() {
+    let (mut presenter, now, _zombies, recovered) = recovering_exhausted();
+    let effects = presenter.tick(ms(now, 2_000)).expect("a tick");
     assert_eq!(controls(&effects), [&clear_drawing(vec![recovered])]);
     assert!(
         effects
@@ -810,6 +930,7 @@ fn a_recovery_that_finds_every_worker_slot_held_clears_its_batch() {
             .all(|effect| !matches!(effect, Effect::Recover(_)))
     );
     assert!(!presenter.holds_scenes());
+    assert_eq!(presenter.deadline(), None);
 }
 
 #[test]
@@ -880,6 +1001,66 @@ fn a_stopped_run_s_late_step_on_an_already_cut_scene_gets_one_new_cut() {
 }
 
 #[test]
+fn a_recovered_scene_whose_history_ends_in_a_cut_gets_no_cut_until_a_new_commit() {
+    let recovered = SceneId(10);
+    let at_rest = kept(recovered).cut;
+    let mut presenter = presenter();
+    let now = Instant::now();
+    let descriptor = SceneDescriptorV1::new(recovered, 2, 1, 3).expect("counts");
+    let descriptors = Bounded::new(vec![descriptor]).expect("one scene");
+    let effects = presenter
+        .described(GENERATION, &descriptors, now)
+        .expect("membership");
+    assert!(effects.is_empty());
+    let events = vec![
+        SceneEvent::Step {
+            revision: 1,
+            step: Arc::new(rect("a")),
+        },
+        SceneEvent::Step {
+            revision: 2,
+            step: Arc::new(rect("b")),
+        },
+        SceneEvent::Stop(at_rest.clone()),
+    ];
+    let chunk = DataToShell::SceneSnapshotV1 {
+        chunk: SceneSnapshotChunk {
+            scene: recovered,
+            revision: 2,
+            ordinal: 0,
+            header: Some(header()),
+            events: Bounded::new(events).expect("three events"),
+            last: true,
+        },
+    };
+    let job = recovery(data(&mut presenter, chunk, now).expect("a chunk"));
+    presenter
+        .completed(job.run(&mut Shaper), ms(now, 20))
+        .expect("the batch");
+    let effects = presenter.stop(RUN, ms(now, 30)).expect("a stop");
+    assert_eq!(controls(&effects), [&stop_scenes(Vec::new())]);
+    let effects = presenter.stop(RUN, ms(now, 31)).expect("a second stop");
+    assert_eq!(controls(&effects), [&stop_scenes(Vec::new())]);
+    let effects = commit(&mut presenter, recovered, 2, rect("c"), now).expect("a late step");
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::StepFailed {
+            run: RUN,
+            scene: recovered,
+            index: 2,
+            reason: SceneFailure::Cancelled,
+            cut: at_rest.clone(),
+        }]
+    );
+    assert!(jobs(effects).is_empty());
+    acknowledge(&mut presenter, recovered, 3, at_rest, now).expect("the new cut");
+    let later = RunId(RUN.0 + 1);
+    let effects =
+        commit_as(&mut presenter, later, recovered, 3, rect("d"), now).expect("a continuation");
+    assert_eq!(only_job(effects).scene(), recovered);
+}
+
+#[test]
 fn a_finished_answer_holds_its_worker_slot_until_it_is_applied_or_dropped() {
     let (mut presenter, now, job) = preparing();
     let done = job.run(&mut Shaper);
@@ -891,4 +1072,42 @@ fn a_finished_answer_holds_its_worker_slot_until_it_is_applied_or_dropped() {
     assert_eq!(presenter.workers(), 1);
     drop(undelivered);
     assert_eq!(presenter.workers(), 0);
+}
+
+#[test]
+fn jobs_answers_and_the_presenter_print_no_drawing_content() {
+    let private = step(
+        r#"{"step":{"id":"zqxprivateid","put":[{"text":{"id":"zqxprivateid","at":[13337.25,10],"text":"zqxprivatelabel"}}]}}"#,
+    );
+    let leaks = |printed: &str| {
+        ["13337", "zqxprivate"]
+            .iter()
+            .any(|sentinel| printed.contains(sentinel))
+    };
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let effects = commit(&mut presenter, LIVE, 0, private.clone(), now).expect("a step");
+    let printed = format!("{effects:?}");
+    assert!(printed.contains("Prepare"), "{printed}");
+    assert!(!leaks(&printed), "{printed}");
+    let done = only_job(effects).run(&mut Shaper);
+    let printed = format!("{done:?}");
+    assert!(!leaks(&printed), "{printed}");
+    presenter.completed(done, ms(now, 5)).expect("an answer");
+    let printed = format!("{presenter:?}");
+    assert!(!leaks(&printed), "{printed}");
+
+    let mut presenter = self::presenter();
+    let recovered = SceneId(10);
+    described(&mut presenter, &[recovered], now);
+    let effects = data(&mut presenter, snapshot(recovered, private), now).expect("a chunk");
+    let printed = format!("{effects:?}");
+    assert!(printed.contains("Recover"), "{printed}");
+    assert!(!leaks(&printed), "{printed}");
+    let done = recovery(effects).run(&mut Shaper);
+    let printed = format!("{done:?}");
+    assert!(!leaks(&printed), "{printed}");
+    presenter.completed(done, ms(now, 20)).expect("the batch");
+    let printed = format!("{presenter:?}");
+    assert!(!leaks(&printed), "{printed}");
 }

@@ -34,7 +34,8 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    Admission, GlobalBudget, Preparation, SceneState, SceneView, Step, StopCut, StopOutcome,
+    Admission, GlobalBudget, Preparation, SceneEvent, SceneState, SceneView, Step, StopCut,
+    StopOutcome,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry,
     },
@@ -57,8 +58,7 @@ const DEADLINE: Duration = Duration::from_millis(250);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(2);
 /// Jobs alive at once, cancelled ones included, since cancelling only asks. A job, then its
 /// answer, holds a slot until the answer is applied or dropped, spawned or not. Work that finds
-/// every slot taken waits at most its own deadline, and a recovery that finds them taken clears
-/// its batch.
+/// every slot taken waits at most its own deadline; a recovery batch waits under its own.
 const MAX_WORKERS: usize = 8;
 /// The newest cleared or removed ids remembered, so their late frames are dropped.
 const CLEARED_KEPT: usize = 64;
@@ -259,10 +259,13 @@ impl Presenter {
                 slot,
             } => {
                 drop(slot);
-                let running = self
-                    .scenes
-                    .get_mut(&scene)
-                    .and_then(|state| state.running.take_if(|running| running.id == id));
+                let running = self.scenes.get_mut(&scene).and_then(|state| {
+                    let running = state.running.take_if(|running| running.id == id)?;
+                    if let Some(next) = state.queue.front_mut() {
+                        next.queued = now;
+                    }
+                    Some(running)
+                });
                 if let Some(running) = running {
                     self.prepared(scene, &running, result, now, &mut out);
                 }
@@ -423,6 +426,7 @@ struct Scene {
 struct Ticket {
     run: RunId,
     index: u32,
+    /// When it could first start: its commit, or its predecessor's answer.
     queued: Instant,
     preparation: Preparation,
 }
@@ -462,6 +466,8 @@ struct Recovery {
     cancel: Arc<AtomicBool>,
     /// Each scene with its descriptor's revision and retained count.
     scenes: Vec<(SceneId, u32, u32)>,
+    /// The batch until a worker slot frees for it; empty once its job is sent.
+    waiting: Vec<Source>,
 }
 
 /// Effects in order, with the clears gathered into as few `ClearDrawing`s as possible.
@@ -497,6 +503,11 @@ impl Out {
 
 impl Scene {
     fn new(state: SceneState, rest: LayoutState) -> Self {
+        let cut = if matches!(state.recovery_log().last(), Some(SceneEvent::Stop(_))) {
+            Cut::Applied
+        } else {
+            Cut::Open
+        };
         Self {
             retained: rest.resident_bytes(),
             state,
@@ -504,7 +515,7 @@ impl Scene {
             queue: VecDeque::new(),
             running: None,
             ready: Vec::new(),
-            cut: Cut::Open,
+            cut,
             skipping: false,
         }
     }
@@ -602,37 +613,50 @@ impl Presenter {
                 self.forget(source.scene, out);
             }
         }
-        if self.workers() >= MAX_WORKERS {
-            for source in &sources {
-                self.forget(source.scene, out);
-            }
-            sources.clear();
-        }
         if sources.is_empty() {
             self.global = GlobalBudget::default();
             return self.go_live(now, out);
         }
         let id = self.job_id();
-        let cancel = Arc::new(AtomicBool::new(false));
         let scenes = sources
             .iter()
             .map(|source| (source.scene, source.revision, source.committed))
             .collect();
-        let job = RecoveryJob::new(
-            id,
-            sources,
-            self.surface,
-            Arc::clone(&self.theme),
-            Arc::clone(&cancel),
-            Arc::clone(&self.slots),
-        );
-        out.effects.push(Effect::Recover(job));
         self.phase = Phase::Recovering(Recovery {
             id,
             started: now,
-            cancel,
+            cancel: Arc::new(AtomicBool::new(false)),
             scenes,
+            waiting: sources,
         });
+        self.dispatch_recovery(now, out)
+    }
+
+    /// Sends a batch that waited for a worker slot, or abandons it once its deadline passed.
+    fn dispatch_recovery(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        let Phase::Recovering(recovery) = &self.phase else {
+            return Ok(());
+        };
+        if recovery.waiting.is_empty() {
+            return Ok(());
+        }
+        if now >= recovery.started + RECOVERY_DEADLINE {
+            return self.abandon(now, out);
+        }
+        if self.workers() >= MAX_WORKERS {
+            return Ok(());
+        }
+        let Phase::Recovering(recovery) = &mut self.phase else {
+            return Ok(());
+        };
+        out.effects.push(Effect::Recover(RecoveryJob::new(
+            recovery.id,
+            std::mem::take(&mut recovery.waiting),
+            self.surface,
+            Arc::clone(&self.theme),
+            Arc::clone(&recovery.cancel),
+            Arc::clone(&self.slots),
+        )));
         Ok(())
     }
 
@@ -885,6 +909,7 @@ impl Presenter {
     }
 
     fn pump_all(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        self.dispatch_recovery(now, out)?;
         let ids: Vec<_> = self.scenes.keys().copied().collect();
         for id in ids {
             self.pump(id, now, out)?;
@@ -908,6 +933,10 @@ impl Presenter {
             return Ok(());
         };
         let (run, index) = (ticket.run, ticket.index);
+        if now >= ticket.queued + DEADLINE {
+            self.fail(id, run, index, SceneFailure::Timeout, out);
+            return Ok(());
+        }
         let input = PrepareInput::new(
             ticket.preparation,
             scene.tip().clone(),

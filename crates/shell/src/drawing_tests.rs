@@ -468,10 +468,8 @@ fn a_wrong_revision_chunk_spoils_its_snapshot_live_or_held() {
 }
 
 /// The per-step cost of a live step for a scene already shown, with four shown: the reducer
-/// work every placeholder `StepCommit` pays, not typed v1 admission. Build release tests below
-/// normal priority before acquiring the measuring lock. After 30 seconds without cargo/rustc,
-/// run the built test binary at normal priority with `--ignored --exact --nocapture
-/// drawing::tests::measure_live_step_admission --test-threads=1` while holding the lock.
+/// work every placeholder `StepCommit` pays, not typed v1 admission. Run release CPU timing
+/// on a quiet machine with no concurrent builds.
 #[test]
 #[ignore = "a measurement, run by hand on Rez"]
 fn measure_live_step_admission() {

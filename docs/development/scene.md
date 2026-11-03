@@ -579,15 +579,17 @@ A host with no resolvable UI or fallback font aborts the shell under the release
 policy; drawings cannot select fonts, and ordinary shaping errors fail only their scene.
 
 Live preparation targets 50 ms and fails at 250 ms, including a queued step waiting for a
-worker slot. A watchdog independent of completion sets cooperative cancellation and rejects
+worker slot; time behind its serial predecessor is excluded. A watchdog independent of
+completion sets cooperative cancellation and rejects
 late results. At most eight jobs or undelivered answers retain worker slots; dropping an
 unspawned job releases its slot too. Recovered layouts and queued results share a 64 MiB
 residency charge, with shared geometry and layout-owned source copies counted by identity.
 Clearing, removal and disconnect release ownership; cancelled workers keep their slots until
 their answer is applied or dropped. Cancellation never claims to kill a thread.
 
-Recovery has one two-second deadline for the batch, a conservative margin over the measured
-core recovery fixtures (below 86 ms on Rez with fixed text measurement). Full cap recovery
+Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
+a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
+fixed text measurement). Full cap recovery
 with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
 A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
 allowing successful scenes to install. If the whole batch misses its deadline, its pending
@@ -595,7 +597,8 @@ scenes clear and late answers cannot restore them. Stop clears incomplete recove
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
 acknowledgement reaches the exact final committed revision. One new commit permits one new
 effective cut; stale acknowledgements for removed scenes do nothing.
-Clear intent survives brain restarts because scene ids are durable event ids; membership
+Clear intent made while scenes are mirrored survives brain restarts because scene ids are
+durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
 No fresh scene activates and no `StepShown` is sent yet. Production still uses placeholders

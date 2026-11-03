@@ -1,6 +1,6 @@
 //! Local Esc routing for the focused surface.
 
-use super::{Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
+use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
 use crate::escape;
 
 impl Presence {
@@ -32,7 +32,7 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let action = escape::decide(self.activity, panel);
+        let action = local_decision(self.activity, panel, &self.presenter);
         let tell = match action {
             Escape::Stop => self.runs.stop(),
             Escape::Clear => {
@@ -83,4 +83,13 @@ impl Presence {
         self.escape_fixture = false;
         self.sync_escape(cx)
     }
+}
+
+pub(super) fn local_decision(
+    mut activity: Activity,
+    panel: EscapePanel,
+    presenter: &crate::presenter::Presenter,
+) -> Escape {
+    activity.drawing |= matches!(panel, EscapePanel::Open) && presenter.holds_scenes();
+    escape::decide(activity, panel)
 }
