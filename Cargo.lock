@@ -3493,6 +3493,7 @@ dependencies = [
  "jsonwebtoken",
  "keyring",
  "kumochi-protocol",
+ "kumochi-scene",
  "rcgen",
  "reqwest",
  "rusqlite",

@@ -100,9 +100,15 @@ impl From<Handle> for u32 {
 }
 
 /// A relative time in milliseconds, bounded to one minute.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub struct Ms(u32);
+
+impl fmt::Debug for Ms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ms(..)")
+    }
+}
 
 impl Ms {
     /// Returns the relative time in milliseconds.

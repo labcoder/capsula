@@ -419,7 +419,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
 }
 
 /// One object as painted at a sampled instant.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct FrameItem {
     /// Object identity.
     pub handle: Handle,
@@ -435,6 +435,13 @@ pub struct FrameItem {
     pub color: Option<Paint>,
     /// Dash phase of a flowing edge, in periods.
     pub flow: f32,
+}
+impl fmt::Debug for FrameItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameItem")
+            .field("primitives", &self.primitives.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -463,11 +470,17 @@ const HIDDEN: World = World {
 /// the frame it is handed. After [`SceneView::new`], or an activation handed another frame,
 /// call [`Frame::clear`] outside paint before sampling again, and clear it when its scene
 /// clears so it keeps no geometry resident past the scene.
-#[derive(Debug)]
 pub struct Frame {
     items: Vec<FrameItem>,
     world: Vec<World>,
     generation: Option<Arc<()>>,
+}
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Frame")
+            .field("items", &self.items.len())
+            .finish_non_exhaustive()
+    }
 }
 impl Default for Frame {
     fn default() -> Self {
@@ -601,6 +614,7 @@ impl SceneView {
             .collect();
         let mut candidates = self.carried(now, &recolored);
         candidates.extend(glides);
+        // shortcut: explicit tracks keep the step clock under delayed parents; revisit when model instructions need parent-relative timing.
         for op in &*source.put {
             if let Op::Anim(anim) = op
                 && let Some(target) = step.after.handle(&anim.target)
@@ -634,6 +648,7 @@ impl SceneView {
                 node.timing.start = node.timing.start.saturating_add(wait);
                 node.timing.end = node.timing.end.saturating_add(wait);
             }
+            // A surviving node already holds its visible start: ids cannot be re-put and parents cannot change.
             starts.push(node.timing.start);
         }
         self.tracks = own(&mut nodes, candidates);
@@ -1127,6 +1142,16 @@ mod tests {
     #[test]
     fn default_entrance_durations_follow_each_kind() {
         let cases = [
+            (
+                serde_json::json!({"highlight":{"id":"h","target":[0,0]}}),
+                450,
+            ),
+            (
+                serde_json::json!({"line":{"id":"l","from":[0,0],"to":[1,1]}}),
+                600,
+            ),
+            (serde_json::json!({"path":{"id":"p0","d":"M0 0 L1 1"}}), 600),
+            (serde_json::json!({"chart":{"id":"c0"}}), 250),
             (
                 serde_json::json!({"arrow":{"id":"a","from":[0,0],"to":[1,1]}}),
                 600,

@@ -11,9 +11,14 @@ use serde::{
 use std::fmt;
 
 /// A validated 24-bit colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub struct Rgb(u32);
+impl fmt::Debug for Rgb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Rgb(..)")
+    }
+}
 impl Rgb {
     /// Returns the packed RGB value.
     pub fn get(self) -> u32 {
@@ -292,7 +297,7 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 /// Cell with the same validated payloads in JSON and binary.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Cell {
     /// Text value.
     Text(Text),
@@ -300,6 +305,11 @@ pub enum Cell {
     Number(Number),
     /// Bool value.
     Bool(bool),
+}
+impl fmt::Debug for Cell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Cell(..)")
+    }
 }
 #[derive(Serialize, Deserialize)]
 enum CellBinary {
@@ -371,12 +381,17 @@ impl<'de> Deserialize<'de> for Cell {
 }
 
 /// Point with the same validated payloads in JSON and binary.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Point {
     /// Value value.
     Value(Number),
     /// Pair value.
     Pair([Number; 2]),
+}
+impl fmt::Debug for Point {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Point(..)")
+    }
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
 enum PointBinary {

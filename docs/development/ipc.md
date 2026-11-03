@@ -316,8 +316,8 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
 The v1 messages are staged alongside the labelled placeholder protocol. B2 builds the brain
 path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
 the placeholder at both ends and deletes its development-only store rows. Until its consumer
-lands, receiving a v1 message ends the connection rather than ignoring it: B2 replaces the
-brain's `StopScenes`, `StepShown` and `StepFailed` rejection; B4 replaces the shell's v1 data
+lands, receiving a v1 message ends the connection rather than ignoring it. The brain now
+accepts `StopScenes`, `StepShown` and `StepFailed`; B4 replaces the shell's v1 data
 and `ScenesV1` rejection; B8 replaces `NoVisual`. These variants are appended; the handshake
 tags and bytes do not change. Mixed builds still fail their build-id handshake.
 
@@ -341,6 +341,11 @@ unique membership, consecutive chunk ordinals, matching revision, exact log/kept
 semantic replay, and installs only on `last` from the describing connection, provided no clear
 generation changed. A wrong index, bad cut acknowledgement or rejected cut ends the connection;
 ordinary reconnect recovery rebuilds all four scenes together, not one against a new budget.
+If a stored scene cannot replay or the brain builds an invalid descriptor, chunk or encoded
+frame, that whole scene is omitted and cleared durably before membership is sent. Other scenes
+recover against one shared budget; the failure does not force a reconnect loop. A recovered
+scene that B4 cannot prepare is cleared through `ClearDrawing`, retaining its stored history,
+not cut through a stale run's `StepFailed` observation.
 
 The data FIFO orders removal of an evicted scene before the next scene's header and first
 step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are
@@ -351,6 +356,12 @@ The shell drains fenced commits into its semantic mirror without preparing or ac
 then applies the acknowledged cut. While any cut is outstanding, no run activates more work in
 that scene. A cut for an already removed scene is stale. The shell sends at most one cut per
 scene between commits. A replaced run alone does not cut its committed scenes.
+`StopScenes` names every visible v1 scene the shell knows, even if the stopped run has not
+committed there yet. Incomplete recovery scenes are cleared through the existing clear path
+before Stop is sent. The brain cuts an unseen, never-activated scene to zero after any held
+first-step transaction commits. This scene-wide policy relies on D1 having one current run;
+OSC-56's concurrent runs must replace it with per-run revocation so Stop cannot discard
+another run's in-flight work.
 Every accepted cut receives `SceneCutApplied`, including a cut that changes nothing and adds
 no recovery-log entry, so the shell can release its outstanding-cut hold.
 

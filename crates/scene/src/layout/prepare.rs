@@ -168,12 +168,17 @@ pub fn prepare(
         };
         let previous = after.objects.get(&id).cloned();
         let parent = parent(source, &after, previous.as_ref())?;
+        // A boxless diagram keeps its measured contents, which a parent's ranking reads.
+        let measured = previous
+            .as_ref()
+            .filter(|_| matches!(&**source, Op::Diagram(_)))
+            .map(|old| old.item.bounds);
         let mut object = Placed::new(
             Item {
                 handle: *handle,
                 parent,
                 primitives: Arc::from([]),
-                bounds: bounds.map_or_else(Rect::default, rect),
+                bounds: bounds.map(rect).or(measured).unwrap_or_default(),
                 transform: Affine::default(),
                 opacity: opacity.map_or(1.0, crate::Finite::get),
             },
@@ -182,7 +187,6 @@ pub fn prepare(
         );
         object.anchors = [Vec2::default(); 2];
         object.rest = rests.get(&id).copied().unwrap_or_default();
-        object.rank = None;
 
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
@@ -195,7 +199,8 @@ pub fn prepare(
     } else {
         0
     };
-    let mut glides = nodes::place(&sources, &order, &mut after, &mut build, surface)?;
+    let (mut glides, owned_edges) =
+        nodes::place(&sources, &order, &rests, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
         after
             .handles
@@ -226,6 +231,7 @@ pub fn prepare(
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
+        .filter(|id| !owned_edges.contains(*id))
         .filter(|id| {
             !matches!(
                 &*sources[*id].1,
