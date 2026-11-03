@@ -29,6 +29,9 @@ pub enum VaultError {
     /// This operation is incompatible with the persisted control state.
     #[error("account record operation is fenced")]
     Fenced,
+    /// A by-name cleanup check found a surviving manifest or chunk.
+    #[error("account credential names remain")]
+    NotGone,
     /// The host identifier could not be generated.
     #[error("account host randomness is unavailable")]
     Random(#[from] getrandom::Error),

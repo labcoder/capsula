@@ -44,6 +44,7 @@ pub struct SignOut {
 pub struct SignOutMarker {
     v: u8,
     /// Only a pending sign-out fences use of the account.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub sign_out: Option<SignOut>,
     /// Token-bearing leftovers still require a by-name sweep.
     pub sweep: bool,

@@ -233,7 +233,29 @@ fn records_and_host_round_trip_and_a_second_client_is_busy() {
         "second vault is Busy"
     );
     let host = vault.host_id().expect("host id");
-    assert!(valid_host(host.expose()), "host is a canonical UUIDv4 URN");
+    let uuid = host
+        .expose()
+        .strip_prefix("urn:uuid:")
+        .expect("UUID URN prefix");
+    let groups: Vec<_> = uuid.split('-').collect();
+    assert_eq!(
+        groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+        [8, 4, 4, 4, 12]
+    );
+    assert!(
+        groups.iter().all(|group| group
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+        "canonical lowercase hexadecimal"
+    );
+    assert!(
+        u16::from_str_radix(groups[2], 16).expect("version group") & 0xf000 == 0x4000,
+        "version four"
+    );
+    assert!(
+        u16::from_str_radix(groups[3], 16).expect("variant group") & 0xc000 == 0x8000,
+        "RFC UUID variant"
+    );
     committed(vault.save_account(&account("old")));
     committed(vault.save_revocations(&list("one")));
     drop(vault);
@@ -303,7 +325,7 @@ fn exercise_save_faults(record: Chunked, replacement: Replacement) {
     }
     let trace = baseline.0.lock().expect("fake lock").mutations.clone();
     let commit_at = trace.iter().position(|op| matches!(op, Mutation::Set(name) if name == &format!("{service}/{}", record.name()))).expect("manifest commit in trace");
-    for index in 0..trace.len() {
+    for (index, mutation) in trace.iter().enumerate() {
         for fault in [Fault::Refuse, Fault::CrashAfter] {
             let store = seed.fork();
             let mut vault = open(&store, &service, &path);
@@ -312,27 +334,7 @@ fn exercise_save_faults(record: Chunked, replacement: Replacement) {
                 Chunked::Account => vault.save_account(&new_account),
                 Chunked::Revoke => vault.save_revocations(&list("new")),
             }));
-            let changed = match fault {
-                Fault::Refuse => {
-                    let result = outcome.expect("refusal returns, not crashes");
-                    if index > commit_at {
-                        assert!(
-                            matches!(result, SaveResult::Committed { leftovers: true }),
-                            "post-commit cleanup is not a failed save"
-                        );
-                    } else {
-                        assert!(
-                            matches!(result, SaveResult::NotCommitted(_)),
-                            "pre-commit refusal does not commit"
-                        );
-                    }
-                    index > commit_at
-                }
-                Fault::CrashAfter => {
-                    assert!(outcome.is_err(), "crash point reached");
-                    index >= commit_at
-                }
-            };
+            let changed = save_changed_after_fault(outcome, mutation, fault, index, commit_at);
             drop(vault);
             let mut restarted = open(&store, &service, &path);
             match record {
@@ -366,6 +368,49 @@ fn exercise_save_faults(record: Chunked, replacement: Replacement) {
                 }
             }
             assert_only_active_slot(&restarted, &store, record);
+        }
+    }
+}
+
+fn save_changed_after_fault(
+    outcome: std::thread::Result<SaveResult>,
+    mutation: &Mutation,
+    fault: Fault,
+    index: usize,
+    commit_at: usize,
+) -> bool {
+    match fault {
+        Fault::Refuse => {
+            let result = outcome.expect("refusal returns, not crashes");
+            if index > commit_at {
+                assert!(
+                    matches!(result, SaveResult::Committed { leftovers: true }),
+                    "post-commit cleanup is not a failed save"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        (mutation, result),
+                        (
+                            Mutation::Set(_),
+                            SaveResult::NotCommitted(VaultError::Store(
+                                CredentialStoreError::Write(5)
+                            ))
+                        ) | (
+                            Mutation::Delete,
+                            SaveResult::NotCommitted(VaultError::Store(
+                                CredentialStoreError::Delete(5)
+                            ))
+                        )
+                    ),
+                    "pre-commit refusal preserves the exact store error"
+                );
+            }
+            index > commit_at
+        }
+        Fault::CrashAfter => {
+            assert!(outcome.is_err(), "crash point reached");
+            index >= commit_at
         }
     }
 }
@@ -427,7 +472,12 @@ fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_insta
                 }));
                 match fault {
                     Fault::Refuse => assert!(
-                        matches!(outcome.expect("refusal returns"), DeleteResult::Refused(_)),
+                        matches!(
+                            outcome.expect("refusal returns"),
+                            DeleteResult::Refused(VaultError::Store(CredentialStoreError::Delete(
+                                5
+                            )))
+                        ),
                         "refused deletion is reported"
                     ),
                     Fault::CrashAfter => assert!(outcome.is_err(), "crash point reached"),
@@ -466,6 +516,132 @@ fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_insta
             }
         }
     }
+}
+
+#[test]
+fn outside_sign_out_only_an_empty_revocation_list_may_be_deleted() {
+    let (_scratch, path, service, store) = setup("revoke-delete-guard");
+    let mut vault = open(&store, &service, &path);
+    committed(vault.save_revocations(&list("one")));
+    let names = store.names();
+    assert!(
+        matches!(
+            vault.delete_revocations(),
+            DeleteResult::Refused(VaultError::Fenced)
+        ),
+        "unconfirmed entries cannot be discarded by a sweep"
+    );
+    assert_eq!(
+        store.names(),
+        names,
+        "a refusal leaves every record name intact"
+    );
+    committed(vault.save_revocations(&Secret::new(RevocationList::default())));
+    assert!(
+        matches!(
+            vault.update_marker(MarkerUpdate::FinishSweep),
+            Err(VaultError::NotGone)
+        ),
+        "an empty record still has names that must be deleted"
+    );
+    gone(vault.delete_revocations());
+    assert_record_absent(&store, &service, "revoke");
+    vault
+        .update_marker(MarkerUpdate::FinishSweep)
+        .expect("sweep finishes");
+    assert!(
+        store.names().is_empty(),
+        "empty-list cleanup removes the marker too"
+    );
+}
+
+#[test]
+fn sign_out_reader_exposes_the_fenced_record_only_while_a_sign_out_is_pending() {
+    let (_scratch, path, service, store) = setup("sign-out-reader");
+    let mut vault = open(&store, &service, &path);
+    let expected = account("old");
+    committed(vault.save_account(&expected));
+    assert!(
+        matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
+        "ordinary sessions cannot use the sign-out reader"
+    );
+    vault
+        .update_marker(MarkerUpdate::BeginSweep)
+        .expect("sweep-only state");
+    assert!(
+        matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
+        "a sweep alone grants no sign-out access"
+    );
+    vault
+        .update_marker(MarkerUpdate::Promote(Disposition::Keep))
+        .expect("promotion");
+    drop(vault);
+    let vault = open(&store, &service, &path);
+    let fenced = vault
+        .load_for_sign_out()
+        .expect("Prepare reader")
+        .expect("account is present");
+    assert!(
+        fenced.expose().client_id == expected.expose().client_id,
+        "Prepare receives the owning client"
+    );
+    assert!(
+        fenced.expose().tokens == expected.expose().tokens,
+        "Prepare receives the original token set"
+    );
+    assert!(
+        vault
+            .marker()
+            .expect("marker")
+            .sign_out
+            .is_some_and(|sign_out| sign_out.phase == Phase::Revoking),
+        "the preparation phase remains unchanged"
+    );
+    assert!(
+        vault.load_account().expect("ordinary reader").is_none(),
+        "ordinary account use remains fenced"
+    );
+}
+
+#[test]
+fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_errors() {
+    let (_scratch, path, service, store) = setup("revoke-unreadable-delete");
+    let mut vault = open(&store, &service, &path);
+    committed(vault.save_revocations(&list("one")));
+    let manifest = format!("{service}/revoke");
+    store
+        .set(&manifest, &Secret::new(Zeroizing::new(b"{".to_vec())))
+        .expect("corrupt test manifest");
+    let names = store.names();
+    assert!(
+        matches!(
+            vault.delete_revocations(),
+            DeleteResult::Refused(VaultError::Unreadable)
+        ),
+        "unreadable data cannot be discarded without recording uncertainty"
+    );
+    assert_eq!(store.names(), names, "refused cleanup changes no names");
+    vault
+        .update_marker(MarkerUpdate::UnknownOutcome)
+        .expect("persist uncertainty before deletion");
+    drop(vault);
+    let mut vault = open(&store, &service, &path);
+    store.0.lock().expect("fake lock").denied_read = Some(manifest);
+    assert!(
+        matches!(
+            vault.delete_revocations(),
+            DeleteResult::Refused(VaultError::Store(CredentialStoreError::Read(5)))
+        ),
+        "an OS read refusal remains a typed error"
+    );
+    assert_eq!(store.names(), names, "an OS refusal changes no names");
+    store.0.lock().expect("fake lock").denied_read = None;
+    gone(vault.delete_revocations());
+    assert_record_absent(&store, &service, "revoke");
+    assert!(
+        vault.marker().expect("marker").outcome_unknown,
+        "cleanup cannot reset the persisted uncertainty"
+    );
 }
 
 #[cfg(windows)]

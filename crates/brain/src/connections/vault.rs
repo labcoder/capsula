@@ -14,7 +14,8 @@ use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::credential::{
-    CHUNK_SIZE, CredentialStore, MAX_CHUNKS, SecretBytes, delete_chunks, get_chunks, set_chunks,
+    CHUNK_SIZE, CredentialStore, CredentialStoreError, MAX_CHUNKS, SecretBytes, delete_chunks,
+    get_chunks, set_chunks,
 };
 use crate::platform::{self, SessionLock};
 
@@ -144,6 +145,19 @@ impl<S: CredentialStore> Vault<S> {
     pub fn load_account(&self) -> Result<Option<Secret<Account>>, VaultError> {
         if self.marker()?.sign_out.is_some() {
             return Ok(None);
+        }
+        self.load(Chunked::Account)
+    }
+
+    /// Reads the fenced account only for sign-out preparation and registration-only deletion.
+    ///
+    /// This never authorizes inference or refresh; ordinary use must call [`Self::load_account`].
+    ///
+    /// # Errors
+    /// Refuses without a pending sign-out, or reports refused reads and malformed account data.
+    pub fn load_for_sign_out(&self) -> Result<Option<Secret<Account>>, VaultError> {
+        if self.marker()?.sign_out.is_none() {
+            return Err(VaultError::Fenced);
         }
         self.load(Chunked::Account)
     }
@@ -284,6 +298,7 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Removes all revocation names while retaining the independent sweep/sign-out marker.
+    /// Outside sign-out, the saved list must be empty, or malformed with persisted uncertainty.
     pub fn delete_revocations(&mut self) -> DeleteResult {
         let result = (|| {
             let marker = self.marker()?;
@@ -293,6 +308,24 @@ impl<S: CredentialStore> Vault<S> {
                     .is_some_and(|sign_out| sign_out.phase != Phase::Deleting)
             {
                 return Err(VaultError::Fenced);
+            }
+            if marker.sign_out.is_none() {
+                match self.load_revocations() {
+                    Ok(Some(list)) if !list.expose().entries.is_empty() => {
+                        return Err(VaultError::Fenced);
+                    }
+                    Ok(_) => {}
+                    Err(
+                        VaultError::Unreadable
+                        | VaultError::Bounds
+                        | VaultError::Store(
+                            CredentialStoreError::MissingChunk
+                            | CredentialStoreError::InvalidChunkLength
+                            | CredentialStoreError::InvalidBlob,
+                        ),
+                    ) if marker.outcome_unknown => {}
+                    Err(error) => return Err(error),
+                }
             }
             self.erase(Chunked::Revoke)
         })();
@@ -380,7 +413,7 @@ impl<S: CredentialStore> Vault<S> {
 
     fn assert_absent(&self, record: Chunked, keep: Option<Manifest>) -> Result<(), VaultError> {
         if keep.is_none() && self.store.get(&self.target(record.name()))?.is_some() {
-            return Err(VaultError::Fenced);
+            return Err(VaultError::NotGone);
         }
         for slot in 0..2 {
             for index in 0..MAX_CHUNKS {
@@ -392,7 +425,7 @@ impl<S: CredentialStore> Vault<S> {
                     .get(&self.target(&format!("{}/{slot}/{index}", record.name())))?
                     .is_some()
                 {
-                    return Err(VaultError::Fenced);
+                    return Err(VaultError::NotGone);
                 }
             }
         }

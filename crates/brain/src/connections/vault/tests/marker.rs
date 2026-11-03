@@ -85,6 +85,12 @@ fn marker_layout_is_compact_versioned_and_unknown_values_fail_closed() {
             .replace("\"v\":1", "\"v\":2"),
         String::from_utf8(expected.to_vec())
             .expect("ASCII fixture")
+            .replace(
+                "\"sign_out\":{\"disposition\":\"Keep\",\"phase\":\"Revoking\"},",
+                "",
+            ),
+        String::from_utf8(expected.to_vec())
+            .expect("ASCII fixture")
             .replace("\"v\":1", "\"v\":1,\"extra\":true"),
         String::from_utf8(expected.to_vec())
             .expect("ASCII fixture")
@@ -143,14 +149,13 @@ fn sweep_completion_preserves_every_unrelated_fact_and_a_promotion() {
     vault
         .update_marker(MarkerUpdate::UnknownOutcome)
         .expect("uncertainty");
-    let before = vault.marker().expect("current marker");
     let cleared = vault
         .update_marker(MarkerUpdate::FinishSweep)
         .expect("all revoke names absent");
     assert!(!cleared.sweep, "only the completed sweep clears");
-    assert_eq!(cleared.request_pending, before.request_pending);
-    assert_eq!(cleared.outcome_unknown, before.outcome_unknown);
-    assert_eq!(cleared.notice, before.notice);
+    assert!(cleared.request_pending, "the outstanding request remains");
+    assert!(cleared.outcome_unknown, "the unknown outcome remains");
+    assert!(cleared.notice, "the prior notice remains");
     vault
         .update_marker(MarkerUpdate::BeginSweep)
         .expect("another sweep");
@@ -217,6 +222,7 @@ fn a_refused_or_interrupted_sweep_marker_never_writes_a_revocation_record() {
         drop(vault);
         let mut restarted = open(&store, &service, &path);
         committed(restarted.save_revocations(&list("one")));
+        committed(restarted.save_revocations(&Secret::new(RevocationList::default())));
         gone(restarted.delete_revocations());
         restarted
             .update_marker(MarkerUpdate::FinishSweep)
@@ -295,107 +301,139 @@ fn sweep_only_allows_account_load_but_promotion_fences_without_deleting_it() {
 
 #[test]
 fn checkpoint_folds_uncertainty_once_and_a_refusal_prevents_deletion() {
-    for pending in [false, true] {
-        for unknown in [false, true] {
-            for list_empty in [false, true] {
-                let (_scratch, path, service, store) = setup("marker-checkpoint");
-                let mut vault = open(&store, &service, &path);
-                committed(vault.save_account(&account("old")));
-                if list_empty {
-                    committed(vault.save_revocations(&Secret::new(RevocationList::default())));
-                }
-                if pending {
-                    vault
-                        .update_marker(MarkerUpdate::RequestStarted)
-                        .expect("request");
-                }
-                if unknown {
-                    vault
-                        .update_marker(MarkerUpdate::UnknownOutcome)
-                        .expect("unknown");
-                }
-                let promoted = vault
-                    .update_marker(MarkerUpdate::Promote(Disposition::Erase))
-                    .expect("promote");
-                let names = store.names();
-                store.arm(0, Fault::Refuse);
-                assert!(
-                    vault
-                        .update_marker(MarkerUpdate::Checkpoint {
-                            list_empty_on_disk: list_empty
-                        })
-                        .is_err(),
-                    "refused checkpoint is reported"
-                );
-                assert!(
-                    vault.marker().expect("marker after refusal") == promoted,
-                    "refused write changes no control fact"
-                );
-                assert!(
-                    matches!(
-                        vault.delete_account(),
-                        DeleteResult::Refused(VaultError::Fenced)
-                    ),
-                    "no delete starts before a durable checkpoint"
-                );
-                assert_eq!(
-                    store.names(),
-                    names,
-                    "all token names survive a refused checkpoint"
-                );
-                let checkpoint = vault
-                    .update_marker(MarkerUpdate::Checkpoint {
-                        list_empty_on_disk: list_empty,
-                    })
-                    .expect("checkpoint retry");
-                assert!(
-                    checkpoint
-                        .sign_out
-                        .is_some_and(|sign_out| sign_out.phase == Phase::Deleting),
-                    "checkpoint commits the deletion phase"
-                );
-                assert_eq!(checkpoint.notice, !list_empty || pending || unknown);
-                assert!(
-                    !checkpoint.request_pending && !checkpoint.outcome_unknown && checkpoint.sweep,
-                    "uncertainty folds into the decided notice"
-                );
-                let repeated = vault
-                    .update_marker(MarkerUpdate::Checkpoint {
-                        list_empty_on_disk: true,
-                    })
-                    .expect("idempotent checkpoint");
-                assert!(
-                    repeated == checkpoint,
-                    "later empty state cannot change the decision"
-                );
-            }
+    for (pending, unknown, list_empty, expected_notice) in [
+        (false, false, false, true),
+        (false, false, true, false),
+        (false, true, false, true),
+        (false, true, true, true),
+        (true, false, false, true),
+        (true, false, true, true),
+        (true, true, false, true),
+        (true, true, true, true),
+    ] {
+        let (_scratch, path, service, store) = setup("marker-checkpoint");
+        let mut vault = open(&store, &service, &path);
+        committed(vault.save_account(&account("old")));
+        if list_empty {
+            committed(vault.save_revocations(&Secret::new(RevocationList::default())));
         }
+        if pending {
+            vault
+                .update_marker(MarkerUpdate::RequestStarted)
+                .expect("request");
+        }
+        if unknown {
+            vault
+                .update_marker(MarkerUpdate::UnknownOutcome)
+                .expect("unknown");
+        }
+        let promoted = vault
+            .update_marker(MarkerUpdate::Promote(Disposition::Erase))
+            .expect("promote");
+        let names = store.names();
+        store.arm(0, Fault::Refuse);
+        assert!(
+            matches!(
+                vault.update_marker(MarkerUpdate::Checkpoint {
+                    list_empty_on_disk: list_empty
+                }),
+                Err(VaultError::Store(CredentialStoreError::Write(5)))
+            ),
+            "refused checkpoint is reported"
+        );
+        assert!(
+            vault.marker().expect("marker after refusal") == promoted,
+            "refused write changes no control fact"
+        );
+        assert!(
+            matches!(
+                vault.delete_account(),
+                DeleteResult::Refused(VaultError::Fenced)
+            ),
+            "no delete starts before a durable checkpoint"
+        );
+        assert_eq!(
+            store.names(),
+            names,
+            "all token names survive a refused checkpoint"
+        );
+        let checkpoint = vault
+            .update_marker(MarkerUpdate::Checkpoint {
+                list_empty_on_disk: list_empty,
+            })
+            .expect("checkpoint retry");
+        assert!(
+            checkpoint
+                .sign_out
+                .is_some_and(|sign_out| sign_out.phase == Phase::Deleting),
+            "checkpoint commits the deletion phase"
+        );
+        assert_eq!(checkpoint.notice, expected_notice);
+        assert!(
+            !checkpoint.request_pending && !checkpoint.outcome_unknown && checkpoint.sweep,
+            "uncertainty folds into the decided notice"
+        );
+        let repeated = vault
+            .update_marker(MarkerUpdate::Checkpoint {
+                list_empty_on_disk: true,
+            })
+            .expect("idempotent checkpoint");
+        assert!(
+            repeated == checkpoint,
+            "later empty state cannot change the decision"
+        );
     }
 }
 
 #[test]
+fn a_refused_promotion_preserves_the_sweep_marker_and_every_token_name() {
+    let (_scratch, path, service, store) = setup("marker-promotion-refusal");
+    let mut vault = open(&store, &service, &path);
+    committed(vault.save_account(&account("old")));
+    committed(vault.save_revocations(&list("one")));
+    let names = store.names();
+    store.arm(0, Fault::Refuse);
+    assert!(
+        matches!(
+            vault.update_marker(MarkerUpdate::Promote(Disposition::Erase)),
+            Err(VaultError::Store(CredentialStoreError::Write(5)))
+        ),
+        "refused promotion retains its exact error"
+    );
+    let marker = vault.marker().expect("persisted marker");
+    assert!(
+        marker.sign_out.is_none()
+            && marker.sweep
+            && !marker.request_pending
+            && !marker.outcome_unknown
+            && !marker.notice,
+        "only the existing sweep fact remains"
+    );
+    assert_eq!(
+        store.names(),
+        names,
+        "promotion refusal changes no token names"
+    );
+    assert!(
+        vault
+            .load_account()
+            .expect("ordinary account read")
+            .is_some(),
+        "a refused promotion is not a durable sign-out"
+    );
+}
+
+#[test]
 fn refusal_and_crash_at_promotion_and_final_marker_write_preserve_durable_facts() {
-    for confirmed in [false, true] {
+    for (confirmed, expected_notice) in [(false, true), (true, false)] {
         for fault in [Fault::Refuse, Fault::CrashAfter] {
             let (_scratch, path, service, store) = setup("marker-final-fault");
             let mut vault = open(&store, &service, &path);
             committed(vault.save_account(&account("old")));
             committed(vault.save_revocations(&list("one")));
-            let sweep_only = vault.marker().expect("sweep-only marker");
-            store.arm(0, Fault::Refuse);
-            assert!(
-                vault
-                    .update_marker(MarkerUpdate::Promote(Disposition::Erase))
-                    .is_err(),
-                "refused promotion is not durable"
-            );
-            assert!(
-                vault.marker().expect("unchanged marker") == sweep_only,
-                "existing sweep state survives"
-            );
             vault
                 .update_marker(MarkerUpdate::Promote(Disposition::Erase))
-                .expect("promotion retry");
+                .expect("promotion");
             if confirmed {
                 committed(vault.save_revocations(&Secret::new(RevocationList::default())));
             }
@@ -426,10 +464,24 @@ fn refusal_and_crash_at_promotion_and_final_marker_write_preserve_durable_facts(
             let mut restarted = open(&store, &service, &path);
             match fault {
                 Fault::Refuse => {
-                    assert!(
-                        outcome.expect("refusal returns").is_err(),
-                        "refused finish is reported"
-                    );
+                    let result = outcome.expect("refusal returns");
+                    if confirmed {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(VaultError::Store(CredentialStoreError::Delete(5)))
+                            ),
+                            "refused marker deletion is reported"
+                        );
+                    } else {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(VaultError::Store(CredentialStoreError::Write(5)))
+                            ),
+                            "refused notice write is reported"
+                        );
+                    }
                     assert!(
                         restarted.marker().expect("refused finish marker") == decided,
                         "refused finish remains Deleting"
@@ -458,7 +510,7 @@ fn refusal_and_crash_at_promotion_and_final_marker_write_preserve_durable_facts(
                     && !marker.outcome_unknown,
                 "only the decided notice can remain"
             );
-            assert_eq!(marker.notice, !confirmed);
+            assert_eq!(marker.notice, expected_notice);
             let expected_names = if confirmed {
                 Vec::new()
             } else {
@@ -495,7 +547,7 @@ fn finish_requires_by_name_absence_even_without_a_manifest_and_propagates_read_r
     assert!(
         matches!(
             vault.update_marker(MarkerUpdate::FinishSignOut),
-            Err(VaultError::Fenced)
+            Err(VaultError::NotGone)
         ),
         "a missing manifest is not proof of absence"
     );
@@ -549,7 +601,11 @@ fn keep_rewrite_requires_the_checkpoint_and_removes_email_plan_and_every_token_n
             list_empty_on_disk: true,
         })
         .expect("checkpoint");
-    committed(vault.save_account(&registration(&original)));
+    let fenced = vault
+        .load_for_sign_out()
+        .expect("read during Deleting")
+        .expect("account still present");
+    committed(vault.save_account(&registration(&fenced)));
     assert_only_active_slot(&vault, &store, Chunked::Account);
     gone(vault.delete_revocations());
     vault
