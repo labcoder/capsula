@@ -89,6 +89,8 @@ struct Presence {
     stretch: Stretch,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
+    /// The brain's last error, on the dock while connected until the next turn is sent.
+    error: Option<SharedString>,
 }
 
 impl Presence {
@@ -214,6 +216,12 @@ impl Presence {
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let label: SharedString = if self.gesture.get().listening() {
             cx.global::<Strings>().get(Text::Listening).into()
+        } else if let Some(error) = self
+            .error
+            .clone()
+            .filter(|_| self.state == LinkState::Connected)
+        {
+            error
         } else {
             dock_label(self.state, cx)
         };
@@ -389,6 +397,9 @@ impl Presence {
                         input.update(cx, |state, cx| state.set_value("", window, cx));
                     })
                     .map_err(|error| OpenError::Gpui(error.into()))?;
+                if self.error.take().is_some() {
+                    self.refresh_dock(cx);
+                }
                 None
             }
             Err(Refused::Blank) => None,
@@ -842,6 +853,7 @@ pub(crate) fn open(
             scale,
             pointer_settle: None,
             delete_retry: None,
+            error: None,
             stretch,
         }
     });

@@ -1,7 +1,8 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
-use fluent_bundle::{FluentBundle, FluentResource};
+use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
 use gpui_kit::Global;
+use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -200,25 +201,50 @@ impl Strings {
 
     /// The text for `text`. A missing entry shows its id, which the unit test rules out.
     pub(crate) fn get(&self, text: Text) -> String {
-        let Some(pattern) = self.bundle.get_message(text.id()).and_then(|m| m.value()) else {
-            tracing::error!(id = text.id(), "missing string");
-            return text.id().to_owned();
+        self.format(text.id(), None)
+    }
+
+    /// The text for an error the brain sent, with its typed arguments.
+    pub(crate) fn error(&self, error: &UserError) -> String {
+        let mut args = FluentArgs::new();
+        for arg in error.args() {
+            match *arg {
+                ErrorArg::Seconds(seconds) => args.set("seconds", seconds),
+                ErrorArg::Count(count) => args.set("count", count),
+            }
+        }
+        self.format(error_id(error.key()), Some(&args))
+    }
+
+    fn format(&self, id: &'static str, args: Option<&FluentArgs<'_>>) -> String {
+        let Some(pattern) = self.bundle.get_message(id).and_then(|m| m.value()) else {
+            tracing::error!(id, "missing string");
+            return id.to_owned();
         };
         let mut errors = Vec::new();
         let value = self
             .bundle
-            .format_pattern(pattern, None, &mut errors)
+            .format_pattern(pattern, args, &mut errors)
             .into_owned();
         if !errors.is_empty() {
-            tracing::error!(id = text.id(), ?errors, "string failed to format");
+            tracing::error!(id, ?errors, "string failed to format");
         }
         value
     }
 }
 
+/// Each error's catalog id. Append only, beside `ErrorKey`.
+const fn error_id(key: ErrorKey) -> &'static str {
+    match key {
+        ErrorKey::SettingsRefused => "error-settings-refused",
+        ErrorKey::ConfigUnreadable => "error-config-unreadable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Strings, Text};
+    use super::{Strings, Text, error_id};
+    use kumochi_protocol::message::{ErrorKey, UserError};
 
     #[test]
     fn every_text_is_in_the_catalog() {
@@ -234,5 +260,24 @@ mod tests {
             );
         }
         assert_eq!(strings.get(Text::Connected), "Ready");
+    }
+
+    #[test]
+    fn every_error_is_in_the_catalog() {
+        let strings = Strings::english();
+        for key in ErrorKey::ALL {
+            assert!(
+                strings
+                    .bundle
+                    .get_message(error_id(key))
+                    .and_then(|m| m.value())
+                    .is_some(),
+                "{key:?} has no value in locales/en/shell.ftl",
+            );
+        }
+        assert_eq!(
+            strings.error(&UserError::from(ErrorKey::SettingsRefused)),
+            "Couldn't save that setting. Try again."
+        );
     }
 }

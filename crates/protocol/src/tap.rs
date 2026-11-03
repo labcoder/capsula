@@ -72,6 +72,7 @@ impl Tapped for ControlToShell {
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::TurnRefused { .. } => "TurnRefused",
             Self::Settings { .. } => "Settings",
+            Self::Error(_) => "Error",
         }
     }
 
@@ -84,6 +85,7 @@ impl Tapped for ControlToShell {
                 | Self::Scenes { .. }
                 | Self::ThreadDeleted { .. }
                 | Self::TurnRefused { .. }
+                | Self::Error(_)
         )
     }
 }

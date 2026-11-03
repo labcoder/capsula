@@ -20,7 +20,7 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
-    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId,
+    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId, UserError,
 };
 
 use crate::credential::{self, CredentialError};
@@ -87,6 +87,8 @@ pub(crate) enum LinkEvent {
     },
     /// The brain refused the oldest unanswered turn, from the control pipe.
     TurnRefused,
+    /// Something the user should be told, from the control pipe.
+    Error(UserError),
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -652,7 +654,8 @@ impl Link {
                 | ControlToShell::Scenes { .. }
                 | ControlToShell::ThreadDeleted { .. }
                 | ControlToShell::TurnRefused { .. }
-                | ControlToShell::Settings { .. },
+                | ControlToShell::Settings { .. }
+                | ControlToShell::Error(_),
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -750,6 +753,11 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
             }
             Ok(Some(ControlToShell::TurnRefused { .. })) => {
                 if events.send_blocking(LinkEvent::TurnRefused).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::Error(error))) => {
+                if events.send_blocking(LinkEvent::Error(error)).is_err() {
                     return;
                 }
             }

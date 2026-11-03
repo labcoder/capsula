@@ -30,13 +30,16 @@ sequenceDiagram
   W-->>C: written
   C->>C: the staged table and view become the settings
   C-->>S: Settings(view, answer: true)
+  Note over C,S: a refused or failed change sends Error(key) just before its answer
 ```
 
 - At most one write is in flight, off the core loop, so a slow disk never delays Stop or Pong.
   Changes that arrive meanwhile wait and are applied in order.
 - Each change gets exactly one `Settings` with `answer: true` back, in order, while the
-  connection that sent it lasts. A refused or failed change gets the unchanged view, so the
-  shell's field goes back to what's saved. A `Settings` with `answer: false` answers nothing: it's
+  connection that sent it lasts. A refused or failed change gets an `Error` first
+  (`ConfigUnreadable` for a bad file, otherwise `SettingsRefused`), then the unchanged view, so
+  the shell's field goes back to what's saved. An `Error` only ever comes just before an
+  `answer: true` view. A `Settings` with `answer: false` answers nothing: it's
   the connection's first frame, or the settled settings after a change another connection sent.
 
 ## Across connections and Quit
@@ -46,7 +49,7 @@ no shell is connected, and Quit and close write what's left before they end.
 
 - **A later connection** gets the settings as saved so far, then, as each earlier connection's
   change is saved, the settled settings with `answer: false`. An earlier change's refusal is only
-  logged. So a new shell's own changes are answered only by `answer: true`, and nothing from a
+  logged: it sends no `Error` and no view. So a new shell's own changes are answered only by `answer: true`, and nothing from a
   gone shell can pass for one.
 - **Quit** writes the queue within its one absolute deadline (2 s from the accepted Quit). A
   change still unsaved then is logged by count, with no value. The runtime then shuts down

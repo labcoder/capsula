@@ -9,7 +9,8 @@ use tokio::time::Instant;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, ControlToShell, Phase, SettingsOp, SettingsView, UserName,
+    AssistantName, ControlToBrain, ControlToShell, ErrorKey, Phase, SettingsOp, SettingsView,
+    UserName,
 };
 use kumochi_protocol::tap;
 use tokio::io::AsyncRead;
@@ -58,6 +59,15 @@ impl<S: AsyncRead + tokio::io::AsyncWrite> Shell<S> {
     /// connection sent, once saved.
     async fn settled(&mut self) -> SettingsView {
         self.settings(Answer::No).await
+    }
+
+    /// The next control frame, which must be an `Error`.
+    async fn error(&mut self) -> ErrorKey {
+        let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
+        match tokio::time::timeout(super::PATIENCE, next).await {
+            Ok(Ok(Some(ControlToShell::Error(error)))) => error.key(),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }
 
@@ -148,7 +158,7 @@ async fn a_held_write_never_holds_up_stop_and_the_changes_behind_it_wait() {
 }
 
 #[tokio::test]
-async fn a_refused_change_is_answered_with_the_unchanged_view() {
+async fn a_refused_change_is_answered_with_its_error_then_the_unchanged_view() {
     let scratch = Scratch::new("settings-refused");
     let config = scratch.db().with_file_name(CONFIG_FILE);
     std::fs::create_dir_all(config.parent().expect("a folder")).expect("folder");
@@ -160,6 +170,7 @@ async fn a_refused_change_is_answered_with_the_unchanged_view() {
         shell.settled().await;
         shell.scenes().await;
         shell.send(&rename("Nimbus")).await;
+        assert_eq!(shell.error().await, ErrorKey::ConfigUnreadable);
         assert_eq!(
             shell.answer().await.assistant_name.as_str(),
             DEFAULT_ASSISTANT_NAME
@@ -343,6 +354,7 @@ async fn a_failed_write_is_answered_unchanged_and_the_next_change_still_saves() 
         release
             .send(Gate::Write)
             .expect("the write waits on the gate");
+        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
         assert_eq!(
             shell.answer().await.assistant_name.as_str(),
             DEFAULT_ASSISTANT_NAME
@@ -374,6 +386,7 @@ async fn a_panicked_write_logs_only_its_kind() {
         release
             .send(Gate::Panic)
             .expect("the write waits on the gate");
+        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
         assert_eq!(
             shell.answer().await.assistant_name.as_str(),
             DEFAULT_ASSISTANT_NAME
@@ -413,4 +426,44 @@ fn a_held_write_never_holds_up_shutdown() {
     });
     done.recv_timeout(CLOSE_WAIT + Duration::from_secs(5))
         .expect("shutting down didn't wait for the held write");
+}
+
+#[tokio::test]
+async fn an_earlier_connections_refused_change_sends_the_next_one_nothing() {
+    let scratch = Scratch::new("settings-old-refusal");
+    let mut brain = test_support::brain(&scratch, "");
+    let release = brain.hold_config_write();
+    // A folder where the temp file goes makes the held write fail once released.
+    let blocker = scratch.db().with_file_name(format!("{CONFIG_FILE}.tmp"));
+    std::fs::create_dir_all(&blocker).expect("blocker");
+    let mut tap = Tap::from_env();
+    let ((control, data), mut shell) = duplex();
+    let first = async {
+        shell.settled().await;
+        shell.scenes().await;
+        shell.send(&rename("Nimbus")).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), first);
+    assert_eq!(ended, Ended::Lost);
+    let ((control, data), mut shell) = duplex();
+    let second = async {
+        shell.settled().await;
+        shell.scenes().await;
+        release
+            .send(Gate::Write)
+            .expect("the write waits on the gate");
+        // This connection's change waits behind the earlier one and fails the same way, so its
+        // Error is the next frame only if the earlier refusal sent nothing.
+        shell.send(&rename("Cirrus")).await;
+        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
+        assert_eq!(
+            shell.answer().await.assistant_name.as_str(),
+            DEFAULT_ASSISTANT_NAME
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), second);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }

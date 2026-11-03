@@ -9,7 +9,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::message::{AssistantName, SettingsOp, SettingsView, UserName};
+use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsOp, SettingsView, UserName};
 use toml::{Table, Value};
 
 const ASSISTANT_NAME: &str = "assistant_name";
@@ -28,6 +28,16 @@ pub(crate) enum ConfigError {
     /// Writing the file failed; nothing changed.
     #[error("config.toml couldn't be written")]
     Write(#[source] io::Error),
+}
+
+impl ConfigError {
+    /// What the user is told.
+    pub(crate) fn key(&self) -> ErrorKey {
+        match self {
+            Self::Unreadable => ErrorKey::ConfigUnreadable,
+            Self::NoHome | Self::Write(_) => ErrorKey::SettingsRefused,
+        }
+    }
 }
 
 /// The settings and the file they came from.
