@@ -1,0 +1,7 @@
+flowchart LR
+request[The person asks a question that needs current information from an account they configured]
+request --> lookup[Read the available context and make a bounded request to that account]
+lookup --> result{Is the result complete enough to answer the original question?}
+result -->|yes| answer[Show the answer with the source and explain any remaining uncertainty]
+result -->|no| refine[Refine the request using the missing context without repeating work that already succeeded]
+refine --> lookup

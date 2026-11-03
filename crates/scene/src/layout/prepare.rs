@@ -1,6 +1,6 @@
 use super::{
     Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
-    SurfaceGeometry, heap, nodes,
+    SurfaceGeometry, compound, heap, nodes,
     primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
@@ -8,6 +8,7 @@ use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
+    mermaid::Extra,
     record::{Anchor, Change, Enter, Track},
     state::{object, work},
     theme::Theme,
@@ -48,11 +49,16 @@ pub fn prepare(
     };
     build.check_cancel()?;
     let mut after = before.clone();
+    if !ticket.extras.is_empty() {
+        after
+            .extras
+            .insert(ticket.revision, Arc::clone(&ticket.extras));
+    }
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
     let mut tables = false;
     let mut charts = false;
-    for (slot, op) in ticket.step.put.iter().enumerate() {
+    for (slot, op) in ticket.run.put.iter().enumerate() {
         if let Some(visual) = object::visual(op) {
             let handle = Handle::new(ticket.revision, slot)?;
             tables |= matches!(op, Op::Table(_) | Op::Row(_));
@@ -61,7 +67,7 @@ pub fn prepare(
             order.push(visual.id.clone());
         }
     }
-    for change in &*ticket.step.set {
+    for change in &*ticket.run.set {
         let (handle, source) = if let Some((handle, source)) = sources.get(&change.target) {
             (*handle, Arc::clone(source))
         } else {
@@ -88,7 +94,7 @@ pub fn prepare(
         }
     }
     let mut removed = Vec::new();
-    for id in &*ticket.step.remove {
+    for id in &*ticket.run.remove {
         if let Some(old) = after.objects.remove(id) {
             tables |= matches!(&*old.source, Op::Row(_));
             charts |= matches!(&*old.source, Op::Series(_));
@@ -108,7 +114,7 @@ pub fn prepare(
         .map(|(id, object)| (id.clone(), object.rest))
         .collect();
     for change in ticket
-        .step
+        .run
         .set
         .iter()
         .filter(|change| change.color.is_some())
@@ -120,7 +126,7 @@ pub fn prepare(
     }
     let mut motions = BTreeMap::new();
     let mut explicit_pos = BTreeSet::new();
-    for (slot, op) in ticket.step.put.iter().enumerate() {
+    for (slot, op) in ticket.run.put.iter().enumerate() {
         if let Op::Anim(anim) = op {
             rests
                 .entry(anim.target.clone())
@@ -129,7 +135,7 @@ pub fn prepare(
             if anim.track == Track::Pos {
                 explicit_pos.insert(anim.target.clone());
             }
-            let motion = work::motion(anim, slot, &ticket.step)?;
+            let motion = work::motion(anim, slot, &ticket.run)?;
             motions.insert((anim.target.clone(), work::property(anim.track)), motion);
         }
     }
@@ -174,7 +180,11 @@ pub fn prepare(
             Item {
                 handle: *handle,
                 parent,
-                primitives: Arc::from([]),
+                // A titled cluster keeps the title its last layout drew.
+                primitives: previous
+                    .as_ref()
+                    .filter(|_| matches!(&**source, Op::Diagram(_)))
+                    .map_or_else(|| Arc::from([]), |old| Arc::clone(&old.item.primitives)),
                 bounds: bounds.map(rect).or(measured).unwrap_or_default(),
                 transform: Affine::default(),
                 opacity: opacity.map_or(1.0, crate::Finite::get),
@@ -279,6 +289,7 @@ pub fn prepare(
             .motion
             .insert(property, motion);
     }
+    after.prune_extras();
     validate_bounds(&after)?;
     let mut items: Vec<_> = after
         .objects
@@ -295,7 +306,9 @@ pub fn prepare(
     items.sort_by_key(|item| item.handle);
     let resident_bytes = residency(before.objects.values().map(|object| &object.item), &items)
         + heap::source_bytes(before.objects.values(), after.objects.values())
+        + heap::compiled_bytes(&ticket.step, &ticket.run)
         + chart_bytes
+        + ticket.extras.values().map(Extra::bytes).sum::<usize>()
         + after.index_bytes();
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
@@ -546,10 +559,21 @@ fn update_group_bounds(state: &mut LayoutState) {
             .values_mut()
             .filter(|object| matches!(&*object.source, Op::Diagram(_)))
         {
-            if let Some(bounds) = bounds.get(&object.item.handle)
-                && *bounds != object.item.bounds
-            {
-                object.item.bounds = *bounds;
+            let Some(&contents) = bounds.get(&object.item.handle) else {
+                continue;
+            };
+            let (bounds, title) = match object.title {
+                Some(size) => {
+                    let (bounds, origin) = compound::banded(contents, size);
+                    (bounds, Some(origin))
+                }
+                None => (contents, None),
+            };
+            if bounds != object.item.bounds {
+                object.item.bounds = bounds;
+                if let Some(origin) = title {
+                    object.item.primitives = compound::retitle(&object.item.primitives, origin);
+                }
                 changed = true;
             }
         }
