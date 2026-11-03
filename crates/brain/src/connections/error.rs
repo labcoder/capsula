@@ -11,9 +11,9 @@ pub enum VaultError {
     /// Another session holds the vault lock.
     #[error("account session is busy")]
     Busy,
-    /// The local data directory is unavailable.
-    #[error("local account data directory is unavailable")]
-    NoLocalAppData,
+    /// The platform's account data directory is unavailable.
+    #[error("account data directory is unavailable")]
+    NoDataDir,
     /// Opening the session lock failed.
     #[error("account session lock failed")]
     Lock(#[source] io::Error),

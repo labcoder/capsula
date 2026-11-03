@@ -424,7 +424,7 @@ fn a_refused_promotion_preserves_the_sweep_marker_and_every_token_name() {
 }
 
 #[test]
-fn refusal_and_crash_at_promotion_and_final_marker_write_preserve_durable_facts() {
+fn refusal_and_crash_at_finish_preserve_the_checkpointed_outcome() {
     for (confirmed, expected_notice) in [(false, true), (true, false)] {
         for fault in [Fault::Refuse, Fault::CrashAfter] {
             let (_scratch, path, service, store) = setup("marker-final-fault");

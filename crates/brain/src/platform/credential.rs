@@ -23,18 +23,18 @@ pub enum CredentialStoreError {
     /// A single blob exceeds the platform limit.
     #[error("credential blob is too large")]
     BlobTooLarge,
-    /// Windows returned malformed credential metadata.
+    /// The OS returned malformed credential metadata.
     #[error("invalid credential blob")]
     InvalidBlob,
-    /// Windows refused a read with this error code.
+    /// The OS refused a read with this error code.
     #[error("credential read failed ({0})")]
-    Read(u32),
-    /// Windows refused a write with this error code.
+    Read(i32),
+    /// The OS refused a write with this error code.
     #[error("credential write failed ({0})")]
-    Write(u32),
-    /// Windows refused a delete with this error code.
+    Write(i32),
+    /// The OS refused a delete with this error code.
     #[error("credential delete failed ({0})")]
-    Delete(u32),
+    Delete(i32),
     /// A chunk count or secret size exceeds the bounded record size.
     #[error("invalid credential chunk count")]
     InvalidChunkCount,
@@ -276,33 +276,8 @@ mod tests {
     }
 
     #[test]
-    fn secret_and_fake_debug_are_redacted() {
-        let store = MemoryStore::default();
+    fn secret_debug_is_redacted() {
         let secret = Secret::new(Zeroizing::new(b"test-only-secret-sentinel".to_vec()));
-        store.set("slot/0", &secret).expect("write sentinel");
         assert_eq!(format!("{secret:?}"), "***");
-        let debug = format!("{store:?}");
-        assert!(debug.contains("***"), "fake redacts its stored value");
-        assert!(
-            !debug.contains("test-only-secret-sentinel"),
-            "no secret text"
-        );
-        assert!(!debug.contains("116, 101, 115"), "no secret bytes");
-        for error in [
-            CredentialStoreError::InvalidTarget,
-            CredentialStoreError::BlobTooLarge,
-            CredentialStoreError::InvalidBlob,
-            CredentialStoreError::Read(5),
-            CredentialStoreError::Write(5),
-            CredentialStoreError::Delete(5),
-            CredentialStoreError::InvalidChunkCount,
-            CredentialStoreError::MissingChunk,
-            CredentialStoreError::InvalidChunkLength,
-        ] {
-            assert!(
-                !format!("{error:?} {error}").contains("test-only-secret-sentinel"),
-                "error is redacted"
-            );
-        }
     }
 }

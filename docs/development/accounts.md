@@ -3,8 +3,16 @@
 The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
 credential by exact target name. Windows uses `CredWriteW` with
 `CRED_PERSIST_LOCAL_MACHINE`: entries survive process exit and sign-in on this machine,
-but don't roam to another PC. `keyring` hard-codes enterprise persistence, so it remains
-only on the separate instance-capability path, unchanged.
+but don't roam to another PC. `keyring` 3.6.3, the version used here, hard-codes enterprise
+persistence; it remains on the separate instance-capability path, unchanged. The newer
+keyring-core 1.x stack's `windows-native-keyring-store` 1.1.0 supports local persistence.
+We chose not to add that second keyring stack: our store is small and reviewed, returns
+zeroizing bytes, and its guard wipes the validated native read blob and frees the allocation
+on every exit, including panic unwinding. `CredentialStore` is the seam for a macOS Keychain store.
+
+Credential Manager protects entries per Windows user, not per process. Any process running
+as the same Windows user can read these entries. The session lock coordinates cooperating
+brain instances; it does not provide isolation from other processes running as that user.
 
 Account targets belong under `CREDENTIAL_SERVICE` (`Kumochi Dev` in debug builds), never
 `INSTANCE_SERVICE`. A caller supplies the full target; the store doesn't rewrite it or
@@ -18,8 +26,10 @@ An empty value uses one empty chunk. Reads require an explicit bounded count, al
 and full-length nonfinal chunks. Deletes are idempotent and attempt every specified name,
 reporting the first failure. Only `ERROR_NOT_FOUND` means absence.
 
-These synchronous operations run off the core loop while the vault retains its session
-lock, even if an async waiter is cancelled. The vault owns the guard until it is dropped.
+There are no production callers of `Vault` yet. Callers must run these synchronous operations
+off the core loop and retain the vault, including its session lock, until all blocking work
+ends, even if an async waiter is cancelled or shutdown begins. The vault owns the guard until
+it is dropped.
 
 `platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
 `File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
@@ -51,8 +61,21 @@ manifest. Before that commit the old value remains active; afterwards the new on
 `SaveResult::Committed { leftovers }` distinguishes a successful commit with failed old-slot
 cleanup from `NotCommitted`. An unknown or dirty inactive slot gets a full 64-name sweep;
 ordinary post-commit cleanup uses the old manifest's count. Reads never fall back to old data.
-An unreadable `chatgpt` manifest or `host` record is recoverable only through sign-out today;
-PR 9 supplies that recovery flow. This layer doesn't silently replace either record.
+An unreadable `chatgpt` manifest requires sign-out recovery, whose orchestration belongs to
+PR 9. An unreadable `host` has no recovery yet: sign-out preserves it, and PR 9 must decide
+that policy. This layer does not silently replace either record.
+
+```mermaid
+flowchart LR
+    A["Manifest: slot A active"] --> B["Clean inactive B"]
+    B --> C["Write B chunks"]
+    C --> D["Replace manifest with B<br/>commit point"]
+    B -. refusal .-> N["NotCommitted<br/>A remains active"]
+    C -. refusal .-> N
+    D -. refusal .-> N
+    D --> E["Delete old A chunks"]
+    E --> F["Committed<br/>leftovers records cleanup failure"]
+```
 
 Marker updates merge the current persisted state, not a default or queued snapshot. A late
 sweep cannot undo a sign-out promotion. The checkpoint atomically enters `Deleting`, decides
@@ -64,6 +87,17 @@ can survive local deletion without retaining tokens. `SignInCommitted` clears an
 only after a new token-bearing account commit, without resetting other control facts.
 The instance capability is untouched.
 
+```mermaid
+stateDiagram-v2
+    state "No pending sign-out" as NoSignOut
+    [*] --> NoSignOut
+    NoSignOut --> Revoking: promote and set notice
+    Revoking --> Revoking: checkpoint refused; no deletes
+    Revoking --> Deleting: checkpoint decides notice
+    Deleting --> Deleting: cleanup or Finish refused
+    Deleting --> NoSignOut: Finish leaves notice-only or absent state
+```
+
 Ordinary `load_account` reads return no usable account while a sign-out is pending.
 `load_for_sign_out` is available only during that pending sign-out, so Prepare can adopt
 the refresh token and Keep-Delete can read the registration. The existing account writer
@@ -73,5 +107,14 @@ OS read failures remain errors. A cleanup check that finds surviving names repor
 distinct from a control-state fence.
 
 This module provides storage operations, not the startup/restart state machine, token lane,
-request handling, age-out policy or revocation networking. Those callers supply the checkpoint's
-pre-deletion evidence and must retain the vault through every blocking operation.
+request handling, age-out policy or revocation networking. Callers must serialize vault work
+and revalidate queued ownership immediately before dispatch. They must supply the checkpoint's
+evidence from durably saved revocation results before deletion, never infer confirmation from
+the later absence of records, and resume sign-out according to its persisted phase.
+
+The real Windows persistence tests run on every `cargo test`, under isolated random names:
+`<CREDENTIAL_SERVICE>-credential-test-<nonce>` and
+`<CREDENTIAL_SERVICE>-vault-test-<nonce>/...`. Cleanup follows assertions and panic unwinding,
+but a terminated process can leave persistent test-only entries containing fixture strings.
+The owner can remove stray entries matching those exact test patterns in Windows Credential
+Manager; there is no automatic enumeration or cleanup of other test runs.
