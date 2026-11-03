@@ -10,13 +10,14 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, ErrorKey, SettingsOp, SettingsView, ThreadId, UserName,
+    AssistantName, ErrorKey, MaxFrameRate, SettingsOp, SettingsView, ThreadId, UserName,
 };
 use toml::{Table, Value};
 
 const ASSISTANT_NAME: &str = "assistant_name";
 const USER_NAME: &str = "user_name";
 const ONBOARDED: &str = "onboarded";
+const MAX_FRAME_RATE: &str = "max_frame_rate";
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +151,14 @@ impl Config {
             SettingsOp::FinishOnboarding => {
                 table.insert(ONBOARDED.to_owned(), Value::Boolean(true));
             }
+            SettingsOp::SetMaxFrameRate(rate) => match rate.fps() {
+                Some(fps) => {
+                    table.insert(MAX_FRAME_RATE.to_owned(), Value::Integer(fps.into()));
+                }
+                None => {
+                    table.remove(MAX_FRAME_RATE);
+                }
+            },
         }
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
@@ -209,11 +218,21 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         Some(Value::Boolean(done)) => *done,
         Some(_) => invalid(ONBOARDED).unwrap_or(false),
     };
+    let max_frame_rate = match table.get(MAX_FRAME_RATE) {
+        None => MaxFrameRate::AUTOMATIC,
+        Some(Value::Integer(fps)) => u16::try_from(*fps)
+            .ok()
+            .and_then(|fps| MaxFrameRate::cap(fps).ok())
+            .or_else(|| invalid(MAX_FRAME_RATE))
+            .unwrap_or_default(),
+        Some(_) => invalid(MAX_FRAME_RATE).unwrap_or_default(),
+    };
     SettingsView {
         assistant_name,
         user_name,
         onboarded,
         main_thread,
+        max_frame_rate,
     }
 }
 

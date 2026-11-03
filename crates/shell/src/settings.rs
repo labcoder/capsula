@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use kumochi_protocol::message::{
-    AssistantName, ErrorKey, NameError, SettingsOp, SettingsView, UserError, UserName,
+    AssistantName, ErrorKey, MaxFrameRate, NameError, SettingsOp, SettingsView, UserError, UserName,
 };
 
 use crate::strings::Text;
@@ -60,9 +60,26 @@ pub(crate) struct Completion {
     pub(crate) field: Field,
 }
 
+/// What a queued settings operation changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Name(Field),
+    /// The frame rate has no draft; the rate is kept so a quick second choice compares to it.
+    FrameRate(MaxFrameRate),
+}
+
+impl Slot {
+    fn field(self) -> Option<Field> {
+        match self {
+            Self::Name(field) => Some(field),
+            Self::FrameRate(_) => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Pending {
-    field: Field,
+    slot: Slot,
     failed: bool,
     reset_draft: bool,
 }
@@ -71,7 +88,7 @@ struct Pending {
 pub(crate) struct Settings {
     view: Option<SettingsView>,
     notice: Option<UserError>,
-    notice_field: Option<Field>,
+    notice_slot: Option<Slot>,
     assistant: FieldState,
     user: FieldState,
     pending: VecDeque<Pending>,
@@ -132,7 +149,11 @@ impl Settings {
             return None;
         }
         let pending = self.pending.pop_front()?;
-        let state = self.field_mut(pending.field);
+        if !pending.failed && self.notice_slot.map(Slot::field) == Some(pending.slot.field()) {
+            self.clear_notice();
+        }
+        let field = pending.slot.field()?;
+        let state = self.field_mut(field);
         state.saving = false;
         if pending.reset_draft {
             state.value.clone_from(&state.authoritative);
@@ -141,12 +162,9 @@ impl Settings {
         {
             state.error = None;
         }
-        if !pending.failed && self.notice_field == Some(pending.field) {
-            self.clear_notice();
-        }
         Some(Completion {
             failed: pending.failed,
-            field: pending.field,
+            field,
         })
     }
 
@@ -176,7 +194,7 @@ impl Settings {
 
     pub(crate) fn clear_notice(&mut self) {
         self.notice = None;
-        self.notice_field = None;
+        self.notice_slot = None;
     }
 
     pub(crate) fn field(&self, field: Field) -> &FieldState {
@@ -210,7 +228,7 @@ impl Settings {
         value.clone_into(&mut state.value);
         state.error = None;
         for pending in &mut self.pending {
-            if pending.field == field {
+            if pending.slot == Slot::Name(field) {
                 pending.reset_draft = false;
             }
         }
@@ -275,6 +293,41 @@ impl Settings {
         )
     }
 
+    /// The newest frame rate cap the user chose: the last one queued, else the saved one.
+    pub(crate) fn max_frame_rate_choice(&self) -> Option<MaxFrameRate> {
+        let queued = self
+            .pending
+            .iter()
+            .rev()
+            .find_map(|pending| match pending.slot {
+                Slot::FrameRate(rate) => Some(rate),
+                Slot::Name(_) => None,
+            });
+        queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
+    }
+
+    /// Sends a new frame rate cap unless it's the newest one, queued or saved. It shows once the
+    /// brain answers.
+    pub(crate) fn send_max_frame_rate(
+        &mut self,
+        rate: MaxFrameRate,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self
+            .max_frame_rate_choice()
+            .is_none_or(|newest| newest == rate)
+            || !send(SettingsOp::SetMaxFrameRate(rate))
+        {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::FrameRate(rate),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
     pub(crate) fn rename_refusal(&self) -> Text {
         if self.assistant.saving {
             Text::RenameBusy
@@ -300,7 +353,7 @@ impl Settings {
         }
         self.field_mut(field).saving = true;
         self.pending.push_back(Pending {
-            field,
+            slot: Slot::Name(field),
             failed: false,
             reset_draft: matches!(draft, Draft::Reset),
         });
@@ -309,15 +362,15 @@ impl Settings {
 
     pub(crate) fn error(&mut self, error: UserError) -> Option<Field> {
         self.notice = Some(error.clone());
-        self.notice_field = self
+        self.notice_slot = self
             .pending
             .front()
             .filter(|_| settings_error(error.key()))
-            .map(|pending| pending.field);
-        self.notice_field?;
+            .map(|pending| pending.slot);
+        self.notice_slot?;
         let pending = self.pending.front_mut()?;
         pending.failed = true;
-        let field = pending.field;
+        let field = pending.slot.field()?;
         self.field_mut(field).error = Some(Error::Brain(error));
         Some(field)
     }
