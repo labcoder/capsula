@@ -1,18 +1,18 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use fluent_bundle::{FluentBundle, FluentResource};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use url::Url;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use super::{DYNAMIC_CLIENT, SignIn, SignInError};
 use crate::connections::records::MAX_ID_BYTES;
 
-/// Local policy: cap the entire HTTP header, including its terminator, at 8 KiB.
-const HEADER_LIMIT: usize = 8192;
+/// Local policy: cap the entire HTTP header, including its terminator, at 32 KiB.
+const HEADER_LIMIT: usize = 32768;
 /// Local policy: one absolute read limit, not a renewed limit for each chunk.
 const READ_LIMIT: Duration = Duration::from_secs(2);
 /// Local policy: a reply gets at most one second, inside the overall attempt deadline.
@@ -22,13 +22,19 @@ const WRITE_LIMIT: Duration = Duration::from_secs(1);
 pub(super) enum Page {
     Received,
     Rejected,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CallbackError {
+    Rejected,
+    Terminal(SignInError),
 }
 
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Event {
     Reading,
-    ReadTimedOut,
     Rejected,
 }
 
@@ -37,47 +43,56 @@ impl SignIn {
         &self,
     ) -> Result<(Zeroizing<String>, Zeroizing<String>), SignInError> {
         loop {
-            let (mut socket, peer) = self.listener.accept().await.map_err(|_| SignInError::Io)?;
-            if !peer.ip().is_loopback() {
-                continue;
-            }
-            let deadline = tokio::time::Instant::now() + READ_LIMIT;
+            let (mut socket, _) = match self.listener.accept().await {
+                Ok(connection) => connection,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => return Err(SignInError::Io),
+            };
             #[cfg(test)]
             self.event(Event::Reading);
-            let read = tokio::time::timeout_at(deadline, read_header(&mut socket)).await;
-            #[cfg(test)]
-            if read.is_err() {
-                self.event(Event::ReadTimedOut);
-            }
+            let read = read_header(&mut socket).await;
             if tokio::time::Instant::now() >= self.deadline {
                 return Err(SignInError::Expired);
             }
-            let result = match read {
-                Ok(Ok(header)) if tokio::time::Instant::now() < deadline => parse(
+            let result = read.and_then(|header| {
+                parse(
                     &header,
                     &self.redirect,
                     self.state.expose(),
                     self.saved_client.as_ref().map(|c| c.expose().as_str()),
-                ),
-                _ => Err(SignInError::InvalidCallback),
-            };
-            let accepted = !matches!(result, Err(SignInError::InvalidCallback));
-            let reply = response(if accepted {
-                Page::Received
-            } else {
-                Page::Rejected
+                )
             });
+            let page = match &result {
+                Ok(_)
+                | Err(CallbackError::Terminal(
+                    SignInError::Declined | SignInError::Authorization,
+                )) => Page::Received,
+                Err(CallbackError::Terminal(_)) => Page::Failed,
+                Err(CallbackError::Rejected) => Page::Rejected,
+            };
+            let reply = response(page);
             if !matches!(
                 tokio::time::timeout(WRITE_LIMIT, socket.write_all(reply.as_bytes())).await,
                 Ok(Ok(()))
             ) {
                 tracing::debug!("sign-in callback reply not delivered");
             }
-            if accepted {
-                if tokio::time::Instant::now() >= self.deadline {
-                    return Err(SignInError::Expired);
-                }
-                return result;
+            if tokio::time::Instant::now() >= self.deadline {
+                return Err(SignInError::Expired);
+            }
+            match result {
+                Ok(result) => return Ok(result),
+                Err(CallbackError::Terminal(error)) => return Err(error),
+                Err(CallbackError::Rejected) => {}
             }
             #[cfg(test)]
             self.event(Event::Rejected);
@@ -92,24 +107,38 @@ impl SignIn {
     }
 }
 
-async fn read_header(socket: &mut TcpStream) -> Result<Zeroizing<String>, SignInError> {
-    let mut bytes = Zeroizing::new([0; HEADER_LIMIT]);
-    let mut length = 0;
-    loop {
-        let n = socket
-            .read(&mut bytes[length..])
-            .await
-            .map_err(|_| SignInError::InvalidCallback)?;
-        length += n;
-        if let Some(end) = bytes[..length].windows(4).position(|v| v == b"\r\n\r\n") {
-            let header =
-                std::str::from_utf8(&bytes[..end + 4]).map_err(|_| SignInError::InvalidCallback)?;
-            return Ok(Zeroizing::new(header.to_owned()));
+pub(super) async fn read_header(
+    socket: &mut (impl AsyncRead + Unpin),
+) -> Result<Zeroizing<String>, CallbackError> {
+    let deadline = tokio::time::Instant::now() + READ_LIMIT;
+    let header = tokio::time::timeout_at(deadline, async {
+        let mut bytes = Zeroizing::new(vec![0; HEADER_LIMIT + 1]);
+        let mut length = 0;
+        loop {
+            let n = socket
+                .read(&mut bytes[length..])
+                .await
+                .map_err(|_| CallbackError::Rejected)?;
+            length += n;
+            if let Some(end) = bytes[..length].windows(4).position(|v| v == b"\r\n\r\n") {
+                if end + 4 > HEADER_LIMIT {
+                    return Err(CallbackError::Rejected);
+                }
+                let header =
+                    std::str::from_utf8(&bytes[..end + 4]).map_err(|_| CallbackError::Rejected)?;
+                return Ok(Zeroizing::new(header.to_owned()));
+            }
+            if n == 0 || length > HEADER_LIMIT {
+                return Err(CallbackError::Rejected);
+            }
         }
-        if n == 0 || length == HEADER_LIMIT {
-            return Err(SignInError::InvalidCallback);
-        }
+    })
+    .await
+    .map_err(|_| CallbackError::Rejected)??;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(CallbackError::Rejected);
     }
+    Ok(header)
 }
 
 pub(super) fn parse(
@@ -117,23 +146,26 @@ pub(super) fn parse(
     redirect: &str,
     state: &str,
     saved_client: Option<&str>,
-) -> Result<(Zeroizing<String>, Zeroizing<String>), SignInError> {
-    let invalid = SignInError::InvalidCallback;
+) -> Result<(Zeroizing<String>, Zeroizing<String>), CallbackError> {
+    let invalid = CallbackError::Rejected;
     let mut lines = request.split("\r\n");
     let mut first = lines.next().ok_or(invalid)?.split(' ');
     if first.next() != Some("GET") {
         return Err(invalid);
     }
     let target = first.next().ok_or(invalid)?;
-    if !target.starts_with("/auth/callback?")
+    let query = target.strip_prefix("/auth/callback?").ok_or(invalid)?;
+    if target.contains('#')
         || target.bytes().any(|b| b <= b' ' || !b.is_ascii())
         || first.next() != Some("HTTP/1.1")
         || first.next().is_some()
     {
         return Err(invalid);
     }
-    let expected = Url::parse(redirect).map_err(|_| invalid)?;
-    let host = format!("127.0.0.1:{}", expected.port().ok_or(invalid)?);
+    let host = redirect
+        .strip_prefix("http://")
+        .and_then(|r| r.strip_suffix("/auth/callback"))
+        .ok_or(invalid)?;
     let mut hosts = 0;
     for line in lines.take_while(|line| !line.is_empty()) {
         let (name, value) = line.split_once(':').ok_or(invalid)?;
@@ -153,13 +185,9 @@ pub(super) fn parse(
     if hosts != 1 {
         return Err(invalid);
     }
-    let url = Url::parse(&format!("http://{host}{target}")).map_err(|_| invalid)?;
-    if url.fragment().is_some() || url.path() != "/auth/callback" {
-        return Err(invalid);
-    }
-    let mut query = HashMap::new();
-    for (key, value) in url.query_pairs() {
-        if query
+    let mut parameters = HashMap::new();
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        if parameters
             .insert(key.into_owned(), Zeroizing::new(value.into_owned()))
             .is_some()
         {
@@ -167,33 +195,36 @@ pub(super) fn parse(
         }
     }
     if !bool::from(
-        query
+        parameters
             .get("state")
             .map_or(&[][..], |s| s.as_bytes())
             .ct_eq(state.as_bytes()),
     ) {
         return Err(invalid);
     }
-    if let Some(error) = query.get("error") {
-        return Err(if error.as_str() == "access_denied" {
-            SignInError::Declined
-        } else {
-            SignInError::Authorization
-        });
+    if let Some(error) = parameters.get("error") {
+        return Err(CallbackError::Terminal(
+            if error.as_str() == "access_denied" {
+                SignInError::Declined
+            } else {
+                SignInError::Authorization
+            },
+        ));
     }
-    let code = query
+    let failed = CallbackError::Terminal(SignInError::SignInFailed);
+    let code = parameters
         .remove("code")
         .filter(|c| !c.is_empty())
-        .ok_or(invalid)?;
-    let client = match (saved_client, query.remove("client_id")) {
+        .ok_or(failed)?;
+    let client = match (saved_client, parameters.remove("client_id")) {
         (Some(saved), supplied) if supplied.as_ref().is_none_or(|s| s.as_str() == saved) => {
             Zeroizing::new(saved.to_owned())
         }
         (None, Some(client)) if !client.is_empty() && client.as_str() != DYNAMIC_CLIENT => client,
-        _ => return Err(invalid),
+        _ => return Err(failed),
     };
     if client.len() > MAX_ID_BYTES {
-        return Err(invalid);
+        return Err(failed);
     }
     Ok((code, client))
 }
@@ -211,6 +242,7 @@ pub(super) fn response(page: Page) -> String {
     let (id, status) = match page {
         Page::Received => ("callback-ok", "200 OK"),
         Page::Rejected => ("callback-rejected", "400 Bad Request"),
+        Page::Failed => ("callback-failed", "400 Bad Request"),
     };
     let pattern = bundle
         .get_message(id)

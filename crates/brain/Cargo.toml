@@ -49,5 +49,4 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [dev-dependencies]
-log = "0.4"
 tokio = { version = "1", features = ["test-util"] }

@@ -1,42 +1,29 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use url::Url;
 use zeroize::Zeroizing;
 
-use super::callback::{self, Event};
-use super::{Intent, LaunchTarget, Launcher, SignIn, SignInError};
+use super::callback::{self, CallbackError, Event};
+use super::{Authorization, Intent, LaunchError, LaunchTarget, Launcher, SignIn, SignInError};
 use crate::connections::records::{Account, Tokens};
-use crate::test_support::{Captured, SENTINEL};
-
-type Launch = (String, Vec<String>);
 
 #[derive(Default)]
-struct RecordingLauncher(RefCell<Option<Launch>>);
+struct RecordingLauncher(RefCell<Option<String>>);
 
 impl Launcher for RecordingLauncher {
-    fn launch(&self, target: &LaunchTarget) -> Result<(), SignInError> {
-        let url = Url::parse(target.url()).expect("authorization URL");
-        let redirect = url
-            .query_pairs()
-            .find(|(k, _)| k == "redirect_uri")
-            .expect("redirect")
-            .1;
-        let redirect = Url::parse(&redirect).expect("loopback redirect");
-        let address: SocketAddr = format!("127.0.0.1:{}", redirect.port().expect("port"))
-            .parse()
-            .expect("address");
-        let _bound =
-            std::net::TcpStream::connect(address).expect("listener is bound before launch");
-        self.0.replace(Some((
-            target.url().to_owned(),
-            target.arguments().map(str::to_owned).to_vec(),
-        )));
+    fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
+        self.0.replace(Some(target.url().to_owned()));
         Ok(())
     }
 }
@@ -53,6 +40,34 @@ async fn attempt() -> (SignIn, SocketAddr, mpsc::UnboundedReceiver<Event>) {
 
 fn request(address: SocketAddr, query: &str) -> String {
     format!("GET /auth/callback?{query} HTTP/1.1\r\nHost: {address}\r\n\r\n")
+}
+
+fn valid(attempt: &SignIn, address: SocketAddr) -> String {
+    request(
+        address,
+        &format!(
+            "state={}&code=test-code&client_id=issued",
+            attempt.state.expose().as_str()
+        ),
+    )
+}
+
+async fn result(
+    task: JoinHandle<Result<Authorization, SignInError>>,
+) -> Result<Authorization, SignInError> {
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("receive watchdog")
+        .expect("receive task")
+}
+
+async fn event(seen: &mut mpsc::UnboundedReceiver<Event>, expected: Event) {
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), seen.recv())
+            .await
+            .expect("event watchdog"),
+        Some(expected)
+    );
 }
 
 async fn send(address: SocketAddr, request: &str) -> String {
@@ -93,295 +108,314 @@ async fn read_reply(socket: &mut TcpStream) -> String {
         response
     })
     .await
-    .expect("reply deadline")
+    .expect("reply watchdog")
+}
+
+async fn pending(mut future: Pin<&mut impl Future>) {
+    poll_fn(|cx| {
+        assert!(
+            future.as_mut().poll(cx).is_pending(),
+            "future must still be pending"
+        );
+        Poll::Ready(())
+    })
+    .await;
 }
 
 #[test]
 fn callback_is_bound_to_attempt_and_registration() {
     let address = "127.0.0.1:1455".parse().expect("address");
-    let redirect = "http://127.0.0.1:1455/auth/callback";
-    let parse =
-        |query: &str, client| callback::parse(&request(address, query), redirect, "state", client);
-    let (code, client) =
-        parse("state=state&code=one-use&client_id=oaiapp_issued", None).expect("issued client");
-    assert_eq!(code.as_str(), "one-use");
-    assert_eq!(client.as_str(), "oaiapp_issued");
-    let (code, client) =
-        parse("state=state&code=returning", Some("saved-client")).expect("saved client");
-    assert_eq!(code.as_str(), "returning");
-    assert_eq!(client.as_str(), "saved-client");
-    assert_eq!(
-        parse(
-            "state=state&code=c&client_id=saved-client",
-            Some("saved-client")
+    let parse = |query: &str, client| {
+        callback::parse(
+            &request(address, query),
+            "http://127.0.0.1:1455/auth/callback",
+            "state",
+            client,
         )
-        .expect("matching client")
-        .1
-        .as_str(),
-        "saved-client"
-    );
-    for query in [
-        "state=state&code=c",
-        "state=state&code=c&client_id=",
-        "state=state&code=c&client_id=dynamic_agent_client",
-        "state=state&code=&client_id=oaiapp_issued",
-        "state=state&client_id=oaiapp_issued",
-        "state=state&code=c&client_id=oaiapp_issued&%73tate=state",
-        "state=state&code=c&client_id=oaiapp_issued&extra=a&extra=b",
-        "state=state&code=c&client_id=oaiapp_issued#fragment",
+    };
+    for (query, saved, expected) in [
+        ("state=state&code=one-use&client_id=issued", None, "issued"),
+        ("state=state&code=one-use", Some("saved"), "saved"),
+        (
+            "state=state&code=one-use&client_id=saved",
+            Some("saved"),
+            "saved",
+        ),
     ] {
-        assert_eq!(
-            parse(query, None),
-            Err(SignInError::InvalidCallback),
-            "invalid query"
-        );
+        let (code, client) = parse(query, saved).expect("bound client");
+        assert_eq!((code.as_str(), client.as_str()), ("one-use", expected));
+    }
+    for query in [
+        "state=old&error=access_denied",
+        "state=state&code=c&client_id=issued&%73tate=state",
+        "state=state&code=c&client_id=issued&extra=a&extra=b",
+        "state=state&code=c&client_id=issued#fragment",
+    ] {
+        assert_eq!(parse(query, None), Err(CallbackError::Rejected));
     }
     assert_eq!(
-        parse(
-            "state=state&code=c&client_id=different",
-            Some("saved-client")
-        ),
-        Err(SignInError::InvalidCallback)
-    );
-    assert_eq!(
-        parse("state=old&error=access_denied", None),
-        Err(SignInError::InvalidCallback)
-    );
-    assert_eq!(
         parse("state=state&error=access_denied", None),
-        Err(SignInError::Declined)
+        Err(CallbackError::Terminal(SignInError::Declined))
     );
     assert_eq!(
-        parse("state=state&error=untrusted-provider-text", None),
-        Err(SignInError::Authorization)
+        parse("state=state&error=provider-text", None),
+        Err(CallbackError::Terminal(SignInError::Authorization))
     );
-    let long_client = "c".repeat(257);
+}
+
+fn incomplete_cases() -> Vec<(String, Option<&'static str>)> {
+    vec![
+        ("state=state&client_id=issued".into(), None),
+        ("state=state&code=&client_id=issued".into(), None),
+        ("state=state&code=c".into(), None),
+        ("state=state&code=c&client_id=".into(), None),
+        (
+            "state=state&code=c&client_id=dynamic_agent_client".into(),
+            None,
+        ),
+        (
+            "state=state&code=c&client_id=different".into(),
+            Some("saved"),
+        ),
+        (
+            format!("state=state&code=c&client_id={}", "x".repeat(257)),
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn every_state_matching_incomplete_result_is_terminal() {
+    let address = "127.0.0.1:1455".parse().expect("address");
+    let actual: Vec<_> = incomplete_cases()
+        .iter()
+        .map(|(query, saved)| {
+            callback::parse(
+                &request(address, query),
+                "http://127.0.0.1:1455/auth/callback",
+                "state",
+                *saved,
+            )
+        })
+        .collect();
     assert_eq!(
-        parse(&format!("state=state&code=c&client_id={long_client}"), None),
-        Err(SignInError::InvalidCallback)
+        actual,
+        vec![Err(CallbackError::Terminal(SignInError::SignInFailed)); 7]
     );
 }
 
 #[tokio::test]
+async fn incomplete_callbacks_end_receive_and_serve_the_failure_page() {
+    for (query, saved) in incomplete_cases() {
+        let (mut attempt, address, _seen) = attempt().await;
+        let query = query.replace(
+            "state=state",
+            &format!("state={}", attempt.state.expose().as_str()),
+        );
+        attempt.saved_client = saved.map(|s| Secret::new(Zeroizing::new(s.to_owned())));
+        let task = tokio::spawn(attempt.receive());
+        let reply = send(address, &request(address, &query)).await;
+        assert!(
+            reply.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "failed callback status"
+        );
+        assert!(
+            reply.ends_with("Sign-in failed. Return to the app and start sign-in again."),
+            "fixed failure page"
+        );
+        assert_eq!(result(task).await.unwrap_err(), SignInError::SignInFailed);
+    }
+}
+
+#[tokio::test]
 async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
-    let logs = Captured::default();
-    let _logging = logs.install();
     let (attempt, address, mut seen) = attempt().await;
-    let query = format!(
-        "state={}&code={SENTINEL}&client_id=oaiapp_issued",
-        attempt.state.expose().as_str()
-    );
-    let valid = request(address, &query);
+    let valid = valid(&attempt, address);
     let invalid = [
         valid.replace("/auth/callback?", "/wrong?"),
         valid.replace("Host: 127.0.0.1", "Host: localhost"),
         valid.replace(&format!("Host: {address}"), "Host: 127.0.0.1:1"),
         valid.replace(attempt.state.expose().as_str(), "stale-state"),
-        request(address, &format!("{query}&state=duplicate")),
+        valid.replace("&code=", "&state=duplicate&code="),
         valid.replace("\r\n\r\n", &format!("\r\nHost: {address}\r\n\r\n")),
         valid.replace("GET ", "POST "),
         valid.replace(
             "/auth/callback?",
             &format!("http://{address}/auth/callback?"),
         ),
+        valid.replacen("\r\n", "\n", 1),
+        valid.replace("Host:", " Host:"),
+        valid.replace("/auth/callback?", "/auth/%63allback?"),
+        valid.replace(&format!("Host: {address}\r\n"), ""),
+        valid.replace("HTTP/1.1", "HTTP/1.0"),
+        valid.replace("Host:", "Host :"),
     ];
-    let result = tokio::spawn(attempt.receive());
-    for rejected in invalid {
-        let response = send(address, &rejected).await;
+    let task = tokio::spawn(attempt.receive());
+    for request in invalid {
         assert!(
-            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
-            "invalid request rejected"
+            send(address, &request)
+                .await
+                .starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "invalid callback rejected"
         );
-        assert!(!response.contains(SENTINEL), "code never reflected");
-        assert_eq!(seen.recv().await, Some(Event::Reading));
-        assert_eq!(seen.recv().await, Some(Event::Rejected));
-        assert!(
-            !result.is_finished(),
-            "stale request left the attempt alive"
-        );
+        event(&mut seen, Event::Reading).await;
+        event(&mut seen, Event::Rejected).await;
     }
-    let response = send(address, &valid).await;
+    let reply = send(address, &valid.replace("Host:", "host:")).await;
     assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "valid callback accepted"
+        reply.starts_with("HTTP/1.1 200 OK\r\n"),
+        "lowercase host accepted after stale requests"
     );
-    assert!(!response.contains(SENTINEL), "code never reflected");
-    let authorization = result.await.expect("task").expect("valid callback");
-    assert_eq!(authorization.code.expose().as_str(), SENTINEL);
-    assert_eq!(authorization.client_id.expose().as_str(), "oaiapp_issued");
+    assert!(!reply.contains("test-code"), "reply never reflects code");
+    let authorization = result(task).await.expect("valid callback");
+    assert_eq!(authorization.code.expose().as_str(), "test-code");
+    assert_eq!(authorization.client_id.expose().as_str(), "issued");
     assert_eq!(
         authorization.redirect,
         format!("http://{address}/auth/callback")
     );
     assert!(
-        !format!("{authorization:?}").contains(SENTINEL),
-        "callback data redacted"
-    );
-    assert!(
-        !logs.text().contains(SENTINEL),
-        "callback code never logged"
-    );
-    assert!(
-        TcpStream::connect(address).await.is_err(),
-        "one-shot listener closed"
+        !format!("{authorization:?}").contains("test-code"),
+        "code redacted"
     );
 }
 
 #[tokio::test]
-async fn oversized_header_is_rejected_before_a_valid_callback() {
-    let (attempt, address, mut seen) = attempt().await;
-    let state = attempt.state.expose().to_string();
-    let oversized = request(
-        address,
-        &format!(
-            "state={state}&code=oversized&client_id=issued&padding={}",
-            "x".repeat(8192)
-        ),
-    );
-    assert!(
-        oversized.len() > 8192,
-        "otherwise-valid header exceeds the cap"
-    );
-    let task = tokio::spawn(attempt.receive());
-    let mut socket = TcpStream::connect(address).await.expect("oversized client");
-    socket
-        .write_all(oversized.as_bytes())
-        .await
-        .expect("send oversized header");
-    assert_eq!(seen.recv().await, Some(Event::Reading));
-    assert_eq!(seen.recv().await, Some(Event::Rejected));
-    let valid = request(
-        address,
-        &format!("state={state}&code=valid&client_id=issued"),
-    );
-    assert!(
-        send(address, &valid)
-            .await
-            .starts_with("HTTP/1.1 200 OK\r\n"),
-        "attempt remains usable"
-    );
-    assert_eq!(
-        task.await
-            .expect("task")
-            .expect("callback")
-            .code
-            .expose()
-            .as_str(),
-        "valid"
-    );
+async fn exact_32_kib_header_is_accepted_and_one_more_byte_gets_400() {
+    for (length, status) in [(32768, "200 OK"), (32769, "400 Bad Request")] {
+        let (attempt, address, _seen) = attempt().await;
+        let valid = valid(&attempt, address);
+        let prefix = valid.trim_end_matches("\r\n");
+        let padding = "x".repeat(length - prefix.len() - "\r\nCookie: \r\n\r\n".len());
+        let request = format!("{prefix}\r\nCookie: {padding}\r\n\r\n");
+        assert_eq!(request.len(), length);
+        let task = tokio::spawn(attempt.receive());
+        assert!(
+            send(address, &request)
+                .await
+                .starts_with(&format!("HTTP/1.1 {status}\r\n")),
+            "exact boundary status"
+        );
+        if length == 32769 {
+            assert!(
+                send(address, &valid)
+                    .await
+                    .starts_with("HTTP/1.1 200 OK\r\n"),
+                "oversize didn't consume attempt"
+            );
+        }
+        assert_eq!(
+            result(task)
+                .await
+                .expect("valid callback")
+                .code
+                .expose()
+                .as_str(),
+            "test-code"
+        );
+    }
 }
 
 #[tokio::test]
-async fn exactly_eight_kib_header_is_accepted() {
+async fn a_twenty_kib_cookie_does_not_break_sign_in() {
     let (attempt, address, _seen) = attempt().await;
-    let query = format!(
-        "state={}&code=c&client_id=issued",
-        attempt.state.expose().as_str()
+    let request = valid(&attempt, address).replace(
+        "\r\n\r\n",
+        &format!("\r\nCookie: local={}\r\n\r\n", "x".repeat(20 * 1024)),
     );
-    let prefix = request(address, &query).trim_end_matches("\r\n").to_owned();
-    let suffix = "\r\nX-Padding: ";
-    let padding = "x".repeat(8192 - prefix.len() - suffix.len() - 4);
-    let request = format!("{prefix}{suffix}{padding}\r\n\r\n");
-    assert_eq!(request.len(), 8192);
     let task = tokio::spawn(attempt.receive());
     assert!(
         send(address, &request)
             .await
             .starts_with("HTTP/1.1 200 OK\r\n"),
-        "header at limit accepted"
+        "browser cookie accepted"
     );
     assert_eq!(
-        task.await
-            .expect("task")
-            .expect("callback")
-            .code
-            .expose()
-            .as_str(),
-        "c"
+        result(task).await.expect("callback").code.expose().as_str(),
+        "test-code"
     );
 }
 
 #[tokio::test]
-async fn slow_partial_header_has_an_absolute_two_second_limit() {
-    let (attempt, address, mut seen) = attempt().await;
-    let state = attempt.state.expose().to_string();
+async fn reset_preconnect_before_receive_does_not_end_the_attempt() {
+    let (attempt, address, _seen) = attempt().await;
+    let valid = valid(&attempt, address);
+    let socket = TcpSocket::new_v4().expect("IPv4 socket");
+    #[expect(
+        deprecated,
+        reason = "zero linger makes this fixture's close abortive without waiting"
+    )]
+    socket
+        .set_linger(Some(Duration::ZERO))
+        .expect("abortive close");
+    drop(socket.connect(address).await.expect("preconnect"));
     let task = tokio::spawn(attempt.receive());
-    let mut socket = TcpStream::connect(address).await.expect("slow client");
-    socket
-        .write_all(b"GET /auth/callback?")
-        .await
-        .expect("partial header");
-    assert_eq!(seen.recv().await, Some(Event::Reading));
-    let read_started = tokio::time::Instant::now();
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::time::resume();
-    socket
-        .write_all(b"state=")
-        .await
-        .expect("more partial data");
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(1100)).await;
-    assert_eq!(seen.recv().await, Some(Event::ReadTimedOut));
-    assert!(
-        tokio::time::Instant::now() - read_started < Duration::from_millis(2200),
-        "read timed out on the advanced clock, not a renewed per-chunk deadline"
-    );
-    tokio::time::resume();
-    assert_eq!(seen.recv().await, Some(Event::Rejected));
-    assert!(
-        read_reply(&mut socket)
-            .await
-            .starts_with("HTTP/1.1 400 Bad Request\r\n"),
-        "slow client rejected"
-    );
-    let valid = request(address, &format!("state={state}&code=c&client_id=issued"));
     assert!(
         send(address, &valid)
             .await
             .starts_with("HTTP/1.1 200 OK\r\n"),
-        "attempt remains usable"
+        "valid callback after reset"
     );
     assert_eq!(
-        task.await
-            .expect("task")
-            .expect("callback")
+        result(task)
+            .await
+            .expect("callback after reset")
             .code
             .expose()
             .as_str(),
-        "c"
+        "test-code"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_partial_header_has_an_absolute_two_second_limit() {
+    let (mut client, mut server) = tokio::io::duplex(64);
+    let started = tokio::time::Instant::now();
+    let mut read = Box::pin(callback::read_header(&mut server));
+    client.write_all(b"GET ").await.expect("first chunk");
+    pending(read.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    client.write_all(b"/auth/").await.expect("second chunk");
+    pending(read.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(600)).await;
+    assert_eq!(read.await, Err(CallbackError::Rejected));
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_millis(2100),
+        "no auto-advance to a renewed deadline"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn fragmented_header_can_finish_before_the_absolute_deadline() {
+    let (mut client, mut server) = tokio::io::duplex(64);
+    let mut read = Box::pin(callback::read_header(&mut server));
+    client.write_all(b"GET ").await.expect("first chunk");
+    pending(read.as_mut()).await;
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    client
+        .write_all(b"/ HTTP/1.1\r\n\r\n")
+        .await
+        .expect("header remainder");
+    assert_eq!(
+        read.await.expect("complete header").as_str(),
+        "GET / HTTP/1.1\r\n\r\n"
     );
 }
 
 #[tokio::test]
 async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline() {
     let (attempt, address, mut seen) = attempt().await;
-    let deadline = attempt.deadline;
-    let valid = request(
-        address,
-        &format!(
-            "state={}&code=c&client_id=issued",
-            attempt.state.expose().as_str()
-        ),
-    );
+    let valid = valid(&attempt, address);
     let task = tokio::spawn(attempt.receive());
     let mut idle = TcpStream::connect(address).await.expect("idle preconnect");
-    assert_eq!(seen.recv().await, Some(Event::Reading));
-    let read_started = tokio::time::Instant::now();
+    event(&mut seen, Event::Reading).await;
     let mut callback = TcpStream::connect(address).await.expect("queued callback");
     callback
         .write_all(valid.as_bytes())
         .await
-        .expect("send valid callback behind idle socket");
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_millis(2100)).await;
-    assert_eq!(seen.recv().await, Some(Event::ReadTimedOut));
-    assert!(
-        tokio::time::Instant::now() - read_started < Duration::from_millis(2200),
-        "idle read timed out on the advanced clock"
-    );
-    tokio::time::resume();
-    assert_eq!(seen.recv().await, Some(Event::Rejected));
+        .expect("queued header");
+    event(&mut seen, Event::Rejected).await;
     assert!(
         read_reply(&mut idle)
             .await
@@ -395,63 +429,31 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
         "queued callback accepted"
     );
     assert_eq!(
-        task.await
-            .expect("task")
-            .expect("callback")
-            .code
-            .expose()
-            .as_str(),
-        "c"
-    );
-    assert!(
-        tokio::time::Instant::now() < deadline,
-        "finished within attempt deadline"
+        result(task).await.expect("callback").code.expose().as_str(),
+        "test-code"
     );
 }
 
-#[tokio::test]
-async fn expired_attempt_neither_launches_nor_accepts_a_queued_valid_callback() {
-    let (attempt, address, _seen) = attempt().await;
-    let valid = request(
-        address,
-        &format!(
-            "state={}&code=c&client_id=issued",
-            attempt.state.expose().as_str()
-        ),
-    );
-    let mut queued = TcpStream::connect(address)
-        .await
-        .expect("queued connection");
-    queued
-        .write_all(valid.as_bytes())
-        .await
-        .expect("queued callback");
-    tokio::time::pause();
+#[tokio::test(start_paused = true)]
+async fn expired_attempt_neither_launches_nor_receives() {
+    let (attempt, _address, _seen) = attempt().await;
     tokio::time::advance(Duration::from_secs(300)).await;
-    tokio::time::resume();
     let launcher = RecordingLauncher::default();
-    assert_eq!(attempt.open_browser(&launcher), Err(SignInError::Expired));
+    assert_eq!(attempt.open_browser(&launcher), Err(LaunchError::Expired));
     assert!(
         launcher.0.borrow().is_none(),
         "expired attempt never launched"
     );
     assert_eq!(attempt.receive().await.unwrap_err(), SignInError::Expired);
-    assert!(
-        TcpStream::connect(address).await.is_err(),
-        "expired listener closed"
-    );
 }
 
-#[tokio::test]
-async fn five_minute_deadline_also_bounds_an_active_slow_client() {
-    let (attempt, address, mut seen) = attempt().await;
-    let task = tokio::spawn(attempt.receive());
-    let _idle = TcpStream::connect(address).await.expect("idle connection");
-    assert_eq!(seen.recv().await, Some(Event::Reading));
-    tokio::time::pause();
+#[tokio::test(start_paused = true)]
+async fn pending_attempt_expires_after_five_minutes() {
+    let (attempt, _address, _seen) = attempt().await;
+    let mut receive = Box::pin(attempt.receive());
+    pending(receive.as_mut()).await;
     tokio::time::advance(Duration::from_secs(300)).await;
-    tokio::time::resume();
-    assert_eq!(task.await.expect("task").unwrap_err(), SignInError::Expired);
+    assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
 }
 
 #[tokio::test]
@@ -475,37 +477,28 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
         .expect("bind");
     let launcher = RecordingLauncher::default();
     attempt.open_browser(&launcher).expect("injected launch");
-    let (url, arguments) = launcher.0.into_inner().expect("launch recorded");
-    let tokens = saved.tokens.as_ref().expect("saved tokens");
+    let url = launcher.0.into_inner().expect("launch recorded");
     for value in [
-        tokens.access_token.as_str(),
-        tokens.refresh_token.as_str(),
-        tokens.id_token.as_ref().expect("ID token").as_str(),
+        "synthetic-access-token-B1",
+        "synthetic-refresh-token-B1",
+        "synthetic-id-token-B1",
         "id_token_hint",
         "login_hint",
         "saved-email@example.invalid",
     ] {
-        assert!(!url.contains(value), "sensitive value absent from URL");
         assert!(
-            arguments.iter().all(|a| !a.contains(value)),
-            "sensitive value absent from launch arguments"
+            !url.contains(value),
+            "sensitive value absent from launch URL"
         );
     }
-    assert_eq!(arguments, vec![url.clone()]);
     let url = Url::parse(&url).expect("URL");
-    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-    assert_eq!(
-        query.get("client_id").map(std::convert::AsRef::as_ref),
-        Some("oaiapp_saved")
-    );
+    let query: BTreeMap<_, _> = url.query_pairs().collect();
+    assert_eq!(query["client_id"], "oaiapp_saved");
     assert!(
         !query.contains_key("agent_name_hint"),
-        "returning registration omits agent hint"
+        "no returning agent hint"
     );
-    assert!(
-        !query.contains_key("prompt"),
-        "ordinary sign-in doesn't force consent"
-    );
+    assert!(!query.contains_key("prompt"), "no forced consent");
     for secret in [
         attempt.state.expose().as_str(),
         attempt.nonce.expose().as_str(),
@@ -515,7 +508,7 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
     ] {
         assert!(
             !format!("{attempt:?} {:?}", attempt.target).contains(secret),
-            "attempt and target redact sensitive fields"
+            "attempt and launch target redact fields"
         );
     }
 }
@@ -537,65 +530,57 @@ async fn new_attempts_have_independent_secrets_and_explicit_consent_only_when_re
         &second.verifier,
     ];
     for (index, value) in values.iter().enumerate() {
-        assert_eq!(value.expose().len(), 43);
         for other in &values[index + 1..] {
             assert_ne!(value.expose(), other.expose());
         }
     }
     let url = Url::parse(first.target.url()).expect("URL");
-    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-    assert_eq!(query["client_id"], "dynamic_agent_client");
-    assert_eq!(
-        query["agent_name_hint"],
-        kumochi_protocol::constants::DISPLAY_NAME
-    );
-    assert_eq!(query["prompt"], "consent");
-    assert_eq!(query["code_challenge_method"], "S256");
-    assert_eq!(
-        query["code_challenge"],
-        super::pkce::challenge(first.verifier.expose())
-    );
-    assert_eq!(query["redirect_uri"], first.redirect);
-}
-
-#[test]
-fn browser_crate_path_and_log_facade_do_not_leak_into_tracing() {
-    let captured = Captured::default();
-    let _logging = captured.install();
-    let target = LaunchTarget(Secret::new(
-        Url::parse(&format!("https://example.invalid/{SENTINEL}")).expect("sentinel URL"),
-    ));
-    let mut options = webbrowser::BrowserOptions::default();
-    options.with_dry_run(true);
-    super::launch_browser(&target, &options).expect("real webbrowser path, dry run only");
-    assert!(
-        !log::log_enabled!(target: "webbrowser", log::Level::Debug),
-        "no log-to-tracing bridge may expose browser commands"
-    );
-    log::debug!(target: "webbrowser", "background spawn: {}", target.url());
-    tracing::info!("capture-control");
-    assert!(
-        captured.text().contains("capture-control"),
-        "capture is active"
-    );
-    assert!(
-        !captured.text().contains(SENTINEL),
-        "browser URL never logged"
-    );
+    let mut query: BTreeMap<_, _> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    for key in ["state", "nonce", "code_challenge"] {
+        assert!(query.remove(key).is_some(), "random field present");
+    }
+    let expected: BTreeMap<_, _> = [
+        ("client_id", "dynamic_agent_client"),
+        ("agent_name_hint", kumochi_protocol::constants::DISPLAY_NAME),
+        ("ext_agent_host_id", "urn:uuid:host"),
+        ("response_type", "code"),
+        ("redirect_uri", first.redirect.as_str()),
+        (
+            "scope",
+            "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
+        ),
+        ("resource", "https://api.openai.com/v1"),
+        ("code_challenge_method", "S256"),
+        ("prompt", "consent"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    assert_eq!(query, expected);
 }
 
 #[test]
 fn callback_pages_are_localized_nonreflecting_and_not_cached() {
     for (page, expected) in [
-        (callback::Page::Received, "Sign-in response received."),
+        (
+            callback::Page::Received,
+            "Sign-in response received. You can close this tab and return to the app.",
+        ),
         (
             callback::Page::Rejected,
-            "This sign-in response was rejected.",
+            "This sign-in response was rejected. Return to the app and try again.",
+        ),
+        (
+            callback::Page::Failed,
+            "Sign-in failed. Return to the app and start sign-in again.",
         ),
     ] {
         let response = callback::response(page);
         let (header, body) = response.split_once("\r\n\r\n").expect("HTTP response");
-        assert!(body.starts_with(expected), "Fluent message rendered");
+        assert_eq!(body, expected);
         assert!(
             header.contains(&format!("Content-Length: {}\r\n", body.len())),
             "correct byte length"

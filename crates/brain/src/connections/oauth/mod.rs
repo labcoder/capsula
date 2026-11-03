@@ -43,18 +43,12 @@ pub enum SignInError {
     /// The local listener failed.
     #[error("sign-in loopback failed")]
     Io,
-    /// The OS random source failed.
-    #[error("sign-in randomness unavailable")]
-    Random,
     /// The five-minute attempt deadline elapsed.
     #[error("sign-in expired")]
     Expired,
-    /// The OS couldn't open the system browser.
-    #[error("sign-in browser launch failed")]
-    Launch,
-    /// A callback didn't match this attempt or the HTTP envelope was invalid.
-    #[error("sign-in callback rejected")]
-    InvalidCallback,
+    /// A state-matching callback couldn't complete this registration.
+    #[error("sign-in failed")]
+    SignInFailed,
     /// The user declined consent in a state-matching callback.
     #[error("sign-in declined")]
     Declined,
@@ -63,19 +57,36 @@ pub enum SignInError {
     Authorization,
 }
 
+/// Failures while preparing an attempt, before a callback can be received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BindError {
+    /// The local listener failed.
+    #[error("sign-in loopback failed")]
+    Io,
+    /// The OS random source failed.
+    #[error("sign-in randomness unavailable")]
+    Random,
+}
+
+/// Failures while opening a prepared attempt in the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LaunchError {
+    /// The attempt has already expired.
+    #[error("sign-in expired")]
+    Expired,
+    /// The OS couldn't open the system browser.
+    #[error("sign-in browser launch failed")]
+    Launch,
+}
+
 /// A token-free URL passed as the sole application-supplied browser argument.
 #[derive(Debug)]
-pub struct LaunchTarget(Secret<Url>);
+pub struct LaunchTarget(Secret<Zeroizing<String>>);
 
 impl LaunchTarget {
     /// Inspect only at the launcher boundary; never log or send this over the pipe.
     pub fn url(&self) -> &str {
         self.0.expose().as_str()
-    }
-
-    /// The arguments supplied by the brain; webbrowser owns OS browser-command discovery.
-    pub fn arguments(&self) -> [&str; 1] {
-        [self.url()]
     }
 }
 
@@ -84,8 +95,8 @@ pub trait Launcher {
     /// Open the target without logging it.
     ///
     /// # Errors
-    /// Return `Launch` if the operating system refuses to open the browser.
-    fn launch(&self, target: &LaunchTarget) -> Result<(), SignInError>;
+    /// Return `LaunchError::Launch` if the operating system refuses to open the browser.
+    fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError>;
 }
 
 /// The system browser, opened through webbrowser with its default options.
@@ -93,18 +104,9 @@ pub trait Launcher {
 pub struct SystemBrowser;
 
 impl Launcher for SystemBrowser {
-    fn launch(&self, target: &LaunchTarget) -> Result<(), SignInError> {
-        launch_browser(target, &webbrowser::BrowserOptions::default())
+    fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
+        webbrowser::open(target.url()).map_err(|_| LaunchError::Launch)
     }
-}
-
-fn launch_browser(
-    target: &LaunchTarget,
-    options: &webbrowser::BrowserOptions,
-) -> Result<(), SignInError> {
-    let [url] = target.arguments();
-    webbrowser::open_browser_with_options(webbrowser::Browser::Default, url, options)
-        .map_err(|_| SignInError::Launch)
 }
 
 /// A process-local attempt. Dropping it closes the listener; receiving consumes it once.
@@ -155,16 +157,16 @@ impl SignIn {
         host: &str,
         saved: Option<&Account>,
         intent: Intent,
-    ) -> Result<Self, SignInError> {
+    ) -> Result<Self, BindError> {
         let deadline = Instant::now() + ATTEMPT_LIMIT;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .map_err(|_| SignInError::Io)?;
-        let address = listener.local_addr().map_err(|_| SignInError::Io)?;
+            .map_err(|_| BindError::Io)?;
+        let address = listener.local_addr().map_err(|_| BindError::Io)?;
         let redirect = format!("http://{address}/auth/callback");
-        let state = Secret::new(pkce::random().map_err(|_| SignInError::Random)?);
-        let nonce = Secret::new(pkce::random().map_err(|_| SignInError::Random)?);
-        let verifier = Secret::new(pkce::random().map_err(|_| SignInError::Random)?);
+        let state = Secret::new(pkce::random().map_err(|_| BindError::Random)?);
+        let nonce = Secret::new(pkce::random().map_err(|_| BindError::Random)?);
+        let verifier = Secret::new(pkce::random().map_err(|_| BindError::Random)?);
         let mut authorization =
             Url::parse(AUTHORIZE).expect("the provider endpoint is a valid URL");
         {
@@ -197,7 +199,7 @@ impl SignIn {
             state,
             nonce,
             verifier,
-            target: LaunchTarget(Secret::new(authorization)),
+            target: LaunchTarget(Secret::new(Zeroizing::new(String::from(authorization)))),
             saved_client: saved.map(|a| Secret::new(a.client_id.clone())),
             deadline,
             #[cfg(test)]
@@ -209,9 +211,9 @@ impl SignIn {
     ///
     /// # Errors
     /// Fails if the attempt expired or the launcher refuses the target.
-    pub fn open_browser(&self, launcher: &impl Launcher) -> Result<(), SignInError> {
+    pub fn open_browser(&self, launcher: &impl Launcher) -> Result<(), LaunchError> {
         if Instant::now() >= self.deadline {
-            return Err(SignInError::Expired);
+            return Err(LaunchError::Expired);
         }
         launcher.launch(&self.target)
     }
