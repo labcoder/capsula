@@ -44,6 +44,15 @@ enum Outcome {
 pub(super) type Written = (u64, Result<(Pending, Result<(), ConfigError>), JoinError>);
 
 impl Brain {
+    /// Holds the next settings write before it touches the file, until the returned sender
+    /// sends or drops.
+    #[cfg(test)]
+    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<Gate> {
+        let (release, held) = std::sync::mpsc::channel();
+        self.config_gate = Some(held);
+        release
+    }
+
     /// Sends the settings as they are now, answering no change.
     pub(super) fn settings_now(&self, link: &mut Link<'_, '_>) -> Result<(), Full> {
         link.control(&ControlToShell::Settings {
@@ -119,6 +128,8 @@ impl Brain {
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 self.config.commit(pending);
+                #[cfg(test)]
+                self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied
             }
             Ok((_, Err(error))) => {

@@ -158,16 +158,19 @@ pub(crate) enum Seen {
     DeleteAnswered,
     /// A quit ended the current run and now waits for the store.
     QuitDraining,
+    /// A settings write is on disk and became the settings.
+    SettingsCommitted,
 }
 
 impl Brain {
-    /// Starts the store thread. The store must already be recovered, and `high_water` is its
-    /// highest thread and run ids.
+    /// Starts the store thread. The store must already be recovered, `main_thread` is its main
+    /// thread, and `high_water` is its highest thread and run ids.
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
     pub(crate) fn new(
         store: Store,
+        main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
         engine: Box<dyn Engine>,
@@ -189,7 +192,7 @@ impl Brain {
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         Ok(Self {
-            coordinator: Coordinator::new(last_thread, last_run, scenes),
+            coordinator: Coordinator::new(main_thread, last_thread, last_run, scenes),
             store: Some(store),
             engine,
             inputs_tx,
@@ -213,15 +216,6 @@ impl Brain {
             #[cfg(test)]
             gates,
         })
-    }
-
-    /// Holds the next settings write before it touches the file, until the returned sender
-    /// sends or drops.
-    #[cfg(test)]
-    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<settings::Gate> {
-        let (release, held) = std::sync::mpsc::channel();
-        self.config_gate = Some(held);
-        release
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -252,7 +246,7 @@ impl Brain {
     fn control_taken(&self, input: &Input) {
         if matches!(
             input,
-            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. }
+            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. } | Input::ThreadOp(_)
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
@@ -678,8 +672,10 @@ impl Brain {
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
-                        let failed = self.inputs_tx.send(failure);
-                        debug_assert!(failed.is_ok(), "the brain holds its own receiver");
+                        if let Some(failure) = failure {
+                            let failed = self.inputs_tx.send(failure);
+                            debug_assert!(failed.is_ok(), "the brain holds its own receiver");
+                        }
                     }
                 }
                 Effect::Control(message) => {
@@ -809,6 +805,7 @@ fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
             after_turns,
             resend,
         }),
+        ControlToBrain::ThreadOp(op) => Some(Input::ThreadOp(op)),
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::Quitting

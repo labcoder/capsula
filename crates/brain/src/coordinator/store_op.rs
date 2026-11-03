@@ -1,9 +1,11 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
-use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, SceneId, Step, ThreadId};
+use kumochi_protocol::message::{
+    DataToShell, Deleted, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
+};
 
 use super::Input;
-use crate::store::{RunEnd, SceneTarget};
+use crate::store::{RunEnd, SceneTarget, TitleSource};
 
 /// A store operation: an autocommit read, or a write in one transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +77,23 @@ pub enum StoreOp {
         /// The thread.
         thread: ThreadId,
     },
+    /// Retitle a live task. A user title always applies; a model title only over first words,
+    /// and only in the deletion generation it names. Nothing answers it.
+    SetTitle {
+        /// The task.
+        thread: ThreadId,
+        /// Its new title.
+        title: ThreadTitle,
+        /// Who set it, with a model's generation.
+        source: TitleSource,
+    },
+    /// Store a live thread's model and effort. Nothing answers it.
+    SetModel {
+        /// The thread.
+        thread: ThreadId,
+        /// The model and effort.
+        choice: ModelChoice,
+    },
 }
 
 impl StoreOp {
@@ -84,16 +103,18 @@ impl StoreOp {
             Self::ReadPage { .. }
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
-            | Self::Delete { .. } => None,
+            | Self::Delete { .. }
+            | Self::SetTitle { .. }
+            | Self::SetModel { .. } => None,
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
         }
     }
 
-    /// Answers an operation that couldn't reach the store.
-    pub fn failed(&self) -> Input {
-        match self {
+    /// Answers an operation that couldn't reach the store; `None` for one nothing waits on.
+    pub fn failed(&self) -> Option<Input> {
+        Some(match self {
             Self::ReadPage { epoch, request, .. } => Input::PageRead {
                 epoch: *epoch,
                 request: *request,
@@ -115,6 +136,7 @@ impl StoreOp {
                 outcome: Deleted::NotHidden,
                 last_run: None,
             },
-        }
+            Self::SetTitle { .. } | Self::SetModel { .. } => return None,
+        })
     }
 }

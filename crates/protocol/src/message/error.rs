@@ -151,10 +151,33 @@ mod tests {
         let mut bytes = postcard::to_allocvec(&error).expect("encodes");
         assert_eq!(postcard::from_bytes::<UserError>(&bytes), Ok(error));
         // Key, then the args' length: one more arg than allowed.
-        assert_eq!(bytes[1], 4);
-        bytes[1] = 5;
-        bytes.splice(2..2, [1, 0]);
-        assert!(postcard::from_bytes::<UserError>(&bytes).is_err());
+        let mut args = bytes.clone();
+        assert_eq!(args[1], 4);
+        args[1] = 5;
+        args.splice(2..2, [1, 0]);
+        // `TryFrom`'s refusal reaches postcard as a custom error, which keeps no text.
+        assert_eq!(
+            postcard::from_bytes::<UserError>(&args),
+            Err(postcard::Error::SerdeDeCustom)
+        );
+        // Key, the args' length, four 6-byte args, then the actions' length: one more action.
+        let at = 2 + 4 * 6;
+        assert_eq!(bytes[at], 3);
+        bytes[at] = 4;
+        bytes.push(0);
+        assert_eq!(
+            postcard::from_bytes::<UserError>(&bytes),
+            Err(postcard::Error::SerdeDeCustom)
+        );
+    }
+
+    #[test]
+    fn every_key_that_decodes_is_in_all() {
+        let decoded: Vec<ErrorKey> = (0..=u8::MAX)
+            .filter_map(|tag| postcard::from_bytes(&[tag]).ok())
+            .collect();
+        assert!(decoded.iter().all(|key| ErrorKey::ALL.contains(key)));
+        assert_eq!(decoded.len(), ErrorKey::ALL.len());
     }
 
     #[test]

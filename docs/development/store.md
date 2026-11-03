@@ -19,7 +19,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 | Table | Holds |
 |---|---|
-| `threads` | Title, timestamps, `state` (`live` or `deleting`) and `deletion_generation`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
+| `threads` | Title, timestamps, `state` (`live` or `deleting`), `deletion_generation`, `kind` (`main` or `thread`), `title_source` (`words`, `model` or `user`), and the nullable `model` and `effort`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
 | `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; only a scene's `scene_cleared`, and the `revealed` of a Stop that came after its run ended, are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
@@ -44,6 +44,36 @@ content. The threads panel's pages leave `scene_begin` and `scene_cleared` out.
 
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
 and never returns a thread being deleted.
+
+## The main thread, titles and model choices
+
+Schema 3 adds four `threads` columns, each with `ADD COLUMN`, so no table is rebuilt and older
+rows read as `thread` and `words` with no model:
+
+| Column | Holds |
+|---|---|
+| `kind` | `main` for Kumo's thread, `thread` for a task. A unique partial index allows one `main`. It keeps these two values for good: changing a `CHECK` rebuilds the table, so later facts (origin, parent, archive) get their own nullable columns |
+| `title_source` | Who wrote the title: `words` (the first turn's first line, from `BeginTurn`), `model` or `user` |
+| `model`, `effort` | The thread's model slug and effort as free text, both set or both null (a `CHECK`). They're checked against the catalog per run, so a catalog change never needs a migration, and a page carries a stored choice even once the catalog drops it |
+
+- **The main thread** is created by the recovery scan when it's missing, after unfinished
+  deletions and before `high_water()` is read, as one statement of its own. A start cut short
+  before it commits leaves no row, and the next start creates it. `Store::main_thread()` reads its
+  id, which the coordinator and every `SettingsView` carry. Its stored title stays empty: the shell
+  labels its row from the assistant's name in the settings it received, so one name lives in one
+  place. Nothing deletes it.
+- **Titles.** `SetTitle` changes only a live task, never the main thread. A user title replaces
+  any title. A model title applies only while `title_source` is still `words` and the deletion
+  generation is the one it names, so a model title that arrives after a rename, a hide or a
+  removal changes nothing. A later `BeginTurn` on an existing thread never touches its title or
+  source. Neither a rename nor a model choice moves the thread in the list.
+- **Model choice.** `SetModel` stores a live thread's `model` and `effort`; a hidden or missing
+  thread changes nothing.
+- **Deletion and the purge.** The four columns live in the `threads` row, so deleting a task's row
+  removes them with it, and the purge's `VACUUM INTO` copy carries the kept rows' columns over
+  unchanged. No table is added, so `store::delete`'s table list and the remnants scan need nothing
+  new. A test plants a renamed title and a model slug, deletes, purges, scans every file's bytes
+  and restarts: neither survives, and a kept task keeps its choice.
 
 ## Page reads and checkpoints
 
@@ -288,7 +318,8 @@ The brain opens the store and runs the recovery scan before it serves any shell:
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;
 - runs still `active` in live threads become `failed` with reason `crash`, keeping what they
   committed;
-- an owed purge is reported, and the store thread runs it once no run is active.
+- an owed purge is reported, and the store thread runs it once no run is active;
+- the main thread is created if it's missing, before the high-water ids are read.
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
 deletions, and whether the purge is still owed.

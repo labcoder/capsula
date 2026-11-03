@@ -666,7 +666,8 @@ mod tests {
     /// A brain started on `store`, as after a restart.
     fn restarted(store: &Store) -> Coordinator {
         let (thread, run) = store.high_water().expect("ids");
-        Coordinator::new(thread, run, store.scenes().expect("scenes"))
+        let main = store.main_thread().expect("recovered");
+        Coordinator::new(main, thread, run, store.scenes().expect("scenes"))
     }
 
     #[test]
@@ -678,6 +679,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch folder");
         let mut store = Store::open(&dir.join("store.db")).expect("store");
+        store.recover().expect("recovered");
         let mut runs = Runs::default();
         runs.met(Incarnation(1));
         runs.connected(1);
@@ -719,7 +721,7 @@ mod tests {
             matches!(
                 turn,
                 Input::Turn {
-                    thread: Some(ThreadId(1)),
+                    thread: Some(ThreadId(2)),
                     ..
                 }
             ),

@@ -9,7 +9,9 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsOp, SettingsView, UserName};
+use kumochi_protocol::message::{
+    AssistantName, ErrorKey, SettingsOp, SettingsView, ThreadId, UserName,
+};
 use toml::{Table, Value};
 
 const ASSISTANT_NAME: &str = "assistant_name";
@@ -41,7 +43,6 @@ impl ConfigError {
 }
 
 /// The settings and the file they came from.
-#[derive(Debug)]
 pub(crate) struct Config {
     path: Option<PathBuf>,
     /// `Err` when the file can't be written over: no home, or unreadable.
@@ -56,37 +57,55 @@ enum Refusal {
 }
 
 /// A change staged for writing. [`Pending::write`] blocks, so it runs off the core loop.
-#[derive(Debug)]
 pub(crate) struct Pending {
     path: PathBuf,
     table: Table,
     view: SettingsView,
 }
 
+/// Only the table's shape: its values and the path can hold names.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("loaded", &self.table.is_ok())
+            .field("keys", &self.table.as_ref().map_or(0, Table::len))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Only the table's size: its values and the path can hold names.
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("keys", &self.table.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
-    /// The settings in `config.toml` under `dir`, or the defaults. Only a missing file is
-    /// writable as new; any other read or parse failure refuses every change until the user
-    /// repairs or removes the file and restarts.
-    pub(crate) fn load(dir: Option<PathBuf>) -> Self {
+    /// The settings in `config.toml` under `dir`, or the defaults, with the store's main thread,
+    /// which every view names. Only a missing file is writable as new; any other read or parse
+    /// failure refuses every change until the user repairs or removes the file and restarts.
+    pub(crate) fn load(dir: Option<PathBuf>, main_thread: ThreadId) -> Self {
         let Some(path) = dir.map(|dir| dir.join(CONFIG_FILE)) else {
             tracing::warn!("%APPDATA% isn't an absolute path; settings won't be saved");
-            return Self::refusing(None, Refusal::NoHome);
+            return Self::refusing(None, Refusal::NoHome, main_thread);
         };
         let table = match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let Ok(table) = text.parse::<Table>() else {
                     tracing::warn!("config.toml doesn't parse; using defaults, not saving");
-                    return Self::refusing(Some(path), Refusal::Unreadable);
+                    return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
                 };
                 table
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Table::new(),
             Err(error) => {
                 tracing::warn!(kind = ?error.kind(), "config.toml can't be read; not saving");
-                return Self::refusing(Some(path), Refusal::Unreadable);
+                return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
             }
         };
-        let view = view_of(&table);
+        let view = view_of(&table, main_thread);
         Self {
             path: Some(path),
             table: Ok(table),
@@ -94,11 +113,11 @@ impl Config {
         }
     }
 
-    fn refusing(path: Option<PathBuf>, refusal: Refusal) -> Self {
+    fn refusing(path: Option<PathBuf>, refusal: Refusal, main_thread: ThreadId) -> Self {
         Self {
             path,
             table: Err(refusal),
-            view: view_of(&Table::new()),
+            view: view_of(&Table::new(), main_thread),
         }
     }
 
@@ -132,7 +151,7 @@ impl Config {
                 table.insert(ONBOARDED.to_owned(), Value::Boolean(true));
             }
         }
-        let view = view_of(&table);
+        let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
     }
 
@@ -169,7 +188,7 @@ fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
 
 /// The settings a table holds. A known key with a bad value reads as its default, and stays in
 /// the table untouched until the user sets that key.
-fn view_of(table: &Table) -> SettingsView {
+fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
     let assistant_name = match table.get(ASSISTANT_NAME) {
         None => None,
         Some(Value::String(text)) => AssistantName::new(text)
@@ -194,6 +213,7 @@ fn view_of(table: &Table) -> SettingsView {
         assistant_name,
         user_name,
         onboarded,
+        main_thread,
     }
 }
 

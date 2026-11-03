@@ -99,11 +99,20 @@ pub async fn run() -> Result<(), BrainError> {
         failed_deletions = recovered.failed_deletions,
         "store recovered"
     );
+    // Recovery created it if it was missing, so its id is below the high water.
+    let main_thread = store.main_thread()?;
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
-    let config = config::Config::load(platform::config_dir());
-    let mut brain = Brain::new(store, high_water, scenes, Box::new(fixture()?), config)
-        .map_err(BrainError::StoreThread)?;
+    let config = config::Config::load(platform::config_dir(), main_thread);
+    let mut brain = Brain::new(
+        store,
+        main_thread,
+        high_water,
+        scenes,
+        Box::new(fixture()?),
+        config,
+    )
+    .map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;

@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::frame::Pipe;
+use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     AssistantName, ControlToBrain, ControlToShell, ErrorKey, Phase, SettingsOp, SettingsView,
     UserName,
@@ -18,6 +18,7 @@ use tokio::io::AsyncRead;
 use super::{Ended, Shell, duplex};
 use crate::ipc;
 use crate::runtime::CLOSE_WAIT;
+use crate::runtime::Seen;
 use crate::runtime::settings::Gate;
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, SENTINEL, Scratch};
@@ -264,19 +265,58 @@ async fn changes_from_a_gone_shell_are_written_while_none_is_connected() {
     let scratch = Scratch::new("settings-idle");
     let mut brain = test_support::brain(&scratch, "");
     let mut tap = Tap::from_env();
+    let mut seen = brain.observe();
     brain.control_offline(rename("Nimbus"), 0, &mut tap);
     brain.control_offline(rename("Cirrus"), 0, &mut tap);
-    let saved = async {
-        while saved_name(&scratch) != "Cirrus" {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let committed = async {
+        let mut commits = 0;
+        while commits < 2 {
+            if seen.recv().await.expect("the brain reports") == Seen::SettingsCommitted {
+                commits += 1;
+            }
         }
     };
     tokio::select! {
         () = brain.idle() => unreachable!("idle never returns"),
-        saved = tokio::time::timeout(super::PATIENCE, saved) => {
-            saved.expect("both changes are written with no shell connected");
+        committed = tokio::time::timeout(super::PATIENCE, committed) => {
+            committed.expect("both changes are written with no shell connected");
         }
     }
+    assert_eq!(saved_name(&scratch), "Cirrus");
+}
+
+#[tokio::test]
+async fn a_user_name_drained_after_a_disconnect_never_reaches_the_tap() {
+    const USER: &str = "Zqxdraineduser";
+    let scratch = Scratch::new("settings-tap-drained");
+    let mut brain = test_support::brain(&scratch, "");
+    let recording = scratch.db().with_file_name("tap.bin");
+    let mut tap = Tap::to_file(File::create(&recording).expect("tap file"));
+    let change = op(SettingsOp::SetUserName(Some(
+        UserName::new(USER).expect("valid"),
+    )));
+    let len = frame::encode(&change, Pipe::Control)
+        .expect("encodes")
+        .len()
+        - frame::HEADER_LEN;
+    brain.control_offline(change, len, &mut tap);
+    brain.quit(Instant::now() + CLOSE_WAIT).await;
+    drop(tap);
+    assert_eq!(
+        scratch.config().view().user_name,
+        Some(UserName::new(USER).expect("valid"))
+    );
+    let recorded = std::fs::read(&recording).expect("tap read");
+    assert!(
+        !recorded.windows(USER.len()).any(|w| w == USER.as_bytes()),
+        "the name was recorded"
+    );
+    let mut dumped = Vec::new();
+    tap::dump(&mut recorded.as_slice(), &mut dumped).expect("dumps");
+    assert_eq!(
+        String::from_utf8(dumped).expect("utf-8"),
+        format!("    0 Control shell -> brain  Settings ({len} bytes)\n1 frames\n")
+    );
 }
 
 #[tokio::test]

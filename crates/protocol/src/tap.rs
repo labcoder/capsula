@@ -46,17 +46,27 @@ impl Tapped for ControlToBrain {
             Self::ClearDrawing { .. } => "ClearDrawing",
             Self::DeleteThread { .. } => "DeleteThread",
             Self::Settings(_) => "Settings",
+            Self::ThreadOp(_) => "ThreadOp",
         }
     }
 
+    /// `ThreadOp` isn't listed: a rename carries the user's title.
     fn content_free(&self) -> bool {
+        // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(
             self,
             Self::Quitting
-                | Self::Stop { .. }
+                | Self::Stop {
+                    run: _,
+                    revealed: _
+                }
                 | Self::Pong
-                | Self::ClearDrawing { .. }
-                | Self::DeleteThread { .. }
+                | Self::ClearDrawing { scene_ids: _ }
+                | Self::DeleteThread {
+                    thread: _,
+                    after_turns: _,
+                    resend: _
+                }
         )
     }
 }
@@ -77,14 +87,23 @@ impl Tapped for ControlToShell {
     }
 
     fn content_free(&self) -> bool {
+        // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(
             self,
-            Self::Welcome { .. }
-                | Self::RunState { .. }
+            Self::Welcome { incarnation: _ }
+                | Self::RunState {
+                    run: _,
+                    thread: _,
+                    phase: _
+                }
                 | Self::Ping
-                | Self::Scenes { .. }
-                | Self::ThreadDeleted { .. }
-                | Self::TurnRefused { .. }
+                | Self::Scenes { scenes: _ }
+                | Self::ThreadDeleted {
+                    thread: _,
+                    outcome: _,
+                    last_run: _
+                }
+                | Self::TurnRefused { thread: _ }
                 | Self::Error(_)
         )
     }

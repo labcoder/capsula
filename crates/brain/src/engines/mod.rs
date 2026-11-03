@@ -402,7 +402,14 @@ mod tests {
         for bad in [String::new(), format!("{longest}b"), "caf\u{e9}".to_owned()] {
             assert_eq!(CallId::new(&bad), Err(Refused::CallId), "{bad:?}");
         }
-        assert!(Opaque::new(vec![0; Opaque::MAX]).is_ok(), "256 KiB fits");
+        let boundary: Vec<u8> = (0..Opaque::MAX)
+            .map(|i| u8::try_from(i % 251).expect("below 251"))
+            .collect();
+        assert_eq!(
+            Opaque::new(boundary.clone()).map(|item| item.0),
+            Ok(boundary.into_boxed_slice()),
+            "256 KiB fits whole"
+        );
         assert_eq!(
             Opaque::new(vec![0; Opaque::MAX + 1]),
             Err(Refused::OutputItem)

@@ -31,6 +31,8 @@ mod pages;
 mod scenes;
 #[path = "settings_tests.rs"]
 mod settings;
+#[path = "thread_op_tests.rs"]
+mod thread_ops;
 
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -212,6 +214,7 @@ fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection
 fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
+    let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     store
         .conn_for_tests()
@@ -221,6 +224,7 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
     let scenes = store.scenes().expect("scenes");
     Brain::new(
         store,
+        main_thread,
         high_water,
         scenes,
         Box::new(fixture),

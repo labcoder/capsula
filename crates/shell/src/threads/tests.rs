@@ -1,5 +1,5 @@
 use super::*;
-use kumochi_protocol::message::{PageEventKind, RunId};
+use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
 #[test]
 fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early() {
@@ -26,6 +26,8 @@ fn row(id: u64) -> ThreadRow {
         id: ThreadId(id),
         title: format!("private title {id}"),
         updated_ms: i64::try_from(id).expect("small"),
+        kind: ThreadKind::Thread,
+        choice: None,
     }
 }
 

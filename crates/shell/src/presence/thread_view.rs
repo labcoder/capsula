@@ -91,6 +91,7 @@ impl ListDelegate for ThreadsDelegate {
                 .text_color(cx.theme().muted_foreground)
                 .child(cx.global::<Strings>().get(Text::ThreadDeleting))
         });
+        // shortcut: Kumo's row shows its empty stored title; PR 5 labels it from SettingsView.
         Some(
             ListItem::new(("thread", row.id.0))
                 .accessibility_label(row.title.clone())

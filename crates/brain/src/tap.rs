@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::io::Write as _;
+use std::path::Path;
 
 use kumochi_protocol::constants::PIPE_TAP_ENV;
 use kumochi_protocol::frame::Pipe;
@@ -24,7 +25,12 @@ impl Tap {
         let Some(path) = std::env::var_os(PIPE_TAP_ENV) else {
             return Self(None);
         };
-        let opened = File::create_new(&path).and_then(|mut file| {
+        Self::create(Path::new(&path))
+    }
+
+    /// Starts a new recording at `path`, or records nothing when it already exists.
+    fn create(path: &Path) -> Self {
+        let opened = File::create_new(path).and_then(|mut file| {
             record::write_header(&mut file)?;
             Ok(file)
         });
@@ -63,5 +69,34 @@ impl Tap {
             tracing::warn!(%error, "pipe tap write failed; recording stopped");
             self.0 = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kumochi_protocol::frame::Pipe;
+    use kumochi_protocol::message::ControlToBrain;
+    use kumochi_protocol::tap::{Direction, MAGIC};
+
+    use super::Tap;
+    use crate::test_support::Scratch;
+
+    #[test]
+    fn a_second_tap_at_the_same_path_leaves_the_first_recording_untouched() {
+        let scratch = Scratch::new("tap-reopen");
+        let path = scratch.db().with_file_name("tap.bin");
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("folder");
+        let mut first = Tap::create(&path);
+        first.record(Pipe::Control, Direction::ToBrain, &ControlToBrain::Pong, 1);
+        let before = std::fs::read(&path).expect("recorded");
+        assert!(before.starts_with(&MAGIC) && before.len() > MAGIC.len());
+        let mut second = Tap::create(&path);
+        second.record(Pipe::Control, Direction::ToBrain, &ControlToBrain::Pong, 1);
+        assert!(
+            second.0.is_none(),
+            "an existing file is never recorded into"
+        );
+        drop((first, second));
+        assert_eq!(std::fs::read(&path).expect("still there"), before);
     }
 }

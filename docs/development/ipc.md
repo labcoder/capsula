@@ -66,7 +66,7 @@ flowchart LR
 | Page message | Direction | Fields |
 |---|---|---|
 | `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }` or `PageOf::Events { thread, before }` |
-| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`), `next` |
+| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`, `kind`, optional `choice`), `next` |
 | `Page` | Brain to shell, data | `request`, `thread`, events (`id`, optional `run`, `kind`, `text`, `cut`), `before` |
 | `PageFailed` | Brain to shell, data | `request`; the read failed and the brain logged its kind |
 
@@ -111,6 +111,26 @@ flowchart LR
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
+
+## Thread ops
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `ThreadOp::Rename` | Control, shell to brain | `thread`, `title`: a `ThreadTitle`, trimmed, one line, 1–80 characters, checked on decode |
+| `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Minimal` to `XHigh`) |
+
+- Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
+  A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
+- **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
+  brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
+  with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries
+  `main_thread`, and each `ThreadRow` its `kind`, so the shell knows which row is Kumo's.
+- **The plain list pins the main thread.** The first page of `PageOf::Threads` without search
+  starts with it and counts it toward the 50 rows; continuations leave it out, and the cursor is
+  always a task's, so the main thread never repeats and its own updates never move a cursor. A
+  first page keeps the main thread and at least one task whenever a task exists, shortening that
+  task's title if it alone overflows the frame. A search ranks the main thread like any other.
+- `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
 
 ## Scenes and recovery
 
@@ -204,6 +224,8 @@ sequenceDiagram
   S->>S: fence runs up to last_run, then drop the rows
 ```
 
+- **The main thread** is never deleted: a `DeleteThread` naming it is answered `NotHidden` at
+  once, before any run is interrupted or any fence is added, with no store operation.
 - **Admission.** A delete ends the thread's current run and queues one store operation. One
   for a thread already being deleted only moves its watermark. The brain keeps at most eight
   in flight, twice the shell's four slots [guess], because deletes outlive the connection that
@@ -289,6 +311,6 @@ nothing is recorded. The tap fails closed. Each record holds the frame's op name
 its fields only when the op is on the content-free list in `crates/protocol/src/tap.rs`
 (`Quitting`, `Stop`, `Pong`, `ClearDrawing` and `DeleteThread` from the shell; `Welcome`,
 `RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` and `Error` from the brain). Anything
-else, `Hello` and `Settings` included, is never serialized for the tap, and a new op stays
+else, `Hello`, `Settings` and `ThreadOp` included, is never serialized for the tap, and a new op stays
 redacted until someone lists it. `cargo xtask pipe-dump <file>` prints one line per frame: the
 fields of a listed op, otherwise `Op (n bytes)`.

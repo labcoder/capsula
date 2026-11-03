@@ -2,8 +2,8 @@ use super::{Direction, MAGIC, Record, Tapped, dump, read, read_header, write, wr
 use crate::Secret;
 use crate::frame::{FrameError, HEADER_LEN, Pipe, encode};
 use crate::message::{
-    AssistantName, ControlToBrain, ControlToShell, Hello, Incarnation, SettingsOp, SettingsView,
-    UserName,
+    AssistantName, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation, SettingsOp,
+    SettingsView, ThreadId, ThreadOp, ThreadTitle, UserName,
 };
 
 const NAME: &str = "Zqxassistant";
@@ -29,6 +29,7 @@ fn view() -> ControlToShell {
             assistant_name: AssistantName::new(NAME).expect("valid"),
             user_name: Some(UserName::new(USER).expect("valid")),
             onboarded: true,
+            main_thread: ThreadId(1),
         },
         answer: true,
     }
@@ -91,6 +92,50 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     let mut reader = &file[MAGIC.len()..];
     let read_back: Vec<_> = std::iter::from_fn(|| read(&mut reader).expect("reads")).collect();
     assert_eq!(read_back, records);
+}
+
+#[test]
+fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
+    let capability = *b"Zqxcapabilityzqxcapabilityzqx123";
+    let hello = DataToBrain::Hello(Hello {
+        build_id: "0.1.0+abc".to_owned(),
+        capability: Secret::new(capability),
+    });
+    let len = wire_len(&hello, Pipe::Data);
+    let record = Record::of(Pipe::Data, Direction::ToBrain, &hello, len).expect("records");
+    assert_eq!(record.payload, None);
+    let file = recording(&[record]);
+    for secret in [&capability[..], b"0.1.0+abc"] {
+        assert!(!contains(&file, secret), "{secret:?} was recorded");
+    }
+    let mut out = Vec::new();
+    dump(&mut file.as_slice(), &mut out).expect("dumps");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        format!("    0 Data shell -> brain  Hello ({len} bytes)\n1 frames\n")
+    );
+}
+
+#[test]
+fn a_rename_keeps_only_its_op_name_and_length() {
+    const TITLE: &str = "Zqxrenamedtitle";
+    let rename = ControlToBrain::ThreadOp(ThreadOp::Rename {
+        thread: ThreadId(2),
+        title: ThreadTitle::new(TITLE).expect("valid"),
+    });
+    let record = record(Direction::ToBrain, &rename);
+    assert_eq!(record.payload, None);
+    let file = recording(&[record]);
+    assert!(!contains(&file, TITLE.as_bytes()), "the title was recorded");
+    let mut out = Vec::new();
+    dump(&mut file.as_slice(), &mut out).expect("dumps");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        format!(
+            "    0 Control shell -> brain  ThreadOp ({} bytes)\n1 frames\n",
+            wire_len(&rename, Pipe::Control)
+        )
+    );
 }
 
 #[test]

@@ -181,12 +181,13 @@ async fn play(lines: Arc<[Line]>, mut out: Outbox) {
 mod tests {
     use std::time::Duration;
 
-    use kumochi_protocol::message::{RunId, ThreadId};
+    use kumochi_protocol::message::{ControlToShell, Phase, RunId, Step, ThreadId};
     use tokio::sync::mpsc;
 
     use super::{DEFAULT, Fixture, Line, call, step};
     use crate::coordinator::{Coordinator, Effect, Input, StoreOp};
     use crate::engines::{Engine, EngineFailure, Finish, RunRequest, ToolName, TurnEvent, start};
+    use crate::store::SceneTarget;
 
     fn request() -> RunRequest {
         RunRequest {
@@ -287,7 +288,7 @@ mod tests {
         let fixture = Fixture::parse("0 step first\n1000 step second").expect("parses");
         let (inputs, mut received) = mpsc::channel(16);
         let _cancel = start(&fixture, request(), inputs);
-        let mut core = Coordinator::new(ThreadId(0), RunId(2), Vec::new());
+        let mut core = Coordinator::new(ThreadId(1), ThreadId(1), RunId(2), Vec::new());
         core.handle(Input::Turn {
             thread: Some(ThreadId(1)),
             text: "go".to_owned(),
@@ -298,13 +299,25 @@ mod tests {
         let started = received.recv().await.expect("the call starts");
         assert_eq!(core.handle(started), Ok(Vec::new()));
         let first = received.recv().await.expect("the first step");
-        let effects = core.handle(first).expect("current");
-        assert!(
-            effects.iter().any(|effect| matches!(
-                effect,
-                Effect::Store(StoreOp::CommitStep { index: 0, step, .. }) if step.label == "first"
-            )),
-            "{effects:?}"
+        assert_eq!(
+            core.handle(first),
+            Ok(vec![
+                Effect::Control(ControlToShell::RunState {
+                    run: RunId(3),
+                    thread: ThreadId(1),
+                    phase: Phase::Answering,
+                }),
+                Effect::Store(StoreOp::CommitStep {
+                    thread: ThreadId(1),
+                    run: RunId(3),
+                    text: None,
+                    scene: SceneTarget::New { evict: None },
+                    index: 0,
+                    step: Step {
+                        label: "first".to_owned(),
+                    },
+                }),
+            ])
         );
         assert!(
             received.is_empty(),

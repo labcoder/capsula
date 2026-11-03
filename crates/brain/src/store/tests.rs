@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kumochi_protocol::message::{Deleted, RunId, ThreadId};
+use kumochi_protocol::message::{Deleted, RunId, ThreadId, ThreadKind};
 use rusqlite::Connection;
 
 use crate::test_support::Scratch;
@@ -15,7 +15,7 @@ use super::{
 const MARKER: &str = "zqxplantedmarker";
 
 /// Every byte of the store's files, ASCII-lowercased.
-fn raw_bytes(db: &Path) -> Vec<u8> {
+pub(super) fn raw_bytes(db: &Path) -> Vec<u8> {
     let mut bytes = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let mut path = db.as_os_str().to_owned();
@@ -108,7 +108,7 @@ fn run_row(store: &Store, run: RunId) -> (String, Option<String>) {
 }
 
 /// What the store's thread does with an owed purge, in one go.
-fn purge(store: &mut Store) -> Swap {
+pub(super) fn purge(store: &mut Store) -> Swap {
     let copied = clean_copy(store);
     let swapped = store.swap(&copied).expect("swap");
     store.leftovers().remove().expect("purge files removed");
@@ -153,7 +153,7 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 2
+            known: 3
         })
     ));
 }
@@ -486,14 +486,9 @@ fn a_deletion_that_fails_again_at_start_stays_hidden_and_is_reported() {
         },
         "the stuck thread's run isn't counted as crashed"
     );
-    assert!(
-        store
-            .pages()
-            .thread_page(None, 50)
-            .map(|(rows, _)| rows)
-            .expect("threads")
-            .is_empty()
-    );
+    let (rows, _) = store.pages().thread_page(None, 50).expect("threads");
+    let listed: Vec<_> = rows.iter().map(|row| row.kind).collect();
+    assert_eq!(listed, [ThreadKind::Main], "only the main thread is listed");
     assert!(store.pages().search_ids(MARKER).expect("search").is_empty());
 }
 

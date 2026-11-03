@@ -244,7 +244,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{Strings, Text, error_id};
-    use kumochi_protocol::message::{ErrorKey, UserError};
+    use fluent_bundle::{FluentBundle, FluentResource};
+    use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 
     #[test]
     fn every_text_is_in_the_catalog() {
@@ -278,6 +279,27 @@ mod tests {
         assert_eq!(
             strings.error(&UserError::from(ErrorKey::SettingsRefused)),
             "Couldn't save that setting. Try again."
+        );
+    }
+
+    #[test]
+    fn an_error_fills_in_each_argument_by_name() {
+        let id = error_id(ErrorKey::SettingsRefused);
+        let ftl = format!("{id} = Wait {{ $seconds }} s for {{ $count }} more\n");
+        let resource = FluentResource::try_new(ftl).expect("the test message parses");
+        let mut bundle = FluentBundle::new(vec!["en".parse().expect("valid")]);
+        bundle.add_resource(resource).expect("one message");
+        let strings = Strings { bundle };
+        let error = UserError::new(
+            ErrorKey::SettingsRefused,
+            vec![ErrorArg::Count(3), ErrorArg::Seconds(30)],
+            Vec::new(),
+        )
+        .expect("within the limits");
+        // Isolation stays on, as in the shipped bundle, so each value is wrapped in FSI and PDI.
+        assert_eq!(
+            strings.error(&error),
+            "Wait \u{2068}30\u{2069} s for \u{2068}3\u{2069} more"
         );
     }
 }

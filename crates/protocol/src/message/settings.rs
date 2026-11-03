@@ -5,25 +5,27 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::ThreadId;
+
 /// The longest name, in Unicode scalar values.
 pub const MAX_NAME_CHARS: usize = 24;
 
-/// Why a name was refused.
+/// Why a name or a thread title was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NameError {
     /// Nothing but whitespace.
-    #[error("the name is empty")]
+    #[error("the text is empty")]
     Empty,
-    /// More than [`MAX_NAME_CHARS`] characters.
-    #[error("the name is longer than {MAX_NAME_CHARS} characters")]
+    /// More characters than its kind allows: [`MAX_NAME_CHARS`] for a name.
+    #[error("the text is too long")]
     TooLong,
-    /// A control character or a line break: the name goes into every request's instructions.
-    #[error("the name isn't one line of text")]
+    /// A control character or a line break: names and titles go into requests and one-line rows.
+    #[error("the text isn't one line")]
     NotOneLine,
 }
 
-/// The shared rule: trimmed, 1–24 scalar values, one line, no control characters.
-fn checked(text: &str) -> Result<String, NameError> {
+/// The shared rule: trimmed, 1–`max` scalar values, one line, no control characters.
+pub(super) fn checked(text: &str, max: usize) -> Result<String, NameError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(NameError::Empty);
@@ -34,14 +36,16 @@ fn checked(text: &str) -> Result<String, NameError> {
     {
         return Err(NameError::NotOneLine);
     }
-    if text.chars().count() > MAX_NAME_CHARS {
+    if text.chars().count() > max {
         return Err(NameError::TooLong);
     }
     Ok(text.to_owned())
 }
 
+/// A checked text type: built only through [`checked`] with `$max`, on decode too, and with a
+/// `Debug` that prints only its length.
 macro_rules! name {
-    ($(#[$doc:meta])* $name:ident) => {
+    ($(#[$doc:meta])* $name:ident, $max:expr) => {
         $(#[$doc])*
         #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
@@ -53,7 +57,7 @@ macro_rules! name {
             /// # Errors
             /// [`NameError`] says which part of the rule it breaks.
             pub fn new(text: &str) -> Result<Self, NameError> {
-                checked(text).map(Self)
+                checked(text, $max).map(Self)
             }
 
             /// The name's text.
@@ -87,12 +91,12 @@ macro_rules! name {
 
 name! {
     /// What the assistant is called, in every request and on Kumo's row.
-    AssistantName
+    AssistantName, MAX_NAME_CHARS
 }
 
 name! {
     /// What the assistant calls the user. Optional: unset is `None`, never an empty name.
-    UserName
+    UserName, MAX_NAME_CHARS
 }
 
 /// A settings change, shell to brain. Each one is answered by exactly one
@@ -117,6 +121,8 @@ pub struct SettingsView {
     pub user_name: Option<UserName>,
     /// Onboarding has finished.
     pub onboarded: bool,
+    /// The main thread, Kumo's, which the shell labels with `assistant_name`.
+    pub main_thread: ThreadId,
 }
 
 #[cfg(test)]
