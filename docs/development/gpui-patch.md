@@ -17,9 +17,19 @@ doing nothing; a minimized window does it too.
 
 ## What the patch does
 
-`vsync.rs` gains a per-window `FrameRequest`: a "wants a frame" flag and an input-sustain
-deadline. The vsync thread invalidates only windows whose request is set, and sleeps on an event
-when no window wants a frame, so a settled app makes no vsync wakes at all.
+The scheduling lives in one new file, `src/vsync/frame_demand.rs`, kept free of Win32 so its unit
+tests run in CI (`cargo test -p gpui-pre-windows --lib frame_demand`). Each window has a
+`FrameRequest`, a "wants a frame" flag plus an input-sustain deadline. The vsync thread waits on
+`FRAME_DEMAND` and invalidates only the windows whose request is set, so a settled app repaints
+nothing.
+
+```mermaid
+flowchart LR
+    W["Window: schedule_frame, input, forced render, gesture"] -->|request| D["FRAME_DEMAND"]
+    D -->|wakes| V["vsync thread"]
+    V -->|"RedrawWindow, only windows that asked"| P["WM_PAINT, draw_window"]
+    V -.->|"idle: every 1 s"| L["lost-device check"]
+```
 
 A window asks for a frame when:
 
@@ -30,16 +40,22 @@ A window asks for a frame when:
   GPUI attempts a forced draw, so repeated deferrals can't strand it;
 - GPUI receives any input for it, by any route (window messages, accelerators, DirectManipulation,
   drag and drop): the window then keeps drawing every vblank for one second (`INPUT_SUSTAIN`);
-- DirectManipulation is active (touchpad pan and inertia).
+- DirectManipulation's status changes, or it is active (touchpad pan and inertia). Status
+  changes arrive even while no frames run, so a pan that starts after its hit-test frame still
+  wakes the window. That status changes arrive without updates is an assumption the desk check
+  below confirms.
 
-The vsync thread also checks for a lost GPU device, and it now does so only when some window
-wants a frame; a device lost while everything is idle is noticed on the next frame instead.
+With no frame wanted, the vsync thread still wakes once a second to check for a lost GPU device,
+so an idle, visible window recovers without waiting for input. That wake reads the device state
+and repaints nothing.
 
 Two of these stand in for core behaviour that relies on being woken every vblank: GPUI retries
 a re-entrant skip, and keeps presenting for a second after input that changed something. The
 backend can't see either, so it errs on the side of drawing: it retries forced frames until GPUI
 tries one, and sustains after every input, changed or not. That keeps the fix in the backend, so
 `gpui-pre` stays a registry crate.
+Two `#[cfg(any(test, feature = "test-support"))]` items (`window.rs`, `directx_renderer.rs`) are
+narrowed to the feature alone, so the crate's own tests build without GPUI's test support.
 Each modified file says so in its first line, as Apache-2.0 4(b) asks; the license text is
 `vendor/gpui-pre-windows/LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` lists the crate.
 
@@ -55,14 +71,22 @@ runs, each set under one `measuring.lock` hold.
 | `idle --panel` | 2.50% | 0.065% |
 | `stretch` (animating) | 10.40%, 10.25% | 10.43%, 10.36% |
 
+The once-a-second lost-device check costs about 0.001% of a core at rest: alternating `idle`
+runs without and with it read 0.063% and 0.064% twice (18:11–18:16Z).
+
 The `stretch` runs alternated before and after in one hold; the idle "before" runs come from an
-earlier hold the same day. During `stretch` the fixture counted 8641 ticks and about 7170 shape
-changes in every run, before and after, so the animation draws as often as it did. A spike app
-measured presents with PresentMon: 2876 vs 2875 presents at 144 Hz and 1436 vs 1437 at a 72 fps
+earlier hold the same day. In every `stretch` run the fixture counted 8641 or 8642 ticks and
+7159 to 7215 shape changes, before and after. Those are the fixture's own counters, not presents,
+so they show the animation was driven the same way. Presents were measured only in a spike app,
+with PresentMon: 2876 vs 2875 presents at 144 Hz and 1436 vs 1437 at a 72 fps
 cap, with the same 6.94 ms and 13.89 ms median intervals.
 
-Real-input checks (hover, drag, typing, touchpad pan and inertia) and a device-lost check are
-done by hand at the desk (OSC-132); none of them is automated.
+These need hardware and are checked by hand at the desk (OSC-132):
+
+- hover, drag and typing;
+- touchpad pan and pinch, with inertia;
+- an idle window with two fingers resting on the touchpad before a slow pan or pinch;
+- device loss while Kumochi is idle, visible and unfocused, with no input or resize afterwards.
 
 ## Re-vendoring on a GPUI bump
 
@@ -74,9 +98,13 @@ done by hand at the desk (OSC-132); none of them is automated.
 3. Replace `vendor/gpui-pre-windows` with the new release's `.crate` contents, unchanged, minus
    `.cargo-ok`, and commit that alone; `diff -r` it against the registry source first.
 4. Re-apply the patch from the previous release's patch commit (`git log -- vendor/`), fixing
-   conflicts by hand. Check that `begin_vsync_thread`, `draw_window`, `schedule_frame` and
-   `handle_msg` still have the shapes the patch assumes, and that the core still calls
+   conflicts by hand. The patch touches six upstream files (`events.rs`, `platform.rs`,
+   `window.rs`, `vsync.rs`, `direct_manipulation.rs`, `directx_renderer.rs`) and adds
+   `vsync/frame_demand.rs`; `directx_renderer.rs` and `window.rs` carry the `test-support`
+   cfg narrowing that lets CI run `frame_demand`'s tests. Check that `begin_vsync_thread`, `draw_window`, `schedule_frame` and
+   `on_input` still have the shapes the patch assumes, and that the core still calls
    `schedule_frame` after updates and still has its input-rate sustain.
-5. `cargo build --locked`, `cargo xtask check-vendor`, `cargo test --workspace`.
+5. `cargo build --locked`, `cargo xtask check-vendor`, `cargo test --workspace`, and
+   `cargo test -p gpui-pre-windows --locked --lib frame_demand`.
 6. Re-measure `cargo xtask bench idle` and `bench stretch` against the previous build, and
    repeat the OSC-132 hand checks.
