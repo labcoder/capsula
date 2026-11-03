@@ -294,7 +294,7 @@ flowchart LR
 
 `PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
 host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
-nodes and edges, then validates measured/generated bounds and conservative motion
+nodes, edges, tables and rows, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
 Charts remain unsupported until the chart layer of A6. `PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
@@ -354,6 +354,9 @@ number uses scientific notation if grouped output would exceed the display-text 
 
 A table's explicit box supplies its origin and available width; content determines
 its height, as in S1. Without a box it uses the host viewport's origin and width.
+Its content-sized height must still fit the ±20,000 canvas: an over-tall table fails
+the step with `OutOfRange` in preparation's final bounds check, so the model can
+send a smaller table.
 Empty tables still prepare their header and background. Adding, updating or removing
 a row rebuilds that table's current geometry at the new step's activation, without
 changing an earlier prepared picture. A detached row keeps its placed columns and

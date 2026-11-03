@@ -8,7 +8,7 @@ use crate::runtime::DATA_CAP;
 fn preamble(frame: &[u8]) -> bool {
     matches!(
         frame::decode::<ControlToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
-        ControlToShell::Scenes { .. } | ControlToShell::Settings(_)
+        ControlToShell::Scenes { .. } | ControlToShell::Settings { .. }
     )
 }
 

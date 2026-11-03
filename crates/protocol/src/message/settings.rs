@@ -96,7 +96,7 @@ name! {
 }
 
 /// A settings change, shell to brain. Each one is answered by exactly one
-/// [`super::ControlToShell::Settings`], in order.
+/// [`super::ControlToShell::Settings`] with `answer` set, in order, while its connection lasts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingsOp {
     /// Rename the assistant.

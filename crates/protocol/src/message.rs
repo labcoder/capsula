@@ -221,11 +221,18 @@ pub enum ControlToShell {
         /// The thread the submit named.
         thread: Option<ThreadId>,
     },
-    /// The settings: once per connection before `Scenes`, and after every
-    /// [`ControlToBrain::Settings`].
-    Settings(SettingsView),
-    /// Something the user should know went wrong. A refused settings change sends it just
-    /// before that change's `Settings`.
+    /// The settings: once per connection before `Scenes`, once per
+    /// [`ControlToBrain::Settings`] from this connection, in order, and after a change an earlier
+    /// connection sent is saved.
+    Settings {
+        /// The settings as saved.
+        view: SettingsView,
+        /// It answers this connection's oldest unanswered change. Otherwise it's the settled
+        /// settings, sent on its own.
+        answer: bool,
+    },
+    /// Something the user should know went wrong. A refused settings change from this
+    /// connection sends it just before that change's answer.
     Error(UserError),
 }
 
