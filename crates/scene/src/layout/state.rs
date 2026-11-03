@@ -58,6 +58,7 @@ pub(super) struct Placed {
     pub rank: Option<usize>,
     pub initialized: bool,
     pub motion: BTreeMap<&'static str, crate::state::work::Motion>,
+    pub chart_basis: Option<Arc<super::chart::Basis>>,
 }
 
 impl Placed {
@@ -73,6 +74,7 @@ impl Placed {
             rank: cached.and_then(|old| old.rank),
             initialized: cached.is_some_and(|old| old.initialized),
             motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
+            chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
         }
     }
 }
@@ -260,6 +262,78 @@ mod tests {
         )
         .expect("input");
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
+    }
+    #[test]
+    fn chart_basis_is_replaced_when_attached_and_shared_after_a_cut() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"basis","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300]}},{"series":{"id":"s","in":"c","data":[1,2]}}]}}"#,
+        );
+        let key: WireId = "s".to_owned().try_into().expect("id");
+        let first_basis = first.after.objects[&key]
+            .chart_basis
+            .as_ref()
+            .expect("basis");
+        let second = picture(
+            &mut scene,
+            &mut budget,
+            &first.after,
+            r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
+        );
+        let second_basis = second.after.objects[&key]
+            .chart_basis
+            .as_ref()
+            .expect("refitted basis");
+        assert!(
+            !Arc::ptr_eq(first_basis, second_basis),
+            "attached preparation installs a new immutable basis"
+        );
+        let handle = second.after.handle(&key).expect("series handle");
+        scene
+            .stop(
+                &StopCut {
+                    activated: 2,
+                    revealed: Bounded::new(vec![handle]).expect("cut"),
+                },
+                &mut budget,
+            )
+            .expect("stop");
+        let detached = second.after.cut(&scene).expect("detached layout");
+        let detached_basis = detached.objects[&key]
+            .chart_basis
+            .as_ref()
+            .expect("frozen basis");
+        assert!(
+            Arc::ptr_eq(second_basis, detached_basis),
+            "the cut carries the existing allocation"
+        );
+        let next = picture(
+            &mut scene,
+            &mut budget,
+            &detached,
+            r#"{"step":{"id":"data","set":[{"target":"s","data":[2,1]}]}}"#,
+        );
+        assert!(
+            Arc::ptr_eq(
+                detached_basis,
+                next.after.objects[&key]
+                    .chart_basis
+                    .as_ref()
+                    .expect("updated basis")
+            ),
+            "detached updates reuse the allocation rather than refitting"
+        );
     }
     #[test]
     fn recovery_preserves_the_hidden_state_used_by_the_next_glide() {

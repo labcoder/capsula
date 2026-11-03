@@ -67,10 +67,10 @@ pub(super) fn validate(
             object.work.usage.segments = match chart.kind {
                 ChartKind::Line => count.saturating_sub(1),
                 ChartKind::Area => {
-                    if count == 0 {
+                    if count < 2 {
                         0
                     } else {
-                        count + 2
+                        count * 2 + 1
                     }
                 }
                 ChartKind::Pie => count * (crate::path::PIE_ARC_SEGMENTS + 2),

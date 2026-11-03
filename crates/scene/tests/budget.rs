@@ -517,6 +517,27 @@ fn tracks_depth_transforms_and_repeated_duration_are_bounded() {
 }
 
 #[test]
+fn area_stroke_and_fill_are_reserved_before_preparation() {
+    for (points, segments) in [(500, 1065), (0, 64), (1, 64), (2, 69)] {
+        let mut state = scene("area");
+        let mut budget = GlobalBudget::default();
+        put(
+            &mut state,
+            &mut budget,
+            vec![
+                json!({"chart":{"id":"c","kind":"area"}}),
+                json!({"series":{"id":"s","in":"c","data":vec![1;points]}}),
+            ],
+        );
+        assert_eq!(
+            budget.usage().segments,
+            segments,
+            "area fill, open top-edge stroke and axes are charged for {points} points"
+        );
+    }
+}
+
+#[test]
 fn chart_domains_and_stacked_sums_remain_safe_after_sets_and_detachment() {
     let empty = scene("s");
     let global = GlobalBudget::default();

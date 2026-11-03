@@ -1547,6 +1547,252 @@ fn table_lists_accept_eight_cells_and_alignments_and_reject_nine() {
 }
 
 #[test]
+fn chart_series_removal_uses_the_prepared_prefix_and_keeps_older_pictures() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"a","in":"c","data":[0,1]}}
+        ]}),
+    );
+    let second = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"second","put":[
+            {"series":{"id":"b","in":"c","data":[10,20]}}
+        ]}),
+    );
+    let removed_handle = second.handles[0].1;
+    let third = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"third","remove":["b"]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("first chart");
+    let unchanged = first.after.items();
+    assert!(
+        first.after.handle(&id("b")).is_none(),
+        "future series never enters the earlier picture"
+    );
+    let second =
+        picture(&scene, second, &first.after, &mut Measure::default()).expect("second chart");
+    assert!(
+        second.after.handle(&id("b")).is_some(),
+        "a future removal does not affect this picture"
+    );
+    let third =
+        picture(&scene, third, &second.after, &mut Measure::default()).expect("removed series");
+    assert_eq!(
+        third.removed,
+        [removed_handle],
+        "removal is published at its own activation"
+    );
+    assert_eq!(
+        first.after.items(),
+        unchanged,
+        "later reflows never mutate an earlier picture"
+    );
+    assert_eq!(
+        third.after.items(),
+        unchanged,
+        "after removal the original series again determines the ranges"
+    );
+}
+
+#[test]
+fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[100,100,300,200],"x":{"min":0,"max":2},"y":{"min":0,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[[0,0],[1,5],[2,10]]}},
+            {"anim":{"target":"c","track":"pos","keys":[[0,[20,30]]]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("chart");
+    cut(&mut scene, &mut budget, 1, &["s"], &first.after);
+    let detached = first.after.cut(&scene).expect("detached series");
+    let expected = detached.items().pop().expect("survivor");
+    let expected_bounds = detached.bounds(&id("s")).expect("bounds");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"data","set":[
+            {"target":"s","data":[[0,0],[1,5],[2,1000]]}
+        ]}),
+    );
+    let next =
+        picture(&scene, next, &detached, &mut Measure::default()).expect("frozen data update");
+    assert_eq!(
+        next.after.bounds(&id("s")).expect("updated bounds"),
+        expected_bounds,
+        "the update keeps the pre-update world placement and scale"
+    );
+    assert_eq!(
+        next.after.items(),
+        [expected],
+        "the middle point retains its scale and the out-of-domain value maps to the old upper boundary"
+    );
+    let (_, replayed) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("recovery");
+    assert_eq!(
+        replayed.items(),
+        next.after.items(),
+        "recovery reconstructs the frozen basis before replaying the data update"
+    );
+}
+
+#[test]
+fn narrow_chart_labels_do_not_invert_their_rounded_clamp_bounds() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"narrow","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,64,300]}},
+            {"series":{"id":"s","in":"c","data":[0,1,2]}}
+        ]}),
+    );
+    let result = picture(&scene, commit, &before, &mut Measure::default()).expect("narrow chart");
+    assert_eq!(result.display.items.len(), 2);
+    let x_labels: Vec<_> = result.display.items[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text {
+                origin,
+                text,
+                max_width,
+                ..
+            } if origin.y > 270.0 => Some((*origin, text.as_str(), *max_width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        x_labels,
+        [(kumochi_scene::geom::Vec2::new(25.6, 275.4), "0", Some(8.0))]
+    );
+}
+
+#[test]
+fn chart_color_sets_repaint_the_zero_baseline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"s","in":"c","data":[0,1]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("chart");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"color","set":[{"target":"c","color":"red"}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut Measure::default()).expect("colored chart");
+    let items = next.after.items();
+    let Prim::Line { color, .. } = items[0].primitives.last().expect("baseline") else {
+        panic!("baseline line");
+    };
+    let red = serde_json::from_value(json!("red")).expect("color");
+    let expected = kumochi_scene::display::Paint::from(Theme::default().resolve(&red)).faded(0.4);
+    assert_eq!(
+        *color, expected,
+        "the accepted chart color reaches its visible baseline"
+    );
+    assert_ne!(
+        items[0].primitives,
+        first.after.items()[0].primitives,
+        "a chart color update changes the output"
+    );
+}
+
+#[test]
+fn chart_axes_area_and_all_pie_series_stay_within_their_reservations() {
+    for (kind, data, expected_series_segments, expected_charge) in [
+        ("area", json!([0, 1, 2]), 7, 71),
+        ("pie", json!([1, 1]), 244, 488),
+    ] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut put = vec![
+            json!({"chart":{"id":"c","kind":kind,"box":[0,0,400,300]}}),
+            json!({"series":{"id":"a","in":"c","data":data}}),
+        ];
+        if kind == "pie" {
+            put.push(json!({"series":{"id":"b","in":"c","data":[1,1]}}));
+        }
+        let commit = committed(&mut scene, &mut budget, json!({"id":"first","put":put}));
+        let result =
+            picture(&scene, commit, &before, &mut Measure::default()).expect("chart primitives");
+        let mut pie_colors = Vec::new();
+        for item in result.after.items() {
+            pie_colors.extend(
+                item.primitives
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        Prim::Fill { color, .. } => Some(*color),
+                        _ => None,
+                    }),
+            );
+            let segments: usize = item
+                .primitives
+                .iter()
+                .map(|primitive| match primitive {
+                    Prim::Line { points, closed, .. } => {
+                        points.len().saturating_sub(1) + usize::from(*closed)
+                    }
+                    Prim::Fill { points, .. } => points.len(),
+                    _ => 0,
+                })
+                .sum();
+            let expected = if Some(item.handle) == result.after.handle(&id("c")) {
+                if kind == "pie" { 0 } else { 6 }
+            } else {
+                expected_series_segments
+            };
+            assert_eq!(segments, expected, "exact generated topology for {kind}");
+        }
+        assert_eq!(
+            scene.usage().segments,
+            expected_charge,
+            "admission reserves both area primitives and every pie series"
+        );
+        if kind == "pie" {
+            assert_eq!(
+                pie_colors,
+                (0..4)
+                    .map(|slot| Theme::default().series(slot).into())
+                    .collect::<Vec<kumochi_scene::display::Paint>>(),
+                "adjacent series continue the slice palette rather than repeating their shared boundary color"
+            );
+        }
+    }
+}
+
+#[test]
 fn narrow_table_measures_its_wrapped_title_and_header() {
     use kumochi_scene::{geom::Vec2, record::Align};
     let mut scene = SceneState::begin(header()).expect("scene");
@@ -1874,4 +2120,84 @@ fn measure_prepare_twelve_tables_at_row_and_column_caps() {
     println!(
         "prepare_12_tables_40x8_short samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
     );
+}
+
+#[test]
+#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+fn measure_prepare_charts_at_mark_and_pie_segment_caps() {
+    for (kind, charts, marks, segments) in [("scatter", 5, 20_000, 320), ("pie", 1, 163, 19_886)] {
+        let mut samples = Vec::new();
+        for iteration in 0..69 {
+            let mut scene = SceneState::begin(header()).expect("scene");
+            let mut budget = GlobalBudget::default();
+            let mut layout = LayoutState::new(&scene);
+            let mut measure = Measure::default();
+            for chart in 0..charts {
+                let mut put = vec![
+                    json!({"chart":{"id":format!("c{chart}"),"kind":kind,"box":[0,chart*350,800,300]}}),
+                ];
+                put.extend((0..8).map(|series| {
+                    let points = if kind == "scatter" { 500 } else if series == 7 { 23 } else { 20 };
+                    json!({"series":{"id":format!("s{chart}_{series}"),"in":format!("c{chart}"),"data":vec![1;points]}})
+                }));
+                let commit = committed(
+                    &mut scene,
+                    &mut budget,
+                    json!({"id":format!("chart{chart}"),"put":put}),
+                );
+                layout = picture(&scene, commit, &layout, &mut measure)
+                    .expect("capped charts")
+                    .after;
+            }
+            assert_eq!(
+                scene.usage().marks,
+                marks,
+                "scatter fills the scene mark cap; pie is segment-limited"
+            );
+            assert_eq!(
+                scene.usage().segments,
+                segments,
+                "one additional pie slice would exceed 20,000 segments"
+            );
+            let set: Vec<_> = (0..charts)
+                .flat_map(|chart| {
+                    (0..8).map(
+                        move |series| json!({"target":format!("s{chart}_{series}"),"color":"red"}),
+                    )
+                })
+                .collect();
+            let commit = committed(&mut scene, &mut budget, json!({"id":"update","set":set}));
+            let input = PrepareInput::new(
+                commit.preparation,
+                layout.clone(),
+                SurfaceGeometry::default(),
+                Arc::new(Theme::default()),
+            )
+            .expect("input");
+            measure.calls.clear();
+            let start = std::time::Instant::now();
+            let result = std::hint::black_box(prepare(
+                std::hint::black_box(input),
+                &mut measure,
+                &AtomicBool::new(false),
+            ))
+            .expect("chart update");
+            let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+            result.validate(&scene, &layout).expect("current result");
+            assert_eq!(
+                result.display.items.len(),
+                charts * 9,
+                "every chart and its eight series are replaced"
+            );
+            if iteration >= 5 {
+                samples.push(elapsed);
+            }
+        }
+        println!("prepare_{kind}_cap_raw_us={samples:?}");
+        let mean = samples.iter().sum::<f64>() / 64.0;
+        let maximum = samples.into_iter().fold(0.0_f64, f64::max);
+        println!(
+            "prepare_{kind}_cap samples=64 warmups=5 marks={marks} segments={segments} mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
+        );
+    }
 }
