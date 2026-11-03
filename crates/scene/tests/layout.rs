@@ -1425,6 +1425,36 @@ fn row_only_rebuild_preserves_the_detached_tables_absorbed_opacity() {
 }
 
 #[test]
+fn measured_entrance_pivots_bound_child_motion_outside_the_resting_union() {
+    let prepare_case = |offset| {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let step = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"pivot","put":[
+                {"diagram":{"id":"parent","enter":"pop"}},
+                {"shape":{"id":"child","in":"parent","kind":"rect","box":[0,0,10000,10000]}},
+            {"anim":{"target":"child","track":"x","keys":[[0,offset],[100,0]]}}
+            ]}),
+        );
+        picture(&scene, step, &before, &mut Measure::default())
+    };
+    assert!(
+        prepare_case(8000).is_ok(),
+        "the measured parent pivot and child envelope fit"
+    );
+    assert!(
+        matches!(
+            prepare_case(8100),
+            Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange
+        ),
+        "only the measured parent pivot pushes the child envelope beyond the canvas"
+    );
+}
+
+#[test]
 fn table_alignment_and_row_cell_caps_are_admission_errors_not_layout_truncation() {
     let scene = SceneState::begin(header()).expect("scene");
     let budget = GlobalBudget::default();

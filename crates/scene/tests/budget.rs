@@ -802,6 +802,15 @@ fn duplicate_owners_and_zero_periods_fail_at_their_source_fields() {
         );
         assert_eq!(error.path.as_str(), "put[0].anim.repeat");
     }
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"long_infinite","put":[
+            {"anim":{"target":"t0","track":"opacity","repeat":-1,"delay":1,"keys":[[0,0],[60000,1]]}}
+        ]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put[0].anim.keys[1][0]");
     put(
         &mut state,
         &mut budget,
@@ -858,7 +867,7 @@ fn entrance_envelopes_reserve_translation_and_descendant_pivots() {
         &mut state,
         &mut budget,
         vec![json!({"diagram":{
-            "id":"parent","box":[0,0,100,100],"enter":"pop"
+            "id":"parent","box":[0,0,10000,10000],"enter":"pop"
         }})],
     );
     put(
@@ -872,7 +881,7 @@ fn entrance_envelopes_reserve_translation_and_descendant_pivots() {
         &state,
         &budget,
         json!({"id":"outside","put":[{"shape":{
-            "id":"outside","in":"parent","kind":"rect","box":[19000,0,1,1]
+            "id":"outside","in":"parent","kind":"rect","box":[18100,0,1,1]
         }}]}),
         ErrorCode::OutOfRange,
     );

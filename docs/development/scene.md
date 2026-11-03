@@ -266,6 +266,8 @@ a 60-second motion deadline, independent of narration length. Delays, entrances,
 glides and repeats are clipped to that deadline. A stopped view returns only handles
 whose own entrance and every ancestor's entrance have finished, each clipped to the
 deadline; the host passes those handles into the authoritative `StopCut`.
+Entrance origins are per object: a delayed parent can hide a child's already-running
+entrance, so that child may first appear at rest with its parent.
 
 After painting at `t`, request another frame when `animating(t)` is true, otherwise
 wake at `next_wake(t)`. This paints the final frame without continuously polling

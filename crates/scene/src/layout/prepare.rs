@@ -133,10 +133,7 @@ pub fn prepare(
                 explicit_pos.insert(anim.target.clone());
             }
             let motion = work::motion(anim, slot, &ticket.step)?;
-            motions
-                .entry((anim.target.clone(), work::property(anim.track)))
-                .and_modify(|previous: &mut work::Motion| *previous = previous.peak(motion))
-                .or_insert(motion);
+            motions.insert((anim.target.clone(), work::property(anim.track)), motion);
         }
     }
     for (id, object) in &mut after.objects {

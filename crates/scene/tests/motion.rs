@@ -498,6 +498,21 @@ fn finished_tracks_frame_the_same_live_and_after_a_cut() {
         sample(&recovered, 300).items(),
         "rest equals the finished tracks"
     );
+    let (state, layout) = kumochi_scene::layout::recover(
+        scene.header().clone(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure,
+        &AtomicBool::new(false),
+    )
+    .expect("replay the original steps and cut");
+    let replayed = SceneView::new(&layout, state.activated());
+    assert_eq!(
+        live.items(),
+        sample(&replayed, 300).items(),
+        "logged recovery replays the same final color, draw and yoyo values"
+    );
     let shape = &live.items()[0];
     assert_eq!(
         shape.draw.to_bits(),

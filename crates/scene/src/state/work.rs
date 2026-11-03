@@ -328,9 +328,6 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
     if period == 0 && anim.repeat != 0 {
         return Err(fail("repeat", ErrorCode::OutOfRange));
     }
-    if anim.repeat == -1 && period + anim.delay.unwrap_or_default().get() > MAX_MOTION_MS {
-        return Err(fail("repeat", ErrorCode::OutOfRange));
-    }
     if anim.repeat > i32::try_from(MAX_MOTION_MS - 1).expect("motion cap fits i32") {
         return Err(fail("repeat", ErrorCode::OutOfRange));
     }
