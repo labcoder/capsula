@@ -35,6 +35,10 @@ field. Cancelling a field while its save is in flight leaves that draft and save
 Disconnect drops all in-flight slots; the replacement connection must first supply its view
 before new saves are available. A late answer from another generation is ignored.
 
+The **Max frame rate** radio group sends its choice at once and shows it when the brain
+answers; its slot in the FIFO belongs to no field, so its answer completes no field and its
+refusal marks none. Choosing the current value sends nothing. See [frame rate](frame-rate.md).
+
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also
 dismisses it. The status panel is hidden while Settings is open; close Settings to reach Retry
@@ -55,6 +59,7 @@ the [user guide](../user/settings.md).
 | `assistant_name` | 1–24 characters | `Kumo` |
 | `user_name` | 1–24 characters, or absent | absent (unset) |
 | `onboarded` | boolean | `false` |
+| `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
 
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
 both sides: trimmed, 1–24 Unicode scalar values, one line, with no control characters and no

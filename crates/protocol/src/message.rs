@@ -27,7 +27,10 @@ pub use scenes::{
     MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_SCENE_STAGING_BYTES, SceneCut, SceneCuts,
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
-pub use settings::{AssistantName, MAX_NAME_CHARS, NameError, SettingsOp, SettingsView, UserName};
+pub use settings::{
+    AssistantName, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp, SettingsView,
+    UserName,
+};
 pub use threads::{
     Effort, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelSlug, SlugError, ThreadKind,
     ThreadOp, ThreadTitle,

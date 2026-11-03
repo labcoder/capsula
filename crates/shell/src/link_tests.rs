@@ -141,6 +141,7 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         user_name: None,
         onboarded: true,
         main_thread: ThreadId(9),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
     };
     frame::write(
         &mut &link.control,
