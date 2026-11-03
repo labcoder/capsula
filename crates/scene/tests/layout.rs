@@ -1810,3 +1810,68 @@ fn measure_prepare_table_at_column_and_row_caps() {
         "prepare_table_8x40_400chars samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
     );
 }
+
+#[test]
+#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+fn measure_prepare_twelve_tables_at_row_and_column_caps() {
+    let mut samples = Vec::new();
+    for iteration in 0..69 {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let mut layout = LayoutState::new(&scene);
+        let mut measure = Measure::default();
+        for table in 0..12 {
+            let mut put = vec![
+                json!({"table":{"id":format!("t{table}"),"box":[0,table*1500,1000,1000],"cols":vec!["C";8]}}),
+            ];
+            put.extend((0..40).map(|row| json!({"row":{"id":format!("r{table}_{row}"),"in":format!("t{table}"),"cells":vec!["v";8]}})));
+            let commit = committed(
+                &mut scene,
+                &mut budget,
+                json!({"id":format!("table{table}"),"put":put}),
+            );
+            layout = picture(&scene, commit, &layout, &mut measure)
+                .expect("table fixture")
+                .after;
+        }
+        assert_eq!(
+            scene.usage().cells,
+            3840,
+            "the fixture occupies twelve bounded tables"
+        );
+        let set: Vec<_> = (0..12)
+            .map(|table| json!({"target":format!("r{table}_0"),"color":"red"}))
+            .collect();
+        let commit = committed(&mut scene, &mut budget, json!({"id":"update","set":set}));
+        let input = PrepareInput::new(
+            commit.preparation,
+            layout.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        measure.calls.clear();
+        let start = std::time::Instant::now();
+        let result = std::hint::black_box(prepare(
+            std::hint::black_box(input),
+            &mut measure,
+            &AtomicBool::new(false),
+        ))
+        .expect("many-table update");
+        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+        result.validate(&scene, &layout).expect("current result");
+        assert_eq!(
+            result.display.items.len(),
+            492,
+            "all twelve table headers and 480 rows are replaced"
+        );
+        if iteration >= 5 {
+            samples.push(elapsed);
+        }
+    }
+    let mean = samples.iter().sum::<f64>() / 64.0;
+    let maximum = samples.into_iter().fold(0.0_f64, f64::max);
+    println!(
+        "prepare_12_tables_40x8_short samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
+    );
+}
