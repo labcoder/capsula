@@ -7,7 +7,7 @@ mod pipe;
 mod process;
 mod root_store;
 
-pub use credential::WindowsCredentialStore;
+pub(crate) use credential::WindowsCredentialStore;
 pub use fs::{free_space, links_unsupported, replace_file};
 pub use job::{Helper, Job};
 pub use pipe::{Instance, PipeServer, client_image, create_owner_only, session_id};
