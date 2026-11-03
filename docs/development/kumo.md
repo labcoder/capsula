@@ -81,3 +81,23 @@ owned, for a soft ramp and for the rendered body at 48 and 84 px drawn at 1.0, 1
 2.0 scale and at a size between, and each owned row stays within `ceil(scale) + 2` pixels of
 the sampled edge. They also cover the inclusive cutoff, empty images and placements, and a
 single texel.
+
+## Expressions
+
+`expression.rs`'s `Animator` turns a `Mood` (idle, listening, thinking, speaking) into frames.
+Each mood is a target pose, a set of eye, lid, gaze and inner-light numbers, and a mood change
+eases every number toward it, so any mood can follow any other.
+
+Kumo is still unless something engages it. `engage` (hover, listening or speaking beginning)
+starts one blink, and `disengage` cuts a blink under way. Listening and speaking move
+continuously while they last: the body breathes and squashes with the voice level, the light
+orbits, and blinks recur on a seeded schedule. Idle and thinking hold their pose. There's no
+idle timer: `is_animating` says whether the next frame differs, and the owner asks GPUI for a
+frame only while it's true, so a settled Kumo costs nothing. `set_motion(Motion::Reduced)`
+follows the operating system's reduced-motion setting: each mood shows its static pose, a blink
+under way stops at once, and nothing moves.
+
+Tests cover a minute of idle asking for no frame, exactly one blink per engagement,
+disengaging mid-blink, reduced motion with and without a voice, turning it on mid-blink and off
+again, a voice mood moving and blinking over a long turn, and a mood change easing and then
+settling.

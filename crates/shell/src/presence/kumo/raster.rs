@@ -384,6 +384,25 @@ mod tests {
     }
 
     #[test]
+    fn outer_rows_and_columns_are_empty_without_the_shadow() {
+        let size = 48;
+        let look = Look {
+            shadow: false,
+            ..Look::default()
+        };
+        let renderer = Renderer::new(&Silhouette::emoji(), size, look);
+        let mut out = vec![0; renderer.image_len()];
+        renderer
+            .render(&FrameState::IDLE, &mut out)
+            .expect("the buffer is the renderer's size");
+        for k in 0..size {
+            for (i, j) in [(k, 0), (k, size - 1), (0, k), (size - 1, k)] {
+                assert_eq!(out[index(size, i, j) * 4 + 3], 0, "edge pixel {i},{j}");
+            }
+        }
+    }
+
+    #[test]
     fn corners_are_clear_and_the_middle_is_opaque() {
         let out = rendered(48);
         for (i, j) in [(0, 0), (47, 0)] {
@@ -399,11 +418,8 @@ mod tests {
         let eye = FrameState::IDLE.eyes[0].center;
         let at = FRAMING.to_pixel(size, eye);
         let px = &out[index(size, pixel(at.x), pixel(at.y)) * 4..][..4];
-        // The theme's eye ink is 0x353A5E: BGR 5E 3A 35.
-        assert_eq!(px[3], 255, "the eye sits on opaque body");
-        for (got, want) in px[..3].iter().zip([0x5E_u8, 0x3A, 0x35]) {
-            assert!(got.abs_diff(want) <= 8, "eye pixel {px:?}");
-        }
+        // The theme's eye ink is 0x353A5E, fully opaque: BGRA 5E 3A 35 FF.
+        assert_eq!(px, &[0x5E, 0x3A, 0x35, 0xFF]);
     }
 
     #[test]
