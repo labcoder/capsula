@@ -3,24 +3,53 @@
 //! unused, and Cargo only warns, so the patched behavior would quietly disappear.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 
 pub(crate) fn run() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .context("xtask lives inside the workspace")?;
-    let lock = fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut checked = 0;
     for entry in fs::read_dir(root.join("vendor")).context("reading vendor/")? {
-        let manifest_path = entry?.path().join("Cargo.toml");
+        let dir = entry?.path();
+        let manifest_path = dir.join("Cargo.toml");
         let manifest = fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?;
         let (name, version) = package_id(&manifest)
             .with_context(|| format!("{} names no package and version", manifest_path.display()))?;
-        check_resolved(&lock, name, version)?;
-        println!("{name} {version}: built from vendor/");
+        let output = Command::new(&cargo)
+            .args(["pkgid", "--locked", name])
+            .current_dir(root)
+            .output()
+            .context("running cargo pkgid")?;
+        ensure!(
+            output.status.success(),
+            "Cargo.lock must hold exactly one {name}, built from vendor/: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let pkgid = String::from_utf8_lossy(&output.stdout);
+        let (path, locked) = path_source(pkgid.trim()).with_context(|| {
+            format!(
+                "Cargo takes {name} from {}, not vendor/: re-vendor it at the version the \
+                 dependency graph asks for (docs/development/gpui-patch.md)",
+                pkgid.trim()
+            )
+        })?;
+        ensure!(
+            fs::canonicalize(&path).ok() == Some(fs::canonicalize(&dir)?),
+            "Cargo builds {name} from {}, not {}",
+            path.display(),
+            dir.display()
+        );
+        ensure!(
+            locked == version,
+            "Cargo builds {name} {locked}, but vendor/ holds {version}"
+        );
+        println!("{name} {version}: built from {}", dir.display());
         checked += 1;
     }
     if checked == 0 {
@@ -29,38 +58,23 @@ pub(crate) fn run() -> Result<()> {
     Ok(())
 }
 
+/// The directory and version of a `path+file://` package id, as `cargo pkgid` prints it.
+fn path_source(pkgid: &str) -> Option<(PathBuf, &str)> {
+    let (url, fragment) = pkgid.strip_prefix("path+file://")?.split_once('#')?;
+    let version = fragment.rsplit('@').next()?;
+    let path = match url.strip_prefix('/') {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest,
+        _ => url,
+    };
+    Some((PathBuf::from(path), version))
+}
+
 /// The name and version in a manifest's `[package]` table.
 fn package_id(manifest: &str) -> Option<(&str, &str)> {
     let package = manifest
         .split("\n[")
         .find_map(|table| table.strip_prefix("package]"))?;
     Some((value(package, "name")?, value(package, "version")?))
-}
-
-/// Checks that Cargo.lock holds exactly one `name`, at `version`, with no source: a path package.
-fn check_resolved(lock: &str, name: &str, version: &str) -> Result<()> {
-    let packages: Vec<&str> = lock
-        .split("[[package]]")
-        .skip(1)
-        .filter(|package| value(package, "name") == Some(name))
-        .collect();
-    let [package] = packages.as_slice() else {
-        bail!(
-            "Cargo.lock holds {} packages named {name}; it must hold only vendor/'s {version}",
-            packages.len()
-        );
-    };
-    if let Some(source) = value(package, "source") {
-        bail!(
-            "Cargo.lock takes {name} from {source}, not vendor/: re-vendor it at the version the \
-             dependency graph asks for (docs/development/gpui-patch.md)"
-        );
-    }
-    let locked = value(package, "version").unwrap_or("none");
-    if locked != version {
-        bail!("Cargo.lock holds {name} {locked}, but vendor/ holds {version}");
-    }
-    Ok(())
 }
 
 /// The string value of `key = "..."` in a TOML table, read line by line.
@@ -78,47 +92,38 @@ fn value<'a>(table: &'a str, key: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_resolved, package_id};
+    use std::path::PathBuf;
 
-    const VENDORED: &str = "[[package]]\nname = \"gpui-pre-windows\"\nversion = \"0.3.10\"\ndependencies = [\n \"windows 0.62.2\",\n]\n";
-    const REGISTRY: &str = "[[package]]\nname = \"gpui-pre-windows\"\nversion = \"0.3.10\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
-    const OTHER: &str = "[[package]]\nname = \"gpui-pre-windows-extra\"\nversion = \"0.3.10\"\n";
-
-    fn error(lock: &str, version: &str) -> String {
-        check_resolved(lock, "gpui-pre-windows", version)
-            .unwrap_err()
-            .to_string()
-    }
+    use super::{package_id, path_source};
 
     #[test]
-    fn a_single_path_package_at_the_vendored_version_passes() {
-        let lock = format!("version = 4\n\n{OTHER}\n{VENDORED}");
-        assert!(check_resolved(&lock, "gpui-pre-windows", "0.3.10").is_ok());
-    }
-
-    #[test]
-    fn a_registry_copy_means_the_patch_stopped_applying() {
+    fn a_path_package_id_gives_its_directory_and_version() {
         assert_eq!(
-            error(REGISTRY, "0.3.10"),
-            "Cargo.lock takes gpui-pre-windows from registry+https://github.com/rust-lang/crates.io-index, \
-             not vendor/: re-vendor it at the version the dependency graph asks for \
-             (docs/development/gpui-patch.md)"
+            path_source("path+file:///C:/dev/capsula/vendor/gpui-pre-windows#0.3.10"),
+            Some((
+                PathBuf::from("C:/dev/capsula/vendor/gpui-pre-windows"),
+                "0.3.10"
+            ))
+        );
+        assert_eq!(
+            path_source("path+file:///home/k/capsula/vendor/gpui#gpui-pre-windows@0.3.10"),
+            Some((PathBuf::from("/home/k/capsula/vendor/gpui"), "0.3.10"))
         );
     }
 
     #[test]
-    fn a_missing_duplicate_or_mismatched_package_fails() {
+    fn a_registry_or_git_package_id_is_not_vendored() {
         assert_eq!(
-            error(OTHER, "0.3.10"),
-            "Cargo.lock holds 0 packages named gpui-pre-windows; it must hold only vendor/'s 0.3.10"
+            path_source(
+                "registry+https://github.com/rust-lang/crates.io-index#gpui-pre-windows@0.3.10"
+            ),
+            None
         );
         assert_eq!(
-            error(&format!("{VENDORED}{REGISTRY}"), "0.3.10"),
-            "Cargo.lock holds 2 packages named gpui-pre-windows; it must hold only vendor/'s 0.3.10"
-        );
-        assert_eq!(
-            error(VENDORED, "0.3.11"),
-            "Cargo.lock holds gpui-pre-windows 0.3.10, but vendor/ holds 0.3.11"
+            path_source(
+                "git+https://github.com/zed-industries/zed?rev=08cbb88#gpui-pre-windows@0.3.10"
+            ),
+            None
         );
     }
 
