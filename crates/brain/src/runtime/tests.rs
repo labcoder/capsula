@@ -24,6 +24,8 @@ use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
+#[path = "account_tests.rs"]
+mod accounts;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]
@@ -80,7 +82,7 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
         }),
     ];
     for (message, expected) in messages.into_iter().zip(expected) {
-        assert_eq!(super::control_input(message), Ok(Some(expected)));
+        assert_eq!(super::controls::control_input(message), Ok(Some(expected)));
     }
 }
 
@@ -147,6 +149,16 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         .await;
     }
 
+    /// The next control frame other than an account view, which every connection sends.
+    async fn unaccounted(&mut self) -> std::io::Result<Option<ControlToShell>> {
+        loop {
+            match ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control).await {
+                Ok(Some(ControlToShell::Account(_))) => {}
+                other => return other.map_err(std::io::Error::other),
+            }
+        }
+    }
+
     async fn send(&mut self, message: &ControlToBrain) {
         let frame = frame::encode(message, Pipe::Control).expect("encodes");
         self.control_out.write_all(&frame).await.expect("sent");
@@ -174,6 +186,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
+                Some(ControlToShell::Account(_)) => {}
                 other => return other,
             }
         }
@@ -203,6 +216,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
                 ControlToShell::Settings { view, .. } => self.views.push(view),
+                ControlToShell::Account(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -325,6 +339,7 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         scenes,
         Box::new(fixture),
         scratch.config(),
+        crate::test_support::accounts(scratch),
     )
     .expect("brain")
 }

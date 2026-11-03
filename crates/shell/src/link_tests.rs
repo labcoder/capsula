@@ -10,13 +10,125 @@ use kumochi_protocol::message::{
     ThreadId,
 };
 
-use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
 use crate::platform::{PipeClient, test_pair};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
     EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadKind, ThreadRow,
 };
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real pipe connection exercises every typed scene frame family"
+)]
+fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
+    use kumochi_protocol::message::{SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk};
+    use kumochi_scene::{Record, SceneEvent, StopCut, parse_record, text::Bounded};
+
+    let link = attended("typed-scenes");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let scene = SceneId(7);
+    let descriptors = Bounded::new(vec![
+        SceneDescriptorV1::new(scene, 1, 1, 1).expect("descriptor"),
+    ])
+    .expect("one scene");
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::ScenesV1 {
+            scenes: descriptors.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("membership written");
+    let LinkEvent::ScenesV1 { generation, scenes } = next(&events) else {
+        panic!("typed membership")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(scenes, descriptors);
+    let Record::Begin(begin) = parse_record(
+        br#"{"begin":{"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"}}"#,
+    )
+    .expect("header") else {
+        panic!("begin")
+    };
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"private-step"}}"#).expect("step")
+    else {
+        panic!("step")
+    };
+    let header = SceneHeader {
+        begin,
+        layout_version: 1,
+    };
+    let frames = [
+        DataToShell::SceneBegin {
+            scene,
+            header: header.clone(),
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(3),
+            scene,
+            index: 0,
+            step: step.clone(),
+        },
+        DataToShell::SceneSnapshotV1 {
+            chunk: SceneSnapshotChunk {
+                scene,
+                revision: 1,
+                ordinal: 0,
+                header: Some(header),
+                events: Bounded::new(vec![SceneEvent::Step {
+                    revision: 1,
+                    step: Arc::new(step),
+                }])
+                .expect("event"),
+                last: true,
+            },
+        },
+        DataToShell::SceneCutApplied {
+            scene,
+            revision: 1,
+            cut: StopCut {
+                activated: 1,
+                revealed: Bounded::default(),
+            },
+        },
+        DataToShell::SceneEnd {
+            run: RunId(3),
+            scene,
+            complete: true,
+        },
+        DataToShell::ScenesRemoved {
+            scenes: vec![scene],
+        },
+    ];
+    for sent in frames {
+        frame::write(&mut &*link.data, &sent, Pipe::Data).expect("typed frame written");
+        let LinkEvent::Data {
+            generation,
+            message,
+            bytes,
+        } = next(&events)
+        else {
+            panic!("typed data")
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(message, sent);
+        assert_eq!(
+            usize::try_from(bytes).expect("frame size"),
+            frame::encode(&sent, Pipe::Data).expect("frame").len()
+        );
+        session.grant(bytes);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("credit"),
+            Some(DataToBrain::Credit { bytes })
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
 
 #[test]
 fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
@@ -363,6 +475,73 @@ fn a_repeated_handshake_ends_the_connection() {
         Ok(None)
     ));
     assert!(link.link.join().expect("joined"));
+}
+
+/// A connection's first frames in the order the brain sends them, which its tap test pins:
+/// the handshake takes Welcome, and the link passes Settings and Scenes on around the account
+/// view without ending the connection.
+#[test]
+fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
+    use kumochi_protocol::message::{AccountView, AssistantName, SettingsView};
+    let (control, shell_control) = pair("first-frames-control");
+    let (_data, shell_data) = pair("first-frames-data");
+    control.set_timeout(Some(PATIENCE));
+    let view = SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(9),
+    };
+    for message in [
+        ControlToShell::Welcome {
+            incarnation: Incarnation(4),
+        },
+        ControlToShell::Settings {
+            answer: false,
+            view: view.clone(),
+        },
+        ControlToShell::Account(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        }),
+        ControlToShell::Scenes { scenes: Vec::new() },
+    ] {
+        frame::write(&mut &control, &message, Pipe::Control).expect("written");
+    }
+    let incarnation = welcome(&shell_control).expect("the handshake takes Welcome");
+    assert_eq!(incarnation, Incarnation(4));
+    let (sender, events) = async_channel::unbounded();
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        shared: Arc::new(Shared::default()),
+    };
+    let (_handle, start) = start(link, sender);
+    let connection = Connection {
+        control: Arc::new(shell_control),
+        data: Arc::new(shell_data),
+        incarnation,
+    };
+    let link = thread::spawn(move || start.link.attend(connection, &start.events));
+    let events = patient(events);
+    let _session = connected(next(&events));
+    let LinkEvent::Settings {
+        view: shown,
+        answer: false,
+        ..
+    } = next(&events)
+    else {
+        panic!("settings first");
+    };
+    assert_eq!(shown, view);
+    let LinkEvent::Scenes(scenes) = next(&events) else {
+        panic!("scenes after the account view");
+    };
+    assert!(scenes.is_empty());
+    frame::write(&mut &control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    let pong = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
+    assert_eq!(pong.expect("still connected"), Some(ControlToBrain::Pong));
+    drop(control);
+    assert!(link.join().expect("joined"));
 }
 
 #[test]

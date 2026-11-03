@@ -831,6 +831,16 @@ impl SceneState {
         }
         Ok((scenes, global))
     }
+
+    /// Charges an unbound recovered scene to a batch budget, changing neither on rejection.
+    pub(crate) fn bind(&mut self, global: &mut GlobalBudget) -> Result<(), StepError> {
+        self.check_context(global)?;
+        global
+            .check(self.bound_usage(), self.usage)
+            .map_err(StepError::new)?;
+        self.apply_usage(global, self.usage);
+        Ok(())
+    }
 }
 
 /// A per-call begin/step/end guard; scenes themselves can span many calls.

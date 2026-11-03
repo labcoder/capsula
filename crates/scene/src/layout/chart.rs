@@ -2,7 +2,7 @@ mod axis;
 
 use super::{
     PrepareError,
-    primitives::Build,
+    primitives::{Build, invariant},
     state::{LayoutState, Placed},
 };
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
 };
 use axis::{Domain, header};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     sync::Arc,
 };
@@ -67,10 +67,35 @@ pub(super) struct Basis {
     baselines: Box<[[f64; 2]]>,
     pie: Option<[f64; 2]>,
 }
+impl Basis {
+    fn bytes(&self) -> usize {
+        size_of::<Self>() + self.baselines.len() * size_of::<[f64; 2]>()
+    }
+}
 impl fmt::Debug for Basis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ChartBasis { .. }")
     }
+}
+/// Bytes the distinct chart bases in `state` retain, each shared plot counted once.
+pub(super) fn retained_bytes(state: &LayoutState) -> usize {
+    let mut bases = HashSet::new();
+    let mut plots = HashSet::new();
+    let mut bytes = 0;
+    for basis in state
+        .objects
+        .values()
+        .filter_map(|object| object.chart_basis.as_ref())
+    {
+        if !bases.insert(Arc::as_ptr(basis)) {
+            continue;
+        }
+        bytes += basis.bytes();
+        if plots.insert(Arc::as_ptr(&basis.plot)) {
+            bytes += basis.plot.payload_bytes();
+        }
+    }
+    bytes
 }
 struct Drawing {
     bounds: Rect,
@@ -147,9 +172,12 @@ fn color(series: &Series, palette: usize, build: &Build<'_>) -> Paint {
 
 fn pie_label(category: Option<&Text>, share: f64) -> Result<Text, PrepareError> {
     let percent = format!("{:.0}%", share * 100.0);
-    let label = category.map_or_else(|| percent.clone(), |c| format!("{} {percent}", c.as_str()));
+    let Some(category) = category else {
+        return Ok(percent.try_into()?);
+    };
+    let label = format!("{} {percent}", category.as_str());
     if label.chars().count() > crate::limits::MAX_TEXT_CHARS {
-        return Ok(category.ok_or(PrepareError::Stale)?.clone());
+        return Ok(category.clone());
     }
     Ok(label.try_into()?)
 }
@@ -352,13 +380,13 @@ pub(super) fn place(
                 dirty.insert(*handle);
             }
             Op::Series(series) => {
-                if let Some(old) = state
+                if let Some(basis) = state
                     .objects
                     .get(id)
-                    .filter(|o| o.item.parent.is_none() && o.chart_basis.is_some())
+                    .filter(|o| o.item.parent.is_none())
+                    .and_then(|o| o.chart_basis.clone())
                 {
                     // shortcut: clips to the frozen domain, until a standalone refit exists.
-                    let basis = Arc::clone(old.chart_basis.as_ref().ok_or(PrepareError::Stale)?);
                     let drawing = draw(series, &basis, build)?;
                     install(
                         state,
@@ -375,7 +403,7 @@ pub(super) fn place(
                             .parent
                             .as_ref()
                             .and_then(|id| state.handle(id))
-                            .ok_or(PrepareError::Stale)?,
+                            .ok_or_else(invariant)?,
                     );
                 }
             }
@@ -412,15 +440,11 @@ fn series_members(
     removed: &[Handle],
     handle: Handle,
 ) -> Result<SeriesMembers, PrepareError> {
-    let id = state
-        .handles
-        .get(&handle)
-        .ok_or(PrepareError::Stale)?
-        .clone();
-    let old = state.objects.get(&id).ok_or(PrepareError::Stale)?;
+    let id = state.handles.get(&handle).ok_or_else(invariant)?.clone();
+    let old = state.objects.get(&id).ok_or_else(invariant)?;
     let source = Arc::clone(sources.get(&id).map_or(&old.source, |(_, s)| s));
     let Op::Chart(chart) = &*source else {
-        return Err(PrepareError::Stale);
+        return Err(invariant());
     };
     let mut members: BTreeMap<_, _> = state
         .objects
@@ -461,7 +485,7 @@ fn reflow(
     build.check_cancel()?;
     let prefix = series_members(sources, state, removed, handle)?;
     let Op::Chart(chart) = &*prefix.source else {
-        return Err(PrepareError::Stale);
+        return Err(invariant());
     };
     let series: Vec<_> = prefix
         .members
@@ -517,7 +541,7 @@ fn reflow(
     let mut palette = 0;
     for (h, (id, source)) in prefix.members {
         let Op::Series(series) = &*source else {
-            return Err(PrepareError::Stale);
+            return Err(invariant());
         };
         let mut baselines = Vec::new();
         if chart.kind == ChartKind::Bar && chart.stacked {
@@ -554,7 +578,7 @@ fn reflow(
             1
         };
         angle += span;
-        bytes += size_of::<Basis>() + basis.baselines.len() * size_of::<[f64; 2]>();
+        bytes += basis.bytes();
         let drawing = draw(series, &basis, build)?;
         install(state, id, source, h, Some(handle), drawing, Some(basis));
     }
@@ -873,7 +897,9 @@ mod tests {
         let before = LayoutState::new(&scene);
         let [c, s, t]: [WireId; 3] =
             ["c", "s", "t"].map(|id| id.to_owned().try_into().expect("id"));
-        let index = size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3;
+        // Each one-byte id has two heap copies; a series source owns its id, "c" and two points.
+        let index = size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3 + 2;
+        let series = size_of::<Op>() + 2 + 2 * size_of::<Point>();
         let full = 18 * size_of::<Prim>()
             + 12 * size_of::<Vec2>()
             + 10
@@ -902,7 +928,11 @@ mod tests {
             &before,
             r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300],"opacity":0.5,"categories":["ab","c"],"x":{"min":-0.5,"max":1.5},"y":{"min":-5,"max":5}}},{"series":{"id":"s","in":"c","opacity":0.5,"data":[1,2]}},{"series":{"id":"t","in":"c","data":[2,1]}},{"anim":{"target":"s","track":"opacity","keys":[[0,0.75]]}}]}}"#,
         );
-        assert_eq!(first.resident_bytes, full);
+        assert_eq!(
+            first.resident_bytes,
+            full + size_of::<Op>() + 4 + 2 * size_of::<Text>() + 2 * series,
+            "the chart source owns its id, two category texts and their three bytes"
+        );
         let initial = bases(&first.after);
         assert!(
             Arc::ptr_eq(&initial[0].plot, &initial[1].plot),
@@ -919,7 +949,7 @@ mod tests {
             &first.after,
             r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
         );
-        assert_eq!(second.resident_bytes, full);
+        assert_eq!(second.resident_bytes, full + series);
         let refit = bases(&second.after);
         assert!(
             !Arc::ptr_eq(&initial[0], &refit[0])
@@ -956,7 +986,10 @@ mod tests {
             &detached,
             r#"{"step":{"id":"data","put":[{"anim":{"target":"s","track":"opacity","keys":[[0,0.25]]}}],"set":[{"target":"s","data":[2,1]}]}}"#,
         );
-        assert_eq!(next.resident_bytes, 2 * size_of::<Prim>() + 2 * index);
+        assert_eq!(
+            next.resident_bytes,
+            2 * size_of::<Prim>() + 2 * index + series
+        );
         let kept = bases(&next.after);
         assert!(
             Arc::ptr_eq(&kept[0], &frozen[0]) && Arc::ptr_eq(&kept[1], &frozen[1]),

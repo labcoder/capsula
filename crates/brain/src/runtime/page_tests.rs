@@ -9,7 +9,9 @@ use crate::runtime::DATA_CAP;
 fn preamble(frame: &[u8]) -> bool {
     matches!(
         frame::decode::<ControlToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
-        ControlToShell::Scenes { .. } | ControlToShell::Settings { .. }
+        ControlToShell::Scenes { .. }
+            | ControlToShell::Settings { .. }
+            | ControlToShell::Account(_)
     )
 }
 
@@ -201,7 +203,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         );
         turns_tx.send((None, "go".to_owned())).await.expect("turn");
         let mut bytes = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             bytes = timeout(PATIENCE, control.recv())
                 .await
                 .expect("state")
@@ -506,6 +508,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         Vec::new(),
         Box::new(Fixture::parse("").expect("fixture")),
         scratch.config(),
+        crate::test_support::accounts(&scratch),
     )
     .expect("brain");
     let ((control, data), mut shell) = duplex();

@@ -507,7 +507,9 @@ impl Runs {
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
-            | DataToShell::SceneEnd { .. } => {}
+            | DataToShell::SceneEnd { .. } => {
+                // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
+            }
         }
     }
 
@@ -567,7 +569,10 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         | DataToShell::SceneStepCommit { .. }
         | DataToShell::SceneSnapshotV1 { .. }
         | DataToShell::SceneCutApplied { .. }
-        | DataToShell::SceneEnd { .. } => None,
+        | DataToShell::SceneEnd { .. } => {
+            // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
+            None
+        }
     }
 }
 
