@@ -761,6 +761,61 @@ fn an_older_run_ending_never_settles_a_newer_one() {
 }
 
 #[test]
+fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() {
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    runs.select_thread(None);
+    let revision = runs.revision();
+    let mut sent = Vec::new();
+    runs.submit("one", |turn| {
+        sent.push(turn);
+        true
+    })
+    .expect("first new turn sent");
+    assert_eq!(
+        runs.submit("two", |turn| {
+            sent.push(turn);
+            true
+        }),
+        Err(Refused::Busy)
+    );
+    assert_eq!(
+        sent,
+        [DataToBrain::TextSubmit {
+            thread: None,
+            text: "one".to_owned(),
+        }]
+    );
+    assert_eq!(runs.submitted.len(), 1);
+    assert_eq!(runs.target(), Target::New);
+    assert_eq!(runs.revision(), revision);
+
+    runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
+    assert_eq!(runs.target(), Target::Task(ThreadId(11)));
+    assert!(runs.submitted.is_empty());
+    assert_eq!(runs.revision(), revision);
+    runs.submit("two", |turn| {
+        sent.push(turn);
+        true
+    })
+    .expect("retry continues the adopted task");
+    assert_eq!(
+        sent,
+        [
+            DataToBrain::TextSubmit {
+                thread: None,
+                text: "one".to_owned(),
+            },
+            DataToBrain::TextSubmit {
+                thread: Some(ThreadId(11)),
+                text: "two".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn only_a_newer_run_sets_the_next_turn_s_thread() {
     let mut runs = Runs::default();
     runs.connected(1);

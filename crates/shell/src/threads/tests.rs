@@ -226,6 +226,31 @@ fn loaded() -> Threads {
 }
 
 #[test]
+fn programmatic_view_changes_and_reopening_keep_the_highlight_in_sync() {
+    let mut state = loaded();
+    state.select(Some(ThreadId(2)));
+    assert_eq!(state.selected_index(), Some(1));
+    state.select(Some(ThreadId(3)));
+    assert_eq!(state.selected_index(), Some(0));
+    state.hide();
+    assert_eq!(state.open, None);
+    assert_eq!(state.selected_index(), None);
+    state.show();
+    assert_eq!(state.selected_index(), None);
+}
+
+#[test]
+fn rename_requires_a_connected_row_that_is_not_deleting() {
+    let mut state = loaded();
+    assert!(state.can_rename(ThreadId(3)));
+    state.deleting.push(ThreadId(3));
+    assert!(!state.can_rename(ThreadId(3)));
+    assert!(state.can_rename(ThreadId(2)));
+    state.disconnected();
+    assert!(!state.can_rename(ThreadId(2)));
+}
+
+#[test]
 fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     let mut state = Threads::default();
     state.show();

@@ -29,7 +29,7 @@ pub(crate) enum Refused {
     Blank,
     /// Longer than a data frame can carry.
     TooLong,
-    /// So many turns are unanswered that one more could make the brain end the connection.
+    /// The turn queue is full, or a New target still awaits its first run state.
     Busy,
     /// No brain to send it to.
     Offline,
@@ -163,6 +163,9 @@ impl Runs {
         if !self.connected || self.main.is_none() {
             return Err(Refused::Offline);
         }
+        if self.target == Target::New && self.submitted.contains(&self.revision) {
+            return Err(Refused::Busy);
+        }
         Ok((
             DataToBrain::TextSubmit {
                 thread: self.thread(),
@@ -295,8 +298,8 @@ impl Runs {
         &self.deleting
     }
 
-    /// The user confirmed deleting `thread`: it takes a slot, and the next turn no longer
-    /// continues it. False when every slot is held or it already holds one.
+    /// The user confirmed deleting `thread`: it takes a slot and returns input to Kumo if
+    /// this was the target. False when every slot is held or it already holds one.
     pub(crate) fn confirm_delete(&mut self, thread: ThreadId) -> bool {
         if !self.can_delete() || self.holds(thread) {
             return false;
@@ -401,7 +404,7 @@ impl Runs {
 
     /// A `RunState`. A run newer than any before answers the oldest pending turn exactly once,
     /// fenced or not, and is fenced before any of its output is applied if Esc cancelled that
-    /// turn. Only such a run sets the next thread, and never over a later explicit selection.
+    /// turn. Only a pending turn at the current revision can adopt a New target's thread.
     pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) -> Applied {
         let mut applied = Applied::default();
         if run > self.answered {

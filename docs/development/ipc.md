@@ -90,9 +90,12 @@ flowchart LR
 - **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
   shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
-  them breaks the connection like any malformed frame. The shell shows the text in the typing
-  panel and on the dock until the next turn is sent. A new key goes at the end of `ErrorKey`
-  and gets its catalog id in `strings.rs`'s `error_id`.
+  them breaks the connection like any malformed frame. The shell retains brain errors in one
+  field, shown in the typing panel, tasks panel and dock until a turn is successfully sent.
+  A failed submit leaves that error intact. Local submission refusals are separate, shown only
+  in the typing panel in preference to the retained brain error. Reconnecting or accepting a
+  `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
+  the end of `ErrorKey` and gets its catalog id in `strings.rs`'s `error_id`.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,

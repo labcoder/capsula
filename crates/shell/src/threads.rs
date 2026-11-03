@@ -87,6 +87,15 @@ impl std::fmt::Debug for Threads {
 }
 
 impl Threads {
+    pub(crate) fn selected_index(&self) -> Option<usize> {
+        self.open
+            .and_then(|thread| self.rows.iter().position(|row| row.id == thread))
+    }
+
+    pub(crate) fn can_rename(&self, thread: ThreadId) -> bool {
+        self.connected && !self.deleting.contains(&thread)
+    }
+
     pub(crate) fn set_settings(&mut self, settings: SettingsView) {
         self.settings = Some(settings);
     }

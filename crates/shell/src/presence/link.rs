@@ -3,8 +3,13 @@
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
+use crate::settings::Update;
 use crate::strings::Strings;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
+
+fn current_generation(current: Option<u64>, received: u64) -> bool {
+    current == Some(received)
+}
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.
@@ -28,7 +33,16 @@ impl Presence {
                     view,
                     answer,
                 } => {
-                    self.settings_changed(generation, view, answer, cx);
+                    self.settings_changed(
+                        generation,
+                        view,
+                        if answer {
+                            Update::Answer
+                        } else {
+                            Update::Unsolicited
+                        },
+                        cx,
+                    );
                 }
                 LinkEvent::RunState { run, thread, phase } => {
                     let applied = self.runs.apply_state(run, thread, phase);
@@ -48,52 +62,7 @@ impl Presence {
                     generation,
                     message,
                     bytes,
-                } => {
-                    if self
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.generation() == generation)
-                    {
-                        let credit = match message {
-                            message @ (DataToShell::ThreadList { .. }
-                            | DataToShell::Page { .. }
-                            | DataToShell::PageFailed { .. }) => {
-                                let credit = self.threads.update(cx, |state, cx| {
-                                    cx.notify();
-                                    state.receive(message, bytes)
-                                });
-                                self.request_pages(cx);
-                                credit
-                            }
-                            DataToShell::SceneSnapshot {
-                                scene,
-                                revision,
-                                chunk,
-                                last,
-                            } => {
-                                let chunk = Chunk {
-                                    scene,
-                                    revision,
-                                    steps: chunk,
-                                    last,
-                                    bytes,
-                                };
-                                match self.runs.apply_snapshot(generation, chunk) {
-                                    Ok(credit) => credit,
-                                    Err(error) => {
-                                        self.end(&error);
-                                        0
-                                    }
-                                }
-                            }
-                            DataToShell::ScenesRemoved { scenes } => {
-                                bytes.saturating_add(self.runs.remove_scenes(&scenes))
-                            }
-                            message => self.runs.apply_data(message, bytes),
-                        };
-                        self.grant(credit);
-                    }
-                }
+                } => self.data_received(generation, message, bytes, cx),
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
                     Ok(effect) => {
                         self.effect(effect);
@@ -116,44 +85,97 @@ impl Presence {
         self.runs_changed(cx)
     }
 
+    fn data_received(
+        &mut self,
+        generation: u64,
+        message: DataToShell,
+        bytes: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if current_generation(
+            self.session.as_ref().map(crate::link::Session::generation),
+            generation,
+        ) {
+            let credit = match message {
+                message @ (DataToShell::ThreadList { .. }
+                | DataToShell::Page { .. }
+                | DataToShell::PageFailed { .. }) => {
+                    let credit = self.threads.update(cx, |state, cx| {
+                        cx.notify();
+                        state.receive(message, bytes)
+                    });
+                    self.request_pages(cx);
+                    credit
+                }
+                DataToShell::SceneSnapshot {
+                    scene,
+                    revision,
+                    chunk,
+                    last,
+                } => {
+                    let chunk = Chunk {
+                        scene,
+                        revision,
+                        steps: chunk,
+                        last,
+                        bytes,
+                    };
+                    match self.runs.apply_snapshot(generation, chunk) {
+                        Ok(credit) => credit,
+                        Err(error) => {
+                            self.end(&error);
+                            0
+                        }
+                    }
+                }
+                DataToShell::ScenesRemoved { scenes } => {
+                    bytes.saturating_add(self.runs.remove_scenes(&scenes))
+                }
+                message => self.runs.apply_data(message, bytes),
+            };
+            self.grant(credit);
+        }
+    }
+
     fn settings_changed(
         &mut self,
         generation: u64,
         view: SettingsView,
-        answer: bool,
+        update: Update,
         cx: &mut Context<'_, Self>,
     ) {
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|session| session.generation() != generation)
-        {
+        if !current_generation(
+            self.session.as_ref().map(crate::link::Session::generation),
+            generation,
+        ) {
             return;
         }
         self.runs.settings(view.main_thread);
+        self.clear_refusal(cx);
+        let previous = (self.error.clone(), self.refusal);
         let completion = self.settings.update(cx, |state, cx| {
-            let completion = state.set_view(view.clone(), answer);
+            let completion = state.set_view(view.clone(), update);
             cx.notify();
             completion
         });
-        if super::settings::settle_notice(&mut self.error, &mut self.error_field, completion) {
-            self.refresh_dock(cx);
-        }
+        super::settings::settle_notice(&mut self.error, &mut self.error_field, completion);
+        self.notices_changed(&previous, cx);
         self.threads.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
         });
     }
 
-    /// Shows the brain's error in the typing panel and on the dock.
+    /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
+        let previous = (self.error.clone(), self.refusal);
         self.error_field = self.settings.update(cx, |state, cx| {
             let field = state.error(error.clone());
             cx.notify();
             field
         });
         self.error = Some(cx.global::<Strings>().error(error).into());
-        self.refresh_dock(cx);
+        self.notices_changed(&previous, cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
@@ -191,6 +213,9 @@ impl Presence {
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        if state == LinkState::Connected {
+            self.clear_refusal(cx);
+        }
         if state == LinkState::Failed {
             self.native.enable_retry();
         } else {
@@ -228,5 +253,17 @@ impl Presence {
             panel.state = state;
             cx.notify();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_generation;
+
+    #[test]
+    fn settings_views_require_the_current_connection_generation() {
+        assert!(!current_generation(Some(8), 7));
+        assert!(!current_generation(None, 7));
+        assert!(current_generation(Some(8), 8));
     }
 }

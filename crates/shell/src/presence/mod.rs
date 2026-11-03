@@ -96,9 +96,11 @@ struct Presence {
     stretch: Stretch,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
-    /// The brain's last error, on the dock while connected until the next turn is sent.
+    /// The brain's last error, until a turn is sent or its field's retry succeeds.
     error: Option<SharedString>,
     error_field: Option<Field>,
+    /// A local submission refusal, shown only in the typing panel.
+    refusal: Option<Text>,
 }
 
 impl Presence {
@@ -367,14 +369,18 @@ impl Presence {
         });
         if let Some(text) = &self.text {
             text.view.update(cx, |view, cx| {
-                view.stop = stop;
-                cx.notify();
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
             });
         }
         if let Some(panel) = &self.thread_panel {
             panel.view.update(cx, |view, cx| {
-                view.stop = stop;
-                cx.notify();
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
             });
         }
         if let Some(panel) = &self.settings_panel {
@@ -707,6 +713,35 @@ fn presence_labels(cx: &App) -> PresenceLabels {
     }
 }
 
+fn status_window(
+    events: &Sender<PresenceEvent>,
+    cx: &mut App,
+) -> Result<(AnyWindowHandle, Entity<Panel>), OpenError> {
+    let panel_events = events.clone();
+    let close_events = events.clone();
+    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
+        window.set_window_title(constants::DISPLAY_NAME);
+        window.on_window_should_close(cx, move |_, _| {
+            send(&close_events, PresenceEvent::DismissPanel);
+            false
+        });
+        cx.new(|_| Panel {
+            state: LinkState::Connecting,
+            stop: false,
+            events: panel_events,
+            threads: None,
+        })
+    })
+    .map_err(|error| OpenError::Gpui(error.into()))?;
+    let status_events = events.clone();
+    panel_window
+        .update(cx, |_, window, cx| {
+            configure_surface(window, PresenceSurface::Panel, status_events, cx)
+        })
+        .map_err(|error| OpenError::Gpui(error.into()))??;
+    Ok((panel_window, panel))
+}
+
 /// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
 /// from the first frame. The caller starts the brain link afterwards.
 pub(crate) fn open(
@@ -748,30 +783,8 @@ pub(crate) fn open(
     let stretch = Stretch::new(scale);
     let slot = [scaled(112.0, scale), scaled(48.0, scale)];
     let native = PresenceNative::new(labels, events.clone(), stretch.mask_size(slot))?;
-    let panel_events = events.clone();
-    let close_events = events.clone();
-    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
-        window.set_window_title(constants::DISPLAY_NAME);
-        window.on_window_should_close(cx, move |_, _| {
-            send(&close_events, PresenceEvent::DismissPanel);
-            false
-        });
-        cx.new(|_| Panel {
-            state: LinkState::Connecting,
-            stop: false,
-            events: panel_events,
-            threads: None,
-        })
-    })
-    .map_err(|error| OpenError::Gpui(error.into()))?;
-    let status_events = events.clone();
-    panel_window
-        .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, status_events, cx)
-        })
-        .map_err(|error| OpenError::Gpui(error.into()))??;
+    let (panel_window, panel) = status_window(&events, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let owner_gesture = Rc::clone(&gesture);
     let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
     let owner = cx.new(|cx| {
@@ -791,7 +804,7 @@ pub(crate) fn open(
             link,
             session: None,
             state: LinkState::Connecting,
-            gesture: owner_gesture,
+            gesture: Rc::clone(&gesture),
             activity: Activity::default(),
             runs: Runs::default(),
             escape_hold: EscapeHold::default(),
@@ -807,6 +820,7 @@ pub(crate) fn open(
             delete_retry: None,
             error: None,
             error_field: None,
+            refusal: None,
             stretch,
         }
     });
@@ -885,9 +899,6 @@ fn listen(
                         if this.state == LinkState::Failed {
                             this.link.retry();
                         }
-                    }
-                    PresenceEvent::DismissPanel if this.settings_open() => {
-                        this.dismiss_settings(cx)?;
                     }
                     PresenceEvent::DismissPanel if this.threads_open() => {
                         this.dismiss_threads(cx)?;
