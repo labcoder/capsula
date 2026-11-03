@@ -183,12 +183,13 @@ Pending replacements reserve each object's maximum expanded cost and the union o
 its property owners, rather than charging the same identity twice. Retirement,
 Stop and terminal `clear` return charges exactly once.
 
-Table rows charge padded cells. Charts charge every data point, reject invalid log
-domains and non-finite stacked sums, and reserve generated data motion. Diagram
-groups reserve their generated position glide; entrances and edge flow also count
-as motion owners. Repeated finite animations, including delay, must fit 60 seconds;
-infinite repeat remains bounded by the later scene deadline. A7 supplies that clock
-and the remaining property-ownership rules.
+Table rows charge padded cells. Charts charge every data point and reject invalid log
+domains and non-finite stacked sums. Only explicit tracks consume track/key budgets;
+entrances, edge flow and generated glides are bounded structurally by the live objects,
+at most two generated effects per object. Chart data changes instantly at activation.
+Repeated finite animations, including delay, must fit 60 seconds; infinite repeat must
+fit its first play and remains bounded by the scene deadline. Zero-period repetition,
+zero-period flow and duplicate same-step (target, property) tracks fail with `OutOfRange`.
 
 The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
 repetitions. It validates coordinates and counts commands before vertices exist.
@@ -242,11 +243,61 @@ palette. Host foreground/accent overrides do not change fixed named colors.
 `display` defines immutable prepared primitives and handle-tagged items. Polygon and
 polyline vertices use shared slices; painters can share prepared primitives instead
 of cloning text or path storage. Debug output summarizes counts, not drawing content
-or vertex arrays. A7 supplies sampled frames. `TextMeasure` supplies the same shaping sizes
+or vertex arrays. `motion` supplies sampled frames. `TextMeasure` supplies the same shaping sizes
 used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No
-painter or motion sampler is implemented yet.
+painter is implemented here.
+
+### Motion and the host clock
+
+`motion::SceneView` owns the activated layout and live property owners. Construct an
+at-rest view with the layout and `SceneState::activated()`, not the layout's committed
+revision: a cut can leave a higher dropped revision in that layout. Live Stop and
+recovery use this same at-rest construction. `activate` accepts only the matching
+prepared predecessor, applies removals, and rebuilds parent-first sampling order.
+It may allocate; `frame` does not allocate or lock. A caller-owned `Frame` reserves
+space for the per-scene object cap and reuses it. Its items share immutable primitive
+Arcs, so the host must clear the frame when clearing its scene.
+
+The host supplies monotonic `u64` milliseconds. Absolute additions saturate; `Ms`
+remains a bounded duration, never an absolute timestamp. Every activation establishes
+a 60-second motion deadline, independent of narration length. Delays, entrances,
+glides and repeats are clipped to that deadline. A stopped view returns only handles
+whose own entrance and every ancestor's entrance have finished, each clipped to the
+deadline; the host passes those handles into the authoritative `StopCut`.
+Entrance origins are per object: a delayed parent can hide a child's already-running
+entrance, so that child may first appear at rest with its parent.
+
+After painting at `t`, request another frame when `animating(t)` is true, otherwise
+wake at `next_wake(t)`. This paints the final frame without continuously polling
+holds. A delayed track is not animating until its moving interval starts; the next
+wake reports its future start. With no pending motion it returns `None`.
+
+Newest activated owners replace older owners of the same property. Delayed tracks
+hold their first key; finite yoyo tracks rest on the first key after an even number
+of plays and the last key otherwise. Explicit opacity, draw and color override their
+own base rather than multiplying it. Optional resting values preserve that ownership
+across cuts and recovery. Own opacity multiplies a separate inherited factor, ancestor
+opacity and entrance alpha; no division by a previous zero opacity occurs. A later
+`set color` clears the previous color owner. Draw progress also multiplies a draw entrance.
+
+The spring is the standard underdamped response with damping ratio 0.3 and natural
+frequency 20, normalized by its response at 1. Its endpoint is exactly 1 without a
+snap; the conservative overshoot bound is 0.3759. Positive scales interpolate in
+logarithmic space using f64, so shrinking springs stay positive. Opacity, draw and
+color samples clamp to their valid ranges. Pop and grow scale about the object's
+centre; slide and fly translate vertically. Admission and measured preparation use
+the same entrance envelope, including pivot translation inherited by descendants.
+Generated position glides capture the sampled live start when activated and run for
+450 ms with InOut easing; a newer explicit position owner wins over a glide.
+
+Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with no
+60-second narration cap: 11 words take 4,000 ms and 200 take 72,728 ms. Word offsets
+use integer proportional placement within that segment, with u128 multiplication.
+Speech-driven timing and painting belong to their later slices.
+
+<!-- shortcut: Esc during an explicit opacity fade-in without enter reveals its final opacity; exact interrupted recovery needs timestamps in the log. -->
 
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
@@ -302,7 +353,7 @@ mutates an earlier picture. The host calls `PreparedStep::validate` against the 
 scene and predecessor immediately before accepting the result.
 
 A diagram gets at most one generated position glide per step, targeting its last
-resting position plus the shift. A7 supplies the sampled start at activation and
+resting position plus the shift. Motion captures the sampled start at activation and
 compiles at most two keys. An explicit same-step position track wins; nodes without
 a diagram parent never receive a group glide. All shifted output remains coordinate-
 checked, including motion extrema rather than only the final resting rectangle.
@@ -314,8 +365,7 @@ its ancestor's static and final activated transforms, including generated glides
 opacity. No per-revision layout undo deltas or persisted geometry are needed.
 A cut fences both old results and old predecessor states, even when a result's
 objects survive the cut.
-Resting transforms currently scale, rotate, then translate by `pos + (x, y)`;
-A7 must confirm this composition against its sampler.
+Resting and sampled transforms scale, rotate, then translate by `pos + (x, y)`.
 
 `layout::recover` shares semantic replay's ordered traversal. Every original step
 and effective cut is semantically validated, but layout skips any step dropped by
@@ -362,9 +412,8 @@ a row rebuilds that table's current geometry at the new step's activation, witho
 changing an earlier prepared picture. A detached row keeps its placed columns and
 absorbed ancestor transform, including when later cell/color/emphasis updates arrive.
 Emphasis changes rebuild both the text weight and the colored background band.
-Updates to a detached row or to a detached table itself can still lose inherited
-opacity; row-only rebuilds preserve an untouched table's factor. A7 must retain
-inherited opacity independently of the object's own opacity.
+Inherited opacity is stored independently from own opacity and survives table and
+row rebuilds, including explicit own-opacity overrides from zero.
 Width fitting tolerates at most 0.01 px of residual excess, so summed columns can
 be that much wider than the supplied box.
 
@@ -379,7 +428,7 @@ Pie updates redistribute their retained span; a formerly zero-total series that
 becomes positive gets a full-circle fallback because it had no allocated span.
 These are placement facts only, never wire/persisted fields; ordered recovery
 rebuilds them from the original kept chart preparations and cuts.
-Series updates currently preserve their absorbed opacity. Explicit opacity changes
+Series updates preserve their inherited opacity. Explicit opacity changes
 use an `anim` opacity track, not `set.opacity`, which the strict schema rejects.
 
 Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
@@ -406,7 +455,7 @@ It uses the same deterministic, exclusive-lock timing method as the table fixtur
 
 The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
 `alignment_defaults_and_explicit_override` retain their names. Preparation replaces
-S1's draw-time measurement and entrance progress; A7 owns sampling. No source data is
+S1's draw-time measurement; `motion` owns entrance and property sampling. No source data is
 silently clipped to a table cap. The ignored
 `measure_prepare_table_at_column_and_row_caps` fixture rebuilds one table with eight
 columns, forty rows and 400 characters per cell using deterministic measurement.

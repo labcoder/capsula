@@ -617,7 +617,7 @@ fn diagram_caps_accept_their_exact_limits_without_charging_failed_additions() {
             state.usage().segments,
             state.usage().tracks
         ),
-        (145, 1824, 1)
+        (145, 1824, 0)
     );
     rejected(
         &state,
@@ -721,11 +721,14 @@ fn spring_scale_envelopes_and_repeat_counts_remain_positive_and_finite() {
             json!({"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,0.1],[1,1]]}}),
         ],
     );
-    rejected(
-        &state,
-        &budget,
-        json!({"id":"negative_overshoot","put":[{"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,1],[1,0.1]]}}]}),
-        ErrorCode::OutOfRange,
+    apply(
+        &mut state,
+        &mut budget,
+        json!({"id":"positive_shrink","put":[{"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,1],[1,0.1]]}}]}),
+    );
+    assert_eq!(
+        state.handle(&id("t0")),
+        Some(kumochi_scene::Handle::new(1, 0).expect("handle"))
     );
     put(
         &mut state,
@@ -752,6 +755,134 @@ fn spring_scale_envelopes_and_repeat_counts_remain_positive_and_finite() {
         &rotated,
         &global,
         json!({"id":"outside","put":[{"anim":{"target":"g","track":"rotate","keys":[[0,45]]}}]}),
+        ErrorCode::OutOfRange,
+    );
+}
+
+#[test]
+fn generated_entrances_do_not_consume_explicit_tracks() {
+    let mut state = scene("entrances");
+    let mut budget = GlobalBudget::default();
+    for chunk in 0..2 {
+        put(
+            &mut state,
+            &mut budget,
+            (chunk * 300..chunk * 300 + 300)
+                .map(|n| json!({"text":{"id":format!("t{n}"),"at":[0,0],"text":"","enter":"fade"}}))
+                .collect(),
+        );
+    }
+    assert_eq!(budget.usage().objects, 600);
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
+}
+
+#[test]
+fn duplicate_owners_and_zero_periods_fail_at_their_source_fields() {
+    let mut state = scene("motion_errors");
+    let mut budget = GlobalBudget::default();
+    put(&mut state, &mut budget, texts(0, 1));
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"duplicate","put":[
+            {"anim":{"target":"t0","track":"opacity","keys":[[0,0],[100,1]]}},
+            {"anim":{"target":"t0","track":"opacity","keys":[[0,1]]}}
+        ]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put[1].anim.track");
+    for repeat in [-1, 3] {
+        let error = rejected(
+            &state,
+            &budget,
+            json!({"id":"zero_repeat","put":[
+                {"anim":{"target":"t0","track":"opacity","repeat":repeat,"keys":[[0,1]]}}
+            ]}),
+            ErrorCode::OutOfRange,
+        );
+        assert_eq!(error.path.as_str(), "put[0].anim.repeat");
+    }
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"long_infinite","put":[
+            {"anim":{"target":"t0","track":"opacity","repeat":-1,"delay":1,"keys":[[0,0],[60000,1]]}}
+        ]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put[0].anim.keys[1][0]");
+    put(
+        &mut state,
+        &mut budget,
+        vec![
+            json!({"diagram":{"id":"d"}}),
+            json!({"node":{"id":"a","in":"d","label":""}}),
+            json!({"node":{"id":"b","in":"d","label":""}}),
+        ],
+    );
+    let error = rejected(
+        &state,
+        &budget,
+        json!({"id":"zero_flow","put":[
+            {"edge":{"id":"e","in":"d","from":"a","to":"b","flow":0}}
+        ]}),
+        ErrorCode::OutOfRange,
+    );
+    assert_eq!(error.path.as_str(), "put[0].edge.flow");
+}
+
+#[test]
+fn entrance_envelopes_reserve_translation_and_descendant_pivots() {
+    for (enter, positive_inside, positive_outside, negative_inside, negative_outside) in [
+        ("pop", 17500, 18000, -17500, -18000),
+        ("slide", 19985, 19986, -19986, -19987),
+        ("fly", 19951, 19952, -19952, -19953),
+    ] {
+        for (inside, outside) in [
+            (positive_inside, positive_outside),
+            (negative_inside, negative_outside),
+        ] {
+            let mut state = scene("entrance_edge");
+            let mut budget = GlobalBudget::default();
+            put(
+                &mut state,
+                &mut budget,
+                vec![json!({"shape":{
+                    "id":"inside","kind":"rect","box":[inside,0,1,1],"enter":enter
+                }})],
+            );
+            rejected(
+                &state,
+                &budget,
+                json!({"id":"outside","put":[{"shape":{
+                    "id":"outside","kind":"rect","box":[outside,0,1,1],"enter":enter
+                }}]}),
+                ErrorCode::OutOfRange,
+            );
+        }
+    }
+    let mut state = scene("parent_pivot");
+    let mut budget = GlobalBudget::default();
+    put(
+        &mut state,
+        &mut budget,
+        vec![json!({"diagram":{
+            "id":"parent","box":[0,0,10000,10000],"enter":"pop"
+        }})],
+    );
+    put(
+        &mut state,
+        &mut budget,
+        vec![json!({"shape":{
+            "id":"inside","in":"parent","kind":"rect","box":[18000,0,1,1]
+        }})],
+    );
+    rejected(
+        &state,
+        &budget,
+        json!({"id":"outside","put":[{"shape":{
+            "id":"outside","in":"parent","kind":"rect","box":[18100,0,1,1]
+        }}]}),
         ErrorCode::OutOfRange,
     );
 }
@@ -868,7 +999,7 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
         &mut budget,
         vec![json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}})],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (1, 2));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     put(
         &mut state,
         &mut budget,
@@ -878,13 +1009,13 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
             json!({"node":{"id":"b","in":"d","label":""}}),
         ],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (2, 4));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     put(
         &mut state,
         &mut budget,
         vec![json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}})],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (3, 6));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     let error = rejected(
         &state,
         &budget,

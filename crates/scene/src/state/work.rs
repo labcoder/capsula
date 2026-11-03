@@ -15,11 +15,6 @@ pub(crate) struct Motion {
     pub max: [f32; 2],
 }
 impl Motion {
-    const UNIT: Self = Self {
-        keys: 2,
-        min: [0.0; 2],
-        max: [1.0; 2],
-    };
     pub(crate) fn peak(self, other: Self) -> Self {
         Self {
             keys: self.keys.max(other.keys),
@@ -68,6 +63,7 @@ pub(crate) struct Work {
     pub inherited_min_scale: f32,
     pub inherited_translation: f32,
     pub inherited_rotation: bool,
+    pub enter: Option<Enter>,
     pub motion: BTreeMap<&'static str, Motion>,
 }
 
@@ -108,6 +104,7 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         scale: 1.0,
         inherited_scale: 1.0,
         inherited_min_scale: 1.0,
+        enter: entrance(op),
         ..Work::default()
     };
     let name = super::object::visual(op)
@@ -183,16 +180,9 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             work.chart_owner.clone_from(&r.parent);
             work.data = Some(Data::Put(index));
             work.usage.marks = r.data.len();
-            work.motion.insert("data", Motion::UNIT);
         }
         Op::Node(_) | Op::Edge(_) => {}
         Op::Anim(_) | Op::Mermaid(_) => unreachable!("only visual operations get work metadata"),
-    }
-    if entrance(op).is_some_and(|enter| enter != Enter::None) {
-        work.motion.insert("entrance", Motion::UNIT);
-    }
-    if matches!(op,Op::Edge(r) if r.flow.is_some()) {
-        work.motion.insert("flow", Motion::UNIT);
     }
     Ok(work)
 }
@@ -294,7 +284,7 @@ fn rect_extent(bounds: [Finite; 4]) -> Result<f32, ErrorCode> {
     Ok(extent)
 }
 
-fn entrance(op: &Op) -> Option<Enter> {
+pub(crate) fn entrance(op: &Op) -> Option<Enter> {
     match op {
         Op::Line(r) | Op::Arrow(r) => r.enter,
         Op::Path(r) => r.enter,
@@ -335,6 +325,9 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
         .expect("nonempty keys were validated")
         .0
         .get();
+    if period == 0 && anim.repeat != 0 {
+        return Err(fail("repeat", ErrorCode::OutOfRange));
+    }
     if anim.repeat > i32::try_from(MAX_MOTION_MS - 1).expect("motion cap fits i32") {
         return Err(fail("repeat", ErrorCode::OutOfRange));
     }
@@ -362,7 +355,12 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
             let first = key_vector(&pair[0].1);
             let last = key_vector(&pair[1].1);
             for axis in 0..2 {
-                let end = last[axis] + (last[axis] - first[axis]) * 0.25;
+                let progress = 1.0 + crate::motion::SPRING_OVERSHOOT;
+                let end = if anim.track == Track::Scale && axis == 0 {
+                    crate::motion::interpolate_scale(first[axis], last[axis], progress)
+                } else {
+                    last[axis] + (last[axis] - first[axis]) * crate::motion::SPRING_OVERSHOOT
+                };
                 min[axis] = min[axis].min(end);
                 max[axis] = max[axis].max(end);
             }
@@ -417,10 +415,16 @@ pub(super) fn changes(
                     .or_insert_with(|| object.clone());
             }
             let value = motion(anim, index, step)?;
-            let entry = owners
-                .entry((anim.target.clone(), property(anim.track)))
-                .or_insert(value);
-            *entry = entry.peak(value);
+            if owners
+                .insert((anim.target.clone(), property(anim.track)), value)
+                .is_some()
+            {
+                return Err(StepError::in_step(
+                    &step.id,
+                    op_path(index, "anim").field("track"),
+                    ErrorCode::OutOfRange,
+                ));
+            }
         }
     }
     for ((target, property), value) in owners {
@@ -450,4 +454,22 @@ pub(super) fn changes(
         }
     }
     Ok(original)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spring_scale_shrink_has_a_positive_geometric_envelope() {
+        let step: Step = serde_json::from_str(
+            r#"{"id":"shrink","put":[{"anim":{"target":"t","track":"scale","ease":"spring","keys":[[0,1],[100,0.2]]}}]}"#,
+        ).expect("step");
+        let Op::Anim(anim) = &step.put[0] else {
+            panic!("anim fixture")
+        };
+        let envelope = motion(anim, 0, &step).expect("positive scale envelope");
+        assert!((envelope.min[0] - 0.109_216_23).abs() < 1e-6);
+        assert_eq!(envelope.max[0].to_bits(), 1.0_f32.to_bits());
+    }
 }

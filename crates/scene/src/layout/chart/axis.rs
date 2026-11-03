@@ -48,7 +48,7 @@ impl Domain {
     fn ticks(self) -> Vec<f64> {
         let step = tick_step(self, TickBounds::Inside);
         let first = (self.min / step).ceil();
-        (0..6)
+        (0..7)
             .map(|i| (first + f64::from(i)) * step)
             .filter(|v| v.is_finite() && *v >= self.min && *v <= self.max)
             .collect()
@@ -203,7 +203,7 @@ pub(super) fn header(
         let size = out.label(
             title.clone(),
             Vec2::new(frame.origin.x + CHART_LABEL_INSET, top),
-            frame.size.x - 24.0,
+            frame.size.x - 2.0 * CHART_LABEL_INSET,
             Align::Left,
             TextStyle {
                 size: build.theme.font_size,
@@ -215,7 +215,7 @@ pub(super) fn header(
         top += size.y + 8.0;
     }
     if series.iter().filter(|s| s.name.is_some()).count() >= 2 {
-        let mut x = frame.origin.x + 12.0;
+        let mut x = frame.origin.x + CHART_LABEL_INSET;
         let mut height = style.size * 1.3 + 8.0;
         let mut palette = 0;
         for s in series {
@@ -232,9 +232,11 @@ pub(super) fn header(
                 .measure(name, style, None)?
                 .x
                 .min((frame.size.x - 46.0).max(1.0));
-            if x > frame.origin.x + 12.0 && x + width + 18.0 > frame.max().x - 12.0 {
+            if x > frame.origin.x + CHART_LABEL_INSET
+                && x + width + 18.0 > frame.max().x - CHART_LABEL_INSET
+            {
                 top += height;
-                x = frame.origin.x + 12.0;
+                x = frame.origin.x + CHART_LABEL_INSET;
                 height = style.size * 1.3 + 8.0;
             }
             out.rect(
@@ -307,10 +309,10 @@ pub(super) fn header(
     );
     let mut plot = Plot {
         frame: Rect {
-            origin: Vec2::new(frame.origin.x + 12.0, top),
+            origin: Vec2::new(frame.origin.x + CHART_LABEL_INSET, top),
             size: Vec2::new(
-                (frame.size.x - 24.0).max(0.0),
-                (frame.max().y - top - 12.0).max(0.0),
+                (frame.size.x - 2.0 * CHART_LABEL_INSET).max(0.0),
+                (frame.max().y - top - CHART_LABEL_INSET).max(0.0),
             ),
         },
         kind: chart.kind,
@@ -324,8 +326,8 @@ pub(super) fn header(
     if let Some(label) = &chart.y.label {
         let size = out.label(
             label.clone(),
-            Vec2::new(frame.origin.x + 12.0, top),
-            frame.size.x - 24.0,
+            Vec2::new(frame.origin.x + CHART_LABEL_INSET, top),
+            frame.size.x - 2.0 * CHART_LABEL_INSET,
             Align::Left,
             style,
             muted,
@@ -449,6 +451,91 @@ mod tests {
     use super::*;
     use crate::{display::Prim, theme::Theme};
     use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+    #[test]
+    fn seven_tick_windows_keep_the_upper_tick() {
+        for log in [false, true] {
+            assert_eq!(
+                Domain {
+                    min: 0.0,
+                    max: 12.0,
+                    log
+                }
+                .ticks(),
+                [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_log_window_without_a_decade_has_no_y_labels() {
+        let chart: Chart = serde_json::from_str(
+            r#"{"id":"c","box":[0,0,400,300],"kind":"line","y":{"min":2,"max":8,"scale":"log"}}"#,
+        )
+        .expect("chart");
+        let series: Series = serde_json::from_str(r#"{"id":"s","data":[2,8]}"#).expect("series");
+        let mut build = Build {
+            viewport: Rect::default(),
+            theme: &Theme::default(),
+            measure: &mut Measure,
+            cancel: &AtomicBool::new(false),
+            scales: &BTreeMap::new(),
+        };
+        let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
+        assert_eq!(plot.y.min.to_bits(), 2.0_f64.log10().to_bits());
+        assert_eq!(plot.y.max.to_bits(), 8.0_f64.log10().to_bits());
+        assert_eq!(
+            out.output
+                .iter()
+                .filter(|p| matches!(
+                    p,
+                    Prim::Text {
+                        align: Align::Right,
+                        ..
+                    }
+                ))
+                .count(),
+            0
+        );
+        assert_eq!(plot.frame.origin.x.to_bits(), 22.0_f32.to_bits());
+    }
+
+    #[test]
+    fn log_x_labels_keep_both_edge_decades() {
+        let chart: Chart = serde_json::from_str(
+            r#"{"id":"c","box":[0,0,800,300],"kind":"scatter","x":{"scale":"log"}}"#,
+        )
+        .expect("chart");
+        let series: Series =
+            serde_json::from_str(r#"{"id":"s","data":[[0.00001,0],[100000,1]]}"#).expect("series");
+        let mut build = Build {
+            viewport: Rect::default(),
+            theme: &Theme::default(),
+            measure: &mut Measure,
+            cancel: &AtomicBool::new(false),
+            scales: &BTreeMap::new(),
+        };
+        let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
+        let labels: Vec<_> = out
+            .output
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text {
+                    origin,
+                    text,
+                    align: Align::Center,
+                    ..
+                } => Some((origin.x, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
+            ["1.0e-6", "1.0e-4", "0.01", "1", "100", "10k", "1M"]
+        );
+        assert_eq!(labels[0].0.to_bits(), plot.frame.origin.x.to_bits());
+        assert_eq!((labels[6].0 + 14.0).to_bits(), plot.frame.max().x.to_bits());
+    }
+
     #[test]
     fn ticks_are_nice_and_ranges_cover_data() {
         for (min, max) in [
