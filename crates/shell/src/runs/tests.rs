@@ -141,16 +141,24 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
     runs.select_thread(Some(ThreadId(9)));
     submit(&mut runs, "two");
     submit(&mut runs, "three");
-    let revision = runs.revision();
+    assert_eq!(
+        runs.submitted.iter().copied().collect::<Vec<_>>(),
+        [0, 1, 1]
+    );
+    assert!(runs.select_thread(None));
+    assert_eq!(runs.target(), Target::New);
+    assert_eq!(runs.revision(), 2);
     assert_eq!(runs.stop(), None);
     for run in 1..=3 {
         assert_eq!(
-            runs.apply_state(RunId(run), ThreadId(run), Phase::Thinking)
-                .stop,
-            Some(stop(run))
+            runs.apply_state(RunId(run), ThreadId(run), Phase::Thinking),
+            Applied {
+                stop: Some(stop(run)),
+                credit: 0,
+            }
         );
-        assert_eq!(runs.target(), Target::Task(ThreadId(9)));
-        assert_eq!(runs.revision(), revision);
+        assert_eq!(runs.target(), Target::New);
+        assert_eq!(runs.revision(), 2);
     }
     assert!(runs.submitted.is_empty());
     assert!(!runs.working());

@@ -18,6 +18,7 @@ impl Presence {
         if !self.runs.confirm_delete(thread) {
             return;
         }
+        self.refresh_conversation(cx);
         self.link.delete(thread);
         self.threads.update(cx, |state, cx| {
             state.delete_failed = false;

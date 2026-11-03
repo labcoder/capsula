@@ -19,6 +19,7 @@ use kumochi_protocol::message::{
     ThreadKind, ThreadOp, ThreadRow, ThreadTitle,
 };
 
+use super::thread_selection::Selection;
 use super::{Presence, PresenceEvent, send};
 use crate::runs::Target;
 use crate::strings::{Strings, Text};
@@ -32,7 +33,7 @@ gpui_kit::actions!(threads_panel, [EarlierMessages, LaterMessages]);
 pub(super) struct ThreadsDelegate {
     model: Entity<Threads>,
     owner: WeakEntity<Presence>,
-    selected: Option<ThreadId>,
+    selection: Selection,
     _watch: Subscription,
 }
 
@@ -46,8 +47,7 @@ impl ThreadsDelegate {
         let watch = cx.observe_in(&model, window, |list, _, window, cx| {
             let delegate = list.delegate_mut();
             let state = delegate.model.read(cx);
-            delegate.selected = state.open;
-            let ix = state.selected_index().map(IndexPath::new);
+            let ix = delegate.selection.observe(state).map(IndexPath::new);
             list.set_selected_index(ix, window, cx);
             cx.notify();
         });
@@ -55,7 +55,7 @@ impl ThreadsDelegate {
             Self {
                 model,
                 owner,
-                selected: None,
+                selection: Selection::default(),
                 _watch: watch,
             },
             window,
@@ -103,13 +103,12 @@ impl ListDelegate for ThreadsDelegate {
         _: &mut Window,
         cx: &mut Context<'_, ListState<Self>>,
     ) {
-        self.selected = ix
-            .and_then(|ix| self.model.read(cx).rows.get(ix.row))
-            .map(|row| row.id);
+        self.selection
+            .select(ix.map(|ix| ix.row), self.model.read(cx));
     }
 
     fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<'_, ListState<Self>>) {
-        if let Some(thread) = self.selected {
+        if let Some(thread) = self.selection.selected {
             let owner = self.owner.clone();
             cx.defer(move |cx| {
                 let _gone = owner.update(cx, |owner, cx| owner.select_thread(Some(thread), cx));
@@ -320,21 +319,40 @@ impl ThreadsView {
         if !self.model.read(cx).can_rename(thread) {
             return;
         }
-        let message = match rename_message(thread, kind, &self.rename_input.read(cx).value()) {
-            Ok(message) => message,
-            Err(error) => {
-                self.rename_error = Some(error);
-                cx.notify();
-                return;
-            }
+        let Some(current) = self
+            .model
+            .read(cx)
+            .row(thread)
+            .map(|row| row_label(row, self.model.read(cx).settings.as_ref()))
+        else {
+            self.cancel_rename(window, cx);
+            return;
         };
+        let message =
+            match rename_message(thread, kind, &self.rename_input.read(cx).value(), &current) {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    self.cancel_rename(window, cx);
+                    return;
+                }
+                Err(error) => {
+                    self.rename_error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            };
         let sent = self
             .owner
             .update(cx, |owner, cx| {
-                let sent = owner
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| owner.link.send_control(session, message));
+                let sent = match message {
+                    ControlToBrain::Settings(SettingsOp::SetAssistantName(name)) => {
+                        owner.rename_assistant(name, cx)
+                    }
+                    message => owner
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| owner.link.send_control(session, message)),
+                };
                 if sent && kind == ThreadKind::Thread {
                     owner.threads.update(cx, |state, cx| {
                         state.renamed(thread);
@@ -775,24 +793,56 @@ fn row_is_target(row: &ThreadRow, target: Target) -> bool {
     }
 }
 
-fn rename_message(thread: ThreadId, kind: ThreadKind, text: &str) -> Result<ControlToBrain, Text> {
+fn rename_message(
+    thread: ThreadId,
+    kind: ThreadKind,
+    text: &str,
+    current: &str,
+) -> Result<Option<ControlToBrain>, Text> {
     let result = match kind {
         ThreadKind::Main => AssistantName::new(text)
             .map(|name| ControlToBrain::Settings(SettingsOp::SetAssistantName(name))),
         ThreadKind::Thread => ThreadTitle::new(text)
             .map(|title| ControlToBrain::ThreadOp(ThreadOp::Rename { thread, title })),
     };
-    result.map_err(|error| match error {
-        NameError::Empty => Text::RenameEmpty,
-        NameError::TooLong if kind == ThreadKind::Main => Text::RenameNameTooLong,
-        NameError::TooLong => Text::RenameTooLong,
-        NameError::NotOneLine => Text::RenameOneLine,
-    })
+    result
+        .map(|message| (text.trim() != current).then_some(message))
+        .map_err(|error| match error {
+            NameError::Empty => Text::RenameEmpty,
+            NameError::TooLong if kind == ThreadKind::Main => Text::RenameNameTooLong,
+            NameError::TooLong => Text::RenameTooLong,
+            NameError::NotOneLine => Text::RenameOneLine,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rename_message(
+        thread: ThreadId,
+        kind: ThreadKind,
+        text: &str,
+    ) -> Result<ControlToBrain, Text> {
+        super::rename_message(thread, kind, text, "previous")
+            .map(|message| message.expect("the test requests a changed name"))
+    }
+
+    #[test]
+    fn unchanged_names_and_titles_send_no_rename() {
+        assert_eq!(
+            super::rename_message(ThreadId(4), ThreadKind::Main, " Kumo ", "Kumo"),
+            Ok(None)
+        );
+        assert_eq!(
+            super::rename_message(ThreadId(5), ThreadKind::Thread, " Birthday ", "Birthday"),
+            Ok(None)
+        );
+        assert_eq!(
+            super::rename_message(ThreadId(4), ThreadKind::Main, "   ", "Kumo"),
+            Err(Text::RenameEmpty)
+        );
+    }
 
     #[test]
     fn rename_uses_the_kind_and_validates_before_sending() {

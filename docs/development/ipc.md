@@ -90,8 +90,12 @@ flowchart LR
 - **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
   shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
-  them breaks the connection like any malformed frame. The shell retains brain errors in one
-  field, shown in the typing panel, tasks panel and dock until a turn is successfully sent.
+  them breaks the connection like any malformed frame. The settings model retains the brain
+  error and its field attribution; Presence caches its localized presentation for the typing
+  panel and tasks panel, with a short **Check settings** dock label.
+  It clears when a turn is successfully sent or a successful answer settles a retry of the
+  settings field that produced it. An unsolicited view, reconnect, or another field's success
+  cannot clear it. The settings FIFO attributes each refusal to the unanswered head operation.
   A failed submit leaves that error intact. Local submission refusals are separate, shown only
   in the typing panel in preference to the retained brain error. Reconnecting or accepting a
   `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at

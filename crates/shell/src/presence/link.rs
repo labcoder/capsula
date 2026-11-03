@@ -3,7 +3,7 @@
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
-use crate::strings::Strings;
+use crate::settings::Update;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
 
 impl Presence {
@@ -23,8 +23,21 @@ impl Presence {
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
-                LinkEvent::Settings { generation, view } => {
-                    self.settings_changed(generation, view, cx);
+                LinkEvent::Settings {
+                    generation,
+                    view,
+                    answer,
+                } => {
+                    self.settings_changed(
+                        generation,
+                        view,
+                        if answer {
+                            Update::Answer
+                        } else {
+                            Update::Unsolicited
+                        },
+                        cx,
+                    );
                 }
                 LinkEvent::RunState { run, thread, phase } => {
                     let applied = self.runs.apply_state(run, thread, phase);
@@ -44,52 +57,7 @@ impl Presence {
                     generation,
                     message,
                     bytes,
-                } => {
-                    if self
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.generation() == generation)
-                    {
-                        let credit = match message {
-                            message @ (DataToShell::ThreadList { .. }
-                            | DataToShell::Page { .. }
-                            | DataToShell::PageFailed { .. }) => {
-                                let credit = self.threads.update(cx, |state, cx| {
-                                    cx.notify();
-                                    state.receive(message, bytes)
-                                });
-                                self.request_pages(cx);
-                                credit
-                            }
-                            DataToShell::SceneSnapshot {
-                                scene,
-                                revision,
-                                chunk,
-                                last,
-                            } => {
-                                let chunk = Chunk {
-                                    scene,
-                                    revision,
-                                    steps: chunk,
-                                    last,
-                                    bytes,
-                                };
-                                match self.runs.apply_snapshot(generation, chunk) {
-                                    Ok(credit) => credit,
-                                    Err(error) => {
-                                        self.end(&error);
-                                        0
-                                    }
-                                }
-                            }
-                            DataToShell::ScenesRemoved { scenes } => {
-                                bytes.saturating_add(self.runs.remove_scenes(&scenes))
-                            }
-                            message => self.runs.apply_data(message, bytes),
-                        };
-                        self.grant(credit);
-                    }
-                }
+                } => self.data_received(generation, message, bytes, cx),
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
                     Ok(effect) => {
                         self.effect(effect);
@@ -112,21 +80,80 @@ impl Presence {
         self.runs_changed(cx)
     }
 
-    fn settings_changed(
+    fn data_received(
         &mut self,
         generation: u64,
-        view: SettingsView,
+        message: DataToShell,
+        bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.generation() != generation)
+            .is_some_and(|session| session.generation() == generation)
         {
+            let credit = match message {
+                message @ (DataToShell::ThreadList { .. }
+                | DataToShell::Page { .. }
+                | DataToShell::PageFailed { .. }) => {
+                    let credit = self.threads.update(cx, |state, cx| {
+                        cx.notify();
+                        state.receive(message, bytes)
+                    });
+                    self.request_pages(cx);
+                    credit
+                }
+                DataToShell::SceneSnapshot {
+                    scene,
+                    revision,
+                    chunk,
+                    last,
+                } => {
+                    let chunk = Chunk {
+                        scene,
+                        revision,
+                        steps: chunk,
+                        last,
+                        bytes,
+                    };
+                    match self.runs.apply_snapshot(generation, chunk) {
+                        Ok(credit) => credit,
+                        Err(error) => {
+                            self.end(&error);
+                            0
+                        }
+                    }
+                }
+                DataToShell::ScenesRemoved { scenes } => {
+                    bytes.saturating_add(self.runs.remove_scenes(&scenes))
+                }
+                message => self.runs.apply_data(message, bytes),
+            };
+            self.grant(credit);
+        }
+    }
+
+    fn settings_changed(
+        &mut self,
+        generation: u64,
+        view: SettingsView,
+        update: Update,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        let applied = self.settings.update(cx, |state, cx| {
+            let applied = state.receive(current, generation, view.clone(), update);
+            if applied {
+                cx.notify();
+            }
+            applied
+        });
+        if !applied {
             return;
         }
         self.runs.settings(view.main_thread);
         self.clear_refusal(cx);
+        self.sync_settings_notice(cx);
         self.threads.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
@@ -135,9 +162,11 @@ impl Presence {
 
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
-        let previous = (self.error.clone(), self.refusal);
-        self.error = Some(cx.global::<Strings>().error(error).into());
-        self.notices_changed(&previous, cx);
+        self.settings.update(cx, |state, cx| {
+            let _field = state.error(error.clone());
+            cx.notify();
+        });
+        self.sync_settings_notice(cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
@@ -196,6 +225,11 @@ impl Presence {
             });
             self.request_pages(cx);
         } else {
+            self.settings.update(cx, |state, cx| {
+                state.disconnected();
+                cx.notify();
+            });
+            self.sync_settings_notice(cx);
             self.runs.disconnected();
             self.sync_deletes(cx);
             self.threads.update(cx, |state, cx| {

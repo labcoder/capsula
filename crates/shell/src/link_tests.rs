@@ -39,11 +39,36 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         Pipe::Control,
     )
     .expect("written");
-    let LinkEvent::Settings { generation, view } = next(&events) else {
+    let LinkEvent::Settings {
+        generation,
+        view,
+        answer,
+    } = next(&events)
+    else {
         panic!("settings")
     };
     assert_eq!(generation, session.generation());
+    assert!(!answer);
     assert_eq!(view, expected);
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            answer: true,
+            view: expected.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("written");
+    let LinkEvent::Settings {
+        generation: answered_generation,
+        view: answered_view,
+        answer: true,
+    } = next(&events)
+    else {
+        panic!("a settings answer keeps its answer flag")
+    };
+    assert_eq!(answered_generation, session.generation());
+    assert_eq!(answered_view, expected);
     let mut runs = Runs::default();
     runs.connected(generation);
     runs.settings(view.main_thread);

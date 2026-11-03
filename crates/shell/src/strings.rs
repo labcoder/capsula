@@ -66,11 +66,22 @@ pub(crate) enum Text {
     RenameNameTooLong,
     RenameOneLine,
     TaskFallback,
+    Settings,
+    OpenSettings,
+    CloseSettings,
+    General,
+    Accounts,
+    AssistantName,
+    UserName,
+    UserNameHelp,
+    SettingsSaving,
+    SettingsOffline,
+    DockError,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 56] = [
+    const ALL: [Self; 67] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -127,6 +138,17 @@ impl Text {
         Self::RenameNameTooLong,
         Self::RenameOneLine,
         Self::TaskFallback,
+        Self::Settings,
+        Self::OpenSettings,
+        Self::CloseSettings,
+        Self::General,
+        Self::Accounts,
+        Self::AssistantName,
+        Self::UserName,
+        Self::UserNameHelp,
+        Self::SettingsSaving,
+        Self::SettingsOffline,
+        Self::DockError,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -199,6 +221,17 @@ impl Text {
             Self::RenameNameTooLong => "rename-name-too-long",
             Self::RenameOneLine => "rename-one-line",
             Self::TaskFallback => "task-fallback",
+            Self::Settings => "settings-title",
+            Self::OpenSettings => "action-settings",
+            Self::CloseSettings => "settings-close",
+            Self::General => "settings-general",
+            Self::Accounts => "settings-accounts",
+            Self::AssistantName => "settings-assistant-name",
+            Self::UserName => "settings-user-name",
+            Self::UserNameHelp => "settings-user-name-help",
+            Self::SettingsSaving => "settings-saving",
+            Self::SettingsOffline => "settings-offline",
+            Self::DockError => "dock-error",
         }
     }
 }
