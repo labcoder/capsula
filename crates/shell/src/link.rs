@@ -656,32 +656,7 @@ impl Link {
             &ControlToBrain::Hello(hello.clone()),
             Pipe::Control,
         )?;
-        let incarnation = match frame::read::<ControlToShell>(&mut &control, Pipe::Control)? {
-            None
-            | Some(
-                ControlToShell::RunState { .. }
-                | ControlToShell::Ping
-                | ControlToShell::Scenes { .. }
-                | ControlToShell::ThreadDeleted { .. }
-                | ControlToShell::TurnRefused { .. }
-                | ControlToShell::Settings { .. }
-                | ControlToShell::Error(_)
-                | ControlToShell::ScenesV1 { .. }
-                | ControlToShell::NoVisual { .. }
-                | ControlToShell::Account(_),
-            ) => {
-                return Err(LinkError::Rejected);
-            }
-            Some(ControlToShell::BuildMismatch { brain_build }) => {
-                tracing::warn!(
-                    brain_build,
-                    shell_build = BUILD_ID,
-                    "brain from another build"
-                );
-                return Err(LinkError::BuildMismatch);
-            }
-            Some(ControlToShell::Welcome { incarnation }) => incarnation,
-        };
+        let incarnation = welcome(&control)?;
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
         control.set_timeout(None);
@@ -690,6 +665,34 @@ impl Link {
             data: Arc::new(data),
             incarnation,
         })
+    }
+}
+
+/// The brain's answer to Hello: its incarnation, or why this brain can't be used.
+fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
+    match frame::read::<ControlToShell>(&mut &*control, Pipe::Control)? {
+        None
+        | Some(
+            ControlToShell::RunState { .. }
+            | ControlToShell::Ping
+            | ControlToShell::Scenes { .. }
+            | ControlToShell::ThreadDeleted { .. }
+            | ControlToShell::TurnRefused { .. }
+            | ControlToShell::Settings { .. }
+            | ControlToShell::Error(_)
+            | ControlToShell::ScenesV1 { .. }
+            | ControlToShell::NoVisual { .. }
+            | ControlToShell::Account(_),
+        ) => Err(LinkError::Rejected),
+        Some(ControlToShell::BuildMismatch { brain_build }) => {
+            tracing::warn!(
+                brain_build,
+                shell_build = BUILD_ID,
+                "brain from another build"
+            );
+            Err(LinkError::BuildMismatch)
+        }
+        Some(ControlToShell::Welcome { incarnation }) => Ok(incarnation),
     }
 }
 

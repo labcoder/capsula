@@ -126,6 +126,45 @@ pub trait Http: Send + Sync {
     -> impl Future<Output = Result<Response, HttpError>> + Send;
 }
 
+/// A shareable [`Http`], so the runtime can hand one transport to tasks without naming its type.
+#[derive(Clone)]
+pub struct SharedHttp(Arc<dyn ErasedHttp>);
+
+impl SharedHttp {
+    /// Shares `http`.
+    pub fn new(http: impl Http + 'static) -> Self {
+        Self(Arc::new(http))
+    }
+}
+
+impl fmt::Debug for SharedHttp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SharedHttp")
+    }
+}
+
+impl Http for SharedHttp {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.0.execute_boxed(request)
+    }
+}
+
+type Pending<'a> = std::pin::Pin<Box<dyn Future<Output = Result<Response, HttpError>> + Send + 'a>>;
+
+/// [`Http`] as a trait object.
+trait ErasedHttp: Send + Sync {
+    fn execute_boxed(&self, request: Request) -> Pending<'_>;
+}
+
+impl<T: Http> ErasedHttp for T {
+    fn execute_boxed(&self, request: Request) -> Pending<'_> {
+        Box::pin(self.execute(request))
+    }
+}
+
 /// The checked account client. Its raw reqwest client never leaves this module.
 #[derive(Clone)]
 pub struct Client(reqwest::Client);

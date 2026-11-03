@@ -2,15 +2,16 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, scroll::ScrollableElement as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div,
 };
-use kumochi_protocol::message::NameError;
+use kumochi_protocol::message::{MaxFrameRate, NameError};
 
-use super::{Presence, PresenceEvent, send};
+use super::{Presence, PresenceEvent, frame_rate, send};
 use crate::settings::{Error, Field, Settings};
 use crate::strings::{Strings, Text};
 
@@ -25,6 +26,8 @@ pub(super) struct SettingsView {
     pub(super) stop: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
+    /// Redraws the effective rate when the window's display or its refresh changes.
+    _display: Subscription,
 }
 
 impl SettingsView {
@@ -89,6 +92,8 @@ impl SettingsView {
             let _gone = view.owner.update(cx, |owner, cx| owner.refresh_dock(cx));
             cx.notify();
         });
+        let view = cx.entity_id();
+        let display = window.observe_window_display(move |_, cx| cx.notify(view));
         Self {
             model,
             owner,
@@ -100,6 +105,7 @@ impl SettingsView {
             stop: false,
             _events: subscriptions,
             _watch: watch,
+            _display: display,
         }
     }
 
@@ -172,10 +178,71 @@ impl SettingsView {
             )
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
+
+    /// Automatic, then each cap, with the rate the stretch draws at now.
+    fn frame_rate(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let view = self.model.read(cx).view();
+        let cap = view.map(|view| view.max_frame_rate).unwrap_or_default();
+        let selected = choice_index(self.model.read(cx));
+        let label = strings.get(Text::MaxFrameRate);
+        let owner = self.owner.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().child(label))
+            .child(
+                RadioGroup::horizontal("max-frame-rate")
+                    .child(Radio::new("fps-auto").label(strings.get(Text::FrameRateAutomatic)))
+                    .children(
+                        MaxFrameRate::CAPS.map(|fps| {
+                            Radio::new(("fps", usize::from(fps))).label(fps.to_string())
+                        }),
+                    )
+                    .selected_index(Some(selected))
+                    .disabled(view.is_none())
+                    .on_click(move |&ix, _, cx| {
+                        if let Some(rate) = rate_at(ix) {
+                            let _gone =
+                                owner.update(cx, |owner, cx| owner.save_max_frame_rate(rate, cx));
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    // The panel opens beside the dock, so it's on the dock's display.
+                    .child(
+                        strings.frame_rate(frame_rate::effective(cap, window.refresh_interval(cx))),
+                    ),
+            )
+    }
+}
+
+/// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
+/// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
+fn choice_index(model: &Settings) -> usize {
+    model
+        .max_frame_rate_choice()
+        .and_then(MaxFrameRate::fps)
+        .and_then(|fps| MaxFrameRate::CAPS.iter().position(|&each| each == fps))
+        .map_or(0, |ix| ix + 1)
+}
+
+/// The cap behind radio `ix`: Automatic, then each of [`MaxFrameRate::CAPS`].
+fn rate_at(ix: usize) -> Option<MaxFrameRate> {
+    match ix.checked_sub(1) {
+        None => Some(MaxFrameRate::AUTOMATIC),
+        Some(ix) => MaxFrameRate::CAPS
+            .get(ix)
+            .and_then(|&fps| MaxFrameRate::cap(fps).ok()),
+    }
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let events = self.events.clone();
         let close = self.owner.clone();
@@ -249,6 +316,7 @@ impl Render for SettingsView {
                                     }))
                                     .child(self.field(Field::Assistant, cx))
                                     .child(self.field(Field::User, cx))
+                                    .child(self.frame_rate(window, cx))
                                     .child(
                                         div()
                                             .text_xs()
@@ -265,5 +333,107 @@ impl Render for SettingsView {
                         .on_click(move |_, _, _| send(&stop_events, PresenceEvent::Escape)),
                 )
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext, WeakEntity,
+        WindowBounds, WindowOptions, px, size,
+    };
+    use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
+
+    use super::{choice_index, rate_at};
+    use crate::settings::{Settings, Update};
+    use crate::strings::Strings;
+
+    fn saved() -> SettingsView {
+        SettingsView {
+            assistant_name: AssistantName::new("Kumo").expect("valid"),
+            user_name: None,
+            onboarded: true,
+            main_thread: ThreadId(1),
+            max_frame_rate: MaxFrameRate::AUTOMATIC,
+        }
+    }
+
+    /// The Settings window as the shell opens it, over a saved Automatic cap and no owner.
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<super::SettingsView>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Strings::english());
+            let model = cx.new(|_| {
+                let mut model = Settings::default();
+                assert_eq!(model.set_view(saved(), Update::Unsolicited), None);
+                model
+            });
+            let (events, _) = async_channel::unbounded();
+            let bounds = Bounds {
+                origin: Point::default(),
+                size: size(px(480.), px(640.)),
+            };
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsView::new(model, WeakEntity::new_invalid(), events, window, cx)
+                })
+            })
+            .expect("a window")
+        })
+    }
+
+    #[gpui::test]
+    fn a_refresh_only_change_redraws_the_effective_rate(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        let display = cx
+            .update_window(window, |_, window, cx| {
+                window.display(cx).map(|display| display.id())
+            })
+            .expect("the window")
+            .expect("a display");
+        let notified = Rc::new(Cell::new(0));
+        let _watch = cx.update(|cx| {
+            let notified = Rc::clone(&notified);
+            cx.observe(&view, move |_, _| notified.set(notified.get() + 1))
+        });
+        let hertz_144 = Duration::from_secs(1) / 144;
+        cx.simulate_display_refresh_interval_change(display, Some(hertz_144));
+        assert!(notified.get() > 0, "the view redraws its effective rate");
+        let refresh = cx
+            .update_window(window, |_, window, cx| window.refresh_interval(cx))
+            .expect("the window");
+        assert_eq!(refresh, Some(hertz_144));
+    }
+
+    #[test]
+    fn a_quick_reversal_lands_on_an_unchecked_radio() {
+        let mut model = Settings::default();
+        assert_eq!(model.set_view(saved(), Update::Unsolicited), None);
+        assert_eq!(choice_index(&model), 0);
+        let rate = rate_at(5).expect("a radio");
+        assert_eq!(rate.fps(), Some(144));
+        assert!(model.send_max_frame_rate(rate, |_| true));
+        assert_eq!(
+            choice_index(&model),
+            5,
+            "144 shows checked before the answer"
+        );
+        let automatic = rate_at(0).expect("a radio");
+        assert_ne!(
+            choice_index(&model),
+            0,
+            "so Automatic is unchecked and takes the click"
+        );
+        assert!(model.send_max_frame_rate(automatic, |_| true));
+        assert_eq!(choice_index(&model), 0);
+        assert_eq!(rate_at(6), None);
     }
 }

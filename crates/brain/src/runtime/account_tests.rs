@@ -1,0 +1,342 @@
+//! The account system over the pipes: its view's place in a connection, an op's answer, a
+//! sign-in the real listener ends, and a Busy session lock retried when a shell connects.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
+
+use kumochi_protocol::Secret;
+use kumochi_protocol::constants::SESSION_LOCK;
+use kumochi_protocol::frame::Pipe;
+use kumochi_protocol::message::{AccountOp, AccountView, ControlToBrain, ControlToShell, ErrorKey};
+use serde_json::json;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
+use tokio::time::{Instant, timeout};
+use zeroize::Zeroizing;
+
+use super::{Ended, PATIENCE, Shell, duplex};
+use crate::connections::account::{Input, Listened, Worker};
+use crate::connections::clock::{Clock, FixedClock};
+use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
+use crate::connections::oauth::Authorization;
+use crate::connections::oauth::id_token::IdentityError;
+use crate::connections::records::Account;
+use crate::connections::vault::fake::FakeStore;
+use crate::connections::vault::{SaveResult, Vault};
+use crate::ipc;
+use crate::platform::SessionLock;
+use crate::runtime::account::{Accounts, Net, exchange_task};
+use crate::tap::Tap;
+use crate::test_support::{self, Captured, Scratch};
+
+const SIGNED_OUT: AccountView = AccountView::SignedOut {
+    revocation_unconfirmed: false,
+};
+
+impl<S: AsyncRead + AsyncWrite> Shell<S> {
+    /// The next control frame, whatever it is.
+    async fn frame(&mut self) -> ControlToShell {
+        let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
+        timeout(PATIENCE, next)
+            .await
+            .expect("in time")
+            .expect("readable")
+            .expect("open")
+    }
+
+    /// The next control frame, which must be an account view.
+    async fn account(&mut self) -> AccountView {
+        match self.frame().await {
+            ControlToShell::Account(view) => view,
+            other => panic!("expected Account, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_view_follows_settings_and_a_sign_in_the_browser_refuses_ends_signed_out() {
+    let scratch = Scratch::new("account-connection");
+    let mut brain = test_support::brain(&scratch, "");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert!(matches!(
+            shell.frame().await,
+            ControlToShell::Settings { .. }
+        ));
+        assert_eq!(
+            shell.account().await,
+            SIGNED_OUT,
+            "read before serving, sent once"
+        );
+        assert!(matches!(shell.frame().await, ControlToShell::Scenes { .. }));
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::SignIn))
+            .await;
+        assert_eq!(shell.account().await, AccountView::SigningIn);
+        match shell.frame().await {
+            ControlToShell::Error(error) => assert_eq!(error.key(), ErrorKey::BrowserUnavailable),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert_eq!(shell.account().await, SIGNED_OUT);
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::CancelSignIn))
+            .await;
+        assert_eq!(shell.account().await, SIGNED_OUT, "every op is answered");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_lock_busy_at_startup_is_retried_when_a_shell_connects() {
+    let scratch = Scratch::new("account-busy-runtime");
+    let held = SessionLock::try_acquire(&scratch.db().with_file_name(SESSION_LOCK)).expect("lock");
+    let mut brain = test_support::brain(&scratch, "");
+    drop(held);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert!(matches!(
+            shell.frame().await,
+            ControlToShell::Settings { .. }
+        ));
+        assert_eq!(
+            shell.account().await,
+            AccountView::Busy,
+            "the startup read found it held"
+        );
+        assert!(matches!(shell.frame().await, ControlToShell::Scenes { .. }));
+        assert_eq!(
+            shell.account().await,
+            SIGNED_OUT,
+            "the connection's read took the lock"
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
+
+fn secret(text: &str) -> Secret<Zeroizing<String>> {
+    Secret::new(Zeroizing::new(text.to_owned()))
+}
+
+/// Design §2, at the runtime: \`{:?}\` of the account system, while its exchange is outstanding
+/// and after, never prints the client id, the code or the redirect.
+#[tokio::test]
+async fn the_account_system_never_prints_a_secret() {
+    let scratch = Scratch::new("account-debug");
+    let store = FakeStore::default();
+    let registration = Secret::new(Account {
+        client_id: Zeroizing::new("client-SENTINEL".to_owned()),
+        subject: None,
+        email: None,
+        plan_enabled: false,
+        tokens: None,
+    });
+    let seed = scratch.db().with_file_name("seed.lock");
+    let saved = Vault::with_service(store.clone(), "test-accounts-debug", &seed)
+        .expect("seed vault")
+        .save_account(&registration);
+    assert!(matches!(saved, SaveResult::Committed { .. }));
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "test-accounts-debug", &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let mut printed = vec![format!(
+        "{:?}",
+        accounts.handle(Input::Op(AccountOp::SignIn))
+    )];
+    let frames = accounts.handle(Input::Listened {
+        attempt: 1,
+        result: Listened::Authorized(Authorization {
+            code: secret("code-SENTINEL"),
+            client_id: secret("client-SENTINEL"),
+            nonce: secret("nonce-SENTINEL"),
+            verifier: secret(&"v".repeat(43)),
+            redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
+        }),
+    });
+    printed.push(format!("{accounts:?} {frames:?}"));
+    // The listener's refused launch, the pending flag, the exchange and the flag's release.
+    for _ in 0..4 {
+        let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        let frames = accounts.handle(input);
+        printed.push(format!("{accounts:?} {frames:?}"));
+    }
+    assert!(
+        printed.iter().any(|text| text.contains("Outstanding")),
+        "an exchange was outstanding while printed: {printed:?}"
+    );
+    for text in &printed {
+        assert!(!text.contains("SENTINEL"), "{text}");
+    }
+    accounts.close(Instant::now()).await;
+}
+
+/// Tells the test a job opened the vault, then holds the job until the test releases it.
+type Gate = (std_mpsc::Sender<()>, std_mpsc::Receiver<()>);
+
+/// L4: closing waits for the credential job already running, past its deadline, so the
+/// instance capability's delete never overlaps it.
+#[tokio::test]
+async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
+    let scratch = Scratch::new("account-close");
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let held = SessionLock::try_acquire(&lock).expect("lock");
+    let gate: Arc<Mutex<Option<Gate>>> = Arc::default();
+    let finished = Arc::new(AtomicBool::new(false));
+    let (opening, opened) = (Arc::clone(&gate), Arc::clone(&finished));
+    let worker = Worker::new(
+        Box::new(move || {
+            let waiting = opening.lock().expect("gate").take();
+            if let Some((entered, release)) = waiting {
+                entered.send(()).ok();
+                release.recv().ok();
+                opened.store(true, Ordering::SeqCst);
+            }
+            Vault::with_service(FakeStore::default(), "test-accounts-close", &lock)
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let (entered_tx, entered) = std_mpsc::channel();
+    let (release, waiting) = std_mpsc::channel();
+    *gate.lock().expect("gate") = Some((entered_tx, waiting));
+    // Busy at startup, so a connection reads again, on the credentials thread.
+    accounts.handle(Input::Connected);
+    entered.recv().expect("the job is running");
+    let captured = Captured::default();
+    let _capturing = captured.install();
+    let close = accounts.close(Instant::now());
+    tokio::pin!(close);
+    let past_deadline = async {
+        while !captured.text().contains("still running at the deadline") {
+            tokio::select! {
+                biased;
+                () = &mut close => panic!("close returned while the job ran"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+    };
+    timeout(PATIENCE, past_deadline)
+        .await
+        .expect("the deadline passes");
+    assert!(!finished.load(Ordering::SeqCst), "the job is still held");
+    release.send(()).expect("the job waits for its release");
+    close.await;
+    assert!(
+        finished.load(Ordering::SeqCst),
+        "the job ended before close returned"
+    );
+    drop(held);
+}
+
+/// CAPS-116: the startup load runs on the credentials thread, and has ended once `spawn` returns.
+#[tokio::test]
+async fn the_startup_load_runs_on_the_credentials_thread() {
+    let scratch = Scratch::new("account-startup-thread");
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let opening = Arc::clone(&threads);
+    let worker = Worker::new(
+        Box::new(move || {
+            let name = std::thread::current().name().map(str::to_owned);
+            opening.lock().expect("threads").push(name);
+            Vault::with_service(FakeStore::default(), "test-accounts-thread", &lock)
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    assert_eq!(
+        *threads.lock().expect("threads"),
+        [Some("credentials".to_owned())]
+    );
+    assert_eq!(
+        accounts.handle(Input::Connected),
+        [ControlToShell::Account(SIGNED_OUT)],
+        "loaded before spawn returned"
+    );
+    accounts.close(Instant::now()).await;
+}
+
+/// Answers the token request, then moves the wall clock on while the identity check fetches
+/// discovery, which it refuses.
+struct SlowCheck(Arc<AtomicU64>);
+
+impl Http for SlowCheck {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let (status, body) = match request.endpoint {
+            Endpoint::Token => {
+                let tokens = json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600});
+                (200, serde_json::to_vec(&tokens).expect("fixture"))
+            }
+            Endpoint::Discovery | Endpoint::Jwks(_) => {
+                self.0.fetch_add(20, Ordering::SeqCst);
+                (503, Vec::new())
+            }
+        };
+        std::future::ready(Ok(Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(body)),
+        }))
+    }
+}
+
+struct Ticking(Arc<AtomicU64>);
+
+impl Clock for Ticking {
+    fn unix_seconds(&self) -> Option<u64> {
+        Some(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// CAPS-117 R2: a token set is stamped when it arrives, so the identity check's time is never
+/// added to its lifetime.
+#[tokio::test]
+async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
+    let wall = Arc::new(AtomicU64::new(1_000));
+    let http = SharedHttp::new(SlowCheck(Arc::clone(&wall)));
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        launcher: test_support::net().launcher,
+        clock: Arc::new(Ticking(Arc::clone(&wall))),
+    };
+    let authorization = Authorization {
+        code: secret("code"),
+        client_id: secret("client"),
+        nonce: secret("nonce"),
+        verifier: secret(&"v".repeat(43)),
+        redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
+    };
+    let (events, mut results) = mpsc::unbounded_channel();
+    exchange_task(1, authorization, net, events).await;
+    let Some(Input::Exchanged {
+        attempt: 1,
+        result: Ok(received),
+    }) = results.recv().await
+    else {
+        panic!("one received set for attempt 1");
+    };
+    assert_eq!(
+        wall.load(Ordering::SeqCst),
+        1_020,
+        "the check took its time"
+    );
+    assert_eq!(received.now, Some(1_000));
+    assert!(matches!(
+        received.identity,
+        Err(IdentityError::Status { status: 503 })
+    ));
+}

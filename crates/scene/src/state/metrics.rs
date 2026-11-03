@@ -16,9 +16,16 @@ use std::collections::BTreeMap;
 pub(super) fn validate(
     step: &Step,
     objects: &mut BTreeMap<WireId, Object>,
+    error_slot: impl Fn(crate::Handle) -> Option<usize>,
 ) -> Result<(), StepError> {
     let fail = |code| StepError::in_step(&step.id, FieldPath::default().field("put"), code);
-    let memo = graph_metrics(objects).map_err(&fail)?;
+    let memo = graph_metrics(objects).map_err(|(handle, code)| {
+        let mut path = FieldPath::default().field("put");
+        if let Some(slot) = error_slot(handle) {
+            path = path.index(slot);
+        }
+        StepError::in_step(&step.id, path, code)
+    })?;
     let columns: BTreeMap<_, _> = objects
         .iter()
         .filter(|(_, o)| o.kind == Kind::Table)
@@ -91,15 +98,15 @@ struct Graph {
 }
 fn graph_metrics(
     objects: &BTreeMap<WireId, Object>,
-) -> Result<BTreeMap<crate::Handle, Graph>, ErrorCode> {
+) -> Result<BTreeMap<crate::Handle, Graph>, (crate::Handle, ErrorCode)> {
     let mut memo = BTreeMap::new();
     for id in objects.keys() {
-        graph(id, objects, &mut memo, 0)?;
+        graph(id, objects, &mut memo, 0).map_err(|code| (objects[id].handle, code))?;
     }
     Ok(memo)
 }
 pub(crate) fn validate_transforms(objects: &BTreeMap<WireId, Object>) -> Result<(), ErrorCode> {
-    graph_metrics(objects).map(|_| ())
+    graph_metrics(objects).map(|_| ()).map_err(|(_, code)| code)
 }
 fn graph(
     id: &WireId,

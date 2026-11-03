@@ -1,0 +1,16 @@
+flowchart TB
+subgraph local[Local machine]
+  request([Request])
+  subgraph brain[Brain]
+    plan[Plan] --> context{Needs context?}
+  end
+  subgraph accounts[Chosen accounts]
+    fetch[(Account data)]
+  end
+end
+request --> plan
+context -->|yes| fetch
+fetch --> plan
+context -->|no| reply[Reply]
+%% This component deliberately has no edge to the others.
+draft((Saved draft))

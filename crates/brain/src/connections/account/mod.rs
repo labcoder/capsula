@@ -405,8 +405,11 @@ impl AccountState {
         result: Result<Received, ExchangeError>,
         effects: &mut Vec<Effect>,
     ) {
+        if !matches!(self.lane, Lane::Outstanding { attempt: sent, .. } if sent == attempt) {
+            tracing::warn!("an exchange result with no request outstanding for it was ignored");
+            return;
+        }
         let Lane::Outstanding { client, .. } = mem::replace(&mut self.lane, Lane::Free) else {
-            debug_assert!(false, "an exchange ended with no request outstanding");
             return;
         };
         let current = attempt == self.attempt;
