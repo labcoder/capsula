@@ -1,3 +1,4 @@
+// Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use anyhow::Context as _;
@@ -85,6 +86,9 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if matches!(msg, WM_MOUSEFIRST..=WM_MOUSELAST | WM_KEYFIRST..=WM_KEYLAST) {
+            self.state.frame_request.sustain_after_input();
+        }
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -267,6 +271,7 @@ impl WindowsWindowInner {
             self.state
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
+            FRAME_DEMAND.request();
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -1335,6 +1340,7 @@ impl WindowsWindowInner {
 
     fn handle_dm_pointer_hit_test(&self, wparam: WPARAM) -> Option<isize> {
         self.state.direct_manipulation.on_pointer_hit_test(wparam);
+        self.state.frame_request.request();
         None
     }
 
@@ -1347,16 +1353,23 @@ impl WindowsWindowInner {
             }
             // Validate the region so a nested message pump doesn't keep
             // re-dispatching WM_PAINT for the still-invalid region in a busy
-            // loop until the in-progress draw unwinds. The vsync thread
-            // re-invalidates every window on each vsync (see
-            // `begin_vsync_thread`), so the deferred frame still gets drawn,
-            // at most one vsync late.
+            // loop until the in-progress draw unwinds. Requesting a frame makes
+            // the vsync thread re-invalidate the window, so the deferred frame
+            // still gets drawn, at most one vsync late.
             unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+            self.state.frame_request.request();
             return Some(0);
         };
         let mut request_frame = self.state.callbacks.request_frame.take()?;
+        // Validate before drawing: a frame requested during this draw re-invalidates the window,
+        // and validating afterwards would erase it.
+        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         self.state.direct_manipulation.update();
+        // Manual-update DirectManipulation only advances a gesture and its inertia when drawn.
+        if self.state.direct_manipulation.is_active() {
+            self.state.frame_request.request();
+        }
 
         let events = self.state.direct_manipulation.drain_events();
         if !events.is_empty() {
@@ -1384,10 +1397,14 @@ impl WindowsWindowInner {
             signal_at,
             signal_source,
         });
+        if force_render {
+            // GPUI defers a forced render that arrives during another draw without dirtying the
+            // window, so nothing else would ask for the frame that delivers it.
+            self.state.frame_request.request();
+        }
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);
-        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         Some(0)
     }

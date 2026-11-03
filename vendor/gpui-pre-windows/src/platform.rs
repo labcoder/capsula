@@ -1,3 +1,4 @@
+// Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 use std::{
     cell::{Cell, RefCell},
     ffi::{OsStr, OsString},
@@ -42,6 +43,7 @@ use gpui::*;
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl TrackedWindow {
@@ -423,6 +425,7 @@ impl WindowsPlatform {
             // Not joined: the thread can be sending this thread a message. It exits after its
             // next vsync, and drops its reference to the devices then.
             stop.store(true, Ordering::Release);
+            FRAME_DEMAND.wake_all();
         }
         if let Some(text_system) = &self.direct_write_text_system {
             text_system.release_gpu();
@@ -451,9 +454,14 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
+                    if !FRAME_DEMAND.wait(&stop) {
+                        break;
+                    }
                     let signal_source = vsync_provider.wait_for_vsync();
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
+                        // Hand any request on to the thread that replaces this one.
+                        FRAME_DEMAND.request();
                         break;
                     }
                     if check_device_lost(&directx_device.device)
@@ -472,7 +480,14 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
+                    let now_ms = clock_ms();
+                    let mut sustaining = false;
                     for hwnd in all_windows.read().iter() {
+                        let sustained = hwnd.frame_request.is_sustained(now_ms);
+                        sustaining |= sustained;
+                        if !hwnd.frame_request.take() && !sustained {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -488,6 +503,9 @@ impl WindowsPlatform {
                                 .ok()
                                 .log_err();
                         }
+                    }
+                    if sustaining {
+                        FRAME_DEMAND.request();
                     }
                 }
             })
@@ -761,6 +779,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frame_request: window.state.frame_request.clone(),
         });
 
         Ok(Box::new(window))
@@ -1410,6 +1429,7 @@ impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
             stop.store(true, Ordering::Release);
+            FRAME_DEMAND.wake_all();
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {

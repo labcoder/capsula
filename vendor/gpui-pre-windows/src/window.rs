@@ -1,3 +1,4 @@
+// Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
@@ -55,6 +56,8 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    /// Whether GPUI wants a frame; the vsync thread invalidates only windows that do.
+    pub(crate) frame_request: Arc<FrameRequest>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -170,6 +173,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frame_request: Arc::default(),
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -968,6 +972,11 @@ impl PlatformWindow for WindowsWindow {
         self.state.is_fullscreen()
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frame_request = self.state.frame_request.clone();
+        Some(Rc::new(move || frame_request.request()))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
     }
@@ -1034,11 +1043,22 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state
+        let drawn = self
+            .state
             .renderer
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+        if drawn.is_none() {
+            // The device may be lost, and the vsync thread checks only while a frame is wanted.
+            self.state.frame_request.request();
+        }
+    }
+
+    // GPUI calls this after each update for every window with pending work, which also retries a
+    // frame it skipped because it arrived while another draw was on the stack.
+    fn schedule_frame(&self) {
+        self.state.frame_request.request();
     }
 
     #[cfg(any(test, feature = "test-support"))]

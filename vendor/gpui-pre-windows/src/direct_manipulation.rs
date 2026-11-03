@@ -1,3 +1,4 @@
+// Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -109,6 +110,13 @@ impl DirectManipulationHandler {
         unsafe {
             self.update_manager.Update(None).log_err();
         }
+    }
+
+    /// Whether a gesture or its inertia is in progress.
+    pub fn is_active(&self) -> bool {
+        unsafe { self.viewport.GetStatus() }.is_ok_and(|status| {
+            status == DIRECTMANIPULATION_RUNNING || status == DIRECTMANIPULATION_INERTIA
+        })
     }
 
     pub fn drain_events(&self) -> Vec<PlatformInput> {
