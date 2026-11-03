@@ -493,6 +493,56 @@ mod tests {
     }
 
     #[test]
+    fn every_reference_source_keeps_generated_roots_distinct() {
+        for (parent, put, set, remove) in [
+            (
+                "d",
+                json!([{"text":{"id":"t","in":"--1.0","at":[0,0],"text":""}}]),
+                json!([]),
+                json!([]),
+            ),
+            (
+                "d",
+                json!([{"text":{"id":"t","at":{"ref":"--1.0"},"text":""}}]),
+                json!([]),
+                json!([]),
+            ),
+            (
+                "d",
+                json!([{"anim":{"target":"--1.0","track":"opacity","keys":[[0,1]]}}]),
+                json!([]),
+                json!([]),
+            ),
+            (
+                "d",
+                json!([]),
+                json!([{"target":"--1.0","color":"red"}]),
+                json!([]),
+            ),
+            ("d", json!([]), json!([]), json!(["--1.0"])),
+            ("--1.0", json!([]), json!([]), json!([])),
+        ] {
+            let mut value = json!({"id":"refs","put":[
+                {"diagram":{"id":"d"}},
+                {"mermaid":{"in":parent,"src":"flowchart TB\nA\n"}}
+            ],"set":set,"remove":remove});
+            value["put"].as_array_mut().expect("put array").extend(
+                put.as_array()
+                    .expect("reference operations")
+                    .iter()
+                    .cloned(),
+            );
+            let result =
+                expand(&step(&value), 1, &BTreeSet::new(), 598).expect("expanded references");
+            let Op::Diagram(root) = &result.run.put[1] else {
+                panic!("compiled root");
+            };
+            assert_eq!(root.id.as_str(), "--1.1");
+            assert_eq!(root.parent.as_ref().map(WireId::as_str), Some(parent));
+        }
+    }
+
+    #[test]
     fn one_diagram_holds_96_edges_and_refuses_97() {
         let chart = |edges: usize| {
             let src = format!("flowchart LR\n{}", "A --> B\n".repeat(edges));
