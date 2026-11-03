@@ -366,8 +366,8 @@ fn changing_a_clusters_colour_keeps_its_measured_size_for_new_siblings() {
     );
     assert_eq!(bounds(&second.after, "cluster"), cluster);
     assert_eq!(
-        bounds(&second.after, "sibling").origin.y,
-        cluster.max().y + 46.0
+        bounds(&second.after, "sibling").origin.y.to_bits(),
+        (cluster.max().y + 46.0).to_bits()
     );
 }
 
