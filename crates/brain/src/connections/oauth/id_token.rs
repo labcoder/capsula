@@ -102,7 +102,7 @@ pub async fn verify(
     token: &Secret<Zeroizing<String>>,
     client: &str,
     nonce: &str,
-    clock: &impl Clock,
+    clock: &(impl Clock + ?Sized),
 ) -> Result<VerifiedIdentity, IdentityError> {
     check_inputs(token.expose(), client, nonce)?;
     let discovery: Discovery = document(

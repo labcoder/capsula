@@ -112,7 +112,9 @@ only `127.0.0.1:0`, generate CA and leaf keys in memory, and never install a cer
 requests have a 10 s limit. All success and error bodies are capped at 1 MiB, and a request-id
 header is retained only as at most 256 graphic ASCII bytes. The root loader keeps at most
 1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped and unreadable entries separately.
-Proxied networks cannot sign in until a user-set proxy setting exists. A root Windows hasn't
+Proxied networks cannot sign in until a user-set proxy setting exists. Each exchange builds its
+own client on a blocking thread (`spawn_blocking`), because reading the trust store blocks; a
+root store fixed since the last try is read again. A root Windows hasn't
 installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
 ROOT entries present in Windows' Disallowed store or carrying a due disallowed-time property
 are excluded. A Disallowed store that doesn't exist (`ERROR_FILE_NOT_FOUND`) counts as empty;
@@ -180,8 +182,12 @@ credentials for any account or service.
 
 `connections::account::AccountState` is pure: inputs in (an `AccountOp`, a connection, a finished
 credential job, a listener or exchange result), effects out (a view, an error, a credential job,
-start or close the listener, send a token request). A `Worker` runs its credential
-jobs whole, one at a time and in order, and owns the vault and its session lock.
+start or close the listener, send a token request). `runtime::account::Accounts` runs those
+effects. Credential jobs go, one at a time and in order, to a `credentials` thread that owns the
+vault and its session lock; the listener and the exchange are tokio tasks; every result comes back
+on one channel the core loop polls. The brain reads the vault before it serves anything, and on
+quit waits for the job already dispatched, past the quit deadline if it must, before the instance
+capability is deleted.
 
 ```mermaid
 stateDiagram-v2
@@ -253,8 +259,8 @@ account fenced (`SigningOut`, `Cleanup::Refused`).
 Store access must be serialized: Rez's clean-store reproduction with two and four concurrent
 workers still missed cross-thread reads after successful writes to disjoint names, even with
 a barrier before reads and no deletes until all reads finished. A successful parallel delete
-also left an entry, so tests verify cleanup by exact name. Every read and write runs as a
-`Worker` job, through the vault's one store handle, which takes
+also left an entry, so tests verify cleanup by exact name. Production reads and writes all run on the
+account system's one credentials thread, through the vault's one store handle, which takes
 neither failure at its word: "not found" for a name the handle wrote and hasn't deleted since
 is tried 4 times, 25 ms apart [guess], then fails as `Unsettled` instead of reading as absent,
 and every delete is read back and retried the same way until the name is gone. Whether a
@@ -289,7 +295,7 @@ An empty value uses one empty chunk. Reads require an explicit bounded count, al
 and full-length nonfinal chunks. Deletes are idempotent and attempt every specified name,
 reporting the first failure. Only `ERROR_NOT_FOUND` means absence.
 
-`Worker` is the vault's only caller outside tests. Callers must run these synchronous operations
+The credentials thread is the production caller. Callers must run these synchronous operations
 off the core loop and retain the vault, including its session lock, until all blocking work
 ends, even if an async waiter is cancelled or shutdown begins. The vault owns the guard until
 it is dropped.
