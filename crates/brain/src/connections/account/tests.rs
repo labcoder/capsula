@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
@@ -117,12 +118,32 @@ fn saved_account(subject: &str, refresh: &str) -> Secret<Account> {
     })
 }
 
-/// Wall time a test moves forward, as a running clock or a jump would.
-struct Wall(Arc<AtomicU64>);
+/// Wall and monotonic time a test moves: together as a running clock does, or the wall alone
+/// as a jump does.
+#[derive(Clone)]
+struct Wall {
+    unix: Arc<AtomicU64>,
+    ran: Arc<AtomicU64>,
+    start: Instant,
+}
+
+impl Wall {
+    fn new() -> Self {
+        Self {
+            unix: Arc::new(AtomicU64::new(NOW)),
+            ran: Arc::default(),
+            start: Instant::now(),
+        }
+    }
+}
 
 impl Clock for Wall {
     fn unix_seconds(&self) -> Option<u64> {
-        Some(self.0.load(Ordering::SeqCst))
+        Some(self.unix.load(Ordering::SeqCst))
+    }
+
+    fn monotonic(&self) -> Instant {
+        self.start + Duration::from_secs(self.ran.load(Ordering::SeqCst))
     }
 }
 
@@ -140,7 +161,7 @@ struct Harness {
     store: FakeStore,
     service: String,
     scratch: Scratch,
-    wall: Arc<AtomicU64>,
+    wall: Wall,
     views: Vec<AccountView>,
     errors: Vec<UserError>,
     /// The persisted marker after every credential job, in order.
@@ -168,15 +189,15 @@ impl Harness {
         let store = FakeStore::default();
         let seeding = scratch.db().with_file_name("seed.lock");
         seed(&mut Vault::with_service(store.clone(), &service, &seeding).expect("seed vault"));
-        Self::boot(scratch, service, store, Arc::new(AtomicU64::new(NOW)))
+        Self::boot(scratch, service, store, Wall::new())
     }
 
-    fn boot(scratch: Scratch, service: String, store: FakeStore, wall: Arc<AtomicU64>) -> Self {
+    fn boot(scratch: Scratch, service: String, store: FakeStore, wall: Wall) -> Self {
         let lock = scratch.db().with_file_name(SESSION_LOCK);
         let (opener, name) = (store.clone(), service.clone());
         let worker = Worker::new(
             Box::new(move || Vault::with_service(opener.clone(), &name, &lock)),
-            Arc::new(Wall(Arc::clone(&wall))),
+            Arc::new(wall.clone()),
         );
         let (state, effects) = AccountState::start();
         let mut harness = Self {
@@ -215,8 +236,15 @@ impl Harness {
         Self::boot(scratch, service, store, wall)
     }
 
+    /// Time passes.
     fn advance(&self, seconds: u64) {
-        self.wall.fetch_add(seconds, Ordering::SeqCst);
+        self.wall.ran.fetch_add(seconds, Ordering::SeqCst);
+        self.jump(seconds);
+    }
+
+    /// Only the wall clock moves.
+    fn jump(&self, seconds: u64) {
+        self.wall.unix.fetch_add(seconds, Ordering::SeqCst);
     }
 
     fn feed(&mut self, input: Input) {
@@ -1041,7 +1069,7 @@ fn a_lasting_busy_lock_is_retried_on_each_op() {
         scratch,
         "test-account-busy".to_owned(),
         FakeStore::default(),
-        Arc::new(AtomicU64::new(NOW)),
+        Wall::new(),
     );
     assert_eq!(h.views, [AccountView::Busy]);
     h.op(AccountOp::SignIn);

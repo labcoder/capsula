@@ -118,7 +118,7 @@ fn a_full_list_ages_out_before_a_sign_in_is_refused() {
 fn a_wall_clock_jump_suspends_age_out_until_the_next_start() {
     let mut h = Harness::seeded("sweep-no-jump", listed(full(NOW - AGE_OUT + JUMP)));
     h.feed(Input::Revoked(Vec::new()));
-    h.advance(JUMP);
+    h.jump(JUMP);
     h.op(AccountOp::SignIn);
     assert_eq!(
         h.listening.len(),
@@ -126,9 +126,15 @@ fn a_wall_clock_jump_suspends_age_out_until_the_next_start() {
         "an hour ahead of monotonic time isn't a jump"
     );
 
+    let mut h = Harness::seeded("sweep-running", listed(full(NOW - AGE_OUT + 2 * JUMP)));
+    h.feed(Input::Revoked(Vec::new()));
+    h.advance(2 * JUMP);
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.listening.len(), 1, "a running clock is never a jump");
+
     let mut h = Harness::seeded("sweep-jump", listed(full(NOW - AGE_OUT + JUMP + 1)));
     h.feed(Input::Revoked(Vec::new()));
-    h.advance(JUMP + 1);
+    h.jump(JUMP + 1);
     h.op(AccountOp::SignIn);
     assert_eq!(
         h.errors,

@@ -143,7 +143,7 @@ impl<S: CredentialStore> Worker<S> {
         Self {
             vault: None,
             open,
-            started: (clock.unix_seconds(), Instant::now()),
+            started: (clock.unix_seconds(), clock.monotonic()),
             clock,
             jumped: false,
         }
@@ -238,7 +238,11 @@ impl<S: CredentialStore> Worker<S> {
     fn now_for_age_out(&mut self) -> Option<u64> {
         let now = self.clock.unix_seconds()?;
         let (wall, monotonic) = self.started;
-        let ran = monotonic.elapsed().as_secs();
+        let ran = self
+            .clock
+            .monotonic()
+            .saturating_duration_since(monotonic)
+            .as_secs();
         if wall.is_none_or(|wall| now.saturating_sub(wall) > ran.saturating_add(CLOCK_JUMP_SECONDS))
         {
             if !self.jumped {
