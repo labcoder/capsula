@@ -338,22 +338,85 @@ impl Render for SettingsView {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext, WeakEntity,
+        WindowBounds, WindowOptions, px, size,
+    };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
     use super::{choice_index, rate_at};
     use crate::settings::{Settings, Update};
+    use crate::strings::Strings;
 
-    #[test]
-    fn a_quick_reversal_lands_on_an_unchecked_radio() {
-        let mut model = Settings::default();
-        let view = SettingsView {
+    fn saved() -> SettingsView {
+        SettingsView {
             assistant_name: AssistantName::new("Kumo").expect("valid"),
             user_name: None,
             onboarded: true,
             main_thread: ThreadId(1),
             max_frame_rate: MaxFrameRate::AUTOMATIC,
-        };
-        assert_eq!(model.set_view(view, Update::Unsolicited), None);
+        }
+    }
+
+    /// The Settings window as the shell opens it, over a saved Automatic cap and no owner.
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<super::SettingsView>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Strings::english());
+            let model = cx.new(|_| {
+                let mut model = Settings::default();
+                assert_eq!(model.set_view(saved(), Update::Unsolicited), None);
+                model
+            });
+            let (events, _) = async_channel::unbounded();
+            let bounds = Bounds {
+                origin: Point::default(),
+                size: size(px(480.), px(640.)),
+            };
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsView::new(model, WeakEntity::new_invalid(), events, window, cx)
+                })
+            })
+            .expect("a window")
+        })
+    }
+
+    #[gpui::test]
+    fn a_refresh_only_change_redraws_the_effective_rate(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        let display = cx
+            .update_window(window, |_, window, cx| {
+                window.display(cx).map(|display| display.id())
+            })
+            .expect("the window")
+            .expect("a display");
+        let notified = Rc::new(Cell::new(0));
+        let _watch = cx.update(|cx| {
+            let notified = Rc::clone(&notified);
+            cx.observe(&view, move |_, _| notified.set(notified.get() + 1))
+        });
+        let hertz_144 = Duration::from_secs(1) / 144;
+        cx.simulate_display_refresh_interval_change(display, Some(hertz_144));
+        assert!(notified.get() > 0, "the view redraws its effective rate");
+        let refresh = cx
+            .update_window(window, |_, window, cx| window.refresh_interval(cx))
+            .expect("the window");
+        assert_eq!(refresh, Some(hertz_144));
+    }
+
+    #[test]
+    fn a_quick_reversal_lands_on_an_unchecked_radio() {
+        let mut model = Settings::default();
+        assert_eq!(model.set_view(saved(), Update::Unsolicited), None);
         assert_eq!(choice_index(&model), 0);
         let rate = rate_at(5).expect("a radio");
         assert_eq!(rate.fps(), Some(144));
