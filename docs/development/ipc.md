@@ -60,7 +60,7 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Control | `RunState`, `Ping`, `Settings`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
 | Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
@@ -81,7 +81,12 @@ flowchart LR
   connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
-  answer, so they're never written to it.
+  answer, so they're never written to it. Even on control it keeps only each frame's op and
+  length unless the op is on its content-free list (see Debugging).
+- **Settings** go to the shell once per connection before `Scenes`, once for every
+  `Settings` change the shell sends, in order, applied or refused (`answer: true`), and when a
+  change an earlier connection sent is saved (`answer: false`). See
+  [settings.md](settings.md).
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,
@@ -272,6 +277,12 @@ restarting.
 
 ## Debugging
 
-A debug brain records the control frames it sends and receives, and the handshake with
-capabilities zeroed, when `KUMOCHI_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
-decodes the recording with the same message types.
+A debug brain records the control frames it sends and receives, and both handshakes, when
+`KUMOCHI_PIPE_TAP` names a file that doesn't exist yet; an existing file is left alone and
+nothing is recorded. The tap fails closed. Each record holds the frame's op name and length, and
+its fields only when the op is on the content-free list in `crates/protocol/src/tap.rs`
+(`Quitting`, `Stop`, `Pong`, `ClearDrawing` and `DeleteThread` from the shell; `Welcome`,
+`RunState`, `Ping`, `Scenes`, `ThreadDeleted` and `TurnRefused` from the brain). Anything
+else, `Hello` and `Settings` included, is never serialized for the tap, and a new op stays
+redacted until someone lists it. `cargo xtask pipe-dump <file>` prints one line per frame: the
+fields of a listed op, otherwise `Op (n bytes)`.

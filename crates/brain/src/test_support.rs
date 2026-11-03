@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants;
 
+use crate::config::Config;
 use crate::engines::fixture::Fixture;
 use crate::runtime::Brain;
 use crate::store::Store;
@@ -33,6 +34,11 @@ impl Scratch {
 
     pub(crate) fn db(&self) -> PathBuf {
         self.0.join("store.db")
+    }
+
+    /// Settings kept in this folder, so a test never touches the user's.
+    pub(crate) fn config(&self) -> Config {
+        Config::load(Some(self.0.clone()))
     }
 }
 
@@ -62,7 +68,14 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
     let fixture = Fixture::parse(script).expect("script");
-    Brain::new(store, high_water, scenes, Box::new(fixture)).expect("brain")
+    Brain::new(
+        store,
+        high_water,
+        scenes,
+        Box::new(fixture),
+        scratch.config(),
+    )
+    .expect("brain")
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.

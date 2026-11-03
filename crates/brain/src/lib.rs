@@ -3,6 +3,7 @@
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
 
+mod config;
 pub mod coordinator;
 pub mod credential;
 pub mod engines;
@@ -70,6 +71,13 @@ pub enum BrainError {
     Helpers(#[source] io::Error),
 }
 
+/// Ends the runtime [`run`] ran on without waiting for blocking work. Quit and close already
+/// waited for a settings write up to their deadline; one still stuck on a slow disk ends with the
+/// process, and `config.toml` stays whole because it's replaced, never written in place.
+pub fn shut_down(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(Duration::ZERO);
+}
+
 /// Runs the brain until the shell quits or turns out to be from another build.
 ///
 /// # Errors
@@ -93,7 +101,8 @@ pub async fn run() -> Result<(), BrainError> {
     );
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
-    let mut brain = Brain::new(store, high_water, scenes, Box::new(fixture()?))
+    let config = config::Config::load(platform::config_dir());
+    let mut brain = Brain::new(store, high_water, scenes, Box::new(fixture()?), config)
         .map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.

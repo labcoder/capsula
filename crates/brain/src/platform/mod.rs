@@ -29,6 +29,12 @@ pub fn data_dir() -> Option<PathBuf> {
     data_dir_under(std::env::var_os("LOCALAPPDATA"))
 }
 
+/// The per-user folder for settings, which roam: `%APPDATA%\\<product>`, by the same rule.
+#[must_use]
+pub fn config_dir() -> Option<PathBuf> {
+    data_dir_under(std::env::var_os("APPDATA"))
+}
+
 fn data_dir_under(base: Option<OsString>) -> Option<PathBuf> {
     let base = PathBuf::from(base?);
     base.is_absolute().then(|| base.join(constants::DATA_DIR))
