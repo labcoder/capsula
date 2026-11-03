@@ -131,6 +131,25 @@ pub(super) fn place(
                 .push(id.clone());
         }
     }
+    let mut owned_by = BTreeMap::<Handle, Vec<&crate::WireId>>::new();
+    for id in order {
+        let Some((_, source)) = sources.get(id) else {
+            continue;
+        };
+        let Op::Edge(value) = &**source else {
+            continue;
+        };
+        if state.objects.contains_key(id) {
+            continue;
+        }
+        if let Some(owner) = value
+            .parent
+            .as_ref()
+            .and_then(|owner| state.objects.get(owner))
+        {
+            owned_by.entry(owner.item.handle).or_default().push(id);
+        }
+    }
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by_key(|(parent, _)| Reverse(compound::depth(state, *parent)));
     let mut glides = Vec::new();
@@ -298,29 +317,23 @@ pub(super) fn place(
             state.objects.insert(id, object);
             focus = Some(focus.map_or(bounds, |previous: Rect| previous.union(bounds)));
         }
-        if cluster {
-            // Every endpoint below this cluster is placed, so its new edges can be built once.
-            let owned: Vec<_> = order
-                .iter()
-                .filter(|id| !state.objects.contains_key(*id))
-                .filter_map(|id| {
-                    let (handle, source) = sources.get(id)?;
-                    let Op::Edge(edge) = &**source else {
-                        return None;
-                    };
-                    let owner = state.objects.get(edge.parent.as_ref()?)?.item.handle;
-                    (Some(owner) == parent
-                        && state.objects.contains_key(&edge.from)
-                        && state.objects.contains_key(&edge.to))
-                    .then(|| (id.clone(), *handle, Arc::clone(source)))
-                })
-                .collect();
-            for (id, handle, source) in owned {
-                let mut object = edge(&source, handle, parent, state, build, None)?;
-                object.rest = rests.get(&id).copied().unwrap_or_default();
-                state.handles.insert(handle, id.clone());
+        // Every endpoint below this cluster is placed, so its new edges can be built once.
+        if cluster && let Some(ids) = parent.and_then(|handle| owned_by.remove(&handle)) {
+            for id in ids {
+                let (handle, source) = &sources[id];
+                let Op::Edge(value) = &**source else {
+                    unreachable!("owned_by holds edges");
+                };
+                if !state.objects.contains_key(&value.from)
+                    || !state.objects.contains_key(&value.to)
+                {
+                    continue;
+                }
+                let mut object = edge(source, *handle, parent, state, build, None)?;
+                object.rest = rests.get(id).copied().unwrap_or_default();
+                state.handles.insert(*handle, id.clone());
                 state.objects.insert(id.clone(), object);
-                owned_edges.push(id);
+                owned_edges.push(id.clone());
             }
         }
         if let Some(group_id) = group_id {
