@@ -97,15 +97,18 @@ impl DirectManipulationHandler {
         self.scale_factor.set(scale_factor);
     }
 
-    pub fn on_pointer_hit_test(&self, wparam: WPARAM) {
+    /// Hands a touchpad contact to the viewport, and returns whether it was one.
+    pub fn on_pointer_hit_test(&self, wparam: WPARAM) -> bool {
         unsafe {
             let pointer_id = wparam.loword() as u32;
             let mut pointer_type = POINTER_INPUT_TYPE::default();
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                return true;
             }
         }
+        false
     }
 
     pub fn update(&self) {
@@ -228,7 +231,8 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
-        self.frame_request.gesture_status_changed();
+        self.frame_request
+            .gesture_status_changed(current == DIRECTMANIPULATION_READY);
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {

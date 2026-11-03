@@ -16,6 +16,14 @@ const INPUT_SUSTAIN_MS: u64 = 1000;
 /// How often the vsync thread checks for a lost GPU device while no window wants a frame.
 pub(crate) const IDLE_DEVICE_CHECK: Duration = Duration::from_secs(1);
 
+/// How long a touchpad contact keeps its window updating DirectManipulation while it waits in
+/// READY, in ms. A deliberate pan or pinch moves past the touchpad's recognition threshold within a
+/// few hundred ms of contact, and GPUI already keeps presenting for one second after input
+/// (`INPUT_SUSTAIN_MS`), so this covers recognition without waking longer than input already does.
+// shortcut: unverified on real touchpad hardware (Rez has none). Whether READY needs `Update` to
+// reach RUNNING, and how long fingers rest before moving, are OSC-132's desk checks.
+const TOUCHPAD_CONTACT_MS: u64 = 1000;
+
 /// Why `FrameDemand::wait` returned.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Wake {
@@ -93,7 +101,7 @@ pub(crate) fn clock_ms() -> u64 {
 pub(crate) struct FramePoll {
     /// Invalidate the window now.
     pub invalidate: bool,
-    /// Input is still sustaining it, so keep the vsync thread awake.
+    /// Input or a touchpad contact is still sustaining it, so keep the vsync thread awake.
     pub sustained: bool,
 }
 
@@ -103,6 +111,8 @@ pub(crate) struct FrameRequest {
     requested: AtomicBool,
     /// Until when, on `clock_ms`, input keeps this window's frames coming.
     input_sustain_until: AtomicU64,
+    /// Until when, on `clock_ms`, a touchpad contact waiting in READY keeps them coming.
+    contact_until: AtomicU64,
 }
 
 impl Default for FrameRequest {
@@ -117,6 +127,7 @@ impl FrameRequest {
             demand,
             requested: AtomicBool::new(false),
             input_sustain_until: AtomicU64::new(0),
+            contact_until: AtomicU64::new(0),
         }
     }
 
@@ -140,7 +151,25 @@ impl FrameRequest {
 
     /// DirectManipulation reports status changes without being updated, so each one asks for a
     /// frame: a gesture that starts after its hit-test frame still gets frames to advance it.
-    pub(crate) fn gesture_status_changed(&self) {
+    /// Leaving READY also ends a touchpad contact's keep-alive: a recognized gesture keeps its
+    /// own frames through `gesture_updated`.
+    pub(crate) fn gesture_status_changed(&self, ready: bool) {
+        if !ready {
+            self.contact_until.store(0, Ordering::Relaxed);
+        }
+        self.request();
+    }
+
+    /// DirectManipulation may need `Update` to move a touchpad contact from READY to a gesture,
+    /// so the window keeps drawing, which updates it and repaints only a changed view, until the
+    /// status leaves READY or `TOUCHPAD_CONTACT_MS` passes.
+    pub(crate) fn touchpad_contact(&self) {
+        self.touchpad_contact_at(clock_ms());
+    }
+
+    fn touchpad_contact_at(&self, now_ms: u64) {
+        let until = now_ms.saturating_add(TOUCHPAD_CONTACT_MS);
+        self.contact_until.store(until, Ordering::Relaxed);
         self.request();
     }
 
@@ -153,7 +182,8 @@ impl FrameRequest {
 
     /// Takes any pending request.
     pub(crate) fn poll(&self, now_ms: u64) -> FramePoll {
-        let sustained = self.input_sustain_until.load(Ordering::Relaxed) > now_ms;
+        let sustained = self.input_sustain_until.load(Ordering::Relaxed) > now_ms
+            || self.contact_until.load(Ordering::Relaxed) > now_ms;
         let requested = self.requested.swap(false, Ordering::AcqRel);
         FramePoll {
             invalidate: requested || sustained,
@@ -206,7 +236,7 @@ mod tests {
         time::Duration,
     };
 
-    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, Wake};
+    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, TOUCHPAD_CONTACT_MS, Wake};
 
     /// Long enough that a test never reaches it: the waits below end on demand or stop.
     const NEVER: Duration = Duration::from_secs(3600);
@@ -306,16 +336,63 @@ mod tests {
         assert_eq!(request.poll(0), poll(true, false));
         request.gesture_updated(false);
         assert_eq!(request.poll(0), poll(false, false));
-        request.gesture_status_changed();
+        request.gesture_status_changed(false);
         assert_eq!(request.poll(0), poll(true, false));
         for _ in 0..3 {
             request.gesture_updated(true);
             assert_eq!(request.poll(0), poll(true, false));
         }
-        request.gesture_status_changed();
+        request.gesture_status_changed(true);
         assert_eq!(request.poll(0), poll(true, false));
         request.gesture_updated(false);
         assert_eq!(request.poll(0), poll(false, false));
+    }
+
+    #[test]
+    fn a_touchpad_contact_keeps_frames_coming_until_the_cap() {
+        let request = FrameRequest::new(demand());
+        request.touchpad_contact_at(1000);
+        assert_eq!(request.poll(1000), poll(true, true));
+        let end = 1000 + TOUCHPAD_CONTACT_MS;
+        assert_eq!(request.poll(end - 1), poll(true, true));
+        assert_eq!(request.poll(end), poll(false, false));
+    }
+
+    #[test]
+    fn a_new_hit_test_rearms_the_keep_alive() {
+        let request = FrameRequest::new(demand());
+        request.touchpad_contact_at(1000);
+        assert_eq!(request.poll(1000), poll(true, true));
+        request.touchpad_contact_at(1400);
+        let end = 1400 + TOUCHPAD_CONTACT_MS;
+        assert_eq!(request.poll(end - 1), poll(true, true));
+        assert_eq!(request.poll(end), poll(false, false));
+    }
+
+    #[test]
+    fn leaving_ready_ends_the_keep_alive() {
+        let request = FrameRequest::new(demand());
+        request.touchpad_contact_at(1000);
+        request.gesture_status_changed(true);
+        assert_eq!(request.poll(1001), poll(true, true));
+        request.gesture_status_changed(false);
+        assert_eq!(request.poll(1002), poll(true, false));
+        assert_eq!(request.poll(1003), poll(false, false));
+    }
+
+    #[test]
+    fn nothing_runs_at_rest_once_the_keep_alive_expires() {
+        let demand = demand();
+        let request = FrameRequest::new(demand);
+        let running = AtomicBool::new(false);
+        request.touchpad_contact_at(1000);
+        assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Frame);
+        assert_eq!(request.poll(1000), poll(true, true));
+        let end = 1000 + TOUCHPAD_CONTACT_MS;
+        for now in [end, end + 1, end + 60_000] {
+            assert_eq!(request.poll(now), poll(false, false));
+        }
+        assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Idle);
     }
 
     #[test]

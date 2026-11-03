@@ -1336,8 +1336,11 @@ impl WindowsWindowInner {
     }
 
     fn handle_dm_pointer_hit_test(&self, wparam: WPARAM) -> Option<isize> {
-        self.state.direct_manipulation.on_pointer_hit_test(wparam);
-        self.state.frame_request.request();
+        if self.state.direct_manipulation.on_pointer_hit_test(wparam) {
+            self.state.frame_request.touchpad_contact();
+        } else {
+            self.state.frame_request.request();
+        }
         None
     }
 

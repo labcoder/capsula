@@ -40,10 +40,15 @@ A window asks for a frame when:
   GPUI attempts a forced draw, so repeated deferrals can't strand it;
 - GPUI receives any input for it, by any route (window messages, accelerators, DirectManipulation,
   drag and drop): the window then keeps drawing every vblank for one second (`INPUT_SUSTAIN`);
-- DirectManipulation's status changes, or it is active (touchpad pan and inertia). Status
-  changes arrive even while no frames run, so a pan that starts after its hit-test frame still
-  wakes the window. That status changes arrive without updates is an assumption the desk check
-  below confirms.
+- DirectManipulation's status changes, or it is active (touchpad pan and inertia);
+- a touchpad contact reaches DirectManipulation (`DM_POINTERHITTEST`): the window keeps drawing
+  every vblank, which runs `Update` and repaints only a changed view, until the status leaves
+  READY or one second passes (`TOUCHPAD_CONTACT_MS`), and a new contact re-arms it. Without this,
+  nothing runs `Update` at rest: the idle wake only checks the device, so if READY needs updates
+  to become a gesture, a pan that starts after its hit-test frame would wait for other input. The
+  one-second cap covers recognition of a deliberate gesture and matches `INPUT_SUSTAIN`; it is
+  unverified on touchpad hardware, and fingers resting longer before moving are the case the desk
+  check below covers.
 
 With no frame wanted, the vsync thread still wakes once a second to check for a lost GPU device,
 so an idle, visible window recovers without waiting for input. That wake reads the device state
