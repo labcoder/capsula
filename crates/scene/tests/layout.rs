@@ -1093,7 +1093,7 @@ fn invalid_host_measurements_fail_before_publication() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_six_hundred_text_updates() {
     let mut samples = Vec::new();
     for iteration in 0..69 {
@@ -2365,7 +2365,7 @@ fn row_order_cell_sets_and_whole_table_removal_keep_their_boundaries() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_table_at_column_and_row_caps() {
     let mut samples = Vec::new();
     for iteration in 0..69 {
@@ -2429,7 +2429,7 @@ fn measure_prepare_table_at_column_and_row_caps() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_twelve_tables_at_row_and_column_caps() {
     let mut samples = Vec::new();
     for iteration in 0..69 {
@@ -2495,7 +2495,7 @@ fn measure_prepare_twelve_tables_at_row_and_column_caps() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_charts_at_mark_and_pie_segment_caps() {
     for (kind, charts, marks, segments) in [("scatter", 5, 20_000, 320), ("pie", 1, 163, 19_886)] {
         let mut samples = Vec::new();

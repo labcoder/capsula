@@ -1,6 +1,7 @@
 //! Compound graph admission, placement and legal-cap preparation measurements.
 use kumochi_scene::{
-    Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut, WireId,
+    Admission, Budget, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
+    WireId,
     display::{MeasureError, Prim, TextMeasure, TextStyle},
     geom::{Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover},
@@ -38,6 +39,16 @@ fn picture(
     before: &LayoutState,
     value: Value,
 ) -> PreparedStep {
+    picture_on(scene, budget, before, value, SurfaceGeometry::default())
+}
+
+fn picture_on(
+    scene: &mut SceneState,
+    budget: &mut GlobalBudget,
+    before: &LayoutState,
+    value: Value,
+    surface: SurfaceGeometry,
+) -> PreparedStep {
     let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
     let bytes = serde_json::to_vec(&envelope).expect("step JSON");
     let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
@@ -50,7 +61,7 @@ fn picture(
     let input = PrepareInput::new(
         committed.preparation,
         before.clone(),
-        SurfaceGeometry::default(),
+        surface,
         Arc::new(Theme::default()),
     )
     .expect("consecutive preparation");
@@ -64,6 +75,51 @@ fn bounds(layout: &LayoutState, name: &str) -> Rect {
         .bounds(&id(name))
         .expect("safe bounds")
         .expect("object")
+}
+
+fn assert_rect(actual: Rect, origin: [f32; 2], size: [f32; 2]) {
+    assert_eq!(
+        [
+            actual.origin.x,
+            actual.origin.y,
+            actual.size.x,
+            actual.size.y
+        ]
+        .map(f32::to_bits),
+        [origin[0], origin[1], size[0], size[1]].map(f32::to_bits),
+        "the ranked rectangle has its derived position and size"
+    );
+}
+
+fn rejected(scene: &SceneState, budget: &GlobalBudget, value: Value, code: ErrorCode) {
+    let before = (
+        scene.revision(),
+        scene.usage(),
+        scene.recovery_log().len(),
+        budget.usage(),
+        budget.generation(),
+    );
+    let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
+    let bytes = serde_json::to_vec(&envelope).expect("step JSON");
+    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+        panic!("step fixture");
+    };
+    assert_eq!(
+        scene.admit(&step, budget).expect_err("rejected step").code,
+        code,
+        "the intended admission limit refuses the step"
+    );
+    assert_eq!(
+        (
+            scene.revision(),
+            scene.usage(),
+            scene.recovery_log().len(),
+            budget.usage(),
+            budget.generation(),
+        ),
+        before,
+        "failed admission leaves the scene and global budget unchanged"
+    );
 }
 
 fn scene() -> SceneState {
@@ -191,17 +247,122 @@ fn nested_groups_inherit_direction_and_an_explicit_child_direction_wins() {
             json!({"id":"nested","put":[
                 {"diagram":{"id":"outer","dir":outer}},
                 {"diagram":{"id":"inner","in":"outer","dir":inner}},
-                {"node":{"id":"a","in":"inner","label":"A"}},
-                {"node":{"id":"b","in":"inner","label":"B"}},
-                {"edge":{"id":"edge","in":"inner","from":"a","to":"b"}}
+                {"diagram":{"id":"deep","in":"inner"}},
+                {"node":{"id":"a","in":"deep","label":"A"}},
+                {"node":{"id":"b","in":"deep","label":"B"}},
+                {"edge":{"id":"edge","in":"deep","from":"a","to":"b"}}
             ]}),
         );
         let a = bounds(&prepared.after, "a");
         let b = bounds(&prepared.after, "b");
-        assert_eq!(a.size, Vec2::new(80.0, 40.0));
-        assert_eq!(b.size, Vec2::new(80.0, 40.0));
-        assert_eq!(b.origin - a.origin, offset);
+        assert_eq!(
+            [a.size.x, a.size.y, b.size.x, b.size.y].map(f32::to_bits),
+            [80.0_f32, 40.0, 80.0, 40.0].map(f32::to_bits)
+        );
+        let delta = b.origin - a.origin;
+        assert_eq!(
+            [delta.x, delta.y].map(f32::to_bits),
+            [offset.x, offset.y].map(f32::to_bits)
+        );
     }
+}
+
+#[test]
+fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() {
+    for table in [true, false] {
+        let mut scene = scene();
+        let before = LayoutState::new(&scene);
+        let child = if table {
+            json!({"table":{"id":"content","in":"left","box":[0,0,180,120],"cols":["ABCDEFGHIJKLMNOPQRST"]}})
+        } else {
+            json!({"diagram":{"id":"content","in":"left","box":[0,0,180,120]}})
+        };
+        let prepared = picture(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"contents","put":[
+                {"diagram":{"id":"outer"}},
+                {"diagram":{"id":"left","in":"outer"}},
+                child,
+                {"diagram":{"id":"right","in":"outer"}},
+                {"node":{"id":"b","in":"right","label":"B"}}
+            ]}),
+        );
+        let left = bounds(&prepared.after, "left");
+        let right = bounds(&prepared.after, "right");
+        if table {
+            let height = (15.0_f32 * 0.9) * 1.3 + 14.0;
+            let y = (36.0 - height.midpoint(32.0) + 16.0) + 16.0;
+            assert_rect(left, [19.0, y], [180.0, (y + height) - y]);
+            assert_rect(right, [261.0, 32.0], [80.0, 40.0]);
+        } else {
+            assert_rect(left, [19.0, 32.0], [180.0, 120.0]);
+            assert_rect(right, [261.0, 72.0], [80.0, 40.0]);
+        }
+        assert_eq!(bounds(&prepared.after, "content"), left);
+    }
+}
+
+#[test]
+fn a_boxed_child_keeps_its_box_outside_its_parents_ranking() {
+    let mut scene = scene();
+    let before = LayoutState::new(&scene);
+    let prepared = picture(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"boxed","put":[
+            {"diagram":{"id":"outer"}},
+            {"diagram":{"id":"boxed","in":"outer","box":[10,200,100,60]}},
+            {"node":{"id":"a","in":"outer","label":"A"}},
+            {"node":{"id":"b","in":"outer","label":"B"}}
+        ]}),
+    );
+    assert_rect(
+        bounds(&prepared.after, "boxed"),
+        [10.0, 200.0],
+        [100.0, 60.0],
+    );
+    assert_rect(bounds(&prepared.after, "a"), [85.0, 16.0], [80.0, 40.0]);
+    assert_rect(bounds(&prepared.after, "b"), [195.0, 16.0], [80.0, 40.0]);
+}
+
+#[test]
+fn a_nested_overlay_group_inherits_the_surface_default_direction() {
+    let bytes = serde_json::to_vec(&json!({"begin":{
+        "v":1,"scene":"overlay","surface":"overlay","alt":""
+    }}))
+    .expect("header JSON");
+    let Record::Begin(begin) = parse_record(&bytes).expect("begin") else {
+        panic!("begin fixture");
+    };
+    let mut scene = SceneState::begin(begin).expect("overlay scene");
+    let before = LayoutState::new(&scene);
+    let prepared = picture_on(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"overlay","put":[
+            {"diagram":{"id":"outer"}},
+            {"diagram":{"id":"inner","in":"outer"}},
+            {"diagram":{"id":"deep","in":"inner"}},
+            {"node":{"id":"a","in":"deep","label":"A"}},
+            {"node":{"id":"b","in":"deep","label":"B"}},
+            {"edge":{"id":"ab","in":"deep","from":"a","to":"b"}}
+        ]}),
+        SurfaceGeometry::Overlay {
+            logical_size: [800.0, 600.0],
+        },
+    );
+    let a = bounds(&prepared.after, "a");
+    let b = bounds(&prepared.after, "b");
+    assert_eq!((b.origin.x - a.origin.x).to_bits(), 152.0_f32.to_bits());
+    assert_eq!(b.origin.y.to_bits(), a.origin.y.to_bits());
+    assert_eq!(
+        [a.size.x, a.size.y, b.size.x, b.size.y].map(f32::to_bits),
+        [80.0_f32, 40.0, 80.0, 40.0].map(f32::to_bits)
+    );
 }
 
 #[test]
@@ -224,7 +385,10 @@ fn a_cross_group_edge_ranks_clusters_and_routes_between_world_space_endpoints() 
     let a = bounds(&prepared.after, "a");
     let b = bounds(&prepared.after, "b");
     assert_eq!(b.origin - a.origin, Vec2::new(184.0, 0.0));
-    assert!(bounds(&prepared.after, "left").max().x < bounds(&prepared.after, "right").origin.x);
+    assert_eq!(
+        bounds(&prepared.after, "right").origin.x.to_bits(),
+        (bounds(&prepared.after, "left").max().x + 104.0).to_bits()
+    );
     let view = SceneView::new(&prepared.after, 1);
     let mut frame = Frame::new();
     view.frame(0, &mut frame).expect("rest frame");
@@ -259,6 +423,7 @@ fn a_cross_group_edge_ranks_clusters_and_routes_between_world_space_endpoints() 
 #[test]
 fn a_diagram_can_rank_48_direct_nodes_alongside_child_clusters() {
     let mut scene = scene();
+    let mut budget = GlobalBudget::default();
     let before = LayoutState::new(&scene);
     let mut put = vec![json!({"diagram":{"id":"outer"}})];
     put.extend((0..48).map(|index| {
@@ -272,12 +437,30 @@ fn a_diagram_can_rank_48_direct_nodes_alongside_child_clusters() {
     }
     let prepared = picture(
         &mut scene,
-        &mut GlobalBudget::default(),
+        &mut budget,
         &before,
         json!({"id":"node-caps","put":put}),
     );
     assert_eq!(scene.usage().objects, 53);
     assert_eq!(prepared.after.items().len(), 53);
+    let members: Vec<_> = (0..48)
+        .map(|index| bounds(&prepared.after, &format!("n{index}")))
+        .chain(["left", "right"].map(|name| bounds(&prepared.after, name)))
+        .collect();
+    for (index, member) in members.iter().enumerate() {
+        for other in &members[index + 1..] {
+            assert!(
+                !member.intersects(*other),
+                "ranked members must not overlap"
+            );
+        }
+    }
+    rejected(
+        &scene,
+        &budget,
+        json!({"id":"node49","put":[{"node":{"id":"extra","in":"outer","label":"N"}}]}),
+        ErrorCode::OverBudget(Budget::DiagramNodes),
+    );
 }
 
 #[test]
@@ -296,12 +479,85 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
             );
             assert_eq!(scene.usage().objects, count);
             assert_eq!(prepared.after.items().len(), count);
+            if count == 600 && matches!(fixture, fixtures::Fixture::CrossGroup) {
+                let clusters = ["g1", "ge", "gf", "g10"].map(|name| bounds(&prepared.after, name));
+                for pair in clusters.windows(2) {
+                    assert_eq!(
+                        pair[1].origin.y.to_bits(),
+                        (pair[0].max().y + 104.0).to_bits()
+                    );
+                    assert_eq!(pair[1].center().x.to_bits(), pair[0].center().x.to_bits());
+                }
+                let items = prepared.after.items();
+                for index in 0..96 {
+                    let handle = prepared
+                        .after
+                        .handle(&id(&format!("x{:x}", 288 + index)))
+                        .expect("cross edge handle");
+                    let edge = items
+                        .iter()
+                        .find(|item| item.handle == handle)
+                        .expect("cross edge item");
+                    assert_eq!(edge.parent, prepared.after.handle(&id("g0")));
+                    assert!(
+                        edge.primitives
+                            .iter()
+                            .any(|primitive| matches!(primitive, Prim::Line { closed: false, .. })),
+                        "cross edge {index} has a routed path"
+                    );
+                }
+            }
             retained.push((scene, prepared));
         }
         assert_eq!(budget.usage().scenes, 4);
         assert_eq!(budget.usage().objects, 1500);
         assert_eq!(retained.len(), 4);
+        rejected(
+            &retained[2].0,
+            &budget,
+            json!({"id":"overflow","put":[{"line":{"id":"extra","from":[0,0],"to":[1,1]}}]}),
+            ErrorCode::OverBudget(Budget::LiveObjects),
+        );
     }
+}
+
+#[test]
+fn the_97th_outer_owned_edge_is_rejected_without_charging_the_budget() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut put = vec![
+        json!({"diagram":{"id":"outer"}}),
+        json!({"diagram":{"id":"left","in":"outer"}}),
+        json!({"diagram":{"id":"right","in":"outer"}}),
+        json!({"node":{"id":"a","in":"left","label":"A"}}),
+        json!({"node":{"id":"b","in":"right","label":"B"}}),
+    ];
+    put.extend((0..96).map(|index| {
+        json!({"edge":{
+            "id":format!("e{index}"),"in":"outer","from":"a","to":"b"
+        }})
+    }));
+    let prepared = picture(
+        &mut scene,
+        &mut budget,
+        &before,
+        json!({"id":"edges","put":put}),
+    );
+    assert_rect(bounds(&prepared.after, "left"), [140.0, 32.0], [80.0, 40.0]);
+    assert_rect(
+        bounds(&prepared.after, "right"),
+        [140.0, 176.0],
+        [80.0, 40.0],
+    );
+    rejected(
+        &scene,
+        &budget,
+        json!({"id":"edge97","put":[{"edge":{
+            "id":"extra","in":"outer","from":"a","to":"b"
+        }}]}),
+        ErrorCode::OverBudget(Budget::DiagramEdges),
+    );
 }
 
 #[test]
@@ -335,7 +591,92 @@ fn a_new_cluster_takes_a_free_slot_without_moving_earlier_nodes() {
     assert_eq!(bounds(&second.after, "a"), a);
     assert_eq!(bounds(&second.after, "b"), b);
     assert_eq!(bounds(&second.after, "left"), bounds(&first.after, "left"));
-    assert!(bounds(&second.after, "left").max().y < bounds(&second.after, "right").origin.y);
+    assert_eq!(
+        bounds(&second.after, "right").origin.y.to_bits(),
+        (bounds(&second.after, "left").max().y + 62.0).to_bits()
+    );
+}
+
+#[test]
+fn removing_a_cluster_node_releases_its_bound_before_a_sibling_is_added() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = picture(
+        &mut scene,
+        &mut budget,
+        &before,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"outer","box":[0,0,264,1000]}},
+            {"diagram":{"id":"left","in":"outer","dir":"right"}},
+            {"node":{"id":"a","in":"left","label":"A"}},
+            {"node":{"id":"b","in":"left","label":"B"}},
+            {"edge":{"id":"ab","in":"left","from":"a","to":"b"}}
+        ]}),
+    );
+    assert_rect(bounds(&first.after, "left"), [16.0, 32.0], [232.0, 40.0]);
+    let removed = picture(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"remove","remove":["ab","b"]}),
+    );
+    assert_rect(bounds(&removed.after, "left"), [16.0, 32.0], [80.0, 40.0]);
+    let added = picture(
+        &mut scene,
+        &mut budget,
+        &removed.after,
+        json!({"id":"sibling","put":[
+            {"diagram":{"id":"right","in":"outer"}},
+            {"node":{"id":"c","in":"right","label":"C"}}
+        ]}),
+    );
+    assert_rect(bounds(&added.after, "a"), [16.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&added.after, "left"), [16.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&added.after, "right"), [158.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&added.after, "c"), [158.0, 32.0], [80.0, 40.0]);
+}
+
+#[test]
+fn a_new_diagram_prepares_when_the_step_removes_an_edge_that_ranked_clusters() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = picture(
+        &mut scene,
+        &mut budget,
+        &before,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"outer","box":[0,0,1000,1000]}},
+            {"diagram":{"id":"left","in":"outer"}},
+            {"diagram":{"id":"right","in":"outer"}},
+            {"node":{"id":"a","in":"left","label":"A"}},
+            {"node":{"id":"b","in":"right","label":"B"}},
+            {"edge":{"id":"ab","in":"outer","from":"a","to":"b"}}
+        ]}),
+    );
+    assert_rect(bounds(&first.after, "left"), [460.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&first.after, "right"), [460.0, 176.0], [80.0, 40.0]);
+    let second = picture(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"second","remove":["ab"],"put":[
+            {"diagram":{"id":"new","in":"outer"}},
+            {"node":{"id":"c","in":"new","label":"C"}}
+        ]}),
+    );
+    assert!(
+        second
+            .after
+            .bounds(&id("ab"))
+            .expect("safe bounds")
+            .is_none()
+    );
+    assert_rect(bounds(&second.after, "a"), [460.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&second.after, "b"), [460.0, 176.0], [80.0, 40.0]);
+    assert_rect(bounds(&second.after, "new"), [32.0, 32.0], [80.0, 40.0]);
+    assert_rect(bounds(&second.after, "c"), [32.0, 32.0], [80.0, 40.0]);
 }
 
 #[test]

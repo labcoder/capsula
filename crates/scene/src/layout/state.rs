@@ -514,7 +514,12 @@ mod tests {
                 .expect("safe")
                 .expect("group")
         });
-        assert!(bounds[0].size.x >= 180.0, "the label widens its group");
+        assert_eq!(bounds[0].size.x.to_bits(), 180.0_f32.to_bits());
+        assert_eq!(bounds[0].size.y.to_bits(), 152.0_f32.to_bits());
+        assert_eq!(
+            bounds[1].origin.x.to_bits(),
+            (bounds[0].max().x + 62.0).to_bits()
+        );
         assert!(
             !bounds[0].intersects(bounds[1]),
             "sibling groups stay apart"
@@ -545,13 +550,7 @@ mod tests {
             .expect("safe")
             .point(edge.anchors[1]);
         let b = after.bounds(&id("b")).expect("safe").expect("b");
-        assert!(
-            (end.y - b.origin.y).abs() < 1e-3,
-            "the edge meets b's offset top, {end:?} vs {b:?}"
-        );
-        assert!(
-            end.x >= b.origin.x && end.x <= b.max().x,
-            "{end:?} vs {b:?}"
-        );
+        assert_eq!(end.y.to_bits(), b.origin.y.to_bits());
+        assert_eq!(end.x.to_bits(), (b.origin.x + 40.0).to_bits());
     }
 }

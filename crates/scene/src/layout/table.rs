@@ -395,7 +395,7 @@ pub(super) fn place(
                     let mut output = old.item.primitives.to_vec();
                     output.retain(|primitive| !matches!(primitive, Prim::Rect { .. }));
                     let mut column = 0;
-                    // shortcut: frozen rows retain their rule while bounds grow; revisit in A8's visual gate.
+                    // shortcut: frozen rows retain their rule while bounds grow; revisit in A9's visual gate.
                     let mut bounds = old.item.bounds;
                     for primitive in &mut output {
                         if let Prim::Text {
