@@ -226,12 +226,15 @@ impl Presence {
 
     pub(super) fn save_max_frame_rate(&mut self, rate: MaxFrameRate, cx: &mut Context<'_, Self>) {
         let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, _| {
-            state.send_max_frame_rate(rate, |op| {
+        self.settings.update(cx, |state, cx| {
+            let sent = state.send_max_frame_rate(rate, |op| {
                 session
                     .as_ref()
                     .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            })
+            });
+            if sent {
+                cx.notify();
+            }
         });
     }
 

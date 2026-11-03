@@ -696,10 +696,10 @@ fn a_name_refusal_ahead_of_a_frame_rate_stays_on_the_name() {
         settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
         None
     );
-    assert!(matches!(
+    assert_eq!(
         settings.field(Field::User).error,
-        Some(Error::Brain(_))
-    ));
+        Some(Error::Brain(ErrorKey::SettingsRefused.into()))
+    );
     assert_eq!(
         settings.dock_notice(),
         Some(Text::DockError),

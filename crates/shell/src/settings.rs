@@ -293,6 +293,19 @@ impl Settings {
         )
     }
 
+    /// The newest frame rate cap the user chose: the last one queued, else the saved one.
+    pub(crate) fn max_frame_rate_choice(&self) -> Option<MaxFrameRate> {
+        let queued = self
+            .pending
+            .iter()
+            .rev()
+            .find_map(|pending| match pending.slot {
+                Slot::FrameRate(rate) => Some(rate),
+                Slot::Name(_) => None,
+            });
+        queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
+    }
+
     /// Sends a new frame rate cap unless it's the newest one, queued or saved. It shows once the
     /// brain answers.
     pub(crate) fn send_max_frame_rate(
@@ -300,16 +313,11 @@ impl Settings {
         rate: MaxFrameRate,
         send: impl FnOnce(SettingsOp) -> bool,
     ) -> bool {
-        let Some(view) = &self.view else {
-            return false;
-        };
-        let newest = (self.pending.iter().rev())
-            .find_map(|pending| match pending.slot {
-                Slot::FrameRate(rate) => Some(rate),
-                Slot::Name(_) => None,
-            })
-            .unwrap_or(view.max_frame_rate);
-        if newest == rate || !send(SettingsOp::SetMaxFrameRate(rate)) {
+        if self
+            .max_frame_rate_choice()
+            .is_none_or(|newest| newest == rate)
+            || !send(SettingsOp::SetMaxFrameRate(rate))
+        {
             return false;
         }
         self.pending.push_back(Pending {

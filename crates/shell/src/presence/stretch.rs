@@ -25,9 +25,6 @@ const PILL_INSET: f32 = 4.0;
 /// The spring's natural frequency, per second: a 90 px pull settles in about a third of a
 /// second, with no overshoot.
 const SPRING: f64 = 28.0;
-/// A longer frame gap steps only this far, so a stall can't fling the bulb. It's above every
-/// frame interval a 30 cap gives on a 48 Hz or faster display, so no cap slows the motion.
-const MAX_STEP: f64 = 1.0 / 24.0;
 /// The spring integrates in steps no longer than this, so it moves alike at every frame rate.
 const MAX_SUBSTEP: f64 = 1.0 / 144.0;
 /// The fixture's out-and-back period, in seconds.
@@ -146,7 +143,7 @@ pub(super) struct Stretch {
     spring: Spring,
     drive: Drive,
     ticking: bool,
-    last: Option<Instant>,
+    pacer: frame_rate::Pacer,
     /// Where the hit proxy is, kept until the outline crosses its margin.
     proxy: Option<[i32; 4]>,
     mask: MaskState,
@@ -176,7 +173,7 @@ impl Stretch {
             spring: Spring::default(),
             drive: Drive::Rest,
             ticking: false,
-            last: None,
+            pacer: frame_rate::Pacer::default(),
             proxy: None,
             mask: MaskState::default(),
             active: Counts::default(),
@@ -304,7 +301,7 @@ impl Presence {
             return;
         }
         self.stretch.ticking = true;
-        self.stretch.last = None;
+        self.stretch.pacer.start(Instant::now());
         self.stretch.mask.rearm();
         self.stretch.active = Counts::default();
         let source = if matches!(self.stretch.drive, Drive::Fixture(_)) {
@@ -337,16 +334,10 @@ impl Presence {
         let cap = (self.settings.read(cx).view())
             .map(|view| view.max_frame_rate)
             .unwrap_or_default();
-        let refresh = window.refresh_interval(cx);
-        let since = self.stretch.last.map(|last| now.duration_since(last));
-        if since.is_some_and(|since| since < frame_rate::min_gap(cap, refresh)) {
+        let Some(step) = (self.stretch.pacer).frame(now, cap, window.refresh_interval(cx)) else {
             schedule(window, cx.weak_entity());
             return;
-        }
-        self.stretch.last = Some(now);
-        let step = since.map_or(1.0 / frame_rate::effective(cap, refresh), |since| {
-            since.as_secs_f64().min(MAX_STEP)
-        });
+        };
         let goal = self.goal(now);
         let settled = self.stretch.spring.step(goal, step);
         self.stretch.active.ticks += 1;

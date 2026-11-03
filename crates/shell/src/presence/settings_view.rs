@@ -26,6 +26,8 @@ pub(super) struct SettingsView {
     pub(super) stop: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
+    /// Redraws the effective rate when the window's display or its refresh changes.
+    _display: Subscription,
 }
 
 impl SettingsView {
@@ -90,6 +92,8 @@ impl SettingsView {
             let _gone = view.owner.update(cx, |owner, cx| owner.refresh_dock(cx));
             cx.notify();
         });
+        let view = cx.entity_id();
+        let display = window.observe_window_display(move |_, cx| cx.notify(view));
         Self {
             model,
             owner,
@@ -101,6 +105,7 @@ impl SettingsView {
             stop: false,
             _events: subscriptions,
             _watch: watch,
+            _display: display,
         }
     }
 
@@ -179,10 +184,7 @@ impl SettingsView {
         let strings = cx.global::<Strings>();
         let view = self.model.read(cx).view();
         let cap = view.map(|view| view.max_frame_rate).unwrap_or_default();
-        let selected = cap
-            .fps()
-            .and_then(|fps| MaxFrameRate::CAPS.iter().position(|&each| each == fps))
-            .map_or(0, |ix| ix + 1);
+        let selected = choice_index(self.model.read(cx));
         let label = strings.get(Text::MaxFrameRate);
         let owner = self.owner.clone();
         div()
@@ -200,14 +202,8 @@ impl SettingsView {
                     )
                     .selected_index(Some(selected))
                     .disabled(view.is_none())
-                    .on_click(move |ix, _, cx| {
-                        let rate = match ix.checked_sub(1) {
-                            None => Some(MaxFrameRate::AUTOMATIC),
-                            Some(ix) => MaxFrameRate::CAPS
-                                .get(ix)
-                                .and_then(|&fps| MaxFrameRate::cap(fps).ok()),
-                        };
-                        if let Some(rate) = rate {
+                    .on_click(move |&ix, _, cx| {
+                        if let Some(rate) = rate_at(ix) {
                             let _gone =
                                 owner.update(cx, |owner, cx| owner.save_max_frame_rate(rate, cx));
                         }
@@ -222,6 +218,26 @@ impl SettingsView {
                         strings.frame_rate(frame_rate::effective(cap, window.refresh_interval(cx))),
                     ),
             )
+    }
+}
+
+/// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
+/// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
+fn choice_index(model: &Settings) -> usize {
+    model
+        .max_frame_rate_choice()
+        .and_then(MaxFrameRate::fps)
+        .and_then(|fps| MaxFrameRate::CAPS.iter().position(|&each| each == fps))
+        .map_or(0, |ix| ix + 1)
+}
+
+/// The cap behind radio `ix`: Automatic, then each of [`MaxFrameRate::CAPS`].
+fn rate_at(ix: usize) -> Option<MaxFrameRate> {
+    match ix.checked_sub(1) {
+        None => Some(MaxFrameRate::AUTOMATIC),
+        Some(ix) => MaxFrameRate::CAPS
+            .get(ix)
+            .and_then(|&fps| MaxFrameRate::cap(fps).ok()),
     }
 }
 
@@ -317,5 +333,44 @@ impl Render for SettingsView {
                         .on_click(move |_, _, _| send(&stop_events, PresenceEvent::Escape)),
                 )
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
+
+    use super::{choice_index, rate_at};
+    use crate::settings::{Settings, Update};
+
+    #[test]
+    fn a_quick_reversal_lands_on_an_unchecked_radio() {
+        let mut model = Settings::default();
+        let view = SettingsView {
+            assistant_name: AssistantName::new("Kumo").expect("valid"),
+            user_name: None,
+            onboarded: true,
+            main_thread: ThreadId(1),
+            max_frame_rate: MaxFrameRate::AUTOMATIC,
+        };
+        assert_eq!(model.set_view(view, Update::Unsolicited), None);
+        assert_eq!(choice_index(&model), 0);
+        let rate = rate_at(5).expect("a radio");
+        assert_eq!(rate.fps(), Some(144));
+        assert!(model.send_max_frame_rate(rate, |_| true));
+        assert_eq!(
+            choice_index(&model),
+            5,
+            "144 shows checked before the answer"
+        );
+        let automatic = rate_at(0).expect("a radio");
+        assert_ne!(
+            choice_index(&model),
+            0,
+            "so Automatic is unchecked and takes the click"
+        );
+        assert!(model.send_max_frame_rate(automatic, |_| true));
+        assert_eq!(choice_index(&model), 0);
+        assert_eq!(rate_at(6), None);
     }
 }
