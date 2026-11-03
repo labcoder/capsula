@@ -1,31 +1,34 @@
 //! The account system over the pipes: its view's place in a connection, an op's answer, a
 //! sign-in the real listener ends, and a Busy session lock retried when a shell connects.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{AccountOp, AccountView, ControlToBrain, ControlToShell, ErrorKey};
+use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 use zeroize::Zeroizing;
 
 use super::{Ended, PATIENCE, Shell, duplex};
 use crate::connections::account::{Input, Listened, Worker};
-use crate::connections::clock::FixedClock;
+use crate::connections::clock::{Clock, FixedClock};
+use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::oauth::Authorization;
+use crate::connections::oauth::id_token::IdentityError;
 use crate::connections::records::Account;
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::ipc;
 use crate::platform::SessionLock;
-use crate::runtime::account::Accounts;
+use crate::runtime::account::{Accounts, Net, exchange_task};
 use crate::tap::Tap;
-use crate::test_support::{self, Scratch};
+use crate::test_support::{self, Captured, Scratch};
 
 const SIGNED_OUT: AccountView = AccountView::SignedOut {
     revocation_unconfirmed: false,
@@ -178,6 +181,9 @@ async fn the_account_system_never_prints_a_secret() {
     accounts.close(Instant::now()).await;
 }
 
+/// Tells the test a job opened the vault, then holds the job until the test releases it.
+type Gate = (std_mpsc::Sender<()>, std_mpsc::Receiver<()>);
+
 /// L4: closing waits for the credential job already running, past its deadline, so the
 /// instance capability's delete never overlaps it.
 #[tokio::test]
@@ -185,14 +191,15 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
     let scratch = Scratch::new("account-close");
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let held = SessionLock::try_acquire(&lock).expect("lock");
-    let gate: Arc<Mutex<Option<std_mpsc::Receiver<()>>>> = Arc::default();
+    let gate: Arc<Mutex<Option<Gate>>> = Arc::default();
     let finished = Arc::new(AtomicBool::new(false));
     let (opening, opened) = (Arc::clone(&gate), Arc::clone(&finished));
     let worker = Worker::new(
         Box::new(move || {
             let waiting = opening.lock().expect("gate").take();
-            if let Some(waiting) = waiting {
-                waiting.recv().ok();
+            if let Some((entered, release)) = waiting {
+                entered.send(()).ok();
+                release.recv().ok();
                 opened.store(true, Ordering::SeqCst);
             }
             Vault::with_service(FakeStore::default(), "test-accounts-close", &lock)
@@ -200,19 +207,136 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
         Arc::new(FixedClock(1_800_000_000)),
     );
     let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let (entered_tx, entered) = std_mpsc::channel();
     let (release, waiting) = std_mpsc::channel();
-    *gate.lock().expect("gate") = Some(waiting);
+    *gate.lock().expect("gate") = Some((entered_tx, waiting));
     // Busy at startup, so a connection reads again, on the credentials thread.
     accounts.handle(Input::Connected);
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        release.send(()).ok();
-    });
-    accounts.close(Instant::now()).await;
+    entered.recv().expect("the job is running");
+    let captured = Captured::default();
+    let _capturing = captured.install();
+    let close = accounts.close(Instant::now());
+    tokio::pin!(close);
+    let past_deadline = async {
+        while !captured.text().contains("still running at the deadline") {
+            tokio::select! {
+                biased;
+                () = &mut close => panic!("close returned while the job ran"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+    };
+    timeout(PATIENCE, past_deadline)
+        .await
+        .expect("the deadline passes");
+    assert!(!finished.load(Ordering::SeqCst), "the job is still held");
+    release.send(()).expect("the job waits for its release");
+    close.await;
     assert!(
         finished.load(Ordering::SeqCst),
-        "close returned while the job ran"
+        "the job ended before close returned"
     );
-    releaser.join().expect("released");
     drop(held);
+}
+
+/// CAPS-116: the startup load runs on the credentials thread, and has ended once `spawn` returns.
+#[tokio::test]
+async fn the_startup_load_runs_on_the_credentials_thread() {
+    let scratch = Scratch::new("account-startup-thread");
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let opening = Arc::clone(&threads);
+    let worker = Worker::new(
+        Box::new(move || {
+            let name = std::thread::current().name().map(str::to_owned);
+            opening.lock().expect("threads").push(name);
+            Vault::with_service(FakeStore::default(), "test-accounts-thread", &lock)
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    assert_eq!(
+        *threads.lock().expect("threads"),
+        [Some("credentials".to_owned())]
+    );
+    assert_eq!(
+        accounts.handle(Input::Connected),
+        [ControlToShell::Account(SIGNED_OUT)],
+        "loaded before spawn returned"
+    );
+    accounts.close(Instant::now()).await;
+}
+
+/// Answers the token request, then moves the wall clock on while the identity check fetches
+/// discovery, which it refuses.
+struct SlowCheck(Arc<AtomicU64>);
+
+impl Http for SlowCheck {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let (status, body) = match request.endpoint {
+            Endpoint::Token => {
+                let tokens = json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600});
+                (200, serde_json::to_vec(&tokens).expect("fixture"))
+            }
+            Endpoint::Discovery | Endpoint::Jwks(_) => {
+                self.0.fetch_add(20, Ordering::SeqCst);
+                (503, Vec::new())
+            }
+        };
+        std::future::ready(Ok(Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(body)),
+        }))
+    }
+}
+
+struct Ticking(Arc<AtomicU64>);
+
+impl Clock for Ticking {
+    fn unix_seconds(&self) -> Option<u64> {
+        Some(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// CAPS-117 R2: a token set is stamped when it arrives, so the identity check's time is never
+/// added to its lifetime.
+#[tokio::test]
+async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
+    let wall = Arc::new(AtomicU64::new(1_000));
+    let http = SharedHttp::new(SlowCheck(Arc::clone(&wall)));
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        launcher: test_support::net().launcher,
+        clock: Arc::new(Ticking(Arc::clone(&wall))),
+    };
+    let authorization = Authorization {
+        code: secret("code"),
+        client_id: secret("client"),
+        nonce: secret("nonce"),
+        verifier: secret(&"v".repeat(43)),
+        redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
+    };
+    let (events, mut results) = mpsc::unbounded_channel();
+    exchange_task(1, authorization, net, events).await;
+    let Some(Input::Exchanged {
+        attempt: 1,
+        result: Ok(received),
+    }) = results.recv().await
+    else {
+        panic!("one received set for attempt 1");
+    };
+    assert_eq!(
+        wall.load(Ordering::SeqCst),
+        1_020,
+        "the check took its time"
+    );
+    assert_eq!(received.now, Some(1_000));
+    assert!(matches!(
+        received.identity,
+        Err(IdentityError::Status { status: 503 })
+    ));
 }
