@@ -187,7 +187,12 @@ effects. Credential jobs go, one at a time and in order, to a `credentials` thre
 vault and its session lock; the listener and the exchange are tokio tasks; every result comes back
 on one channel the core loop polls. The brain reads the vault before it serves anything, and on
 quit waits for the job already dispatched, past the quit deadline if it must, before the instance
-capability is deleted.
+capability is deleted. The runtime delivers exactly one `Vault` result per dispatched job (the
+credentials thread sends one per job it runs) and one `Exchanged` per sent request (the exchange
+task's last step). No runtime test drives a full exchange yet, so the machine also ignores a
+result with no request outstanding for its attempt, which keeps the next request and any owned
+set intact (`a_repeated_exchange_result_leaves_the_next_request_to_finish`,
+`a_repeated_exchange_result_keeps_the_owned_set`).
 
 ```mermaid
 stateDiagram-v2
