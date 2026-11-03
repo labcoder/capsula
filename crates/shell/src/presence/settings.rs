@@ -240,10 +240,10 @@ impl Presence {
 
 #[cfg(test)]
 mod tests {
-    use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsView, ThreadId};
+    use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsView, ThreadId, UserName};
 
     use super::settle_notice;
-    use crate::settings::{Field, Settings};
+    use crate::settings::{Field, Settings, Update};
 
     fn view() -> SettingsView {
         SettingsView {
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn dock_error_survives_unrelated_success_and_reconnect_until_its_field_succeeds() {
         let mut settings = Settings::default();
-        settings.set_view(view(), false);
+        assert_eq!(settings.set_view(view(), Update::Unsolicited), None);
         settings.change(Field::Assistant, "Cloud");
         assert!(settings.save(Field::Assistant, |_| true));
         let mut field = settings.error(ErrorKey::SettingsRefused.into());
@@ -267,7 +267,7 @@ mod tests {
         assert!(!settle_notice(
             &mut notice,
             &mut field,
-            settings.set_view(view(), true)
+            settings.set_view(view(), Update::Answer)
         ));
         assert_eq!(field, Some(Field::Assistant));
         assert_eq!(
@@ -276,10 +276,12 @@ mod tests {
         );
         settings.change(Field::User, "Alex");
         assert!(settings.save(Field::User, |_| true));
+        let mut saved = view();
+        saved.user_name = Some(UserName::new("Alex").expect("valid"));
         assert!(!settle_notice(
             &mut notice,
             &mut field,
-            settings.set_view(view(), true)
+            settings.set_view(saved.clone(), Update::Answer)
         ));
         assert_eq!(
             notice.as_deref(),
@@ -289,19 +291,26 @@ mod tests {
         assert!(!settle_notice(
             &mut notice,
             &mut field,
-            settings.set_view(view(), false)
+            settings.set_view(saved.clone(), Update::Unsolicited)
         ));
         assert_eq!(field, Some(Field::Assistant));
         assert_eq!(
             notice.as_deref(),
             Some("Couldn't save that setting. Try again.")
         );
+        settings.change(Field::Assistant, "Cloud");
         assert!(settings.save(Field::Assistant, |_| true));
+        assert_eq!(
+            notice.as_deref(),
+            Some("Couldn't save that setting. Try again.")
+        );
+        saved.assistant_name = AssistantName::new("Cloud").expect("valid");
         assert!(settle_notice(
             &mut notice,
             &mut field,
-            settings.set_view(view(), true)
+            settings.set_view(saved, Update::Answer)
         ));
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
         assert_eq!(field, None);
         assert_eq!(notice, None);
     }

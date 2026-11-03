@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     DataToBrain, DataToShell, EventId, PageEvent, PageOf, SettingsView, ThreadCursor, ThreadId,
@@ -148,6 +149,7 @@ impl Threads {
     /// The panel closed: nothing more is read until it opens.
     pub(crate) fn hide(&mut self) {
         self.shown = false;
+        self.reread.clear();
         self.select(None);
     }
 
@@ -222,6 +224,17 @@ impl Threads {
         self.cached.remove(&thread);
         self.pages.remove(&thread);
         self.rows.retain(|row| row.id != thread);
+        if self.shown
+            && let Some(Pending {
+                revision,
+                read: Read::Renamed(after),
+                ..
+            }) = self.list_pending
+            && revision == self.list_revision
+            && !self.reread.contains(&after)
+        {
+            self.reread.push_front(after);
+        }
         self.list_revision = self.list_revision.wrapping_add(1);
         if self.list_pending.is_some() && self.list_needed.is_none() {
             self.list_needed = Some(Read::Repair);
@@ -479,9 +492,11 @@ impl Threads {
 
 pub(crate) fn row_label(row: &ThreadRow, settings: Option<&SettingsView>) -> String {
     if row.kind == ThreadKind::Main {
-        settings.map_or_else(String::new, |settings| {
-            settings.assistant_name.as_str().to_owned()
-        })
+        settings
+            .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {
+                settings.assistant_name.as_str()
+            })
+            .to_owned()
     } else {
         row.title.clone()
     }

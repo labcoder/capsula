@@ -65,6 +65,9 @@ updates the displayed title only from that page; a send or an older in-flight re
 save acknowledgement. Kumo's displayed name changes only on the next `SettingsView`.
 The reread can race the rename across the two pipes and show the old title until the next
 refresh; PR 16's `ThreadsChanged` after every committed `SetTitle` will close that gap.
+If a delete invalidates an in-flight rename reread, its original page cursor is queued again
+before the first-page repair, so an offpage renamed task still gets confirmed without reviving
+the deleted row. A search change, refresh or hide discards these old-query rereads.
 Settings updates preserve the input draft, keyboard focus, viewed history, target and selection
 revision; changing a name never retargets input. See [settings](settings.md).
 

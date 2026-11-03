@@ -58,18 +58,18 @@ impl SettingsView {
                                 cx.notify();
                             });
                         }
-                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
-                            if view.editing == Some(field) {
-                                view.editing = None;
-                                let _gone = view
-                                    .owner
-                                    .update(cx, |owner, cx| owner.save_setting(field, cx));
-                                if matches!(event, InputEvent::PressEnter { .. }) {
-                                    window.focus(&view.focus, cx);
-                                }
+                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
+                            if view.editing == Some(field) =>
+                        {
+                            view.editing = None;
+                            let _gone = view
+                                .owner
+                                .update(cx, |owner, cx| owner.save_setting(field, cx));
+                            if matches!(event, InputEvent::PressEnter { .. }) {
+                                window.focus(&view.focus, cx);
                             }
                         }
-                        _ => {}
+                        InputEvent::PressEnter { .. } | InputEvent::Blur => {}
                     }
                     cx.notify();
                 })

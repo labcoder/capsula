@@ -13,7 +13,7 @@ placeholder. `shell/settings.rs` owns the plain drafts, validation, per-field sa
 owns the retained Kit inputs and subscriptions. The shell's UI thread never waits for a save.
 
 Enter or blur validates with the protocol's name types and queues the change. An unchanged
-field without an error does nothing. While saving, that field is readonly and says Saving…;
+normalized name sends no operation, including inline renames. While saving, that field is readonly and says Saving…;
 the other field remains usable. A refused save restores its authoritative value and keeps its
 inline error until that field changes again. Cancelling an edit restores the last received
 value without sending it. The user-name field maps blank input to `None`.

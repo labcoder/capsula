@@ -320,14 +320,28 @@ impl ThreadsView {
         if !self.model.read(cx).can_rename(thread) {
             return;
         }
-        let message = match rename_message(thread, kind, &self.rename_input.read(cx).value()) {
-            Ok(message) => message,
-            Err(error) => {
-                self.rename_error = Some(error);
-                cx.notify();
-                return;
-            }
+        let Some(current) = self
+            .model
+            .read(cx)
+            .row(thread)
+            .map(|row| row_label(row, self.model.read(cx).settings.as_ref()))
+        else {
+            self.cancel_rename(window, cx);
+            return;
         };
+        let message =
+            match rename_message(thread, kind, &self.rename_input.read(cx).value(), &current) {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    self.cancel_rename(window, cx);
+                    return;
+                }
+                Err(error) => {
+                    self.rename_error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            };
         let sent = self
             .owner
             .update(cx, |owner, cx| {
@@ -780,24 +794,56 @@ fn row_is_target(row: &ThreadRow, target: Target) -> bool {
     }
 }
 
-fn rename_message(thread: ThreadId, kind: ThreadKind, text: &str) -> Result<ControlToBrain, Text> {
+fn rename_message(
+    thread: ThreadId,
+    kind: ThreadKind,
+    text: &str,
+    current: &str,
+) -> Result<Option<ControlToBrain>, Text> {
     let result = match kind {
         ThreadKind::Main => AssistantName::new(text)
             .map(|name| ControlToBrain::Settings(SettingsOp::SetAssistantName(name))),
         ThreadKind::Thread => ThreadTitle::new(text)
             .map(|title| ControlToBrain::ThreadOp(ThreadOp::Rename { thread, title })),
     };
-    result.map_err(|error| match error {
-        NameError::Empty => Text::RenameEmpty,
-        NameError::TooLong if kind == ThreadKind::Main => Text::RenameNameTooLong,
-        NameError::TooLong => Text::RenameTooLong,
-        NameError::NotOneLine => Text::RenameOneLine,
-    })
+    result
+        .map(|message| (text.trim() != current).then_some(message))
+        .map_err(|error| match error {
+            NameError::Empty => Text::RenameEmpty,
+            NameError::TooLong if kind == ThreadKind::Main => Text::RenameNameTooLong,
+            NameError::TooLong => Text::RenameTooLong,
+            NameError::NotOneLine => Text::RenameOneLine,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rename_message(
+        thread: ThreadId,
+        kind: ThreadKind,
+        text: &str,
+    ) -> Result<ControlToBrain, Text> {
+        super::rename_message(thread, kind, text, "previous")
+            .map(|message| message.expect("the test requests a changed name"))
+    }
+
+    #[test]
+    fn unchanged_names_and_titles_send_no_rename() {
+        assert_eq!(
+            super::rename_message(ThreadId(4), ThreadKind::Main, " Kumo ", "Kumo"),
+            Ok(None)
+        );
+        assert_eq!(
+            super::rename_message(ThreadId(5), ThreadKind::Thread, " Birthday ", "Birthday"),
+            Ok(None)
+        );
+        assert_eq!(
+            super::rename_message(ThreadId(4), ThreadKind::Main, "   ", "Kumo"),
+            Err(Text::RenameEmpty)
+        );
+    }
 
     #[test]
     fn rename_uses_the_kind_and_validates_before_sending() {

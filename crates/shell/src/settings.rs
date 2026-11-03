@@ -13,6 +13,18 @@ pub(crate) enum Field {
     User,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Update {
+    Answer,
+    Unsolicited,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Draft {
+    Reset,
+    Preserve,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum Error {
     #[error("{0}")]
@@ -73,14 +85,16 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
-    pub(crate) fn set_view(&mut self, view: SettingsView, answer: bool) -> Option<Completion> {
+    pub(crate) fn set_view(&mut self, view: SettingsView, update: Update) -> Option<Completion> {
         let sync_assistant = !self.assistant.saving && !self.editing(Field::Assistant);
         let sync_user = !self.user.saving && !self.editing(Field::User);
-        self.assistant.authoritative = view.assistant_name.as_str().to_owned();
-        self.user.authoritative = view
-            .user_name
+        view.assistant_name
+            .as_str()
+            .clone_into(&mut self.assistant.authoritative);
+        view.user_name
             .as_ref()
-            .map_or_else(String::new, |name| name.as_str().to_owned());
+            .map_or("", UserName::as_str)
+            .clone_into(&mut self.user.authoritative);
         if sync_assistant {
             self.assistant
                 .value
@@ -90,7 +104,7 @@ impl Settings {
             self.user.value.clone_from(&self.user.authoritative);
         }
         self.view = Some(view);
-        if !answer {
+        if update == Update::Unsolicited {
             return None;
         }
         let pending = self.pending.pop_front()?;
@@ -99,7 +113,8 @@ impl Settings {
         if pending.reset_draft {
             state.value.clone_from(&state.authoritative);
         }
-        if !pending.failed && matches!(state.error, Some(Error::Brain(_))) {
+        if !pending.failed && (pending.reset_draft || matches!(state.error, Some(Error::Brain(_))))
+        {
             state.error = None;
         }
         Some(Completion {
@@ -155,8 +170,7 @@ impl Settings {
     }
 
     pub(crate) fn save(&mut self, field: Field, send: impl FnOnce(SettingsOp) -> bool) -> bool {
-        let state = self.field(field);
-        if state.saving || (state.error.is_none() && !self.editing(field)) {
+        if self.field(field).saving {
             return false;
         }
         let value = self.value(field);
@@ -166,7 +180,8 @@ impl Settings {
             Field::User => UserName::new(value).map(|name| SettingsOp::SetUserName(Some(name))),
         };
         match op {
-            Ok(op) => self.send(field, op, true, send),
+            Ok(_) if value.trim() == self.field(field).authoritative => false,
+            Ok(op) => self.send(field, op, Draft::Reset, send),
             Err(error) => {
                 self.field_mut(field).error = Some(Error::Validation(error));
                 false
@@ -180,10 +195,17 @@ impl Settings {
         name: AssistantName,
         send: impl FnOnce(SettingsOp) -> bool,
     ) -> bool {
+        if name.as_str() == self.assistant.authoritative {
+            return false;
+        }
         self.send(
             Field::Assistant,
             SettingsOp::SetAssistantName(name),
-            !self.editing(Field::Assistant),
+            if self.editing(Field::Assistant) {
+                Draft::Preserve
+            } else {
+                Draft::Reset
+            },
             send,
         )
     }
@@ -192,7 +214,7 @@ impl Settings {
         &mut self,
         field: Field,
         op: SettingsOp,
-        reset_draft: bool,
+        draft: Draft,
         send: impl FnOnce(SettingsOp) -> bool,
     ) -> bool {
         if self.field(field).saving {
@@ -206,7 +228,7 @@ impl Settings {
         self.pending.push_back(Pending {
             field,
             failed: false,
-            reset_draft,
+            reset_draft: matches!(draft, Draft::Reset),
         });
         true
     }
@@ -233,7 +255,7 @@ mod tests {
 
     use super::{
         AssistantName, Completion, Error, Field, NameError, Settings, SettingsOp, SettingsView,
-        UserName,
+        Update, UserName,
     };
 
     fn view(assistant: &str, user: Option<&str>) -> SettingsView {
@@ -247,16 +269,15 @@ mod tests {
 
     fn connected() -> Settings {
         let mut settings = Settings::default();
-        assert_eq!(settings.set_view(view("Kumo", Some("Oscar")), false), None);
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Unsolicited),
+            None
+        );
         settings
     }
 
-    fn completion(field: Field, failed: bool) -> Option<Completion> {
-        Some(Completion { field, failed })
-    }
-
     #[test]
-    fn unchanged_fields_skip_saving_but_can_retry_an_error() {
+    fn unchanged_normalized_names_never_save_even_with_an_error() {
         let mut settings = connected();
         for field in [Field::Assistant, Field::User] {
             assert!(
@@ -266,6 +287,25 @@ mod tests {
             assert!(!settings.field(field).saving, "no save is pending");
             assert_eq!(settings.field(field).error, None);
         }
+        for (field, value) in [(Field::Assistant, " Kumo "), (Field::User, " Oscar ")] {
+            settings.change(field, value);
+            assert!(
+                !settings.save(field, |_| panic!("a normalized unchanged name was sent")),
+                "whitespace does not make a name change"
+            );
+            assert!(
+                !settings.field(field).saving,
+                "no normalized save is pending"
+            );
+            assert_eq!(settings.field(field).error, None);
+            settings.cancel(field);
+        }
+        assert!(
+            !settings.send_assistant(AssistantName::new(" Kumo ").expect("valid"), |_| panic!(
+                "an unchanged inline rename was sent"
+            )),
+            "an inline rename also skips the saved name"
+        );
         assert_eq!(settings.error(ErrorKey::SettingsRefused.into()), None);
         settings.change(Field::User, "Alex");
         assert!(settings.save(Field::User, |_| true), "the edit is sent");
@@ -274,8 +314,11 @@ mod tests {
             Some(Field::User)
         );
         assert_eq!(
-            settings.set_view(view("Kumo", Some("Oscar")), true),
-            completion(Field::User, true)
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: true,
+                field: Field::User
+            })
         );
         assert_eq!(settings.value(Field::User), "Oscar");
         assert!(
@@ -283,20 +326,17 @@ mod tests {
             "refusal restored a clean draft"
         );
         assert!(
-            settings.save(Field::User, |op| {
-                assert_eq!(
-                    op,
-                    SettingsOp::SetUserName(Some(UserName::new("Oscar").expect("valid")))
-                );
-                true
-            }),
-            "a clean field with an error can retry"
+            !settings.save(Field::User, |_| panic!("an error-present no-op was sent")),
+            "an error does not turn an unchanged name into a change"
+        );
+        assert!(
+            !settings.field(Field::User).saving,
+            "the no-op stays unsent"
         );
         assert_eq!(
-            settings.set_view(view("Kumo", Some("Oscar")), true),
-            completion(Field::User, false)
+            settings.field(Field::User).error,
+            Some(Error::Brain(ErrorKey::SettingsRefused.into()))
         );
-        assert_eq!(settings.field(Field::User).error, None);
     }
 
     #[test]
@@ -334,8 +374,11 @@ mod tests {
             "one field cannot have two saves in flight"
         );
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Oscar")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.value(Field::Assistant), "Cloud");
         assert!(
@@ -362,8 +405,11 @@ mod tests {
             Some(Field::Assistant)
         );
         assert_eq!(
-            settings.set_view(view("Kumo", Some("Oscar")), true),
-            completion(Field::Assistant, true)
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: true,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.value(Field::Assistant), "Kumo");
         assert!(
@@ -375,7 +421,10 @@ mod tests {
         settings.change(Field::Assistant, "Kumo");
         settings.cancel(Field::Assistant);
         assert_eq!(settings.field(Field::Assistant).error, error);
-        assert_eq!(settings.set_view(view("Kumo", Some("Oscar")), false), None);
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Unsolicited),
+            None
+        );
         assert_eq!(settings.field(Field::Assistant).error, error);
         settings.change(Field::Assistant, "Cloud");
         assert_eq!(settings.field(Field::Assistant).error, None);
@@ -400,8 +449,11 @@ mod tests {
                 "an empty user name sends a clear"
             );
             assert_eq!(
-                settings.set_view(view("Kumo", None), true),
-                completion(Field::User, false)
+                settings.set_view(view("Kumo", None), Update::Answer),
+                Some(Completion {
+                    failed: false,
+                    field: Field::User
+                })
             );
             assert_eq!(settings.value(Field::User), "");
             assert!(!settings.editing(Field::User), "the cleared name is clean");
@@ -431,8 +483,11 @@ mod tests {
             Some(Error::Brain(ErrorKey::SettingsRefused.into()))
         );
         assert_eq!(
-            settings.set_view(view("Kumo", Some("Oscar")), true),
-            completion(Field::User, true)
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: true,
+                field: Field::User
+            })
         );
         assert!(
             !settings.field(Field::User).saving,
@@ -444,15 +499,21 @@ mod tests {
         );
         assert_eq!(settings.value(Field::User), "Oscar");
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Oscar")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.value(Field::Assistant), "Cloud");
         assert_eq!(
             settings.field(Field::User).error,
             Some(Error::Brain(ErrorKey::SettingsRefused.into()))
         );
-        assert_eq!(settings.set_view(view("Cloud", Some("Oscar")), true), None);
+        assert_eq!(
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            None
+        );
     }
 
     #[test]
@@ -463,7 +524,10 @@ mod tests {
             settings.save(Field::Assistant, |_| true),
             "the save is sent"
         );
-        assert_eq!(settings.set_view(view("Other", Some("Alex")), false), None);
+        assert_eq!(
+            settings.set_view(view("Other", Some("Alex")), Update::Unsolicited),
+            None
+        );
         assert!(
             settings.field(Field::Assistant).saving,
             "an unsolicited view is not an answer"
@@ -471,8 +535,11 @@ mod tests {
         assert_eq!(settings.value(Field::Assistant), "Cloud");
         assert_eq!(settings.value(Field::User), "Alex");
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Alex")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Alex")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert!(
             !settings.field(Field::Assistant).saving,
@@ -498,8 +565,11 @@ mod tests {
             settings.change(Field::Assistant, "Later");
             let saved = if failed { "Kumo" } else { "Cloud" };
             assert_eq!(
-                settings.set_view(view(saved, Some("Oscar")), true),
-                completion(Field::Assistant, failed)
+                settings.set_view(view(saved, Some("Oscar")), Update::Answer),
+                Some(Completion {
+                    failed,
+                    field: Field::Assistant
+                })
             );
             assert_eq!(settings.value(Field::Assistant), "Later");
             assert!(
@@ -540,15 +610,21 @@ mod tests {
             "saving is disabled until settings arrive"
         );
         assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
-        assert_eq!(settings.set_view(view("Kumo", Some("Oscar")), false), None);
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Unsolicited),
+            None
+        );
         settings.change(Field::Assistant, "Cloud");
         assert!(
             settings.save(Field::Assistant, |_| true),
             "the new connection accepts a save"
         );
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Oscar")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.value(Field::User), "Alex");
         assert_eq!(
@@ -569,8 +645,18 @@ mod tests {
             Some(Field::Assistant)
         );
         assert_eq!(
-            settings.set_view(view("Kumo", Some("Oscar")), true),
-            completion(Field::Assistant, true)
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: true,
+                field: Field::Assistant
+            })
+        );
+        assert_eq!(settings.value(Field::Assistant), "Kumo");
+        assert!(
+            !settings.send_assistant(AssistantName::new("Kumo").expect("valid"), |_| panic!(
+                "an error-present inline no-op was sent"
+            )),
+            "the error does not make the saved assistant name a change"
         );
         settings.change(Field::User, "Alex");
         assert!(
@@ -579,21 +665,109 @@ mod tests {
         );
         assert!(
             settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
-            "the retry is sent"
+            "the failed different name is retried without editing the settings draft"
         );
+        assert_eq!(settings.value(Field::Assistant), "Kumo");
         assert_eq!(
             settings.field(Field::Assistant).error,
             Some(Error::Brain(ErrorKey::SettingsRefused.into()))
         );
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Oscar")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.field(Field::Assistant).error, None);
         assert_eq!(settings.field(Field::User).error, Some(Error::Offline));
         assert!(
             !settings.field(Field::User).saving,
             "a rejected send is never pending"
+        );
+    }
+
+    #[test]
+    fn successful_retry_of_the_same_draft_clears_its_offline_error() {
+        let mut settings = connected();
+        settings.change(Field::Assistant, "Cloud");
+        assert!(
+            !settings.save(Field::Assistant, |_| false),
+            "the first send fails"
+        );
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
+        assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
+        assert!(
+            !settings.field(Field::Assistant).saving,
+            "a failed send is not pending"
+        );
+        settings.disconnected();
+        assert_eq!(settings.view(), None);
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Unsolicited),
+            None
+        );
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
+        assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
+        assert!(
+            settings.save(Field::Assistant, |_| true),
+            "the same dirty draft is retried after reconnect"
+        );
+        assert!(
+            settings.field(Field::Assistant).saving,
+            "the retry is pending"
+        );
+        assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
+        assert_eq!(
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
+        );
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
+        assert_eq!(settings.field(Field::Assistant).error, None);
+        assert!(
+            !settings.field(Field::Assistant).saving,
+            "success settles the retry"
+        );
+        assert!(
+            !settings.editing(Field::Assistant),
+            "the saved draft is clean"
+        );
+    }
+
+    #[test]
+    fn successful_inline_rename_preserves_an_invalid_settings_draft() {
+        let mut settings = connected();
+        settings.change(Field::Assistant, "");
+        assert!(
+            !settings.save(Field::Assistant, |_| panic!("invalid draft sent")),
+            "the invalid settings draft stays local"
+        );
+        assert!(
+            settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
+            "the independent inline rename is sent"
+        );
+        assert_eq!(
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
+        );
+        assert_eq!(settings.value(Field::Assistant), "");
+        assert_eq!(
+            settings.field(Field::Assistant).error,
+            Some(Error::Validation(NameError::Empty))
+        );
+        assert!(
+            settings.editing(Field::Assistant),
+            "the local draft remains dirty"
+        );
+        assert!(
+            !settings.field(Field::Assistant).saving,
+            "the inline rename settled"
         );
     }
 
@@ -606,8 +780,11 @@ mod tests {
             "the inline rename is sent"
         );
         assert_eq!(
-            settings.set_view(view("Cloud", Some("Oscar")), true),
-            completion(Field::Assistant, false)
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
         );
         assert_eq!(settings.value(Field::Assistant), "Draft");
         settings.cancel(Field::Assistant);
@@ -618,7 +795,10 @@ mod tests {
     fn debug_never_contains_names_or_drafts() {
         let mut settings = Settings::default();
         assert_eq!(
-            settings.set_view(view("AssistantSentinel", Some("UserSentinel")), false),
+            settings.set_view(
+                view("AssistantSentinel", Some("UserSentinel")),
+                Update::Unsolicited
+            ),
             None
         );
         settings.change(Field::Assistant, "DraftSentinel");
