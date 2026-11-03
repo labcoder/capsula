@@ -580,6 +580,7 @@ mod tests {
     fn numbers_are_grouped_rounded_and_trimmed() {
         for (value, expected) in [
             (1234.5, "1,234.5"),
+            (-1234.5, "-1,234.5"),
             (-0.25, "-0.25"),
             (12.0, "12"),
             (1000.0, "1,000"),
@@ -590,5 +591,43 @@ mod tests {
             assert_eq!(number(value), expected);
         }
         assert_eq!(number(1.0e308), "1.00e308");
+        assert_eq!(
+            number(1.0e299).len(),
+            399,
+            "the last grouped magnitude stays within the text cap"
+        );
+        assert_eq!(
+            number(-1.0e299).len(),
+            400,
+            "the sign may reach the exact text cap"
+        );
+        assert_eq!(
+            number(1.0e300),
+            "1.00e300",
+            "grouping beyond the cap uses scientific notation"
+        );
+        assert_eq!(
+            number(-1.0e300),
+            "-1.00e300",
+            "negative scientific output retains the sign"
+        );
+    }
+
+    #[test]
+    fn numeric_columns_shrink_only_after_text_reaches_its_minimum() {
+        let mut widths = [100.0, 100.0];
+        fit(&mut widths, &[true, false], 160.0, 14.0);
+        assert_eq!(
+            widths.map(f32::to_bits),
+            [60.0_f32.to_bits(), 100.0_f32.to_bits()],
+            "text absorbs the first forty pixels"
+        );
+        let mut widths = [100.0, 100.0];
+        fit(&mut widths, &[true, false], 100.0, 14.0);
+        assert_eq!(
+            widths.map(f32::to_bits),
+            [48.0_f32.to_bits(), 52.0_f32.to_bits()],
+            "numeric width shrinks only after text reaches forty-eight pixels"
+        );
     }
 }
