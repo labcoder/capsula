@@ -22,20 +22,29 @@ value without sending it. The user-name field maps blank input to `None`.
 
 Every accepted field operation, including an inline assistant rename from Tasks, enters one
 FIFO. Only `answer: true` consumes its head and clears that field's saving state. The preceding
-`UserError` belongs to that head; `answer: false` updates saved values but never completes an
-operation. Errors remain after the refused answer. An answer to another field cannot erase
+settings error (`SettingsRefused` or `ConfigUnreadable`) belongs to that head; any other
+`UserError` is a general brain notice and never fails a pending save. `answer: false` updates
+saved values but never completes an operation. Errors remain after the refused answer. An answer to another field cannot erase
 them. A successful retry of the field that produced the dock notice clears that notice and
 its full typing-panel explanation; an unsolicited view or reconnect does not. The dock shows
 only **Check settings**, not recovery prose inside its small pill. The full explanation remains
 beside the field and in the typing panel. A new turn also clears the retained typing/dock notice.
+Transport errors clear on a view from the current connection, never on a stale view. An inline
+rename refuses with saving, offline or retry feedback without adding an error to a Settings
+field. Cancelling a field while its save is in flight leaves that draft and save intact.
 Disconnect drops all in-flight slots; the replacement connection must first supply its view
 before new saves are available. A late answer from another generation is ignored.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
-drawing, then cancels the active field edit; another Esc dismisses. The close button and
-Settings… again also dismiss it. Opening the typing panel or Tasks, or moving the dock, uses
-the same dismissal path: save an active edit as a blur would, hide the window, and use the
+drawing, then cancels the active field edit; another Esc dismisses. The close button also
+dismisses it. The status panel is hidden while Settings is open; close Settings to reach Retry
+and Quit there (Retry is also in the dock's native menu). Opening the typing panel or Tasks,
+or moving the dock, uses the same dismissal path: save an active edit as a blur would, hide the window, and use the
 existing platform presence functions to restore the previous foreground when still owned.
+Local validation or send errors keep **Settings not saved** on the dock even after dismissal.
+The retained draft and inline error remain available on reopening; correcting or cancelling
+the edit clears the local indicator. General brain errors use **Needs attention**, not
+**Check settings**.
 No additional platform-specific code is needed. See [panels](panels.md#settings-panel) and
 the [user guide](../user/settings.md).
 

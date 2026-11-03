@@ -30,3 +30,6 @@ Settings, saving an active edit as if you had left the field.
 
 If the dock says **Check settings**, open **Settings…** for the full explanation and retry the
 field that failed. A successful retry clears that notice.
+
+If the dock says **Settings not saved**, an edit couldn't be sent or failed validation.
+Open **Settings…** to correct or cancel the edit; the draft stays there until you do.

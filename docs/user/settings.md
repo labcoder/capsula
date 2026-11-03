@@ -12,9 +12,14 @@ editing. **Accounts** is empty for now.
 
 Settings stays open when you switch to another app. Esc first stops active work or clears a
 drawing. Otherwise it cancels the field you're editing without saving; press Esc again to
-close Settings. **Close** and **Settings…** again also close it, saving an active edit as if
+close Settings. **Close** also closes it, saving an active edit as if
 you had left the field. Closing gives keyboard focus back to the previous app when Settings
 still has it.
+
+Opening the typing panel or Tasks, or moving the dock, also closes Settings. If an edit can't
+be sent or fails validation, the dock says **Settings not saved**; reopen Settings to correct
+or cancel it. The draft stays there. While Settings is open, the status panel is hidden;
+close Settings to reach its Retry and Quit buttons. Retry is also in the dock's native menu.
 
 If the dock says **Check settings**, open Settings for the full explanation. A successful retry
 of the field that failed clears that notice. If the settings file can't be read, repair or
