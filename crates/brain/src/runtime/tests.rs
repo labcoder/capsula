@@ -13,9 +13,9 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
 use super::data::DataQueue;
-use super::fixture::Fixture;
 use super::{Brain, Ended, Link, MAX_ENDING, window};
 use crate::coordinator::Input;
+use crate::engines::fixture::Fixture;
 use crate::ipc;
 #[cfg(windows)]
 use crate::platform::{self, PipeClient, PipeServer};
@@ -212,7 +212,7 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         .expect("busy timeout");
     let fixture = Fixture::parse(script).expect("script");
     let scenes = store.scenes().expect("scenes");
-    Brain::new(store, high_water, scenes, fixture).expect("brain")
+    Brain::new(store, high_water, scenes, Box::new(fixture)).expect("brain")
 }
 
 /// A connection holding the store's write lock, so the brain's writes wait until it ends.
