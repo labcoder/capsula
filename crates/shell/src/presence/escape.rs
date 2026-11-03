@@ -73,7 +73,12 @@ impl Presence {
             }
             Escape::Ignore => None,
         };
-        self.activity = self.activity();
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        self.activity = Self::activity(&self.runs, panel, &self.presenter);
         self.refresh_conversation(cx);
         // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
