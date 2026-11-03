@@ -1,7 +1,7 @@
 use super::{
-    Glide, PrepareError, SurfaceGeometry, diagram,
+    Glide, PrepareError, SurfaceGeometry, compound, diagram,
     primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect},
-    state::{LayoutState, Placed},
+    state::{LayoutState, Placed, Rest},
 };
 use crate::{
     ErrorCode, Handle, Op,
@@ -9,8 +9,11 @@ use crate::{
     geom::{Affine, Rect, Vec2},
     record::{Align, Direction, Node, NodeShape},
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cmp::Reverse, collections::BTreeMap, sync::Arc};
 
+/// Places nodes and clusters, and returns the generated glides plus the new edges a cluster
+/// owns, which are built here so their labels are in the cluster's size before it is ranked.
+/// New nodes take their prepared `rests` first, so those edges and sizes see resting bounds.
 #[expect(
     clippy::too_many_lines,
     reason = "initial batch and stable incremental placement share the same measured node index"
@@ -18,10 +21,11 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(super) fn place(
     sources: &BTreeMap<crate::WireId, (Handle, Arc<Op>)>,
     order: &[crate::WireId],
+    rests: &BTreeMap<crate::WireId, Rest>,
     state: &mut LayoutState,
     build: &mut Build<'_>,
     surface: SurfaceGeometry,
-) -> Result<Vec<Glide>, PrepareError> {
+) -> Result<(Vec<Glide>, Vec<crate::WireId>), PrepareError> {
     let mut measured = BTreeMap::new();
     for id in order {
         let Some((_, source)) = sources.get(id) else {
@@ -60,9 +64,10 @@ pub(super) fn place(
         }
         measured.insert(id.clone(), (size, label, sub));
     }
+    let mut parents = BTreeMap::<crate::WireId, (Handle, Option<Handle>)>::new();
     let mut groups = BTreeMap::<Option<Handle>, Vec<crate::WireId>>::new();
     for id in order {
-        let Some((_, source)) = sources.get(id) else {
+        let Some((handle, source)) = sources.get(id) else {
             continue;
         };
         let Op::Node(node) = &**source else {
@@ -82,42 +87,114 @@ pub(super) fn place(
                 })
                 .transpose()?
         };
+        parents.insert(id.clone(), (*handle, parent));
         groups.entry(parent).or_default().push(id.clone());
     }
+    // An edge ranks once, in its endpoints' least common group, between the two members there
+    // that hold them; edges inside one member never count toward that group's edge cap.
+    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
+    let mut edges = BTreeMap::new();
+    for object in state.objects.values() {
+        if let Op::Edge(edge) = &*object.source {
+            edges.entry(object.item.handle).or_insert(edge);
+        }
+    }
+    for (handle, source) in sources.values() {
+        if let Op::Edge(edge) = &**source {
+            edges.entry(*handle).or_insert(edge);
+        }
+    }
+    let mut chains = BTreeMap::new();
+    for edge in edges.into_values() {
+        for id in [&edge.from, &edge.to] {
+            chains
+                .entry(id)
+                .or_insert_with(|| compound::ancestry(state, &parents, id));
+        }
+        let to = &chains[&edge.to];
+        let common = chains[&edge.from].iter().find_map(|&(from, group)| {
+            to.iter()
+                .find(|(_, other)| *other == group)
+                .map(|&(to, _)| (group, from, to))
+        });
+        if let Some((group, from, to)) = common
+            && from != to
+        {
+            ranked.entry(group).or_default().push((from, to));
+        }
+    }
+    for (id, object) in &state.objects {
+        if object.rank.is_none() && compound::is_cluster(state, object) {
+            groups
+                .entry(object.item.parent)
+                .or_default()
+                .push(id.clone());
+            // Its own pass measures contents that aren't new nodes, such as a table.
+            groups.entry(Some(object.item.handle)).or_default();
+        }
+    }
+    let mut owned_by = BTreeMap::<Handle, Vec<&crate::WireId>>::new();
+    for id in order {
+        let Some((_, source)) = sources.get(id) else {
+            continue;
+        };
+        let Op::Edge(value) = &**source else {
+            continue;
+        };
+        if state.objects.contains_key(id) {
+            continue;
+        }
+        if let Some(owner) = value
+            .parent
+            .as_ref()
+            .and_then(|owner| state.objects.get(owner))
+        {
+            owned_by.entry(owner.item.handle).or_default().push(id);
+        }
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|(parent, _)| Reverse(compound::depth(state, *parent)));
     let mut glides = Vec::new();
+    let mut owned_edges = Vec::new();
     for (parent, mut new_ids) in groups {
+        build.check_cancel()?;
         let group_id = parent.and_then(|handle| state.handles.get(&handle).cloned());
         let group = group_id.as_ref().and_then(|id| state.objects.get(id));
+        let cluster = group.is_some_and(|group| compound::is_cluster(state, group));
         let viewport = group
             .and_then(|group| match &*group.source {
                 Op::Diagram(diagram) => diagram.bounds.map(rect),
                 _ => None,
             })
             .unwrap_or(build.viewport);
-        let direction = group
-            .and_then(|group| match &*group.source {
-                Op::Diagram(diagram) => diagram.dir,
-                _ => None,
-            })
-            .unwrap_or(match surface {
-                SurfaceGeometry::Inline { .. } => Direction::Down,
-                SurfaceGeometry::Overlay { .. } => Direction::Right,
-            });
+        let direction = compound::direction(state, parent, surface);
         let initialized = group.is_some_and(|group| group.initialized);
-        let mut all: Vec<_> = state
-            .objects
-            .iter()
-            .filter(|(_, object)| {
-                matches!(&*object.source, Op::Node(_)) && object.item.parent == parent
-            })
-            .map(|(id, object)| (object.item.handle, id.clone(), object.item.bounds.size))
-            .collect();
+        let mut all = Vec::new();
+        let mut nodes = 0;
+        for (id, object) in &state.objects {
+            if object.item.parent != parent {
+                continue;
+            }
+            if matches!(&*object.source, Op::Node(_)) {
+                nodes += 1;
+                all.push((object.item.handle, id.clone(), object.item.bounds.size));
+            } else if compound::is_cluster(state, object) {
+                all.push((
+                    object.item.handle,
+                    id.clone(),
+                    compound::member_rect(object).size,
+                ));
+            }
+        }
         for id in &new_ids {
-            let (handle, _) = &sources[id];
+            let Some(&(size, _, _)) = measured.get(id) else {
+                continue;
+            };
             if let Some(existing) = all.iter_mut().find(|(_, existing, _)| existing == id) {
-                existing.2 = measured[id].0;
+                existing.2 = size;
             } else {
-                all.push((*handle, id.clone(), measured[id].0));
+                nodes += 1;
+                all.push((sources[id].0, id.clone(), size));
             }
         }
         all.sort_by_key(|(handle, _, _)| *handle);
@@ -127,29 +204,26 @@ pub(super) fn place(
             .enumerate()
             .map(|(index, (_, id, _))| (id.clone(), index))
             .collect();
-        let mut edges: Vec<_> = state
-            .objects
-            .values()
-            .filter_map(|object| match &*object.source {
-                Op::Edge(edge) => Some((object.item.handle, edge)),
-                _ => None,
+        let fresh: Vec<_> = all
+            .iter()
+            .map(|(_, id, _)| {
+                state
+                    .objects
+                    .get(id)
+                    .is_none_or(|object| object.rank.is_none())
             })
             .collect();
-        edges.extend(
-            sources
-                .values()
-                .filter_map(|(handle, source)| match &**source {
-                    Op::Edge(edge) => Some((*handle, edge)),
-                    _ => None,
-                }),
-        );
-        edges.sort_by_key(|(handle, _)| *handle);
-        edges.dedup_by_key(|(handle, _)| *handle);
-        let edges: Vec<_> = edges
+        let slot = |member: Handle| {
+            all.binary_search_by_key(&member, |(handle, _, _)| *handle)
+                .ok()
+        };
+        let edges: Vec<_> = ranked
+            .get(&parent)
             .into_iter()
-            .filter_map(|(_, edge)| Some((*index.get(&edge.from)?, *index.get(&edge.to)?)))
+            .flatten()
+            .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
             .collect();
-        let placement = diagram::layout(&sizes, &edges, direction, diagram::RANK_GAP)?;
+        let placement = diagram::layout(&sizes, nodes, &edges, direction, diagram::RANK_GAP)?;
         let mut ranks = placement.ranks.clone();
         for (slot, (_, id, _)) in all.iter().enumerate() {
             if let Some(rank) = state.objects.get(id).and_then(|object| object.rank) {
@@ -158,14 +232,12 @@ pub(super) fn place(
         }
         for _ in 0..all.len() {
             for &(from, to) in &edges {
-                if placement.ranks[from] < placement.ranks[to]
-                    && !state.objects.contains_key(&all[to].1)
-                {
+                if placement.ranks[from] < placement.ranks[to] && fresh[to] {
                     ranks[to] = ranks[to].max(ranks[from] + 1);
                 }
             }
         }
-        // shortcut: wide initial batches stay unscaled until A8's visual gate.
+        // shortcut: wide initial batches stay unscaled until A9's visual gate.
         let initial = !initialized && all.iter().all(|(_, id, _)| new_ids.contains(id));
         let translate = Vec2::new(
             viewport.center().x - placement.bounds.center().x,
@@ -174,13 +246,39 @@ pub(super) fn place(
         let mut focus = None;
         new_ids.sort_by_key(|id| ranks[index[id]]);
         for id in new_ids {
-            let (handle, source) = &sources[&id];
-            let Op::Node(node) = &**source else {
-                unreachable!("node group contains nodes");
-            };
-            let (size, label, sub) = measured[&id];
             let slot = index[&id];
             let rank = ranks[slot];
+            let Some(&(size, label, sub)) = measured.get(&id) else {
+                let size = sizes[slot];
+                let target = if initial {
+                    Rect {
+                        origin: placement.rects[slot].origin + translate,
+                        size,
+                    }
+                } else {
+                    free_slot(
+                        state,
+                        parent,
+                        rank,
+                        size,
+                        direction,
+                        viewport,
+                        placement.rects[slot].center() + translate,
+                    )?
+                };
+                state.objects.entry(id).and_modify(|member| {
+                    let pad = Vec2::new(compound::PAD, compound::PAD);
+                    let offset = target.origin + pad - member.item.bounds.origin;
+                    member.item.transform = Affine::pose(1.0, 0.0, offset);
+                    member.rank = Some(rank);
+                });
+                focus = Some(focus.map_or(target, |previous: Rect| previous.union(target)));
+                continue;
+            };
+            let (handle, source) = &sources[&id];
+            let Op::Node(node) = &**source else {
+                unreachable!("measured members are nodes");
+            };
             let previous = state.objects.get(&id).cloned();
             let bounds = if let Some(previous) = &previous {
                 Rect::centered(previous.item.bounds.center(), size)
@@ -216,18 +314,49 @@ pub(super) fn place(
             object.anchors = [Vec2::default(); 2];
             object.rank = Some(previous.as_ref().and_then(|old| old.rank).unwrap_or(rank));
             object.initialized = false;
+            object.rest = rests.get(&id).copied().unwrap_or_default();
 
             state.handles.insert(*handle, id.clone());
             state.objects.insert(id, object);
             focus = Some(focus.map_or(bounds, |previous: Rect| previous.union(bounds)));
         }
+        // Every endpoint below this cluster is placed, so its new edges can be built once.
+        if cluster && let Some(ids) = parent.and_then(|handle| owned_by.remove(&handle)) {
+            for id in ids {
+                let (handle, source) = &sources[id];
+                let Op::Edge(value) = &**source else {
+                    unreachable!("owned_by holds edges");
+                };
+                if !state.objects.contains_key(&value.from)
+                    || !state.objects.contains_key(&value.to)
+                {
+                    continue;
+                }
+                let mut object = edge(source, *handle, parent, state, build, None)?;
+                object.rest = rests.get(id).copied().unwrap_or_default();
+                state.handles.insert(*handle, id.clone());
+                state.objects.insert(id.clone(), object);
+                owned_edges.push(id.clone());
+            }
+        }
         if let Some(group_id) = group_id {
+            // A cluster's parent ranks its contents, so they must be measured before it.
+            // shortcut: text, shapes and callouts in a cluster are placed after its parent ranks
+            // it, so they don't widen it; the parser/compiler PR measures them first.
+            let contents = parent
+                .filter(|_| cluster)
+                .and_then(|handle| compound::contents(state, handle));
             let group = state
                 .objects
                 .get_mut(&group_id)
                 .expect("group was resolved above");
-            group.initialized = true;
-            if let Some(focus) = focus {
+            group.initialized |= focus.is_some();
+            if let Some(contents) = contents {
+                group.item.bounds = contents;
+            }
+            // shortcut: a cluster growing on a later step never glides or moves, so it can overlap
+            // a sibling or end off-screen with nothing bringing it into view; revisit in A9.
+            if !cluster && let Some(focus) = focus {
                 let current = group.rest.pos;
                 let shifted = Rect {
                     origin: focus.origin + current,
@@ -253,7 +382,7 @@ pub(super) fn place(
             }
         }
     }
-    Ok(glides)
+    Ok((glides, owned_edges))
 }
 
 fn free_slot(
@@ -265,12 +394,12 @@ fn free_slot(
     viewport: Rect,
     fallback: Vec2,
 ) -> Result<Rect, PrepareError> {
-    // shortcut: slots ignore edge alignment and the resting glide; revisit in A8.
+    // shortcut: slots ignore edge alignment and the resting glide; revisit in A9.
     let mut same_rank: Vec<_> = state
         .objects
         .values()
         .filter(|object| object.item.parent == parent && object.rank == Some(rank))
-        .map(|object| object.item.bounds)
+        .map(compound::member_rect)
         .collect();
     let across = |point: Vec2| {
         if dir == Direction::Right {
@@ -287,10 +416,11 @@ fn free_slot(
             object.item.parent == parent && object.rank.is_some_and(|previous| previous < rank)
         })
         .map(|object| {
+            let rect = compound::member_rect(object);
             if dir == Direction::Right {
-                object.item.bounds.max().x
+                rect.max().x
             } else {
-                object.item.bounds.max().y
+                rect.max().y
             }
         })
         .max_by(f32::total_cmp);

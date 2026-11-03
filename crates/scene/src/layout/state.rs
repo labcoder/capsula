@@ -422,4 +422,135 @@ mod tests {
         assert_eq!(live.glides, replayed.glides);
         assert_eq!(live.glides.len(), 1);
     }
+    #[test]
+    fn edges_inside_child_clusters_do_not_count_toward_the_parents_edge_cap() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"caps","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut put = vec![r#"{"diagram":{"id":"r"}}"#.to_owned()];
+        for group in ["a", "b"] {
+            put.push(format!(r#"{{"diagram":{{"id":"{group}","in":"r"}}}}"#));
+            for node in ["1", "2"] {
+                put.push(format!(
+                    r#"{{"node":{{"id":"{group}{node}","in":"{group}","label":"N"}}}}"#
+                ));
+            }
+            for edge in 0..crate::limits::MAX_DIAGRAM_EDGES {
+                put.push(format!(
+                    r#"{{"edge":{{"id":"{group}e{edge}","in":"{group}","from":"{group}1","to":"{group}2"}}}}"#
+                ));
+            }
+        }
+        let source = format!(r#"{{"step":{{"id":"full","put":[{}]}}}}"#, put.join(","));
+        let prepared = picture(&mut scene, &mut budget, &before, &source);
+        assert_eq!(
+            prepared.after.items().len(),
+            3 + 4 + 2 * crate::limits::MAX_DIAGRAM_EDGES
+        );
+    }
+    #[test]
+    fn initial_sibling_clusters_reserve_their_long_edge_labels() {
+        struct Wide;
+        impl TextMeasure for Wide {
+            fn measure(
+                &mut self,
+                text: &str,
+                _style: TextStyle,
+                _width: Option<f32>,
+            ) -> Result<[f32; 2], MeasureError> {
+                Ok([if text == "long" { 180.0 } else { 8.0 }, 10.0])
+            }
+        }
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"labels","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut put = vec![r#"{"diagram":{"id":"r"}}"#.to_owned()];
+        for group in ["a", "b"] {
+            put.push(format!(r#"{{"diagram":{{"id":"{group}","in":"r"}}}}"#));
+            for node in ["1", "2"] {
+                put.push(format!(
+                    r#"{{"node":{{"id":"{group}{node}","in":"{group}","label":"N"}}}}"#
+                ));
+            }
+            put.push(format!(
+                r#"{{"edge":{{"id":"{group}e","in":"{group}","from":"{group}1","to":"{group}2","label":"long"}}}}"#
+            ));
+        }
+        let source = format!(r#"{{"step":{{"id":"first","put":[{}]}}}}"#, put.join(","));
+        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
+            panic!("step");
+        };
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admit") else {
+            panic!("new");
+        };
+        let ticket = scene
+            .commit(candidate, &mut budget)
+            .expect("commit")
+            .preparation;
+        let input = PrepareInput::new(
+            ticket,
+            before,
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        let prepared = prepare(input, &mut Wide, &AtomicBool::new(false)).expect("prepared");
+        let bounds = ["a", "b"].map(|group| {
+            prepared
+                .after
+                .bounds(&group.to_owned().try_into().expect("id"))
+                .expect("safe")
+                .expect("group")
+        });
+        assert_eq!(bounds[0].size.x.to_bits(), 180.0_f32.to_bits());
+        assert_eq!(bounds[0].size.y.to_bits(), 152.0_f32.to_bits());
+        assert_eq!(
+            bounds[1].origin.x.to_bits(),
+            (bounds[0].max().x + 62.0).to_bits()
+        );
+        assert!(
+            !bounds[0].intersects(bounds[1]),
+            "sibling groups stay apart"
+        );
+    }
+    #[test]
+    fn cluster_edges_end_on_their_endpoints_resting_bounds() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"rests","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let prepared = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            r#"{"step":{"id":"first","put":[{"diagram":{"id":"r"}},{"diagram":{"id":"g","in":"r"}},{"node":{"id":"a","in":"g","label":"A"}},{"node":{"id":"b","in":"g","label":"B"}},{"edge":{"id":"e","in":"g","from":"a","to":"b"}},{"anim":{"target":"b","track":"y","keys":[[0,100]]}}]}}"#,
+        );
+        let id = |name: &str| -> WireId { name.to_owned().try_into().expect("id") };
+        let after = &prepared.after;
+        let edge = &after.objects[&id("e")];
+        let end = after
+            .resting_transform(edge.item.parent.expect("the edge sits in g"))
+            .expect("safe")
+            .point(edge.anchors[1]);
+        let b = after.bounds(&id("b")).expect("safe").expect("b");
+        assert_eq!(end.y.to_bits(), b.origin.y.to_bits());
+        assert_eq!(end.x.to_bits(), (b.origin.x + 40.0).to_bits());
+    }
 }
