@@ -92,10 +92,13 @@ flowchart LR
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
   them breaks the connection like any malformed frame. The settings model retains the brain
   error and its field attribution; Presence caches its localized presentation for the typing
-  panel and tasks panel, with a short **Check settings** dock label.
+  panel and tasks panel, with a short **Check settings** dock label for settings keys and
+  **Needs attention** for any other brain error.
   It clears when a turn is successfully sent or a successful answer settles a retry of the
   settings field that produced it. An unsolicited view, reconnect, or another field's success
-  cannot clear it. The settings FIFO attributes each refusal to the unanswered head operation.
+  cannot clear it. Only `SettingsRefused` and `ConfigUnreadable` are attributed to the settings
+  FIFO's unanswered head operation. Other keys remain general brain errors and never fail a
+  pending settings save.
   A failed submit leaves that error intact. Local submission refusals are separate, shown only
   in the typing panel in preference to the retained brain error. Reconnecting or accepting a
   `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at

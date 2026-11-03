@@ -207,7 +207,7 @@ impl Presence {
         &mut self,
         name: AssistantName,
         cx: &mut Context<'_, Self>,
-    ) -> bool {
+    ) -> Result<(), Text> {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let sent = state.send_assistant(name, |op| {
@@ -216,7 +216,11 @@ impl Presence {
                     .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
             });
             cx.notify();
-            sent
+            if sent {
+                Ok(())
+            } else {
+                Err(state.rename_refusal())
+            }
         })
     }
 

@@ -231,8 +231,10 @@ impl Presence {
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let label: SharedString = if self.gesture.get().listening() {
             cx.global::<Strings>().get(Text::Listening).into()
-        } else if self.error.is_some() && self.state == LinkState::Connected {
-            cx.global::<Strings>().get(Text::DockError).into()
+        } else if let Some(notice) = self.settings.read(cx).dock_notice().filter(|notice| {
+            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
+        }) {
+            cx.global::<Strings>().get(notice).into()
         } else {
             dock_label(self.state, cx)
         };

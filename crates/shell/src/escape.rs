@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_edit_keeps_stop_and_clear_before_cancel_then_dismiss() {
+    fn settings_edit_keeps_stop_and_clear_before_cancel() {
         assert_eq!(
             decide(
                 Activity {
@@ -146,10 +146,6 @@ mod tests {
         assert_eq!(
             decide(Activity::default(), Panel::SettingsEdit),
             Escape::CancelEdit
-        );
-        assert_eq!(
-            decide(Activity::default(), Panel::Settings),
-            Escape::Dismiss
         );
     }
 

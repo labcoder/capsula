@@ -12,9 +12,12 @@ argument, not the product name.
 
 Settings does not hide on deactivation. Esc operates only when Settings is focused: stop,
 clear, cancel the active field edit, then dismiss on the next Esc. Stop and clear leave the
-edit intact. Its close button and **Settings…** again dismiss it too. Opening the typing panel
+edit intact. Its close button dismisses it too. The status panel stays hidden until Settings
+closes, so Retry and Quit there require closing Settings first; native-menu Retry still works.
+Opening the typing panel
 or Tasks, or moving the dock, uses the same dismissal path. On dismissal, an active field
-saves as on blur, and the previous foreground is restored through the existing platform
+saves as on blur. If local validation or sending fails, **Settings not saved** remains on the
+dock and the retained draft and error are available on reopening. The previous foreground is restored through the existing platform
 presence interface. The native focus handoff requires a real Window and remains an owner
 hand check; pure Esc and save ordering are unit-tested. A new Settings panel inherits the
 current capture exclusion, just like Tasks and typing.
