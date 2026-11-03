@@ -21,4 +21,8 @@ reporting the first failure. Only `ERROR_NOT_FOUND` means absence.
 These synchronous operations must run off the core loop while the caller retains the
 vault's session lock, even if an async waiter is cancelled. This layer does not provide
 atomic record replacement or cleanup of unknown leftovers. The vault's manifest, two
-slots, session lock and intent records are separate work; none is written here.
+slots and intent records are separate work; none is written here.
+
+`platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
+`File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
+`platform::session_lock_path()` uses the Dev data folder in debug builds. Startup wiring is separate.

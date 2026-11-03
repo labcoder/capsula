@@ -7,6 +7,10 @@ use kumochi_protocol::constants;
 
 pub mod credential;
 
+mod session_lock;
+
+pub use session_lock::{SessionLock, SessionLockError};
+
 #[cfg(windows)]
 #[expect(
     unsafe_code,
@@ -29,6 +33,14 @@ pub(crate) use windows::{PipeClient, test_pair};
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     data_dir_under(std::env::var_os("LOCALAPPDATA"))
+}
+
+/// The empty account-session lock file under the local data folder, separate for dev builds.
+///
+/// None unless `%LOCALAPPDATA%` is an absolute path, by the same rule as [`data_dir`].
+#[must_use]
+pub fn session_lock_path() -> Option<PathBuf> {
+    Some(data_dir()?.join(constants::SESSION_LOCK))
 }
 
 /// The per-user folder for settings, which roam: `%APPDATA%\\<product>`, by the same rule.
