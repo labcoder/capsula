@@ -1,14 +1,17 @@
+mod axis;
+
 use super::{
     PrepareError,
-    primitives::{Build, rect},
+    primitives::Build,
     state::{LayoutState, Placed},
 };
 use crate::{
     Handle, Op, Text, WireId,
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
-    record::{Align, Axis, AxisScale, Chart, ChartKind, Point, Series},
+    record::{Align, ChartKind, Point, Series},
 };
+use axis::{Domain, header};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -31,169 +34,6 @@ fn point(value: &Point, index: usize) -> (f64, f64) {
         Point::Value(y) => (f64::from(count(index)), y.get()),
         Point::Pair(p) => (p[0].get(), p[1].get()),
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Domain {
-    min: f64,
-    max: f64,
-    log: bool,
-}
-impl Domain {
-    fn fraction(self, value: f64) -> f32 {
-        let value = if self.log {
-            value.max(f64::from_bits(1)).log10()
-        } else {
-            value
-        };
-        if value <= self.min {
-            return 0.0;
-        }
-        if value >= self.max {
-            return 1.0;
-        }
-        let span = self.max - self.min;
-        fraction(if span.is_finite() {
-            (value - self.min) / span
-        } else {
-            (value * 0.5 - self.min * 0.5) / (self.max * 0.5 - self.min * 0.5)
-        })
-    }
-    fn value(self, value: f64) -> f64 {
-        if self.log {
-            10.0_f64.powf(value).min(f64::MAX)
-        } else {
-            value
-        }
-    }
-    fn ticks(self) -> Vec<f64> {
-        let step = tick_step(self, TickBounds::Inside);
-        let first = (self.min / step).ceil();
-        (0..6)
-            .map(|i| (first + f64::from(i)) * step)
-            .filter(|v| v.is_finite() && *v >= self.min && *v <= self.max)
-            .collect()
-    }
-}
-#[derive(Clone, Copy, Debug)]
-enum TickBounds {
-    Inside,
-    Outside,
-}
-fn tick_step(range: Domain, bounds: TickBounds) -> f64 {
-    let raw = (range.max / 5.0 - range.min / 5.0).max(f64::from_bits(1));
-    let base = 10.0_f64.powf(raw.log10().floor()).max(f64::from_bits(1));
-    let (mut best, mut error) = (raw, f64::INFINITY);
-    for scale in [0.1, 1.0, 10.0] {
-        for factor in [1.0, 2.0, 5.0] {
-            let step = base * scale * factor;
-            if !step.is_finite() || step <= 0.0 {
-                continue;
-            }
-            let lo = range.min / step;
-            let hi = range.max / step;
-            let ticks = match bounds {
-                TickBounds::Inside => hi.floor() - lo.ceil(),
-                TickBounds::Outside => hi.ceil() - lo.floor(),
-            } + 1.0;
-            let candidate = (ticks - 5.0).abs();
-            if candidate < error {
-                best = step;
-                error = candidate;
-            }
-        }
-    }
-    best
-}
-fn domain(
-    mut min: f64,
-    mut max: f64,
-    axis: &Axis,
-    baseline: Option<f64>,
-    padding: Option<usize>,
-) -> Domain {
-    let log = axis.scale == AxisScale::Log;
-    if !min.is_finite() {
-        min = if log { 1.0 } else { 0.0 };
-        max = if log { 10.0 } else { 1.0 };
-    }
-    if let Some(baseline) = baseline
-        && !log
-    {
-        min = min.min(baseline);
-        max = max.max(baseline);
-    }
-    if log {
-        min = min.log10();
-        max = max.log10();
-    }
-    let transform = |v: crate::text::Number| if log { v.get().log10() } else { v.get() };
-    if let Some(n) = padding {
-        let pad = if n > 1 {
-            (max / 2.0 - min / 2.0) / f64::from(count(n - 1))
-        } else {
-            0.5
-        };
-        if (min - pad).is_finite() {
-            min -= pad;
-        }
-        if (max + pad).is_finite() {
-            max += pad;
-        }
-    }
-    min = axis.min.map_or(min, transform);
-    max = axis.max.map_or(max, transform);
-    if max <= min {
-        let pad = (min.abs().max(max.abs()) * 0.1).max(1.0);
-        if axis.min.is_some() {
-            max = (min + pad).min(f64::MAX);
-        } else if axis.max.is_some() {
-            min = (max - pad).max(-f64::MAX);
-        } else {
-            min = (min - pad).max(-f64::MAX);
-            max = (max + pad).min(f64::MAX);
-        }
-    }
-    let mut range = Domain { min, max, log };
-    if padding.is_none() {
-        let step = tick_step(range, TickBounds::Outside);
-        let lo = (min / step).floor() * step;
-        let hi = (max / step).ceil() * step;
-        if axis.min.is_none() && lo.is_finite() {
-            range.min = lo;
-        }
-        if axis.max.is_none() && hi.is_finite() {
-            range.max = hi;
-        }
-    }
-    if log {
-        range.min = range.min.max(f64::from_bits(1).log10());
-        range.max = range.max.min(f64::MAX.log10());
-    }
-    range
-}
-fn compact(value: f64, unit: Option<&Text>) -> Result<Text, PrepareError> {
-    let (scaled, suffix) = [(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "k")]
-        .into_iter()
-        .find(|(scale, _)| value.abs() >= *scale)
-        .map_or((value, ""), |(s, t)| (value / s, t));
-    let raw = if scaled.abs() >= 1e6 || (scaled != 0.0 && scaled.abs() < 0.01) {
-        format!("{scaled:.1e}")
-    } else {
-        let scaled = if scaled == 0.0 { 0.0 } else { scaled };
-        let raw = if suffix.is_empty() {
-            format!("{scaled:.2}")
-        } else {
-            format!("{scaled:.1}")
-        };
-        raw.trim_end_matches('0').trim_end_matches('.').to_owned()
-    };
-    let number = format!("{raw}{suffix}");
-    let label = format!("{number}{}", unit.map_or("", Text::as_str));
-    if label.chars().count() > crate::limits::MAX_TEXT_CHARS {
-        return Ok(unit.ok_or(PrepareError::Stale)?.clone());
-    }
-    Ok(label.try_into()?)
 }
 
 struct Plot {
@@ -297,279 +137,12 @@ impl Drawing {
     }
 }
 fn color(series: &Series, palette: usize, build: &Build<'_>) -> Paint {
+    // shortcut: the theme palette wraps after 8 series, add colors when charts need more.
     series
         .color
         .as_ref()
         .map_or_else(|| build.theme.series(palette), |c| build.theme.resolve(c))
         .into()
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "chart header measurement resolves the single shared plot"
-)]
-fn header(
-    chart: &Chart,
-    series: &[&Series],
-    build: &mut Build<'_>,
-) -> Result<(Arc<Plot>, Drawing), PrepareError> {
-    let frame = chart.bounds.map_or(
-        Rect {
-            origin: build.viewport.origin,
-            size: Vec2::new(build.viewport.size.x, build.viewport.size.y.min(300.0)),
-        },
-        rect,
-    );
-    let mut out = Drawing::new(frame);
-    out.rect(frame, 10.0, Paint::from(build.theme.surface).faded(0.92));
-    let style = TextStyle {
-        size: build.theme.font_size * 0.8,
-        bold: false,
-    };
-    let muted = Paint::from(build.theme.muted);
-    let mut top = frame.origin.y + 12.0;
-    if let Some(title) = &chart.title {
-        let size = out.label(
-            title.clone(),
-            Vec2::new(frame.origin.x + 12.0, top),
-            frame.size.x - 24.0,
-            Align::Left,
-            TextStyle {
-                size: build.theme.font_size,
-                bold: true,
-            },
-            build.theme.fg.into(),
-            build,
-        )?;
-        top += size.y + 8.0;
-    }
-    if series.iter().filter(|s| s.name.is_some()).count() >= 2 {
-        let mut x = frame.origin.x + 12.0;
-        let mut height = style.size * 1.3 + 8.0;
-        let mut palette = 0;
-        for s in series {
-            let slot = palette;
-            palette += if chart.kind == ChartKind::Pie {
-                s.data.len()
-            } else {
-                1
-            };
-            let Some(name) = &s.name else {
-                continue;
-            };
-            let width = build
-                .measure(name, style, None)?
-                .x
-                .min((frame.size.x - 46.0).max(1.0));
-            if x > frame.origin.x + 12.0 && x + width + 18.0 > frame.max().x - 12.0 {
-                top += height;
-                x = frame.origin.x + 12.0;
-                height = style.size * 1.3 + 8.0;
-            }
-            out.rect(
-                Rect {
-                    origin: Vec2::new(x, top + 3.0),
-                    size: Vec2::new(9.0, 9.0),
-                },
-                2.0,
-                color(s, slot, build),
-            );
-            let size = out.label(
-                name.clone(),
-                Vec2::new(x + 14.0, top),
-                width,
-                Align::Left,
-                style,
-                muted,
-                build,
-            )?;
-            height = height.max(size.y + 8.0);
-            x += width + 28.0;
-        }
-        top += height;
-    }
-    let n = series
-        .iter()
-        .map(|s| s.data.len())
-        .max()
-        .unwrap_or(0)
-        .max(chart.categories.len());
-    let (mut xmin, mut xmax, mut ymin, mut ymax) = (
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-    );
-    let mut stacks = vec![[0.0_f64; 2]; n];
-    for s in series {
-        for (i, p) in s.data.iter().enumerate() {
-            let (x, y) = point(p, i);
-            xmin = xmin.min(x);
-            xmax = xmax.max(x);
-            ymin = ymin.min(y);
-            ymax = ymax.max(y);
-            if chart.kind == ChartKind::Bar && chart.stacked {
-                let base = &mut stacks[i][usize::from(y < 0.0)];
-                *base += y;
-                ymin = ymin.min(*base);
-                ymax = ymax.max(*base);
-            }
-        }
-    }
-    if !chart.categories.is_empty() && chart.x.scale != AxisScale::Log {
-        xmin = xmin.min(0.0);
-        xmax = xmax.max(f64::from(count(chart.categories.len() - 1)));
-    }
-    let x = domain(
-        xmin,
-        xmax,
-        &chart.x,
-        None,
-        (chart.kind == ChartKind::Bar).then_some(n),
-    );
-    let y = domain(
-        ymin,
-        ymax,
-        &chart.y,
-        matches!(chart.kind, ChartKind::Bar | ChartKind::Area).then_some(0.0),
-        None,
-    );
-    let mut plot = Plot {
-        frame: Rect {
-            origin: Vec2::new(frame.origin.x + 12.0, top),
-            size: Vec2::new(
-                (frame.size.x - 24.0).max(0.0),
-                (frame.max().y - top - 12.0).max(0.0),
-            ),
-        },
-        kind: chart.kind,
-        x,
-        y,
-        categories: chart.categories.to_vec(),
-    };
-    if chart.kind == ChartKind::Pie {
-        return Ok((Arc::new(plot), out));
-    }
-    if let Some(label) = &chart.y.label {
-        let size = out.label(
-            label.clone(),
-            Vec2::new(frame.origin.x + 12.0, top),
-            frame.size.x - 24.0,
-            Align::Left,
-            style,
-            muted,
-            build,
-        )?;
-        top += size.y + 6.0;
-    }
-    let labels = y
-        .ticks()
-        .into_iter()
-        .map(|tick| Ok((tick, compact(y.value(tick), chart.y.unit.as_ref())?)))
-        .collect::<Result<Vec<_>, PrepareError>>()?;
-    let mut left = 0.0_f32;
-    for (_, label) in &labels {
-        left = left.max(build.measure(label, style, None)?.x);
-    }
-    left = (left + 22.0).min(frame.size.x * 0.4);
-    let plot_width = (frame.size.x - left - 18.0).max(0.0);
-    let xlabel_height = chart
-        .x
-        .label
-        .as_ref()
-        .map(|label| build.measure(label, style, Some(plot_width.max(1.0))))
-        .transpose()?
-        .map_or(0.0, |size| size.y + 6.0);
-    let bottom = 16.0 + style.size * 1.3 + xlabel_height;
-    plot.frame = Rect {
-        origin: Vec2::new(frame.origin.x + left, top + 4.0),
-        size: Vec2::new(
-            (frame.size.x - left - 18.0).max(0.0),
-            (frame.max().y - top - bottom - 4.0).max(0.0),
-        ),
-    };
-    if plot.frame.size.x < 1.0 || plot.frame.size.y < 1.0 {
-        return Ok((Arc::new(plot), out));
-    }
-    for (tick, label) in labels {
-        let at = plot.at(x.value(x.min), y.value(tick));
-        out.line(
-            Arc::from([at, Vec2::new(plot.frame.max().x, at.y)]),
-            Paint::from(build.theme.line).faded(0.16),
-            1.0,
-        );
-        out.label(
-            label,
-            Vec2::new(frame.origin.x + 6.0, at.y - style.size * 0.65),
-            left - 14.0,
-            Align::Right,
-            style,
-            muted,
-            build,
-        )?;
-    }
-    let labels = if chart.categories.is_empty() {
-        x.ticks()
-            .into_iter()
-            .map(|v| Ok((x.value(v), compact(x.value(v), chart.x.unit.as_ref())?)))
-            .collect::<Result<Vec<_>, PrepareError>>()?
-    } else {
-        chart
-            .categories
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (f64::from(count(i)), t.clone()))
-            .collect()
-    };
-    let mut right = f32::NEG_INFINITY;
-    for (value, label) in labels {
-        let transformed = if x.log {
-            value.max(f64::from_bits(1)).log10()
-        } else {
-            value
-        };
-        if transformed < x.min || transformed > x.max {
-            continue;
-        }
-        let width = build.measure(&label, style, None)?.x.min(plot.frame.size.x);
-        let left = (plot.at(value, 0.0).x - width * 0.5)
-            .min(plot.frame.max().x - width)
-            .max(plot.frame.origin.x);
-        if left < right + 8.0 {
-            continue;
-        }
-        out.label(
-            label,
-            Vec2::new(left, plot.frame.max().y + 7.0),
-            width,
-            Align::Center,
-            style,
-            muted,
-            build,
-        )?;
-        right = left + width;
-    }
-    if let Some(label) = &chart.x.label {
-        out.label(
-            label.clone(),
-            Vec2::new(plot.frame.origin.x, frame.max().y - xlabel_height - 2.0),
-            plot.frame.size.x,
-            Align::Center,
-            style,
-            muted,
-            build,
-        )?;
-    }
-    let baseline = plot.at(x.value(x.min), 0.0).y;
-    out.line(
-        Arc::from([
-            Vec2::new(plot.frame.origin.x, baseline),
-            Vec2::new(plot.frame.max().x, baseline),
-        ]),
-        build.color(chart.color.as_ref()).faded(0.4),
-        1.0,
-    );
-    Ok((Arc::new(plot), out))
 }
 
 fn pie_label(category: Option<&Text>, share: f64) -> Result<Text, PrepareError> {
@@ -683,6 +256,7 @@ fn draw(series: &Series, basis: &Basis, build: &mut Build<'_>) -> Result<Drawing
             }
             let center = plot.frame.center();
             let radius = plot.frame.size.x.min(plot.frame.size.y) * 0.46;
+            // shortcut: a newly positive detached pie fills the circle, until allocation changes.
             let [mut angle, span] = basis
                 .pie
                 .unwrap_or([-std::f64::consts::FRAC_PI_2, std::f64::consts::TAU]);
@@ -788,6 +362,7 @@ pub(super) fn place(
                     .get(id)
                     .filter(|o| o.item.parent.is_none() && o.chart_basis.is_some())
                 {
+                    // shortcut: clips to the frozen domain, until a standalone refit exists.
                     let basis = Arc::clone(old.chart_basis.as_ref().ok_or(PrepareError::Stale)?);
                     let drawing = draw(series, &basis, build)?;
                     install(
@@ -912,6 +487,7 @@ fn reflow(
         .unwrap_or(0)
         .max(chart.categories.len())
         .max(1);
+    // shortcut: grouped numeric-x bars assume even x spacing (scene.md); upgrade on uneven data.
     let group = plot.frame.size.x / f32::from(count(n)) * 0.76;
     let width = if chart.stacked {
         group
@@ -992,13 +568,19 @@ fn reflow(
 
 #[cfg(test)]
 mod tests {
+    use super::axis::compact;
     use super::*;
+    use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare};
     use crate::{
+        Admission, GlobalBudget, Record, SceneState, StopCut,
         display::{MeasureError, TextMeasure},
+        parse_record,
+        record::Chart,
+        text::Bounded,
         theme::Theme,
     };
     use std::sync::atomic::AtomicBool;
-    struct Measure;
+    pub(super) struct Measure;
     impl TextMeasure for Measure {
         fn measure(
             &mut self,
@@ -1014,6 +596,28 @@ mod tests {
     }
     fn series(data: &str) -> Series {
         serde_json::from_str(&format!(r#"{{"id":"s","data":{data}}}"#)).expect("series")
+    }
+    fn picture(
+        scene: &mut SceneState,
+        budget: &mut GlobalBudget,
+        before: &LayoutState,
+        source: &str,
+    ) -> PreparedStep {
+        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
+            panic!("step");
+        };
+        let Admission::New(candidate) = scene.admit(&step, budget).expect("admit") else {
+            panic!("new");
+        };
+        let ticket = scene.commit(candidate, budget).expect("commit").preparation;
+        let input = PrepareInput::new(
+            ticket,
+            before.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
     }
     fn basis(kind: ChartKind) -> Basis {
         Basis {
@@ -1040,77 +644,6 @@ mod tests {
             baselines: Box::new([]),
             pie: Some([-std::f64::consts::FRAC_PI_2, std::f64::consts::PI]),
         }
-    }
-    #[test]
-    fn ticks_are_nice_and_ranges_cover_data() {
-        for (min, max) in [
-            (0.0, 91.0),
-            (-7.0, 13.0),
-            (42.0, 42.0),
-            (-1e12, 1e12),
-            (0.001, 0.009),
-        ] {
-            let range = domain(min, max, &Axis::default(), None, None);
-            assert!(
-                range.min <= min && range.max >= max && range.min < range.max,
-                "range covers data"
-            );
-            assert!((4..=6).contains(&range.ticks().len()), "nice tick count");
-            let step = tick_step(range, TickBounds::Inside);
-            let magnitude = 10.0_f64.powf(step.log10().floor());
-            let factor = step / magnitude;
-            assert!(
-                [1.0_f64, 2.0, 5.0, 10.0]
-                    .iter()
-                    .any(|n| (factor - n).abs() < 1e-8),
-                "tick step uses 1/2/5"
-            );
-        }
-        assert_eq!(
-            compact(1234.0, Some(&"ms".to_owned().try_into().expect("text")))
-                .expect("label")
-                .as_str(),
-            "1.2kms"
-        );
-        assert_eq!(compact(3.4e6, None).expect("label").as_str(), "3.4M");
-    }
-    #[test]
-    fn extremes_and_log_domains_remain_finite_and_clamped() {
-        for value in [f64::MAX, -f64::MAX, f64::from_bits(1), 0.0] {
-            let range = domain(value, value, &Axis::default(), None, None);
-            assert!(
-                range.min.is_finite() && range.max.is_finite() && range.max > range.min,
-                "finite expanded domain"
-            );
-        }
-        let axis: Axis =
-            serde_json::from_str(r#"{"min":1,"max":100,"scale":"log"}"#).expect("axis");
-        let range = domain(1.0, 100.0, &axis, Some(0.0), None);
-        assert!((range.fraction(10.0) - 0.5).abs() < 1e-6, "log midpoint");
-        assert_eq!(range.fraction(-1.0).to_bits(), 0.0_f32.to_bits());
-        assert_eq!(range.fraction(1e300).to_bits(), 1.0_f32.to_bits());
-        for value in [f64::from_bits(1), f64::MAX] {
-            let axis = Axis {
-                scale: AxisScale::Log,
-                ..Axis::default()
-            };
-            let range = domain(value, value, &axis, Some(0.0), None);
-            assert!(
-                range.min.is_finite() && range.max.is_finite() && range.max > range.min,
-                "finite log extremes"
-            );
-            assert!(
-                range.ticks().iter().all(|v| range.value(*v).is_finite()),
-                "finite log ticks"
-            );
-        }
-        let axis = Axis {
-            min: Some(f64::MAX.try_into().expect("number")),
-            ..Axis::default()
-        };
-        let range = domain(f64::INFINITY, f64::NEG_INFINITY, &axis, None, None);
-        assert_eq!(range.min.to_bits(), f64::MAX.to_bits());
-        assert_eq!(range.max.to_bits(), f64::MAX.to_bits());
     }
     #[test]
     fn every_kind_draws_empty_single_and_huge_data() {
@@ -1182,10 +715,8 @@ mod tests {
     fn stacks_include_every_series_and_pairs_use_numeric_x() {
         let a = series("[[10,1e300],[20,-3]]");
         let b = a.clone();
-        let chart: Chart = serde_json::from_str(
-            r#"{"id":"c","box":[0,0,400,300],"stacked":true,"x":{"min":5,"max":25}}"#,
-        )
-        .expect("chart");
+        let chart: Chart = serde_json::from_str(r#"{"id":"c","box":[0,0,400,300],"stacked":true}"#)
+            .expect("chart");
         let theme = Theme::default();
         let mut build = Build {
             viewport: Rect::default(),
@@ -1329,5 +860,98 @@ mod tests {
             ),
             "cancellation propagates"
         );
+    }
+    #[test]
+    fn residency_and_opacity_follow_the_chart_lifecycle() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"resident","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let [c, s, t]: [WireId; 3] =
+            ["c", "s", "t"].map(|id| id.to_owned().try_into().expect("id"));
+        let index = size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3;
+        let full = 18 * size_of::<Prim>()
+            + 12 * size_of::<Vec2>()
+            + 10
+            + 3 * index
+            + size_of::<Plot>()
+            + 2 * size_of::<Text>()
+            + 3
+            + 2 * (size_of::<Basis>() + 2 * size_of::<[f64; 2]>());
+        let bases = |state: &LayoutState| {
+            [&s, &t].map(|id| Arc::clone(state.objects[id].chart_basis.as_ref().expect("basis")))
+        };
+        let opacity = |state: &LayoutState| {
+            let object = &state.objects[&s];
+            [object.item.opacity, object.rest.opacity].map(f32::to_bits)
+        };
+        let first = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300],"opacity":0.5,"categories":["ab","c"],"x":{"min":-0.5,"max":1.5},"y":{"min":-5,"max":5}}},{"series":{"id":"s","in":"c","opacity":0.5,"data":[1,2]}},{"series":{"id":"t","in":"c","data":[2,1]}},{"anim":{"target":"s","track":"opacity","keys":[[0,0.75]]}}]}}"#,
+        );
+        assert_eq!(first.resident_bytes, full);
+        let initial = bases(&first.after);
+        assert!(
+            Arc::ptr_eq(&initial[0].plot, &initial[1].plot),
+            "series share one plot"
+        );
+        assert_eq!(
+            first.after.objects[&c].item.opacity.to_bits(),
+            0.5_f32.to_bits()
+        );
+        assert_eq!(opacity(&first.after), [0.5_f32, 0.75].map(f32::to_bits));
+        let second = picture(
+            &mut scene,
+            &mut budget,
+            &first.after,
+            r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
+        );
+        assert_eq!(second.resident_bytes, full);
+        let refit = bases(&second.after);
+        assert!(
+            !Arc::ptr_eq(&initial[0], &refit[0])
+                && !Arc::ptr_eq(&initial[1], &refit[1])
+                && Arc::ptr_eq(&refit[0].plot, &refit[1].plot),
+            "an attached refit replaces both bases around one new plot"
+        );
+        let revealed = [&s, &t].map(|id| second.after.handle(id).expect("handle"));
+        scene
+            .stop(
+                &StopCut {
+                    activated: 2,
+                    revealed: Bounded::new(revealed.to_vec()).expect("cut"),
+                },
+                &mut budget,
+            )
+            .expect("stop");
+        let detached = second.after.cut(&scene).expect("detached layout");
+        let frozen = bases(&detached);
+        assert!(
+            Arc::ptr_eq(&frozen[0], &refit[0])
+                && Arc::ptr_eq(&frozen[1], &refit[1])
+                && Arc::ptr_eq(&frozen[0].plot, &frozen[1].plot),
+            "the cut keeps both bases and their plot"
+        );
+        assert_eq!(opacity(&detached), [0.25_f32, 0.75].map(f32::to_bits));
+        let next = picture(
+            &mut scene,
+            &mut budget,
+            &detached,
+            r#"{"step":{"id":"data","put":[{"anim":{"target":"s","track":"opacity","keys":[[0,0.25]]}}],"set":[{"target":"s","data":[2,1]}]}}"#,
+        );
+        assert_eq!(next.resident_bytes, 2 * size_of::<Prim>() + 2 * index);
+        let kept = bases(&next.after);
+        assert!(
+            Arc::ptr_eq(&kept[0], &frozen[0]) && Arc::ptr_eq(&kept[1], &frozen[1]),
+            "a detached update allocates no new basis"
+        );
+        assert_eq!(opacity(&next.after), [0.25_f32, 0.25].map(f32::to_bits));
     }
 }

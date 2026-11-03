@@ -2,6 +2,7 @@
 use kumochi_scene::{
     Admission, Begin, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
     display::{MeasureError, Prim, TextMeasure, TextStyle},
+    geom::Vec2,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
     },
@@ -101,6 +102,27 @@ fn cut(
             budget,
         )
         .expect("valid cut");
+}
+fn assert_vec2_near(actual: Vec2, expected: [f32; 2]) {
+    assert!(
+        (actual.x - expected[0]).abs() <= 0.001 && (actual.y - expected[1]).abs() <= 0.001,
+        "expected {expected:?}, got {actual:?}"
+    );
+}
+fn chart_picture(put: &Value) -> PreparedStep {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(&mut scene, &mut budget, json!({"id":"chart","put":put}));
+    picture(&scene, commit, &before, &mut Measure::default()).expect("chart picture")
+}
+fn titled_bar_fixture() -> Value {
+    json!([
+        {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"title":"T","categories":["Q","R"],
+            "x":{"min":-0.5,"max":1.5,"label":"X"},"y":{"min":-10,"max":10,"label":"Y"}}},
+        {"series":{"id":"a","in":"c","name":"A","data":[2,-2]}},
+        {"series":{"id":"b","in":"c","name":"B","data":[3,-3]}}
+    ])
 }
 
 #[test]
@@ -1584,6 +1606,21 @@ fn chart_series_removal_uses_the_prepared_prefix_and_keeps_older_pictures() {
         second.after.handle(&id("b")).is_some(),
         "a future removal does not affect this picture"
     );
+    let a = first.after.handle(&id("a")).expect("original series");
+    let second_items = second.after.items();
+    assert_ne!(
+        second_items
+            .iter()
+            .find(|item| item.handle == a)
+            .expect("rescaled series")
+            .primitives,
+        unchanged
+            .iter()
+            .find(|item| item.handle == a)
+            .expect("original picture")
+            .primitives,
+        "the added series changes the existing series scale before its removal"
+    );
     let third =
         picture(&scene, third, &second.after, &mut Measure::default()).expect("removed series");
     assert_eq!(
@@ -1622,11 +1659,26 @@ fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
     let detached = first.after.cut(&scene).expect("detached series");
     let expected = detached.items().pop().expect("survivor");
     let expected_bounds = detached.bounds(&id("s")).expect("bounds");
+    let original_points = expected
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points.as_ref()),
+            _ => None,
+        })
+        .expect("original line");
+    assert_eq!(original_points.len(), 3);
+    assert_vec2_near(original_points[1], [260.0, 192.2]);
+    assert_eq!(
+        expected.transform,
+        kumochi_scene::geom::Affine([1.0, 0.0, 0.0, 1.0, 20.0, 30.0]),
+        "the cut absorbs the chart translation"
+    );
     let next = committed(
         &mut scene,
         &mut budget,
         json!({"id":"data","set":[
-            {"target":"s","data":[[0,0],[1,5],[2,1000]]}
+            {"target":"s","data":[[0,0],[1,2.5],[2,1000]]}
         ]}),
     );
     let next =
@@ -1636,11 +1688,23 @@ fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
         expected_bounds,
         "the update keeps the pre-update world placement and scale"
     );
+    let updated = next.after.items().pop().expect("updated survivor");
     assert_eq!(
-        next.after.items(),
-        [expected],
-        "the middle point retains its scale and the out-of-domain value maps to the old upper boundary"
+        updated.transform, expected.transform,
+        "the update retains the absorbed translation"
     );
+    let points = updated
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points.as_ref()),
+            _ => None,
+        })
+        .expect("updated line");
+    assert_eq!(points.len(), 3);
+    assert_vec2_near(points[0], [138.0, 268.4]);
+    assert_vec2_near(points[1], [260.0, 230.3]);
+    assert_vec2_near(points[2], [382.0, 116.0]);
     let (_, replayed) = recover(
         header(),
         scene.recovery_log(),
@@ -1747,16 +1811,7 @@ fn chart_axes_area_and_all_pie_series_stay_within_their_reservations() {
         let commit = committed(&mut scene, &mut budget, json!({"id":"first","put":put}));
         let result =
             picture(&scene, commit, &before, &mut Measure::default()).expect("chart primitives");
-        let mut pie_colors = Vec::new();
         for item in result.after.items() {
-            pie_colors.extend(
-                item.primitives
-                    .iter()
-                    .filter_map(|primitive| match primitive {
-                        Prim::Fill { color, .. } => Some(*color),
-                        _ => None,
-                    }),
-            );
             let segments: usize = item
                 .primitives
                 .iter()
@@ -1780,16 +1835,277 @@ fn chart_axes_area_and_all_pie_series_stay_within_their_reservations() {
             expected_charge,
             "admission reserves both area primitives and every pie series"
         );
-        if kind == "pie" {
-            assert_eq!(
-                pie_colors,
-                (0..4)
-                    .map(|slot| Theme::default().series(slot).into())
-                    .collect::<Vec<kumochi_scene::display::Paint>>(),
-                "adjacent series continue the slice palette rather than repeating their shared boundary color"
-            );
+    }
+}
+
+#[test]
+fn pie_series_continue_the_slice_palette() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"pie","box":[0,0,400,300]}},
+        {"series":{"id":"a","in":"c","data":[1,1]}},
+        {"series":{"id":"b","in":"c","data":[1,1]}}
+    ]));
+    let pie_colors: Vec<_> = result
+        .after
+        .items()
+        .iter()
+        .flat_map(|item| {
+            item.primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Prim::Fill { color, .. } => Some(*color),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert_eq!(
+        pie_colors,
+        (0..4)
+            .map(|slot| Theme::default().series(slot).into())
+            .collect::<Vec<kumochi_scene::display::Paint>>(),
+        "adjacent series continue the slice palette rather than repeating their shared boundary color"
+    );
+}
+
+#[test]
+fn titled_bar_header_places_the_legend_axes_and_category_labels() {
+    let result = chart_picture(&titled_bar_fixture());
+    let items = result.after.items();
+    let handle = result.after.handle(&id("c")).expect("chart handle");
+    let chart = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("chart");
+    let labels: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text { origin, text, .. } => Some((text.as_str(), *origin)),
+            _ => None,
+        })
+        .collect();
+    let expected_labels = [
+        ("T", [12.0, 12.0]),
+        ("A", [26.0, 30.0]),
+        ("B", [62.0, 30.0]),
+        ("Y", [12.0, 53.6]),
+        ("-10", [6.0, 244.6]),
+        ("-5", [6.0, 199.9]),
+        ("0", [6.0, 155.2]),
+        ("5", [6.0, 110.5]),
+        ("10", [6.0, 65.8]),
+        ("Q", [126.0, 259.4]),
+        ("R", [294.0, 259.4]),
+        ("X", [46.0, 282.0]),
+    ];
+    assert_eq!(labels.len(), expected_labels.len());
+    for ((label, origin), (expected_label, expected_origin)) in
+        labels.into_iter().zip(expected_labels)
+    {
+        assert_eq!(label, expected_label);
+        assert_vec2_near(origin, expected_origin);
+    }
+    let rectangles: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rectangles.len(), 3);
+    assert_vec2_near(rectangles[0].origin, [0.0, 0.0]);
+    assert_vec2_near(rectangles[0].size, [400.0, 300.0]);
+    for (rect, origin) in rectangles[1..].iter().zip([[12.0, 33.0], [48.0, 33.0]]) {
+        assert_vec2_near(rect.origin, origin);
+        assert_vec2_near(rect.size, [9.0, 9.0]);
+    }
+    let lines: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 6);
+    for (points, y) in lines
+        .into_iter()
+        .zip([252.4, 207.7, 163.0, 118.3, 73.6, 163.0])
+    {
+        assert_eq!(points.len(), 2);
+        assert_vec2_near(points[0], [46.0, y]);
+        assert_vec2_near(points[1], [382.0, y]);
+    }
+}
+
+#[test]
+fn grouped_and_stacked_bars_use_series_slots_and_signed_baselines() {
+    for (stacked, expected) in [
+        (
+            false,
+            [
+                [66.16, 145.12, 62.84, 17.88],
+                [234.16, 163.0, 62.84, 17.88],
+                [130.0, 136.18, 62.84, 26.82],
+                [298.0, 163.0, 62.84, 26.82],
+            ],
+        ),
+        (
+            true,
+            [
+                [66.16, 145.12, 126.68, 17.88],
+                [234.16, 163.0, 126.68, 17.88],
+                [66.16, 118.3, 126.68, 26.82],
+                [234.16, 180.88, 126.68, 26.82],
+            ],
+        ),
+    ] {
+        let mut put = titled_bar_fixture();
+        put[0]["chart"]["stacked"] = json!(stacked);
+        let result = chart_picture(&put);
+        let chart = result.after.handle(&id("c")).expect("chart handle");
+        let rectangles: Vec<_> = result
+            .after
+            .items()
+            .iter()
+            .filter(|item| item.parent == Some(chart))
+            .flat_map(|item| {
+                item.primitives
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        Prim::Rect { rect, .. } => Some(*rect),
+                        _ => None,
+                    })
+            })
+            .collect();
+        assert_eq!(rectangles.len(), 4);
+        for (rect, [x, y, width, height]) in rectangles.into_iter().zip(expected) {
+            assert_vec2_near(rect.origin, [x, y]);
+            assert_vec2_near(rect.size, [width, height]);
         }
     }
+}
+
+#[test]
+fn pair_x_scatter_uses_uneven_numeric_spacing_and_log_y_midpoints() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"scatter","box":[0,0,400,300],"y":{"min":1,"max":100,"scale":"log"}}},
+        {"series":{"id":"s","in":"c","data":[[10,1],[15,10],[30,100]]}}
+    ]));
+    let items = result.after.items();
+    let handle = result.after.handle(&id("s")).expect("series handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("series");
+    let rectangles: Vec<_> = series
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rectangles.len(), 3);
+    for (rect, center) in rectangles
+        .into_iter()
+        .zip([[46.0, 268.4], [130.0, 142.2], [382.0, 16.0]])
+    {
+        assert_vec2_near(rect.center(), center);
+        assert_vec2_near(rect.size, [8.0, 8.0]);
+    }
+}
+
+#[test]
+fn removing_a_chart_and_all_its_series_publishes_no_rebuilt_items() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"a","in":"c","data":[0,1]}},
+            {"series":{"id":"b","in":"c","data":[1,2]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("first chart");
+    let unchanged = first.after.items();
+    let expected = ["a", "c", "b"].map(|key| first.after.handle(&id(key)).expect("removed handle"));
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"remove","remove":["a","c","b"]}),
+    );
+    let next =
+        picture(&scene, next, &first.after, &mut Measure::default()).expect("whole chart removal");
+    assert_eq!(next.removed, expected);
+    assert!(
+        next.display.items.is_empty(),
+        "no removed parent is rebuilt"
+    );
+    assert!(
+        next.after.items().is_empty(),
+        "the chart and both series are gone"
+    );
+    assert_eq!(
+        first.after.items(),
+        unchanged,
+        "removal leaves the earlier picture intact"
+    );
+}
+
+#[test]
+fn attached_zero_total_pie_keeps_its_series_without_generating_slices() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"pie","box":[0,0,400,300]}},
+        {"series":{"id":"s","in":"c","data":[0,0]}}
+    ]));
+    let items = result.after.items();
+    assert_eq!(items.len(), 2);
+    let chart = result.after.handle(&id("c")).expect("chart handle");
+    let handle = result
+        .after
+        .handle(&id("s"))
+        .expect("zero-total series handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("attached series");
+    assert_eq!(series.parent, Some(chart));
+    assert!(
+        series.primitives.is_empty(),
+        "zero values produce neither slices nor labels"
+    );
+    let chart = items
+        .iter()
+        .find(|item| item.handle == chart)
+        .expect("chart background");
+    assert_eq!(chart.primitives.len(), 1);
+    assert!(
+        matches!(chart.primitives[0], Prim::Rect { .. }),
+        "the empty pie still has its frame"
+    );
+}
+
+#[test]
+fn an_admitted_over_tall_table_fails_preparation_with_out_of_range() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut put = vec![json!({"table":{"id":"t","box":[0,0,48,1000],"cols":["V"]}})];
+    put.extend(
+        (0..40)
+            .map(|row| json!({"row":{"id":format!("r{row}"),"in":"t","cells":["x".repeat(400)]}})),
+    );
+    let commit = committed(&mut scene, &mut budget, json!({"id":"tall","put":put}));
+    let result = picture(&scene, commit, &before, &mut Measure::default());
+    assert!(
+        matches!(result, Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange),
+        "the admitted table's wrapped height exceeds the preparation coordinate bound"
+    );
 }
 
 #[test]
@@ -2050,6 +2366,7 @@ fn measure_prepare_table_at_column_and_row_caps() {
             samples.push(elapsed);
         }
     }
+    println!("prepare_table_cap_raw_us={samples:?}");
     let mean = samples.iter().sum::<f64>() / 64.0;
     let maximum = samples.into_iter().fold(0.0_f64, f64::max);
     println!(
@@ -2115,6 +2432,7 @@ fn measure_prepare_twelve_tables_at_row_and_column_caps() {
             samples.push(elapsed);
         }
     }
+    println!("prepare_twelve_tables_raw_us={samples:?}");
     let mean = samples.iter().sum::<f64>() / 64.0;
     let maximum = samples.into_iter().fold(0.0_f64, f64::max);
     println!(

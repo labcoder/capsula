@@ -68,14 +68,14 @@ pub(super) fn build(
         }
     };
     let half = size * 0.5;
-    center.x = center.x.clamp(
-        build.viewport.origin.x + half.x,
-        build.viewport.max().x - half.x,
-    );
-    center.y = center.y.clamp(
-        build.viewport.origin.y + half.y,
-        build.viewport.max().y - half.y,
-    );
+    center.x = center
+        .x
+        .min(build.viewport.max().x - half.x)
+        .max(build.viewport.origin.x + half.x);
+    center.y = center
+        .y
+        .min(build.viewport.max().y - half.y)
+        .max(build.viewport.origin.y + half.y);
     let rect = Rect::centered(center, size);
     let tip = if target_rect.size.x > 1.0 && target_rect.size.y > 1.0 {
         target_rect.edge_toward(center)
