@@ -78,7 +78,8 @@ pub(crate) struct Expansion {
 
 /// Compiles every `mermaid` operation in `original` for commit `revision`, with at most `live`
 /// new objects. Generated ids skip every id the scene ever reserved and every id the step
-/// names, its sources' included, so they never alias a model's object.
+/// declares or references, its sources' included, so they never alias a model's object or
+/// capture a dangling reference.
 /// # Errors
 /// Fails at the source of the first Mermaid that is invalid, outside D1 or over a budget.
 pub(crate) fn expand(
@@ -105,9 +106,17 @@ pub(crate) fn expand(
     let mut budget = live;
     let mut slots = MAX_STEP_OPS - plain;
     let mut charts = Vec::with_capacity(blocks);
-    let mut names = BTreeSet::new();
+    let referenced: Vec<WireId> = original
+        .put
+        .iter()
+        .flat_map(object::reference_ids)
+        .collect();
+    let mut names: BTreeSet<&str> = referenced.iter().map(WireId::as_str).collect();
+    names.extend(original.set.iter().map(|change| change.target.as_str()));
+    names.extend(original.remove.iter().map(WireId::as_str));
     for (index, op) in original.put.iter().enumerate() {
         if let Op::Mermaid(mermaid) = op {
+            names.insert(mermaid.parent.as_str());
             let chart =
                 parse::parse(mermaid.src.as_str(), budget).map_err(|code| fail(index, code))?;
             slots = slots
@@ -117,6 +126,8 @@ pub(crate) fn expand(
             names.extend(chart.nodes.iter().map(|node| node.id));
             names.extend(chart.groups.iter().filter_map(|group| group.id));
             charts.push(chart);
+        } else if let Op::Anim(anim) = op {
+            names.insert(anim.target.as_str());
         } else if let Some(visual) = object::visual(op) {
             names.insert(visual.id.as_str());
         }
@@ -398,8 +409,8 @@ fn lca(chart: &Flowchart<'_>, from: Option<usize>, to: Option<usize>) -> Option<
 mod tests {
     use super::{Extra, expand};
     use crate::{
-        ErrorCode, FieldPath, Handle, Record, Step, StepError, WireId, parse_record, record::Op,
-        state::object,
+        Budget, ErrorCode, FieldPath, Handle, Record, Step, StepError, WireId, parse_record,
+        record::Op, state::object,
     };
     use serde_json::{Value, json};
     use std::{
@@ -452,6 +463,60 @@ mod tests {
             ErrorCode::IdReused,
         );
         assert_eq!(result.blame(error).path.to_string(), "put[2].shape.id");
+    }
+
+    #[test]
+    fn generated_names_skip_ids_plain_operations_only_reference() {
+        let original = step(&json!({"id":"refs","put":[
+            {"diagram":{"id":"d"}},
+            {"mermaid":{"in":"d","src":"flowchart TB\nA\n"}},
+            {"text":{"id":"t","in":"--1.0","at":[0,0],"text":""}}
+        ]}));
+        let result = expand(&original, 1, &BTreeSet::new(), 598).expect("expanded source");
+        let ids: Vec<_> = result
+            .run
+            .put
+            .iter()
+            .filter_map(object::visual)
+            .map(|visual| (visual.id.as_str(), visual.parent.map(WireId::as_str)))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("d", None),
+                ("--1.1", Some("d")),
+                ("A", Some("--1.1")),
+                ("t", Some("--1.0")),
+            ],
+            "the dangling parent stays unresolved"
+        );
+    }
+
+    #[test]
+    fn one_diagram_holds_96_edges_and_refuses_97() {
+        let chart = |edges: usize| {
+            let src = format!("flowchart LR\n{}", "A --> B\n".repeat(edges));
+            step(&json!({"id":"edges","put":[
+                {"diagram":{"id":"d"}},
+                {"mermaid":{"in":"d","src":src}}
+            ]}))
+        };
+        let result = expand(&chart(96), 1, &BTreeSet::new(), 599).expect("96 edges");
+        assert_eq!(
+            result.run.put.len(),
+            100,
+            "d, the root, two nodes and 96 edges"
+        );
+        let error = expand(&chart(97), 1, &BTreeSet::new(), 599)
+            .err()
+            .expect("97 edges");
+        assert_eq!(
+            (error.code, error.path.to_string()),
+            (
+                ErrorCode::OverBudget(Budget::DiagramEdges),
+                "put[1].mermaid.src".to_owned()
+            )
+        );
     }
 
     #[test]
