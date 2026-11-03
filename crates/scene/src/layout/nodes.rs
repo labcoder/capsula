@@ -104,15 +104,19 @@ pub(super) fn place(
             edges.entry(*handle).or_insert(edge);
         }
     }
+    let mut chains = BTreeMap::new();
     for edge in edges.into_values() {
-        let to = compound::ancestry(state, &parents, &edge.to);
-        let common = compound::ancestry(state, &parents, &edge.from)
-            .into_iter()
-            .find_map(|(from, group)| {
-                to.iter()
-                    .find(|(_, other)| *other == group)
-                    .map(|&(to, _)| (group, from, to))
-            });
+        for id in [&edge.from, &edge.to] {
+            chains
+                .entry(id)
+                .or_insert_with(|| compound::ancestry(state, &parents, id));
+        }
+        let to = &chains[&edge.to];
+        let common = chains[&edge.from].iter().find_map(|&(from, group)| {
+            to.iter()
+                .find(|(_, other)| *other == group)
+                .map(|&(to, _)| (group, from, to))
+        });
         if let Some((group, from, to)) = common
             && from != to
         {
