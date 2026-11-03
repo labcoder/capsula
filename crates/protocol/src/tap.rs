@@ -71,7 +71,7 @@ impl Tapped for ControlToShell {
             Self::Scenes { .. } => "Scenes",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::TurnRefused { .. } => "TurnRefused",
-            Self::Settings(_) => "Settings",
+            Self::Settings { .. } => "Settings",
         }
     }
 

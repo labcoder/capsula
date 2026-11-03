@@ -24,11 +24,14 @@ fn record(direction: Direction, message: &impl Tapped) -> Record {
 }
 
 fn view() -> ControlToShell {
-    ControlToShell::Settings(SettingsView {
-        assistant_name: AssistantName::new(NAME).expect("valid"),
-        user_name: Some(UserName::new(USER).expect("valid")),
-        onboarded: true,
-    })
+    ControlToShell::Settings {
+        view: SettingsView {
+            assistant_name: AssistantName::new(NAME).expect("valid"),
+            user_name: Some(UserName::new(USER).expect("valid")),
+            onboarded: true,
+        },
+        answer: true,
+    }
 }
 
 fn recording(records: &[Record]) -> Vec<u8> {

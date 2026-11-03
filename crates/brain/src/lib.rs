@@ -70,6 +70,13 @@ pub enum BrainError {
     Helpers(#[source] io::Error),
 }
 
+/// Ends the runtime [`run`] ran on without waiting for blocking work. Quit and close already
+/// waited for a settings write up to their deadline; one still stuck on a slow disk ends with the
+/// process, and `config.toml` stays whole because it's replaced, never written in place.
+pub fn shut_down(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(Duration::ZERO);
+}
+
 /// Runs the brain until the shell quits or turns out to be from another build.
 ///
 /// # Errors

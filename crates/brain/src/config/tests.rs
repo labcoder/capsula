@@ -152,5 +152,5 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     assert_eq!(config.view().assistant_name.as_str(), "Nimbus");
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
     let staged = config.stage(SettingsOp::FinishOnboarding).expect("staged");
-    assert!(!staged.view.assistant_name.as_str().contains("Cirrus"));
+    assert_eq!(staged.view.assistant_name.as_str(), "Nimbus");
 }

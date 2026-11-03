@@ -652,7 +652,7 @@ impl Link {
                 | ControlToShell::Scenes { .. }
                 | ControlToShell::ThreadDeleted { .. }
                 | ControlToShell::TurnRefused { .. }
-                | ControlToShell::Settings(_),
+                | ControlToShell::Settings { .. },
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -720,7 +720,7 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
                 }
             }
             // shortcut: the shell shows no settings yet; slice 3's PRs 5 and 6 read the view.
-            Ok(Some(ControlToShell::Settings(_))) => {}
+            Ok(Some(ControlToShell::Settings { .. })) => {}
             Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
                 if events
                     .send_blocking(LinkEvent::RunState { run, thread, phase })
