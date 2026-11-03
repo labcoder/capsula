@@ -1,7 +1,7 @@
 //! Settings changes on the brain's side: one write in flight off the core loop, and exactly
 //! one view back per change, in order.
 
-use kumochi_protocol::message::ControlToShell;
+use kumochi_protocol::message::{ControlToShell, ErrorKey};
 use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
@@ -39,7 +39,7 @@ impl Brain {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
-                    self.settings_now(link)?;
+                    self.refused(error.key(), link)?;
                 }
             }
         }
@@ -53,12 +53,26 @@ impl Brain {
         link: &mut Link<'_, '_>,
     ) -> Result<(), Full> {
         match written {
-            Ok((pending, Ok(()))) => self.config.commit(pending),
-            Ok((_, Err(error))) => tracing::warn!(%error, "settings change refused"),
-            Err(error) => tracing::error!(%error, "the settings write panicked"),
+            Ok((pending, Ok(()))) => {
+                self.config.commit(pending);
+                self.settings_now(link)?;
+            }
+            Ok((_, Err(error))) => {
+                tracing::warn!(%error, "settings change refused");
+                self.refused(error.key(), link)?;
+            }
+            Err(error) => {
+                tracing::error!(%error, "the settings write panicked");
+                self.refused(ErrorKey::SettingsRefused, link)?;
+            }
         }
-        self.settings_now(link)?;
         self.pump_settings(link)
+    }
+
+    /// Answers a refused change: why, then the unchanged settings.
+    fn refused(&self, key: ErrorKey, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        link.control(&ControlToShell::Error(key.into()))?;
+        self.settings_now(link)
     }
 }
 

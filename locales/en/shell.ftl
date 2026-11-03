@@ -51,3 +51,6 @@ thread-delete-cancel = Cancel
 thread-deleting = Deleting…
 thread-delete-failed = Couldn't delete the thread. It's still here; try again.
 thread-deletes-full = Wait for the other deletes to finish.
+
+error-settings-refused = Couldn't save that setting. Try again.
+error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.

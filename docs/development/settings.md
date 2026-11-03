@@ -30,12 +30,14 @@ sequenceDiagram
   W-->>C: written
   C->>C: the staged table and view become the settings
   C-->>S: Settings(view)
+  Note over C,S: a refused or failed change sends Error(key) just before its view
 ```
 
 - At most one write is in flight, off the core loop, so a slow disk never delays Stop, Pong or
   Quit. Changes that arrive meanwhile wait and are applied in order.
 - Each change gets exactly one `Settings` view back, in order. A refused or failed change gets
-  the unchanged view, so the shell's field goes back to what's saved.
+  an `Error` first (`ConfigUnreadable` for a bad file, otherwise `SettingsRefused`), then the
+  unchanged view, so the shell's field goes back to what's saved.
 - A change becomes the settings only once the file is replaced, so a failed write changes
   neither memory nor disk. A leftover `config.toml.tmp` is never read; the next write overwrites
   it.

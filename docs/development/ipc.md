@@ -60,7 +60,7 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Settings`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
 | Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
@@ -86,6 +86,12 @@ flowchart LR
 - **Settings** go to the shell once per connection before `Scenes`, and once for every
   `Settings` change the shell sends, in order, applied or refused. See
   [settings.md](settings.md).
+- **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
+  shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
+  3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
+  them breaks the connection like any malformed frame. The shell shows the text in the typing
+  panel and on the dock until the next turn is sent. A new key goes at the end of `ErrorKey`
+  and gets its catalog id in `strings.rs`'s `error_id`.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,
@@ -281,7 +287,7 @@ A debug brain records the control frames it sends and receives, and both handsha
 nothing is recorded. The tap fails closed. Each record holds the frame's op name and length, and
 its fields only when the op is on the content-free list in `crates/protocol/src/tap.rs`
 (`Quitting`, `Stop`, `Pong`, `ClearDrawing` and `DeleteThread` from the shell; `Welcome`,
-`RunState`, `Ping`, `Scenes`, `ThreadDeleted` and `TurnRefused` from the brain). Anything
+`RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` and `Error` from the brain). Anything
 else, `Hello` and `Settings` included, is never serialized for the tap, and a new op stays
 redacted until someone lists it. `cargo xtask pipe-dump <file>` prints one line per frame: the
 fields of a listed op, otherwise `Op (n bytes)`.

@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::Secret;
 
+mod error;
 mod pages;
 mod settings;
+pub use error::{
+    Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
+};
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use settings::{AssistantName, MAX_NAME_CHARS, NameError, SettingsOp, SettingsView, UserName};
 
@@ -220,6 +224,9 @@ pub enum ControlToShell {
     /// The settings: once per connection before `Scenes`, and after every
     /// [`ControlToBrain::Settings`].
     Settings(SettingsView),
+    /// Something the user should know went wrong. A refused settings change sends it just
+    /// before that change's `Settings`.
+    Error(UserError),
 }
 
 /// Shell to brain, on the data pipe.
