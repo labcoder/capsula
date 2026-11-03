@@ -16,7 +16,10 @@ base64 = "0.22"
 fluent-bundle.workspace = true
 kumochi-protocol.workspace = true
 getrandom.workspace = true
+jsonwebtoken = { version = "9", default-features = false }
 keyring.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # hooks: the progress handler that stops a purge's copy.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks"] }
 serde.workspace = true
@@ -38,6 +41,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
@@ -49,4 +53,5 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }

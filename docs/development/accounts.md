@@ -58,10 +58,117 @@ or DNS; socket tests use only `127.0.0.1` port 0.
 | `http://127.0.0.1:<port>/auth/callback`, state, nonce, PKCE and identical exchange redirect; `access_denied`; returning client binding; optional hints omitted here | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) |
 | `prompt=consent` only after the user requests plan use | [Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery) |
 
-Token exchange, signed identity verification, account state-machine wiring and storage
-mutations are outside this layer.
+The callback stops at `Authorization`; it doesn't exchange, verify or save credentials.
+
+## HTTP, exchange and identity
+
+The stateless helpers expose the sequence below. The account coordinator will own cancellation,
+the token lane, persistence and sign-out separately; these functions don't replace an account
+or write the vault.
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant L as Loopback listener
+    participant B as System browser
+    participant A as OpenAI
+    C->>L: bind 127.0.0.1:0
+    C->>B: open token-free authorization URL
+    B->>A: authorize with state, nonce and PKCE challenge
+    A-->>B: redirect with code and state
+    B->>L: callback
+    L-->>B: fixed received, rejected or failed reply
+    L-->>C: Authorization, or a closed error
+    C->>A: exchange code, verifier, client and exact redirect
+    A-->>C: TokenSet, still unverified and unsaved
+    C->>A: public discovery, then checked same-origin JWKS
+    A-->>C: public verification keys
+    C->>C: verify RS256, issuer, audience, expiry and nonce
+    C->>C: check subject continuity and returned scope
+```
+
+### Checked HTTP and roots
+
+`connections::http_client::build()` is the only production constructor. It loads the current
+user's public Windows ROOT store through `platform::trust_roots`, which includes machine-supplied
+roots. The loader keeps only time-valid roots allowed for server authentication or all uses.
+An unrestricted-use result requires a successful EKU call, zero identifiers and immediately
+captured `CRYPT_E_NOT_FOUND`; unreadable usage isn't treated as unrestricted. Enumeration owns
+one context at a time and transfers that ownership back to the next Win32 enumeration call.
+Early returns free the held context and close the store. Nothing is installed or fetched.
+
+Rustls parses those DER roots and verifies chains offline with ring. Empty or entirely
+unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or permissive
+verifier. There is no platform verifier, native-certs loader or certificate-override setting.
+The real-store test runs in the normal Windows test suite: it reads bounded public certificates
+only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
+
+The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither
+the raw reqwest client nor raw transport errors. Discovery and validated JWKS requests contain
+no credentials; only the fixed token endpoint accepts form fields. A scripted `Http` seam
+lets exchange and JWT tests inspect request data without external traffic. TLS fixtures bind
+only `127.0.0.1:0`, generate CA and leaf keys in memory, and never install a certificate.
+
+**Local policies:** 15 s connect, 60 s read and 120 s total request limits; discovery and JWKS
+requests have a 10 s limit. All success and error bodies are capped at 1 MiB, and a request-id
+header is retained only as at most 256 graphic ASCII bytes. The root loader keeps at most
+1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped entries.
+Proxied networks cannot sign in until a user-set proxy setting exists. A root Windows hasn't
+installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
+
+### Stateless code exchange
+
+`oauth::exchange::exchange` borrows the callback's `Authorization` and posts the documented
+form. It never uses a client id from the token response. `TokenSet` owns zeroizing, redacted
+credentials independently of the active account, so a later verification error doesn't
+consume them. A grant without a refresh token is representable; part 2 decides its persistence
+and use rather than inventing a provider guarantee. The caller also retains registration and
+computes expiry through `Clock`; failed wall-time conversion doesn't consume the token set.
+
+**Local policies:** the token response record is at most 48 KiB, including escaping and unknown
+fields. Access and ID tokens are at most 16 KiB each, refresh tokens 8 KiB, granted scope 1 KiB,
+and client ids and subjects 256 bytes. The code is capped at 16 KiB, the redirect at 256 bytes,
+and the verifier must fit PKCE's 43–128 unreserved ASCII characters. `expires_in` is clipped to
+86,400 seconds as in the spike. `earliest_refresh_at` is consumed without assigning an
+undocumented type or scheduling rule. Only a typed OAuth error on a 4xx response conclusively
+reports refusal; transport failures, malformed replies, oversized data and other statuses
+leave issuance uncertain for the later token lane. No provider message or body enters an error.
+
+### Signed identity and plan permission
+
+`oauth::id_token::verify` checks discovery's exact issuer and allows JWKS only on
+`https://auth.openai.com:443`, without userinfo or a fragment. It selects the declared `kid`
+from that key set, allows only RS256, and verifies the signature before trusting claims.
+Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
+wall `Clock`, not the JWT library's hidden clock; nonce comparison is constant-time.
+`check_subject` rejects a different saved subject, and `permits_plan` requires the exact
+returned `chatgpt.tokens.use.direct` scope. A verified ID token alone doesn't enable inference.
+
+**Local validation policies:** 30 s expiry tolerance, at most 64 JWKS keys and 16 audiences,
+2 KiB for a discovered JWKS URL, 128 bytes for a nonce and 254 bytes for a display email.
+The OIDC authorized-party check requires `azp` to match when present, and requires it for a
+multi-audience token; this is a validation policy, not a claim that OpenAI always emits `azp`.
+Email remains signed display data, not identity or a workspace identifier.
+
+Application-owned token/code strings and response buffers are zeroizing and redact Debug.
+HTTP/TLS library buffers and serde's internal parsing scratch allocations remain outside
+that wipe boundary. Requests, URLs with queries, tokens and response bodies are never logged.
+The JWT fixtures use public throwaway test keys through rustls's ring signer; they aren't
+credentials for any account or service.
+
+| Added provider contract | Public OpenAI source |
+| --- | --- |
+| `https://auth.openai.com/api/accounts/oauth/token`, form `grant_type=authorization_code`, issued `client_id`, `code`, `code_verifier`, exact `redirect_uri`, `resource`; no client secret; `invalid_grant` needs a fresh code | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) |
+| HTTP 200, `access_token`, conditional `refresh_token`, `id_token`, `token_type`, `expires_in`, `scope`, `earliest_refresh_at` | [Token reference](https://developers.openai.com/siwc/token-sharing-open-source/token-reference) |
+| Issuer `https://auth.openai.com`, discovery at `/.well-known/openid-configuration`, `jwks_uri`, supported RS256 | [Discovery](https://auth.openai.com/.well-known/openid-configuration) |
+| ID-token `iss`, `aud`, `exp`, `sub`, `nonce`, `email`, key selection by `kid`, and signed subject continuity | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [Identity verification and sample claims](https://developers.openai.com/siwc/website#6-verify-the-id-token) |
+| Returned `chatgpt.tokens.use.direct` grant, and identity without plan permission | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in#4-validate-the-id-token-and-chatgpt-plan-permission) |
+| `invalid_client`, typed errors and request-id diagnostics | [Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery), [OpenAI's `x-request-id` header](https://developers.openai.com/api/docs/api-reference/debugging-requests#debugging-requests) |
 
 ## Credential storage
+
+The store is accessed from one thread at a time: Credential Manager can miss a cross-thread
+read while writes to other names overlap.
 
 The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
 credential by exact target name. Windows uses `CredWriteW` with

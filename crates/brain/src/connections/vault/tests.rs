@@ -648,55 +648,49 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
 #[test]
 fn windows_vault_persists_only_under_its_random_test_service() {
     use crate::platform::credential::WindowsCredentialStore;
+    use crate::platform::credential::fixture::Fixture;
 
     let (_scratch, path, service, _) = setup("windows-vault");
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut vault =
-            Vault::with_service(WindowsCredentialStore, &service, &path).expect("test vault");
-        let host = vault.host_id().expect("host");
-        committed(vault.save_account(&account("old")));
-        committed(vault.save_revocations(&list("one")));
-        drop(vault);
-        let mut vault =
-            Vault::with_service(WindowsCredentialStore, &service, &path).expect("reopen vault");
-        assert!(
-            vault.host_id().expect("persisted host").expose() == host.expose(),
-            "same host"
-        );
-        assert!(
-            vault
-                .load_account()
-                .expect("account")
-                .expect("exists")
-                .expose()
-                == account("old").expose(),
-            "persisted account"
-        );
-        assert!(
-            vault
-                .load_revocations()
-                .expect("list")
-                .expect("exists")
-                .expose()
-                == list("one").expose(),
-            "persisted revocation record"
-        );
-    }));
-    let mut cleanup = Ok(());
-    for name in ["host", "signout", "chatgpt", "revoke"] {
-        cleanup = cleanup.and(WindowsCredentialStore.delete(&format!("{service}/{name}")));
-    }
+    let mut targets: Vec<_> = ["host", "signout", "chatgpt", "revoke"]
+        .into_iter()
+        .map(|name| format!("{service}/{name}"))
+        .collect();
     for record in ["chatgpt", "revoke"] {
         for slot in 0..2 {
             for index in 0..MAX_CHUNKS {
-                cleanup = cleanup.and(
-                    WindowsCredentialStore.delete(&format!("{service}/{record}/{slot}/{index}")),
-                );
+                targets.push(format!("{service}/{record}/{slot}/{index}"));
             }
         }
     }
-    cleanup.expect("remove every exact name in this test service");
-    if let Err(payload) = outcome {
-        panic::resume_unwind(payload);
-    }
+    let _fixture = Fixture::new(targets);
+    let mut vault =
+        Vault::with_service(WindowsCredentialStore, &service, &path).expect("test vault");
+    let host = vault.host_id().expect("host");
+    committed(vault.save_account(&account("old")));
+    committed(vault.save_revocations(&list("one")));
+    drop(vault);
+    let mut vault =
+        Vault::with_service(WindowsCredentialStore, &service, &path).expect("reopen vault");
+    assert!(
+        vault.host_id().expect("persisted host").expose() == host.expose(),
+        "same host"
+    );
+    assert!(
+        vault
+            .load_account()
+            .expect("account")
+            .expect("exists")
+            .expose()
+            == account("old").expose(),
+        "persisted account"
+    );
+    assert!(
+        vault
+            .load_revocations()
+            .expect("list")
+            .expect("exists")
+            .expose()
+            == list("one").expose(),
+        "persisted revocation record"
+    );
 }
