@@ -538,6 +538,20 @@ fn area_stroke_and_fill_are_reserved_before_preparation() {
 }
 
 #[test]
+fn titled_charts_reserve_the_label_origin_inset_at_the_canvas_edge() {
+    let state = scene("title");
+    let global = GlobalBudget::default();
+    for bounds in [[19995, 0, 4, 300], [0, 19995, 300, 4]] {
+        rejected(
+            &state,
+            &global,
+            json!({"id":"edge","put":[{"chart":{"id":"c","kind":"line","title":"T","box":bounds}}]}),
+            ErrorCode::OutOfRange,
+        );
+    }
+}
+
+#[test]
 fn chart_domains_and_stacked_sums_remain_safe_after_sets_and_detachment() {
     let empty = scene("s");
     let global = GlobalBudget::default();
