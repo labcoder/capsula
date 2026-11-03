@@ -75,12 +75,21 @@ composite to under 128, so a pixel visible after compositing body and neck is ow
 them. One hull per row owns the gaps between lobes; that errs toward owning.
 
 Tests check the renderer's wrong-size error, determinism, clear corners and an opaque middle,
-the eye ink, the bleed rule, and a rendered edge with no dark fringe. The mask tests compare
-against an independent bilinear sampler: every pixel it samples at or above the cutoff is
-owned, for a soft ramp and for the rendered body at 48 and 84 px drawn at 1.0, 1.25, 1.5 and
-2.0 scale and at a size between, and each owned row stays within `ceil(scale) + 2` pixels of
-the sampled edge. They also cover the inclusive cutoff, empty images and placements, and a
-single texel.
+the eye ink, the bleed rule, and a rendered edge with no dark fringe. The mask tests
+compare against an independent reference compositor: it snaps each edge of a logical square
+the way GPUI's `snap_bounds` does (half toward zero), so a fractional origin can draw a quad a
+pixel wider than tall, samples each layer bilinearly and composites them source-over. Every
+pixel at 128 or more after compositing must be owned: the rendered body at 48, 84 and a 168 px
+high-DPI bake, drawn at 1.0 to 2.0 scale from four origins, at 66 px while growing, two bodies a
+frame apart, and two flat layers at the 74 + 74 and 75 + 75 boundary and at 40% each.
+
+Over-ownership is bounded per axis. A span's end lies within `(d + 1) × scale + 3` device
+pixels, in rows and columns, of a visible pixel, where `d` is the material's soft edge: the
+source distance from the alpha-75 to the alpha-128 crossing, 0.29 texels at 48 px, 0.34 at 84
+and 0.46 at 168. The extra texel is the bilinear footprint and the 3 pixels are rounding, the
+next pixel centre and the snap pixel. Pixels between a span's ends are hull gaps, allowed and
+not measured. The tests also cover the inclusive cutoff, a zero-size source, empty images and
+placements, and a single texel.
 
 ## Expressions
 

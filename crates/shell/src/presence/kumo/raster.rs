@@ -180,9 +180,9 @@ impl Renderer {
     }
 }
 
-/// Gives each clear pixel of a straight-alpha BGRA square the colour of a covered 4-neighbour,
-/// keeping its alpha at 0. GPUI filters straight-alpha colour when it scales an image, so a
-/// black clear pixel next to a covered one would darken the edge.
+/// Gives each clear pixel of a straight-alpha BGRA square the colour of a covered 8-neighbour,
+/// keeping its alpha at 0. GPUI filters straight-alpha colour over a 2x2 footprint when it
+/// scales an image, so a black clear pixel beside or diagonal to a covered one would darken it.
 pub(crate) fn bleed_clear(pixels: &mut [u8], size: u16) {
     let covered = |pixels: &[u8], i: u16, j: u16| pixels[index(size, i, j) * 4 + 3] > 0;
     for j in 0..size {
@@ -190,15 +190,11 @@ pub(crate) fn bleed_clear(pixels: &mut [u8], size: u16) {
             if covered(pixels, i, j) {
                 continue;
             }
-            let neighbours = [
-                i.checked_sub(1).map(|i| (i, j)),
-                (i + 1 < size).then(|| (i + 1, j)),
-                j.checked_sub(1).map(|j| (i, j)),
-                (j + 1 < size).then(|| (i, j + 1)),
-            ];
-            let Some((ni, nj)) = neighbours
+            let near = |k: u16| [k.checked_sub(1), Some(k), (k + 1 < size).then_some(k + 1)];
+            let Some((ni, nj)) = near(j)
                 .into_iter()
                 .flatten()
+                .flat_map(|nj| near(i).into_iter().flatten().map(move |ni| (ni, nj)))
                 .find(|&(ni, nj)| covered(pixels, ni, nj))
             else {
                 continue;
@@ -423,16 +419,60 @@ mod tests {
     }
 
     #[test]
-    fn clear_pixels_take_a_covered_neighbours_colour() {
+    fn clear_pixels_take_a_covered_neighbours_colour_diagonals_included() {
         let mut px = vec![0; 3 * 3 * 4];
         px[index(3, 1, 1) * 4..][..4].copy_from_slice(&[10, 20, 30, 255]);
         bleed_clear(&mut px, 3);
-        for (i, j) in [(0, 1), (2, 1), (1, 0), (1, 2)] {
-            assert_eq!(&px[index(3, i, j) * 4..][..4], &[10, 20, 30, 0], "{i},{j}");
+        for j in 0..3 {
+            for i in 0..3 {
+                let alpha = if (i, j) == (1, 1) { 255 } else { 0 };
+                assert_eq!(
+                    &px[index(3, i, j) * 4..][..4],
+                    &[10, 20, 30, alpha],
+                    "{i},{j}"
+                );
+            }
         }
-        for (i, j) in [(0, 0), (2, 2)] {
-            assert_eq!(&px[index(3, i, j) * 4..][..4], &[0; 4], "diagonal {i},{j}");
+    }
+
+    /// Drawn at 2x, every sample GPUI's bilinear filter takes with any alpha has the body's
+    /// colour: no black clear texel inside a footprint darkens it.
+    #[test]
+    fn a_scaled_up_edge_keeps_the_body_colour() {
+        let mut px = vec![0; 3 * 3 * 4];
+        px[index(3, 1, 1) * 4..][..4].copy_from_slice(&[10, 20, 30, 255]);
+        bleed_clear(&mut px, 3);
+        let texel = |i: f32, j: f32, c: usize| {
+            let (i, j) = (pixel(i.clamp(0.0, 2.0)), pixel(j.clamp(0.0, 2.0)));
+            f32::from(px[index(3, i, j) * 4 + c])
+        };
+        for dy in 0..6_u8 {
+            for dx in 0..6_u8 {
+                let (u, v) = (f32::from(dx) / 2.0 - 0.25, f32::from(dy) / 2.0 - 0.25);
+                let (i, j) = (u.floor(), v.floor());
+                let (fu, fv) = (u - i, v - j);
+                let sample = |c| {
+                    let top = texel(i, j, c) * (1.0 - fu) + texel(i + 1.0, j, c) * fu;
+                    let bottom =
+                        texel(i, j + 1.0, c) * (1.0 - fu) + texel(i + 1.0, j + 1.0, c) * fu;
+                    top * (1.0 - fv) + bottom * fv
+                };
+                if sample(3) > 0.0 {
+                    assert!(
+                        (sample(0) - 10.0).abs() < 1e-4,
+                        "sample {dx},{dy} is darkened"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn a_clear_image_stays_clear() {
+        let mut px = vec![0; 4 * 4 * 4];
+        bleed_clear(&mut px, 4);
+        assert_eq!(px, vec![0; 4 * 4 * 4]);
+        bleed_clear(&mut [], 0);
     }
 
     #[test]
