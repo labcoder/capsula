@@ -159,12 +159,15 @@ impl Neck {
             return None;
         }
         let pad = self.body_size * 0.1;
+        // The root fillet is an ellipse 2.2 times as wide as it is tall, centred on the dock.
+        let root = self.radius(0.0) * 0.9;
+        let ends = segs[..n]
+            .iter()
+            .flat_map(|&(a, b, ra, rb)| [(a, v2(ra, ra)), (b, v2(rb, rb))]);
         let (mut lo, mut hi) = (v2(f32::MAX, f32::MAX), v2(f32::MIN, f32::MIN));
-        for &(a, b, ra, rb) in &segs[..n] {
-            for (p, r) in [(a, ra + pad), (b, rb + pad)] {
-                lo = v2(lo.x.min(p.x - r), lo.y.min(p.y - r));
-                hi = v2(hi.x.max(p.x + r), hi.y.max(p.y + r));
-            }
+        for (p, r) in ends.chain([(self.dock, v2(root * 2.2, root))]) {
+            lo = v2(lo.x.min(p.x - r.x - pad), lo.y.min(p.y - r.y - pad));
+            hi = v2(hi.x.max(p.x + r.x + pad), hi.y.max(p.y + r.y + pad));
         }
         Some(Rect {
             origin: v2(lo.x.floor(), lo.y.floor()),
@@ -173,7 +176,9 @@ impl Neck {
     }
 
     /// The widest the goo region can get for a body this size, logical pixels: the curve stays
-    /// within [`SNAP_LEN`] of the dock while attached, its control point included.
+    /// within [`SNAP_LEN`] of the dock while attached, its control point included, and the root
+    /// fillet's half-width, at most `2.2 × 0.9 × 0.73 × 0.15` of the body, is under the widest
+    /// capsule's radius.
     fn cap(body_size: f32) -> f32 {
         2.0 * (SNAP_LEN + body_size * (0.73 * 0.3 + 0.1)) + 2.0
     }
@@ -328,11 +333,10 @@ impl GooShader {
             row.fill(f32::MAX);
             for i in 0..w {
                 let (busy, mask) = self.tiles[(j / TILE) * tw + i / TILE];
-                let o = &mut out[(j * w + i) * 4..][..4];
                 if !busy {
-                    o.copy_from_slice(&[0; 4]);
                     continue;
                 }
+                let o = &mut out[(j * w + i) * 4..][..4];
                 let p = r.origin + v2((index_f32(i) + 0.5) * px, (index_f32(j) + 0.5) * px);
                 let q = to_body(p);
                 let near_body = (p - neck.body).len() < body_reach;
@@ -450,7 +454,7 @@ fn tapered(p: Vec2, a: Vec2, b: Vec2, ra: f32, rb: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GooMismatch, GooShader, MAX_SCALE, Neck, SNAP_LEN, tapered};
+    use super::{GooMismatch, GooShader, MAX_SCALE, Neck, Rect, SNAP_LEN, pixels, tapered};
     use crate::presence::kumo::frame::FrameState;
     use crate::presence::kumo::look::Look;
     use crate::presence::kumo::math::v2;
@@ -472,13 +476,22 @@ mod tests {
 
     fn shade(neck: &Neck, shader: &mut GooShader) -> (usize, usize, Vec<u8>) {
         let r = neck.bounds().expect("an attached neck has goo");
-        let (w, h) = GooShader::size(r, MAX_SCALE);
+        shade_in(neck, r, MAX_SCALE, shader)
+    }
+
+    fn shade_in(
+        neck: &Neck,
+        r: Rect,
+        scale: f32,
+        shader: &mut GooShader,
+    ) -> (usize, usize, Vec<u8>) {
+        let (w, h) = GooShader::size(r, scale);
         let mut out = vec![0; w * h * 4];
         shader
             .render(
                 neck,
                 r,
-                MAX_SCALE,
+                scale,
                 &Silhouette::emoji(),
                 &Look::default(),
                 &FrameState::IDLE,
@@ -545,6 +558,32 @@ mod tests {
     }
 
     #[test]
+    fn a_short_sideways_pull_keeps_the_whole_root_in_the_region() {
+        let dock = v2(400.0, 10.0);
+        let mut neck = Neck::new(dock, BODY);
+        neck.update(0.0, v2(420.0, 20.08));
+        let scale = 0.5;
+        let r = neck.bounds().expect("attached");
+        // Shade a wider image on the same pixel grid; nothing may land outside the region.
+        let grow = 40.0;
+        let wide = Rect {
+            origin: r.origin - v2(grow, grow),
+            size: r.size + v2(2.0 * grow, 2.0 * grow),
+        };
+        let mut shader = GooShader::new(BODY);
+        let (w, h) = GooShader::size(r, scale);
+        let (ww, wh, out) = shade_in(&neck, wide, scale, &mut shader);
+        let skip = pixels(grow, scale);
+        let clipped: Vec<(usize, usize, u8)> = (0..wh)
+            .flat_map(|j| (0..ww).map(move |i| (i, j)))
+            .filter(|&(i, j)| !((skip..skip + w).contains(&i) && (skip..skip + h).contains(&j)))
+            .map(|(i, j)| (i, j, out[(j * ww + i) * 4 + 3]))
+            .filter(|&(.., a)| a > 0)
+            .collect();
+        assert!(clipped.is_empty(), "{r:?} clips {clipped:?}");
+    }
+
+    #[test]
     #[expect(
         clippy::as_conversions,
         clippy::cast_possible_truncation,
@@ -567,15 +606,17 @@ mod tests {
     }
 
     #[test]
-    fn clear_goo_pixels_carry_the_body_colour_where_shaded() {
+    fn no_goo_pixel_is_black_clear_or_covered() {
         let neck = pulled(100.0);
         let mut shader = GooShader::new(BODY);
         let (_, _, out) = shade(&neck, &mut shader);
         let px = out.as_chunks::<4>().0;
         assert!(px.iter().any(|p| p[3] == 255), "some goo is solid");
-        assert!(
-            px.iter().filter(|p| p[3] > 0).all(|p| p[..3] != [0, 0, 0]),
-            "no covered pixel is black"
+        assert!(px.iter().any(|p| p[3] == 0), "some goo is clear");
+        let black = px.iter().filter(|p| p[..3] == [0, 0, 0]).count();
+        assert_eq!(
+            black, 0,
+            "a scaled edge blends toward these, so none is black"
         );
     }
 
