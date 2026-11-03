@@ -1,4 +1,4 @@
-//! Nested diagram clusters: membership, endpoint projection and inherited direction.
+//! Nested diagram clusters: membership, endpoint ancestry and inherited direction.
 //!
 //! A diagram without a `box` inside another diagram is one member of its parent's ranking,
 //! placed by its own transform. Boxed diagrams keep their explicit placement.
@@ -71,25 +71,29 @@ pub(super) fn depth(state: &LayoutState, mut group: Option<Handle>) -> usize {
     depth
 }
 
-/// The direct member of `group` that contains `id`; `parents` covers nodes not yet placed.
-pub(super) fn project<'a>(
-    state: &'a LayoutState,
-    parents: &BTreeMap<WireId, Option<Handle>>,
-    id: &'a WireId,
-    group: Option<Handle>,
-) -> Option<&'a WireId> {
-    let mut current = id;
-    for _ in 0..=MAX_OBJECT_DEPTH {
-        let parent = parents
-            .get(current)
-            .copied()
-            .or_else(|| state.objects.get(current).map(|object| object.item.parent))?;
-        if parent == group {
-            return Some(current);
-        }
-        current = state.handles.get(&parent?)?;
+/// Each member holding `id` with the group it sits in, from `id` up to its root and bounded
+/// by the depth limit; `parents` covers nodes not yet placed.
+pub(super) fn ancestry(
+    state: &LayoutState,
+    parents: &BTreeMap<WireId, (Handle, Option<Handle>)>,
+    id: &WireId,
+) -> Vec<(Handle, Option<Handle>)> {
+    let mut chain = Vec::new();
+    let mut current = parents.get(id).copied().or_else(|| {
+        state
+            .objects
+            .get(id)
+            .map(|object| (object.item.handle, object.item.parent))
+    });
+    while chain.len() <= MAX_OBJECT_DEPTH
+        && let Some((handle, parent)) = current
+    {
+        chain.push((handle, parent));
+        current = parent
+            .and_then(|parent| get(state, parent))
+            .map(|object| (object.item.handle, object.item.parent));
     }
-    None
+    chain
 }
 
 /// The rectangle a member occupies in its parent's space: a node's bounds, or a cluster's

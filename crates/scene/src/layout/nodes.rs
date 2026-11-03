@@ -64,10 +64,10 @@ pub(super) fn place(
         }
         measured.insert(id.clone(), (size, label, sub));
     }
-    let mut parents = BTreeMap::<crate::WireId, Option<Handle>>::new();
+    let mut parents = BTreeMap::<crate::WireId, (Handle, Option<Handle>)>::new();
     let mut groups = BTreeMap::<Option<Handle>, Vec<crate::WireId>>::new();
     for id in order {
-        let Some((_, source)) = sources.get(id) else {
+        let Some((handle, source)) = sources.get(id) else {
             continue;
         };
         let Op::Node(node) = &**source else {
@@ -87,8 +87,37 @@ pub(super) fn place(
                 })
                 .transpose()?
         };
-        parents.insert(id.clone(), parent);
+        parents.insert(id.clone(), (*handle, parent));
         groups.entry(parent).or_default().push(id.clone());
+    }
+    // An edge ranks once, in its endpoints' least common group, between the two members there
+    // that hold them; edges inside one member never count toward that group's edge cap.
+    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
+    let mut edges = BTreeMap::new();
+    for object in state.objects.values() {
+        if let Op::Edge(edge) = &*object.source {
+            edges.entry(object.item.handle).or_insert(edge);
+        }
+    }
+    for (handle, source) in sources.values() {
+        if let Op::Edge(edge) = &**source {
+            edges.entry(*handle).or_insert(edge);
+        }
+    }
+    for edge in edges.into_values() {
+        let to = compound::ancestry(state, &parents, &edge.to);
+        let common = compound::ancestry(state, &parents, &edge.from)
+            .into_iter()
+            .find_map(|(from, group)| {
+                to.iter()
+                    .find(|(_, other)| *other == group)
+                    .map(|&(to, _)| (group, from, to))
+            });
+        if let Some((group, from, to)) = common
+            && from != to
+        {
+            ranked.entry(group).or_default().push((from, to));
+        }
     }
     for (id, object) in &state.objects {
         if object.rank.is_none() && compound::is_cluster(state, object) {
@@ -159,36 +188,15 @@ pub(super) fn place(
                     .is_none_or(|object| object.rank.is_none())
             })
             .collect();
-        let mut edges: Vec<_> = state
-            .objects
-            .values()
-            .filter_map(|object| match &*object.source {
-                Op::Edge(edge) => Some((object.item.handle, edge)),
-                _ => None,
-            })
-            .collect();
-        edges.extend(
-            sources
-                .values()
-                .filter_map(|(handle, source)| match &**source {
-                    Op::Edge(edge) => Some((*handle, edge)),
-                    _ => None,
-                }),
-        );
-        edges.sort_by_key(|(handle, _)| *handle);
-        edges.dedup_by_key(|(handle, _)| *handle);
-        // An edge ranks only where its endpoints project to two different direct members, so
-        // edges inside one child cluster never count toward this diagram's edge cap.
-        let edges: Vec<_> = edges
+        let slot = |member: Handle| {
+            all.binary_search_by_key(&member, |(handle, _, _)| *handle)
+                .ok()
+        };
+        let edges: Vec<_> = ranked
+            .get(&parent)
             .into_iter()
-            .filter_map(|(_, edge)| {
-                let from = compound::project(state, &parents, &edge.from, parent)?;
-                let to = compound::project(state, &parents, &edge.to, parent)?;
-                if from == to {
-                    return None;
-                }
-                Some((*index.get(from)?, *index.get(to)?))
-            })
+            .flatten()
+            .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
             .collect();
         let placement = diagram::layout(&sizes, nodes, &edges, direction, diagram::RANK_GAP)?;
         let mut ranks = placement.ranks.clone();
