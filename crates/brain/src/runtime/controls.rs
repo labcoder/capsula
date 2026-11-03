@@ -77,6 +77,8 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::Quitting
-        | ControlToBrain::Settings(_) => None,
+        | ControlToBrain::Settings(_)
+        // shortcut: no account system answers yet and no shell sends this; slice 3 PR 9b wires it.
+        | ControlToBrain::AccountOp(_) => None,
     })
 }

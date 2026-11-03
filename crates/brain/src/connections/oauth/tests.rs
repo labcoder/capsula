@@ -17,12 +17,25 @@ use zeroize::Zeroizing;
 use super::callback::{self, CallbackError, Event};
 use super::{Authorization, Intent, LaunchError, LaunchTarget, Launcher, SignIn, SignInError};
 use crate::connections::records::{Account, Tokens};
+use crate::test_support::{Captured, SENTINEL};
 
 #[derive(Default)]
 struct RecordingLauncher(RefCell<Option<String>>);
 
 impl Launcher for RecordingLauncher {
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
+        let url = Url::parse(target.url()).expect("authorization URL");
+        let redirect = url
+            .query_pairs()
+            .find(|(key, _)| key == "redirect_uri")
+            .expect("redirect")
+            .1;
+        let redirect = Url::parse(&redirect).expect("loopback redirect");
+        let address: SocketAddr = format!("127.0.0.1:{}", redirect.port().expect("bound port"))
+            .parse()
+            .expect("numeric address");
+        let _connected =
+            std::net::TcpStream::connect(address).expect("listener bound before launch");
         self.0.replace(Some(target.url().to_owned()));
         Ok(())
     }
@@ -120,6 +133,19 @@ async fn pending(mut future: Pin<&mut impl Future>) {
         Poll::Ready(())
     })
     .await;
+}
+
+#[test]
+fn accept_errors_are_classified_per_connection_or_fatal() {
+    use std::io::ErrorKind;
+    let actual = [
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::Interrupted,
+        ErrorKind::PermissionDenied,
+    ]
+    .map(callback::retry_accept);
+    assert_eq!(actual, [true, true, true, false]);
 }
 
 #[test]
@@ -229,8 +255,11 @@ async fn incomplete_callbacks_end_receive_and_serve_the_failure_page() {
 
 #[tokio::test]
 async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
+    let captured = Captured::default();
+    let _logging = captured.install();
+    tracing::info!("capture-control");
     let (attempt, address, mut seen) = attempt().await;
-    let valid = valid(&attempt, address);
+    let valid = valid(&attempt, address).replace("test-code", SENTINEL);
     let invalid = [
         valid.replace("/auth/callback?", "/wrong?"),
         valid.replace("Host: 127.0.0.1", "Host: localhost"),
@@ -266,17 +295,29 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         reply.starts_with("HTTP/1.1 200 OK\r\n"),
         "lowercase host accepted after stale requests"
     );
-    assert!(!reply.contains("test-code"), "reply never reflects code");
+    assert!(!reply.contains(SENTINEL), "reply never reflects code");
     let authorization = result(task).await.expect("valid callback");
-    assert_eq!(authorization.code.expose().as_str(), "test-code");
+    assert_eq!(authorization.code.expose().as_str(), SENTINEL);
     assert_eq!(authorization.client_id.expose().as_str(), "issued");
     assert_eq!(
         authorization.redirect,
         format!("http://{address}/auth/callback")
     );
     assert!(
-        !format!("{authorization:?}").contains("test-code"),
+        !format!("{authorization:?}").contains(SENTINEL),
         "code redacted"
+    );
+    assert!(
+        captured.text().contains("capture-control"),
+        "capture is active"
+    );
+    assert!(
+        !captured.text().contains(SENTINEL),
+        "authorization code never logged"
+    );
+    assert!(
+        TcpStream::connect(address).await.is_err(),
+        "listener closes after success"
     );
 }
 
@@ -530,6 +571,7 @@ async fn new_attempts_have_independent_secrets_and_explicit_consent_only_when_re
         &second.verifier,
     ];
     for (index, value) in values.iter().enumerate() {
+        assert_eq!(value.expose().len(), 43);
         for other in &values[index + 1..] {
             assert_ne!(value.expose(), other.expose());
         }
@@ -539,6 +581,10 @@ async fn new_attempts_have_independent_secrets_and_explicit_consent_only_when_re
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
+    assert_eq!(
+        query.get("code_challenge"),
+        Some(&super::pkce::challenge(first.verifier.expose()))
+    );
     for key in ["state", "nonce", "code_challenge"] {
         assert!(query.remove(key).is_some(), "random field present");
     }

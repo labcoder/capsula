@@ -9,6 +9,7 @@ mod link;
 mod logging;
 mod platform;
 mod presence;
+mod presenter;
 mod runs;
 mod settings;
 mod strings;

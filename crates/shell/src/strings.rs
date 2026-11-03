@@ -336,6 +336,16 @@ const fn error_id(key: ErrorKey) -> &'static str {
     match key {
         ErrorKey::SettingsRefused => "error-settings-refused",
         ErrorKey::ConfigUnreadable => "error-config-unreadable",
+        ErrorKey::SignInTimedOut => "error-sign-in-timed-out",
+        ErrorKey::SignInFailed => "error-sign-in-failed",
+        ErrorKey::SignInOtherAccount => "error-sign-in-other-account",
+        ErrorKey::BrowserUnavailable => "error-browser-unavailable",
+        ErrorKey::AccountOffline => "error-account-offline",
+        ErrorKey::CredentialsUnavailable => "error-credentials-unavailable",
+        ErrorKey::RevocationBacklog => "error-revocation-backlog",
+        ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
+        ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
+        ErrorKey::AccountMisconfigured => "error-account-misconfigured",
     }
 }
 

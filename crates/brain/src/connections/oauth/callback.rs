@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use fluent_bundle::{FluentBundle, FluentResource};
@@ -45,14 +46,7 @@ impl SignIn {
         loop {
             let (mut socket, _) = match self.listener.accept().await {
                 Ok(connection) => connection,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::ConnectionReset
-                            | ErrorKind::ConnectionAborted
-                            | ErrorKind::Interrupted
-                    ) =>
-                {
+                Err(error) if retry_accept(error.kind()) => {
                     continue;
                 }
                 Err(_) => return Err(SignInError::Io),
@@ -229,33 +223,52 @@ pub(super) fn parse(
     Ok((code, client))
 }
 
-pub(super) fn response(page: Page) -> String {
+pub(super) fn retry_accept(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::Interrupted
+    )
+}
+
+static PAGES: LazyLock<Option<[String; 3]>> = LazyLock::new(render_pages);
+
+pub(super) fn response(page: Page) -> &'static str {
+    let Some(pages) = PAGES.as_ref() else {
+        return "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    };
+    &pages[match page {
+        Page::Received => 0,
+        Page::Rejected => 1,
+        Page::Failed => 2,
+    }]
+}
+
+fn render_pages() -> Option<[String; 3]> {
     let resource =
         FluentResource::try_new(include_str!("../../../../../locales/en/brain.ftl").to_owned())
-            .expect("the bundled brain catalog parses; callback tests check it");
-    let language: unic_langid::LanguageIdentifier =
-        "en".parse().expect("en is a valid language id");
+            .ok()?;
+    let language: unic_langid::LanguageIdentifier = "en".parse().ok()?;
     let mut bundle = FluentBundle::new(vec![language]);
-    bundle
-        .add_resource(resource)
-        .expect("brain catalog has no duplicate ids");
-    let (id, status) = match page {
-        Page::Received => ("callback-ok", "200 OK"),
-        Page::Rejected => ("callback-rejected", "400 Bad Request"),
-        Page::Failed => ("callback-failed", "400 Bad Request"),
-    };
-    let pattern = bundle
-        .get_message(id)
-        .and_then(|m| m.value())
-        .expect("callback messages exist");
-    let mut errors = Vec::new();
-    let body = bundle.format_pattern(pattern, None, &mut errors);
-    assert!(
-        errors.is_empty(),
-        "callback messages have no formatting errors"
-    );
-    format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n\r\n{body}",
-        body.len()
-    )
+    bundle.add_resource(resource).ok()?;
+    let mut pages = [String::new(), String::new(), String::new()];
+    for ((id, status), page) in [
+        ("callback-ok", "200 OK"),
+        ("callback-rejected", "400 Bad Request"),
+        ("callback-failed", "400 Bad Request"),
+    ]
+    .into_iter()
+    .zip(&mut pages)
+    {
+        let pattern = bundle.get_message(id).and_then(|m| m.value())?;
+        let mut errors = Vec::new();
+        let body = bundle.format_pattern(pattern, None, &mut errors);
+        if !errors.is_empty() {
+            return None;
+        }
+        *page = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n\r\n{body}",
+            body.len()
+        );
+    }
+    Some(pages)
 }

@@ -1,6 +1,8 @@
 //! One-shot loopback authorization, independent of the saved tokens and account state machine.
 
 mod callback;
+pub mod exchange;
+pub mod id_token;
 mod pkce;
 #[cfg(test)]
 mod tests;

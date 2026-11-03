@@ -3,7 +3,7 @@ use kumochi_scene::{
     Admission, Budget, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
     display::Prim,
     geom::{Rect, Vec2},
-    layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare, recover},
+    layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare, recover, recover_all},
     parse_record,
     text::Bounded,
     theme::Theme,
@@ -773,5 +773,130 @@ fn prepare_four_views_at_caps() {
         for (index, sample) in samples.into_iter().enumerate() {
             println!("sample {index} {sample:.3}");
         }
+    }
+}
+
+fn committed_scene(name: &str, steps: impl IntoIterator<Item = Value>) -> SceneState {
+    let mut scene = named_scene(name);
+    let mut budget = GlobalBudget::default();
+    for value in steps {
+        let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
+        assert!(
+            bytes.len() <= kumochi_scene::limits::MAX_RECORD_BYTES,
+            "fixture fits the record byte cap"
+        );
+        let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+            panic!("step fixture");
+        };
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted step") else {
+            panic!("new step");
+        };
+        scene
+            .commit(candidate, &mut budget)
+            .expect("fresh admission");
+    }
+    scene
+}
+
+/// The 14-diagram chain fixture, grown one batch per step through a 64-step history.
+fn growing_chain(fixture: fixtures::Fixture) -> SceneState {
+    let step = fixtures::capped_step(600, fixture);
+    let put = step["put"].as_array().expect("fixture put list");
+    committed_scene(
+        "chain",
+        (0..64).map(|batch| {
+            let batch_put = &put[batch * put.len() / 64..(batch + 1) * put.len() / 64];
+            json!({"id":format!("b{batch}"),"put":batch_put})
+        }),
+    )
+}
+
+/// 600 objects: a root, 17 clusters of 17 single-node clusters each, and four lines.
+fn many_clusters() -> Value {
+    let mut put = vec![json!({"diagram":{"id":"r","dir":"down"}})];
+    for group in 0..17 {
+        let owner = format!("m{group:x}");
+        put.push(json!({"diagram":{"id":owner,"in":"r","dir":"right"}}));
+        for member in 0..17 {
+            let index = group * 17 + member;
+            let cluster = format!("c{index:x}");
+            put.push(json!({"diagram":{"id":cluster,"in":owner}}));
+            put.push(json!({"node":{"id":format!("n{index:x}"),"in":cluster,"label":"N"}}));
+        }
+    }
+    for index in 0..4 {
+        put.push(json!({"line":{"id":format!("p{index}"),"from":[0,0],"to":[1,1]}}));
+    }
+    assert_eq!(put.len(), 600, "fixture reaches the object cap");
+    json!({"id":"clusters","put":put})
+}
+
+#[test]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
+fn recover_at_the_caps() {
+    use std::{hint::black_box, time::Instant};
+
+    let chain = growing_chain(fixtures::Fixture::Local);
+    let cross = growing_chain(fixtures::Fixture::CrossGroup);
+    let clusters = committed_scene("clusters", [many_clusters()]);
+    let small_local = committed_scene(
+        "small-local",
+        [fixtures::capped_step(150, fixtures::Fixture::Local)],
+    );
+    let small_cross = committed_scene(
+        "small-cross",
+        [fixtures::capped_step(150, fixtures::Fixture::CrossGroup)],
+    );
+    assert_eq!((chain.revision(), cross.revision()), (64, 64));
+    let theme = Arc::new(Theme::default());
+    let cancel = AtomicBool::new(false);
+    for (workload, scenes, objects) in [
+        ("recover-growing-chain-control", vec![&chain], 600),
+        ("recover-growing-chain-cross", vec![&cross], 600),
+        ("recover-many-clusters", vec![&clusters], 600),
+        (
+            "recover-batch-chain-and-clusters",
+            vec![&chain, &clusters],
+            1200,
+        ),
+        (
+            "recover-four-scenes-global-cap",
+            vec![&chain, &clusters, &small_local, &small_cross],
+            1500,
+        ),
+    ] {
+        let sources: Vec<_> = scenes
+            .iter()
+            .map(|scene| (scene.header(), scene.recovery_log()))
+            .collect();
+        let mut samples = Vec::with_capacity(16);
+        let mut retained = 0_usize;
+        for iteration in 0..19 {
+            let start = Instant::now();
+            let (results, global) = recover_all(
+                black_box(&sources),
+                SurfaceGeometry::default(),
+                &theme,
+                &mut Measure,
+                &cancel,
+            );
+            let elapsed = start.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(global.usage().objects, objects);
+            retained = results
+                .iter()
+                .map(|result| {
+                    let (_, layout) = result.as_ref().expect("recovered at the caps");
+                    layout.resident_bytes()
+                })
+                .sum();
+            if iteration >= 3 {
+                samples.push(elapsed);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "workload={workload} samples=16 warmups=3 p50_ms={:.3} max_ms={:.3} resident_bytes={retained}; fixed text measurement, no shaping",
+            samples[8], samples[15]
+        );
     }
 }

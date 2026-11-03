@@ -8,12 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::Secret;
 
+mod account;
 mod error;
 mod pages;
 mod scenes;
 #[macro_use]
 mod settings;
 mod threads;
+pub use account::{
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
+    MAX_EMAIL_BYTES, PlanState,
+};
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
 };
@@ -203,6 +208,8 @@ pub enum ControlToBrain {
         /// The activated revision and finished objects; zero activation clears the scene.
         cut: kumochi_scene::StopCut,
     },
+    /// Something the user asked of the account; answered by one [`ControlToShell::Account`].
+    AccountOp(AccountOp),
 }
 
 /// What a thread's delete came to.
@@ -289,6 +296,10 @@ pub enum ControlToShell {
         /// The run that requested a drawing.
         run: RunId,
     },
+    /// The account: once per connection after `Settings` and before `Scenes`, after every
+    /// change, and once per [`ControlToBrain::AccountOp`]. It carries the display email, so
+    /// the tap never records it.
+    Account(AccountView),
 }
 
 /// Shell to brain, on the data pipe.
