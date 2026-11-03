@@ -15,11 +15,44 @@ pub enum ErrorKey {
     SettingsRefused,
     /// The settings file exists but can't be read, so changes are refused until it's fixed.
     ConfigUnreadable,
+    /// The sign-in attempt passed its five minutes.
+    SignInTimedOut,
+    /// The sign-in couldn't be completed or checked.
+    SignInFailed,
+    /// The browser signed in to a different account than the saved one.
+    SignInOtherAccount,
+    /// The browser couldn't be opened.
+    BrowserUnavailable,
+    /// The account's provider couldn't be reached, or answered that it's temporarily unavailable.
+    AccountOffline,
+    /// Credential Manager refused to read or save the account.
+    CredentialsUnavailable,
+    /// Earlier sessions still wait to be ended, so a new sign-in can't start.
+    RevocationBacklog,
+    /// No usable root certificate loaded from Windows' trusted root store.
+    TrustStoreUnavailable,
+    /// Plan use wasn't granted.
+    PlanNotEnabled,
+    /// The app's registration or grant was refused; retrying won't help.
+    AccountMisconfigured,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 2] = [Self::SettingsRefused, Self::ConfigUnreadable];
+    pub const ALL: [Self; 12] = [
+        Self::SettingsRefused,
+        Self::ConfigUnreadable,
+        Self::SignInTimedOut,
+        Self::SignInFailed,
+        Self::SignInOtherAccount,
+        Self::BrowserUnavailable,
+        Self::AccountOffline,
+        Self::CredentialsUnavailable,
+        Self::RevocationBacklog,
+        Self::TrustStoreUnavailable,
+        Self::PlanNotEnabled,
+        Self::AccountMisconfigured,
+    ];
 }
 
 /// A typed, content-free argument; there's no text variant on purpose.

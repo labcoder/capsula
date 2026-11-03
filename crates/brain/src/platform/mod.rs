@@ -8,8 +8,10 @@ use kumochi_protocol::constants;
 pub mod credential;
 
 mod session_lock;
+mod trust_roots;
 
 pub use session_lock::{SessionLock, SessionLockError};
+pub use trust_roots::{TrustRoots, TrustRootsError};
 
 #[cfg(windows)]
 #[expect(
@@ -21,7 +23,7 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{
     Helper, Instance, Job, PipeServer, client_image, create_owner_only, free_space,
-    launch_detached, links_unsupported, replace_file, session_id,
+    launch_detached, links_unsupported, replace_file, session_id, trust_roots,
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{PipeClient, test_pair};

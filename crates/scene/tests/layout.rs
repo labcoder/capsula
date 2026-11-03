@@ -1,10 +1,11 @@
 //! Incremental placement, preparation isolation and ordered-cut recovery.
 use kumochi_scene::{
-    Admission, Begin, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
+    Admission, Begin, Budget, ErrorCode, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
     display::{MeasureError, Prim, TextMeasure, TextStyle},
     geom::Vec2,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
+        recover_all,
     },
     parse_record,
     text::Bounded,
@@ -77,7 +78,8 @@ fn picture(
         before.clone(),
         SurfaceGeometry::default(),
         Arc::new(Theme::default()),
-    )?;
+    )
+    .map_err(|(error, _)| error)?;
     let result = prepare(input, measure, &AtomicBool::new(false))?;
     result.validate(scene, before)?;
     Ok(result)
@@ -748,7 +750,7 @@ fn a_cut_invalidates_kept_results_and_their_old_layout_base() {
             SurfaceGeometry::default(),
             Arc::new(Theme::default())
         ),
-        Err(PrepareError::Stale)
+        Err((PrepareError::Stale, _))
     ));
 }
 
@@ -2572,4 +2574,216 @@ fn measure_prepare_charts_at_mark_and_pie_segment_caps() {
             "prepare_{kind}_cap samples=64 warmups=5 marks={marks} segments={segments} mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
         );
     }
+}
+
+fn recorded(put: &[Value]) -> SceneState {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    committed(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        json!({"id":"only","put":put}),
+    );
+    scene
+}
+
+#[test]
+fn batch_recovery_keeps_input_order_and_charges_only_what_it_returns() {
+    let label = |id: &str, text: &str| json!({"text":{"id":id,"at":[100,100],"text":text}});
+    let scenes = [
+        recorded(&[label("a", "A")]),
+        recorded(&[label("b", "fail-measure")]),
+        recorded(&[label("c", "C"), label("d", "D")]),
+        recorded(&[label("e", "E")]),
+        recorded(&[label("f", "F")]),
+        recorded(&[label("g", "G")]),
+    ];
+    let header = header();
+    let sources: Vec<_> = scenes
+        .iter()
+        .map(|scene| (&header, scene.recovery_log()))
+        .collect();
+    let (results, mut global) = recover_all(
+        &sources,
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    );
+    let counts: Vec<_> = results
+        .iter()
+        .map(|result| {
+            result
+                .as_ref()
+                .ok()
+                .map(|(scene, layout)| (scene.object_count(), layout.items().len()))
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            Some((1, 1)),
+            None,
+            Some((2, 2)),
+            Some((1, 1)),
+            Some((1, 1)),
+            None
+        ]
+    );
+    let Err(failed) = &results[1] else {
+        panic!("a failed measurement fails its scene");
+    };
+    assert_eq!(failed.revision, 1);
+    assert!(matches!(failed.error, PrepareError::TextMeasure));
+    let Err(over) = &results[5] else {
+        panic!("a fifth recovered scene exceeds the visible cap");
+    };
+    assert_eq!(over.revision, 0);
+    assert!(matches!(
+        &over.error,
+        PrepareError::Layout(error) if error.code == ErrorCode::OverBudget(Budget::VisibleScenes)
+    ));
+    assert_eq!(
+        (global.usage().objects, global.usage().scenes),
+        (5, 4),
+        "neither the failed nor the rejected scene is charged"
+    );
+    let (mut first, _) = results
+        .into_iter()
+        .next()
+        .expect("first result")
+        .expect("first scene");
+    assert_eq!(
+        first
+            .clear(&mut GlobalBudget::default())
+            .expect_err("a foreign budget")
+            .code,
+        ErrorCode::BudgetContext
+    );
+    first.clear(&mut global).expect("the batch budget");
+    assert_eq!((global.usage().objects, global.usage().scenes), (4, 3));
+}
+
+#[test]
+fn retained_bytes_match_step_charges_and_recovery() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let empty = LayoutState::new(&scene);
+    assert_eq!(empty.resident_bytes(), 0);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"shared","put":[
+            {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"categories":["Q","R"],
+                "x":{"min":-0.5,"max":1.5},"y":{"min":-10,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[2,-2]}},
+            {"series":{"id":"t","in":"c","data":[3,-3]}},
+            {"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}
+        ]}),
+    );
+    let first = picture(&scene, commit, &empty, &mut measure).expect("shared geometry");
+    assert_eq!(
+        first.after.resident_bytes(),
+        first.resident_bytes,
+        "a first step charges everything it retains, with the plot and vertices once"
+    );
+    let commit = committed(&mut scene, &mut budget, json!({"id":"nothing","put":[]}));
+    let unchanged = picture(&scene, commit, &first.after, &mut measure).expect("same geometry");
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"more","put":[{"text":{"id":"x","at":[10,10],"text":"X"}}]}),
+    );
+    let second = picture(&scene, commit, &unchanged.after, &mut measure).expect("added text");
+    assert_eq!(
+        second.after.resident_bytes() + unchanged.resident_bytes,
+        unchanged.after.resident_bytes() + second.resident_bytes,
+        "a step adds its new geometry, source and index to the shared prefix"
+    );
+    let (_, recovered) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("recovery");
+    assert_eq!(
+        recovered.resident_bytes(),
+        second.after.resident_bytes(),
+        "recovery charges what the live layout retains"
+    );
+}
+
+#[test]
+fn a_cut_rejects_a_layout_prepared_past_its_kept_prefix() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[{"text":{"id":"x","at":[100,100],"text":"X"}}]}),
+    );
+    let first = picture(&scene, commit, &before, &mut measure).expect("first picture");
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"edit","set":[{"target":"x","text":"Longer"}]}),
+    );
+    let edited = picture(&scene, commit, &first.after, &mut measure).expect("edited picture");
+    cut(&mut scene, &mut budget, 1, &["x"], &first.after);
+    assert!(
+        matches!(
+            edited.after.cut(&scene),
+            Err(PrepareError::Layout(error)) if error.code == ErrorCode::OutOfRange
+        ),
+        "the dropped edit must not survive the cut"
+    );
+    let kept = first.after.cut(&scene).expect("activated prefix");
+    assert_eq!(
+        kept.bounds(&id("x")).expect("kept bounds"),
+        first.after.bounds(&id("x")).expect("first bounds")
+    );
+}
+
+#[test]
+fn a_stale_join_hands_the_ticket_back_for_its_predecessor() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[{"text":{"id":"x","at":[100,100],"text":"X"}}]}),
+    );
+    let first = picture(&scene, commit, &before, &mut measure).expect("first picture");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"next","put":[{"text":{"id":"y","at":[200,100],"text":"Y"}}]}),
+    );
+    let Err((PrepareError::Stale, ticket)) = PrepareInput::new(
+        next.preparation,
+        before,
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    ) else {
+        panic!("a skipped predecessor is stale");
+    };
+    let input = PrepareInput::new(
+        ticket,
+        first.after.clone(),
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    )
+    .expect("the returned ticket joins its predecessor");
+    let prepared = prepare(input, &mut measure, &AtomicBool::new(false)).expect("picture");
+    prepared
+        .validate(&scene, &first.after)
+        .expect("current picture");
+    assert_eq!(prepared.after.items().len(), 2);
 }

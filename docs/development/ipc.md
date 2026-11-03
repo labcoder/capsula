@@ -145,6 +145,21 @@ flowchart LR
 - `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
   Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
 
+## Account
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
+| `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
+
+- No token, code or account identifier crosses the pipe. The only identity is the display
+  email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
+- `AccountOp` is on the tap's content-free list. `Account` isn't, because it carries the email.
+- The view is authoritative: every op is answered by one `Account`, a refused one included, and
+  the shell never moves the account on its own. See [accounts](accounts.md).
+- shortcut: until slice 3 PR 9b wires the account system the brain ignores `AccountOp`, and the
+  shell ignores `Account` until Settings → Accounts (PR 19).
+
 ## Scenes and recovery
 
 A drawing is a **scene**, named by a `SceneId`: the id of the store event that began it. At most
@@ -315,10 +330,10 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
 
 The v1 messages are staged alongside the labelled placeholder protocol. B2 builds the brain
 path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
-the placeholder at both ends and deletes its development-only store rows. Until its consumer
-lands, receiving a v1 message ends the connection rather than ignoring it. The brain now
-accepts `StopScenes`, `StepShown` and `StepFailed`; B4 replaces the shell's v1 data
-and `ScenesV1` rejection; B8 replaces `NoVisual`. These variants are appended; the handshake
+the placeholder at both ends and deletes its development-only store rows. The brain accepts
+`StopScenes`, `StepShown` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
+its presenter. `NoVisual` still ends the connection until B8 supplies its consumer.
+These variants are appended; the handshake
 tags and bytes do not change. Mixed builds still fail their build-id handshake.
 
 | Pipe | Messages | Meaning |
@@ -379,7 +394,7 @@ chunk, not only on final install; a log may exceed the 512 KiB credit window. Ch
 before membership withhold credit and are thereby bounded by that window. Encoded staging is
 limited to 32 MiB per scene and 128 MiB across four, including frame headers, independently of
 the 64 MiB prepared-geometry residency budget. B4 enforces accumulated counts/bytes and measures
-heap residency; these wire-policy caps are not a measured heap bound.
+a process-memory staging proxy; these wire-policy caps are not a measured heap bound.
 
 Every new scene message is excluded from the tap's content-free allow-list. The tap records
 only its operation and byte count, never headers, steps, speech, model ids or parser diagnostics.
