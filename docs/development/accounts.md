@@ -1,4 +1,71 @@
-# Account credential storage
+# Accounts
+
+## Sign-in callback
+
+`connections::oauth::SignIn::bind` binds `127.0.0.1` on port 0 before the browser
+opens. Each attempt owns fresh 32-byte random state, nonce and PKCE verifier from
+`getrandom`; the S256 challenge is unpadded base64url SHA-256. The attempt captures
+only the saved client id, never saved tokens or email. `Intent::EnablePlan` adds
+explicit consent; ordinary sign-in doesn't. The caller supplies the persisted host
+id from the vault.
+
+`open_browser` hands a `LaunchTarget` to an injectable `Launcher`. Production uses
+`SystemBrowser` and `webbrowser`; tests record the URL and the sole application-supplied
+argument without opening a browser. `webbrowser` owns discovery of the OS browser
+executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
+even when a saved record has ID, access and refresh tokens. Returning sign-in uses the
+saved issued client id and lets the provider show its account selector. No launch URL,
+callback request, state, nonce, verifier, authorization code or identity is logged or
+sent over the pipe. Debug output redacts attempt and launch data. There is no `log`
+to `tracing` bridge: webbrowser's command debug messages must stay disabled. The
+privacy test exercises the real crate's dry-run path and the log facade under `Captured`.
+
+`receive` consumes an attempt and returns `Authorization`, not an account or tokens.
+It preserves the code, checked client id, verifier, nonce and exact redirect URI for
+the later exchange. Drop the receive future to cancel and close its listener. Invalid
+requests leave it live; a state-matching OAuth error ends it without an exchange.
+Returning callbacks may omit the client id but cannot replace it. Initial registration
+must supply a nonempty issued id, not `dynamic_agent_client`. The nonce is retained for
+the signed ID token, not checked against an untrusted callback parameter.
+
+The HTTP boundary accepts only `GET /auth/callback?... HTTP/1.1`, exactly one Host
+header equal to `127.0.0.1:<selected port>`, no fragment or duplicate decoded query
+parameter, and constant-time equality with the pending state. Malformed headers,
+wrong path/host/port/state, stale errors and incomplete registration are rejected.
+The callback response is fixed nonreflecting text from `locales/en/brain.ftl`, formatted
+with Fluent, served as UTF-8 plain text with no caching or referrer. Receiving a response
+doesn't mean the account has been verified; that is the exchange's responsibility.
+
+**Local policies:** an entire header, including its terminator, is at most 8 KiB and
+has one absolute 2 s read deadline. A response has up to 1 s to write. The whole attempt,
+including accepts, reads and replies, ends at five minutes on `tokio::time`. The listener
+is serial: each idle preconnect can delay a queued valid callback by its 2 s read plus
+up to 1 s writing its rejection, and multiple idle connections can queue within that
+five-minute deadline. Tests hold accepted/read events, advance the controllable clock,
+and cover an idle preconnect followed by a valid callback. No test uses outside hosts
+or DNS; socket tests use only `127.0.0.1` port 0.
+
+**Public provider contracts:**
+
+| Values and behavior | Public OpenAI source |
+| --- | --- |
+| `https://auth.openai.com/api/accounts/authorize`, PKCE `S256` support | [Discovery](https://auth.openai.com/.well-known/openid-configuration) |
+| `dynamic_agent_client`, issued callback `client_id`, `ext_agent_host_id`, initial `agent_name_hint`, `response_type=code` | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) |
+| `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`, resource `https://api.openai.com/v1` | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) |
+| `http://127.0.0.1:<port>/auth/callback`, state, nonce, PKCE and identical exchange redirect; `access_denied`; returning client binding; optional hints omitted here | [Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) |
+| `prompt=consent` only after the user requests plan use | [Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery) |
+
+This ports the owner's connections spike at `73b595b`: `begin` becomes `SignIn::bind`,
+`open_browser` gains the launcher seam, and `callback`/`parse_callback` become the
+bounded listener/parser. The spike's two callback tests map to
+`stale_and_invalid_callbacks_do_not_consume_pending_attempt` and
+`callback_is_bound_to_attempt_and_registration`. The deliberate changes are `getrandom`
+instead of `rand`, no profiles or token-bearing hints, Fluent response text and a
+five-minute deadline covering the whole receive operation. The serial listener stays.
+Token exchange, signed identity verification, account state-machine wiring and storage
+mutations are outside this layer.
+
+## Credential storage
 
 The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
 credential by exact target name. Windows uses `CredWriteW` with

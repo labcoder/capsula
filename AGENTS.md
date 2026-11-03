@@ -5,7 +5,7 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 
 ## Commands
 - Build: `cargo build --workspace` (the toolchain is pinned in `rust-toolchain.toml`)
-- Test: `cargo test --workspace`. Tests never touch the network.
+- Test: `cargo test --workspace`. Tests may use `127.0.0.1` port 0, never outside hosts or DNS.
 - Lint: `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`
 - Licenses, advisories, duplicates: `cargo deny check`
 - Dev tasks: `cargo xtask help`
