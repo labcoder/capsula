@@ -137,6 +137,9 @@ impl LayoutState {
     }
     /// Drops compiled facts once nothing their step created survives.
     pub(super) fn prune_extras(&mut self) {
+        if self.extras.is_empty() {
+            return;
+        }
         let live: BTreeSet<u32> = self
             .handles
             .keys()

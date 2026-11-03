@@ -149,14 +149,18 @@ one-word header keeps its valid source id. Reopening a named group is unsupporte
 Symbolic directions and BR, minimum-length links, edge ids, group endpoints,
 other shapes or heads, configuration, styling, interactions, HTML, entity codes,
 Mermaid Markdown strings and non-WireId identifiers return `Unsupported` rather
-than disappearing. Malformed or truncated syntax returns `Malformed`, including
+than disappearing. Unknown header words, including misspellings, and refused
+statement-leading id bytes also return `Unsupported`; D1 does not distinguish
+an unknown diagram kind from a typo. Malformed or truncated D1 syntax returns `Malformed`, including
 an `import` after an otherwise valid graph. Text and source limits remain enforced;
 labels such as `click style direction end` and `1<2` are ordinary text. `<br>` stays
 unsupported rather than becoming a line break.
 
 Each source expands in place into a boxless root, parent-first groups, first-mentioned
 nodes and source-ordered edges. A bounded deterministic allocator skips every id
-reserved by the scene or named anywhere in the step, including source group ids.
+reserved by the scene or declared or referenced anywhere in the step, including
+source group ids, parents, anchors, edge endpoints and animation, set and remove
+targets. A generated object cannot satisfy an otherwise dangling reference.
 All expanded objects and operations count once against the ordinary scene and step
 caps before handles are constructed. The 48-node and 96-edge caps apply to each
 diagram after membership and edge ownership are resolved, not to the whole source.
@@ -428,6 +432,12 @@ objects are also drawn late, so they do not contribute to its ranked size; A9's
 renders judge this shortcut. Changed objects retain the later-growth behavior above.
 Private Mermaid group titles reserve the band described above before parent ranking;
 their text belongs to the group handle, not a synthetic child.
+
+RL and BT mirror the initial rank coordinates along the inherited right/down axis.
+A nested group that declares its own direction replaces both the axis and its reversal;
+one without a direction inherits both. Later nodes retain the existing members' positions
+and take free slots toward decreasing x for RL or decreasing y for BT. Recovery derives
+the same direction and slots from the original Mermaid source.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram

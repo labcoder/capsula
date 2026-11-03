@@ -1033,6 +1033,92 @@ fn connected_full_graph() -> String {
 }
 
 #[test]
+fn generated_names_do_not_capture_a_dangling_plain_parent() {
+    rejected(
+        &scene(),
+        &GlobalBudget::default(),
+        &typed(&json!({"id":"graph","put":[
+            {"diagram":{"id":"target"}},
+            {"mermaid":{"in":"target","src":"flowchart TB\nA\n"}},
+            {"text":{"id":"caption","in":"--1.0","at":[0,0],"text":"caption"}}
+        ]})),
+        ErrorCode::UnknownRef,
+        "put[2].text.in",
+    );
+}
+
+#[test]
+fn a_titled_group_recomputes_its_band_after_a_later_node() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = picture(
+        &mut scene,
+        &mut budget,
+        &before,
+        &graph("flowchart TB\nsubgraph g[Group]\nA\nend\n"),
+    );
+    let next = picture(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        &typed(&json!({"id":"grow","put":[
+            {"node":{"id":"B","in":"g","label":"B"}},
+            {"edge":{"id":"next","in":"g","from":"A","to":"B"}}
+        ]})),
+    );
+    assert_rect(bounds(&next.after, "A"), [140.0, 58.0, 80.0, 40.0]);
+    assert_rect(bounds(&next.after, "B"), [16.0, 170.0, 80.0, 40.0]);
+    assert_rect(bounds(&next.after, "g"), [16.0, 32.0, 204.0, 178.0]);
+    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(98.0, 32.0));
+}
+
+#[test]
+fn later_nodes_take_the_next_rank_in_reversed_groups() {
+    for (direction, expected) in [
+        ("RL", [-88.0, 58.0, 80.0, 40.0]),
+        ("BT", [16.0, -54.0, 80.0, 40.0]),
+    ] {
+        let mut scene = scene();
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            &graph(&format!(
+                "flowchart {direction}\nsubgraph g[Group]\nA --> B\nend\n"
+            )),
+        );
+        let next = picture(
+            &mut scene,
+            &mut budget,
+            &first.after,
+            &typed(&json!({"id":"grow","put":[
+                {"node":{"id":"C","in":"g","label":"C"}},
+                {"edge":{"id":"next","in":"g","from":"B","to":"C"}}
+            ]})),
+        );
+        assert_rect(bounds(&next.after, "C"), expected);
+    }
+}
+
+#[test]
+fn a_title_only_subgraph_has_a_single_literal_band() {
+    let mut scene = scene();
+    let before = LayoutState::new(&scene);
+    let prepared = picture(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        &graph("flowchart TB\nsubgraph g[T]\nend\n"),
+    );
+    assert_eq!(scene.object_count(), 3);
+    assert_rect(bounds(&prepared.after, "g"), [176.0, 32.0, 8.0, 26.0]);
+    assert_eq!(title_origin(&prepared.after, "T"), Vec2::new(176.0, 32.0));
+}
+
+#[test]
 fn the_connected_mermaid_measurement_really_prepares_600_objects() {
     let mut scene = scene();
     let before = LayoutState::new(&scene);
