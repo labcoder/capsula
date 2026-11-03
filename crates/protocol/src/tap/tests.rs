@@ -31,6 +31,7 @@ fn view() -> ControlToShell {
             user_name: Some(UserName::new(USER).expect("valid")),
             onboarded: true,
             main_thread: ThreadId(1),
+            max_frame_rate: crate::message::MaxFrameRate::AUTOMATIC,
         },
         answer: true,
     }

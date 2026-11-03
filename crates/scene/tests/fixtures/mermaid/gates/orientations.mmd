@@ -1,0 +1,7 @@
+flowchart RL
+request([Input]) --> consume[Consume the result]
+subgraph worker[Background worker]
+  direction BT
+  cache[(Cache)] --> prepare[Prepare the result]
+end
+prepare --> consume
