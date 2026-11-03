@@ -2,6 +2,7 @@ use kumochi_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf};
 
 use super::*;
 use crate::coordinator::{Coordinator, Effect, StoreOp};
+use crate::engines::RunRequest;
 use crate::runtime::DATA_CAP;
 
 /// The frames a connection opens with, before any run state.
@@ -79,8 +80,11 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     assert_eq!(
         coordinator.handle(Input::TurnStored { run: RunId(1) }),
         Ok(vec![Effect::StartEngine {
-            run: RunId(1),
-            text: "go".to_owned()
+            request: RunRequest {
+                run: RunId(1),
+                thread: ThreadId(1),
+                turn: "go".to_owned()
+            }
         }])
     );
 }
@@ -477,7 +481,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         store,
         (ThreadId(0), RunId(0)),
         Vec::new(),
-        Fixture::parse("").expect("fixture"),
+        Box::new(Fixture::parse("").expect("fixture")),
         scratch.config(),
     )
     .expect("brain");

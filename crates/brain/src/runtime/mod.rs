@@ -1,4 +1,4 @@
-//! The brain's systems around the coordinator: the store thread, the fixture engine, timers,
+//! The brain's systems around the coordinator: the store thread, the engine, timers,
 //! and one shell connection's readers and writers.
 //!
 //! Each pipe has its own reader and writer, polled together in one task, so a reader never
@@ -6,7 +6,6 @@
 //! writer is blocked on a shell that stopped reading.
 
 mod data;
-pub(crate) mod fixture;
 mod recovery;
 mod settings;
 mod store_thread;
@@ -15,7 +14,6 @@ mod tests;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
@@ -26,16 +24,16 @@ use kumochi_protocol::message::{
 use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::coordinator::{Coordinator, Effect, Input};
+use crate::engines::{self, Cancel, Engine};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
 use data::{DataQueue, Owner};
-use fixture::Fixture;
 use recovery::Recovery;
 use store_thread::StoreThread;
 
@@ -98,14 +96,15 @@ pub(crate) enum Quit {
 pub(crate) struct Brain {
     coordinator: Coordinator,
     store: Option<StoreThread>,
-    fixture: Arc<Fixture>,
+    engine: Box<dyn Engine>,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
     /// Engine events, taken only while the data queue has room.
     engine_tx: mpsc::Sender<Input>,
     engine_events: mpsc::Receiver<Input>,
-    engine: Option<(RunId, oneshot::Sender<()>)>,
+    /// The current run's round, aborted when its `Cancel` drops.
+    round: Option<(RunId, Cancel)>,
     deadline: Option<(RunId, Instant)>,
     /// When owed writes are tried again.
     retry_at: Option<Instant>,
@@ -171,7 +170,7 @@ impl Brain {
         store: Store,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
-        fixture: Fixture,
+        engine: Box<dyn Engine>,
         config: Config,
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
@@ -192,12 +191,12 @@ impl Brain {
         Ok(Self {
             coordinator: Coordinator::new(last_thread, last_run, scenes),
             store: Some(store),
-            fixture: Arc::new(fixture),
+            engine,
             inputs_tx,
             inputs,
             engine_tx,
             engine_events,
-            engine: None,
+            round: None,
             deadline: None,
             retry_at: None,
             epoch: 0,
@@ -699,10 +698,10 @@ impl Brain {
                         link = None;
                     }
                 }
-                Effect::StartEngine { run, text: _ } => {
-                    let cancel =
-                        fixture::start(Arc::clone(&self.fixture), run, self.engine_tx.clone());
-                    self.engine = Some((run, cancel));
+                Effect::StartEngine { request } => {
+                    let run = request.run;
+                    let cancel = engines::start(&*self.engine, request, self.engine_tx.clone());
+                    self.round = Some((run, cancel));
                 }
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
@@ -718,13 +717,8 @@ impl Brain {
                     }
                 }
                 Effect::CancelEngine { run } => {
-                    if let Some((engine_run, cancel)) = self.engine.take() {
-                        if engine_run == run {
-                            // An engine that already finished has dropped its receiver.
-                            let _finished = cancel.send(());
-                        } else {
-                            self.engine = Some((engine_run, cancel));
-                        }
+                    if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
+                        self.round = None;
                     }
                 }
                 Effect::ArmRetry { after } => {

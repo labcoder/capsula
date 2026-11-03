@@ -6,6 +6,7 @@
 mod config;
 pub mod coordinator;
 pub mod credential;
+pub mod engines;
 pub mod ipc;
 pub mod logging;
 pub mod platform;
@@ -27,11 +28,11 @@ use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
+use crate::engines::fixture::{self, Fixture};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::relaunch::Crashes;
 use crate::runtime::Brain;
-use crate::runtime::fixture::{self, Fixture};
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
 /// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
@@ -101,7 +102,7 @@ pub async fn run() -> Result<(), BrainError> {
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
     let config = config::Config::load(platform::config_dir());
-    let mut brain = Brain::new(store, high_water, scenes, fixture()?, config)
+    let mut brain = Brain::new(store, high_water, scenes, Box::new(fixture()?), config)
         .map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.

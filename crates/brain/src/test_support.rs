@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::constants;
 
 use crate::config::Config;
+use crate::engines::fixture::Fixture;
 use crate::runtime::Brain;
-use crate::runtime::fixture::Fixture;
 use crate::store::Store;
 
 /// A store file in its own temp folder, removed afterwards.
@@ -68,7 +68,14 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
     let fixture = Fixture::parse(script).expect("script");
-    Brain::new(store, high_water, scenes, fixture, scratch.config()).expect("brain")
+    Brain::new(
+        store,
+        high_water,
+        scenes,
+        Box::new(fixture),
+        scratch.config(),
+    )
+    .expect("brain")
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.
