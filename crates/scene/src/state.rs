@@ -7,6 +7,7 @@ use crate::{
     Begin, Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Record, Step, StepError, WireId,
     budget::Usage,
     limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
+    mermaid::{self, Expansion},
     record::Start,
     text::Bounded,
 };
@@ -68,6 +69,10 @@ fn deserialize_step<'de, D: serde::Deserializer<'de>>(
 
 /// Validation either creates an owned candidate or recognizes a retransmission.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "keep the owned admission candidate unboxed without a per-step allocation or public API change"
+)]
 pub enum Admission {
     /// A checked candidate, bound to its state and budget generations.
     New(Admitted),
@@ -84,6 +89,8 @@ pub struct Admitted {
     mutation: u64,
     usage: Usage,
     step: Arc<Step>,
+    run: Arc<Step>,
+    extras: Arc<BTreeMap<usize, mermaid::Extra>>,
     after: BTreeMap<WireId, Object>,
     created: Vec<(WireId, Handle)>,
     removed: Vec<(WireId, Object)>,
@@ -118,6 +125,9 @@ pub struct Preparation {
     pub(crate) cut_revision: u32,
     pub(crate) revision: u32,
     pub(crate) step: Arc<Step>,
+    /// The compiled step preparation runs; `step` stays the original.
+    pub(crate) run: Arc<Step>,
+    pub(crate) extras: Arc<BTreeMap<usize, mermaid::Extra>>,
     pub(crate) path_scales: BTreeMap<Handle, f32>,
     pub(crate) canvas_size: Option<[f32; 2]>,
 }
@@ -335,10 +345,6 @@ impl SceneState {
     /// Checks a closed step without changing identities, state or counters.
     /// # Errors
     /// Rejects invalid identities, references, ownership, values or a cleared scene.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep the ordered preflight checks and owned candidate construction visible at the trust boundary"
-    )]
     pub fn admit(&self, step: &Step, global: &GlobalBudget) -> Result<Admission, StepError> {
         self.check_context(global)?;
         let fail = |path, code| StepError::in_step(&step.id, path, code);
@@ -390,6 +396,29 @@ impl SceneState {
         global
             .check(self.bound_usage(), minimum)
             .map_err(|code| fail(FieldPath::default(), code))?;
+        let original = Arc::new(step.clone());
+        let expansion = mermaid::expand(
+            &original,
+            revision,
+            &self.reserved,
+            MAX_LIVE_OBJECTS - minimum.objects,
+        )?;
+        self.candidate(original, &expansion, global)
+            .map(Admission::New)
+            .map_err(|error| expansion.blame(error))
+    }
+
+    /// Validates and charges the compiled step as one atomic candidate. Its paths name compiled
+    /// slots until `Expansion::blame` moves them onto the original step.
+    fn candidate(
+        &self,
+        original: Arc<Step>,
+        expansion: &Expansion,
+        global: &GlobalBudget,
+    ) -> Result<Admitted, StepError> {
+        let step = &*expansion.run;
+        let fail = |path, code| StepError::in_step(&step.id, path, code);
+        let revision = self.revision + 1;
         let mut removal_ids = HashSet::with_capacity(step.remove.len());
         for (index, id) in step.remove.iter().enumerate() {
             if !removal_ids.insert(id) {
@@ -411,18 +440,28 @@ impl SceneState {
                 }
                 let handle = Handle::new(revision, index)
                     .map_err(|code| fail(object::path(index, v.name).field("id"), code))?;
-                let object = object::object(&v, op, handle, index, step)?;
+                let mut object = object::object(&v, op, handle, index, step)?;
+                if let Some(segments) = expansion
+                    .extras
+                    .get(&index)
+                    .and_then(mermaid::Extra::segments)
+                {
+                    object.work.usage.segments = segments;
+                }
                 after.insert(v.id.clone(), object);
                 created.push((v.id.clone(), handle));
             }
         }
         for (index, op) in step.put.iter().enumerate() {
             object::validate_op(op, index, step, &after, &removal_ids)?;
+            expansion.check_target(step, index, &after)?;
         }
         object::acyclic(step, &after)?;
         object::validate_changes(step, &after, &removal_ids)?;
         let mut changed = work::changes(step, &mut after, revision)?;
-        metrics::validate(step, &mut after)?;
+        metrics::validate(step, &mut after, |handle| {
+            expansion.source_slot(handle, revision)
+        })?;
         for (id, object) in &after {
             if let Some(previous) = self.objects.get(id)
                 && previous.work.usage != object.work.usage
@@ -451,19 +490,21 @@ impl SceneState {
                 data.freeze(step);
             }
         }
-        Ok(Admission::New(Admitted {
+        Ok(Admitted {
             owner: Arc::clone(&self.identity),
             global: Arc::clone(&global.identity),
             revision: self.revision,
             generation: global.generation(),
             mutation: self.mutation,
             usage,
-            step: Arc::new(step.clone()),
+            step: original,
+            run: Arc::clone(&expansion.run),
+            extras: Arc::clone(&expansion.extras),
             after,
             created,
             removed,
             changed: changed.into_iter().collect(),
-        }))
+        })
     }
 
     /// Installs a candidate after O(1) stamp checks, with no fallible revalidation.
@@ -509,6 +550,8 @@ impl SceneState {
             cut_revision: self.last_cut_revision,
             revision,
             step: Arc::clone(&admitted.step),
+            run: Arc::clone(&admitted.run),
+            extras: Arc::clone(&admitted.extras),
             path_scales,
             canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
         };

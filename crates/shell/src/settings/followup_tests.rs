@@ -8,6 +8,7 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         user_name: user.map(|name| UserName::new(name).expect("valid")),
         onboarded: true,
         main_thread: ThreadId(1),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
     }
 }
 

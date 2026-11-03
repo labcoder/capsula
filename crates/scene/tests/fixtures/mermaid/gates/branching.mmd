@@ -1,0 +1,7 @@
+flowchart TB
+start([Start]) --> request[Read the request]
+request --> cached{Available locally?}
+cached -->|yes| store[(Local store)]
+cached -->|no| fetch(Fetch from the chosen account)
+store --> done((Done))
+fetch --> done

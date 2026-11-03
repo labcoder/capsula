@@ -176,6 +176,17 @@ impl FieldPath {
         write!(self.0, "[{index}]").expect("writing to a string cannot fail");
         self
     }
+    /// The `put` slot this path starts with, and the rest of the path after it.
+    pub(crate) fn put_slot(&self) -> Option<(usize, &str)> {
+        let (index, tail) = self.0.strip_prefix("put[")?.split_once(']')?;
+        Some((index.parse().ok()?, tail))
+    }
+    /// The path `tail` below `put[index]`.
+    pub(crate) fn put_tail(index: usize, tail: &str) -> Self {
+        let mut path = Self::default().field("put").index(index);
+        path.0.push_str(tail);
+        path
+    }
     fn is_op_tag(&self) -> bool {
         self.0.is_empty()
             || self

@@ -43,7 +43,7 @@ impl<S: AsyncRead + tokio::io::AsyncWrite> Shell<S> {
     /// The next control frame, which must be a `Settings` that answers, or doesn't answer, a
     /// change.
     async fn settings(&mut self, answer: Answer) -> SettingsView {
-        let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
+        let next = self.unaccounted();
         let expected = answer == Answer::Yes;
         match tokio::time::timeout(super::PATIENCE, next).await {
             Ok(Ok(Some(ControlToShell::Settings { view, answer }))) if answer == expected => view,
@@ -64,7 +64,7 @@ impl<S: AsyncRead + tokio::io::AsyncWrite> Shell<S> {
 
     /// The next control frame, which must be an `Error`.
     async fn error(&mut self) -> ErrorKey {
-        let next = ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control);
+        let next = self.unaccounted();
         match tokio::time::timeout(super::PATIENCE, next).await {
             Ok(Ok(Some(ControlToShell::Error(error)))) => error.key(),
             other => panic!("expected Error, got {other:?}"),
@@ -214,10 +214,11 @@ async fn names_never_reach_the_tap_in_either_direction() {
     assert!(!dumped.contains(NAME), "{dumped}");
     let lines: Vec<_> = dumped.lines().collect();
     assert!(lines[0].contains("brain -> shell  Settings ("), "{dumped}");
-    assert!(lines[1].contains("brain -> shell  Scenes {"), "{dumped}");
-    assert!(lines[2].contains("shell -> brain  Settings ("), "{dumped}");
-    assert!(lines[3].contains("brain -> shell  Settings ("), "{dumped}");
-    assert!(lines[4].contains("shell -> brain  Pong"), "{dumped}");
+    assert!(lines[1].contains("brain -> shell  Account ("), "{dumped}");
+    assert!(lines[2].contains("brain -> shell  Scenes {"), "{dumped}");
+    assert!(lines[3].contains("shell -> brain  Settings ("), "{dumped}");
+    assert!(lines[4].contains("brain -> shell  Settings ("), "{dumped}");
+    assert!(lines[5].contains("shell -> brain  Pong"), "{dumped}");
 }
 
 fn saved_name(scratch: &Scratch) -> String {

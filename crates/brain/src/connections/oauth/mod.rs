@@ -213,7 +213,7 @@ impl SignIn {
     ///
     /// # Errors
     /// Fails if the attempt expired or the launcher refuses the target.
-    pub fn open_browser(&self, launcher: &impl Launcher) -> Result<(), LaunchError> {
+    pub fn open_browser(&self, launcher: &(impl Launcher + ?Sized)) -> Result<(), LaunchError> {
         if Instant::now() >= self.deadline {
             return Err(LaunchError::Expired);
         }
