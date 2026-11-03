@@ -380,7 +380,10 @@ fn eye_coverage(e: &Eye, rel: Vec2, upp: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRAMING, FrameState, Look, Renderer, SizeMismatch, bleed_clear, index};
+    use super::{
+        FRAMING, FrameState, Lit, Look, Renderer, SizeMismatch, bleed_clear, bleed_lit, index,
+    };
+    use crate::presence::kumo::math::hex;
     use crate::presence::kumo::shape::Silhouette;
 
     #[expect(
@@ -521,7 +524,8 @@ mod tests {
     }
 
     /// A squashed frame samples the bake between texels. Its soft edge must keep the colour the
-    /// unsquashed edge has at the same body point, not pull in the black of empty texels.
+    /// unsquashed edge has at the same body point, not pull in the black of empty texels. The
+    /// pixels compared are the squashed frame's soft edge whose matching still pixel is covered.
     #[test]
     fn a_squashed_edge_keeps_its_colour() {
         let size = 84;
@@ -542,7 +546,7 @@ mod tests {
         renderer
             .render(&f, &mut squashed)
             .expect("the buffer is the renderer's size");
-        let mut worst = 0;
+        let (mut worst, mut compared) = (0, 0);
         for j in 0..size {
             for i in 0..size {
                 let px = &squashed[index(size, i, j) * 4..][..4];
@@ -557,16 +561,66 @@ mod tests {
                 if still_px[3] == 0 {
                     continue;
                 }
+                compared += 1;
                 for c in 0..3 {
                     worst = worst.max(px[c].abs_diff(still_px[c]));
                 }
             }
         }
+        assert!(compared > 50, "only {compared} soft-edge pixels compared");
         // Black from empty texels put it 108 off; neighbouring surface colours differ by about 5.
         assert!(
             worst <= 8,
             "a squashed edge pixel is {worst}/255 off the still edge's colour"
         );
+    }
+
+    /// A 4x4 bake: a solid red texel at (1,1) and a faint blue one at (3,2).
+    #[test]
+    fn an_empty_texel_takes_its_most_covered_neighbours_surface() {
+        let size = 4;
+        let red = Lit {
+            coverage: 1.0,
+            base: hex(0xff_00_00),
+            inside: 0.7,
+            ..Lit::default()
+        };
+        let blue = Lit {
+            coverage: 0.25,
+            base: hex(0x00_00_ff),
+            ..Lit::default()
+        };
+        let mut lit = vec![Lit::default(); 16];
+        lit[index(size, 1, 1)] = red;
+        lit[index(size, 3, 2)] = blue;
+        bleed_lit(&mut lit, size);
+        let at = |i, j| lit[index(size, i, j)];
+        for (i, j, want) in [
+            (0, 0, red),
+            (2, 2, red),
+            (3, 3, blue),
+            (1, 1, red),
+            (3, 2, blue),
+        ] {
+            assert_eq!(at(i, j).base, want.base, "texel {i},{j}");
+            assert!(
+                (at(i, j).inside - want.inside).abs() < 1e-6,
+                "texel {i},{j}"
+            );
+        }
+        for (i, j) in [(0, 0), (2, 2), (3, 3)] {
+            assert!(at(i, j).coverage.abs() < 1e-6, "{i},{j} stays clear");
+        }
+        assert_eq!(
+            at(3, 0).base,
+            hex(0),
+            "no covered neighbour, nothing to take"
+        );
+        // A sample halfway between the solid texel and a bled one keeps the colour, at half
+        // coverage.
+        let mid = at(1, 1).lerp(at(0, 1), 0.5);
+        assert_eq!(mid.base, red.base);
+        assert!((mid.coverage - 0.5).abs() < 1e-6);
     }
 
     #[test]
