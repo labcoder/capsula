@@ -4,6 +4,7 @@
 //! platform code.
 
 mod config;
+pub mod connections;
 pub mod coordinator;
 pub mod credential;
 pub mod drawing;
