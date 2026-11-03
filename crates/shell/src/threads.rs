@@ -1,8 +1,11 @@
 //! The threads panel's page state, independent of GPUI and the connection transport.
 
+use std::collections::{HashMap, VecDeque};
+
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    DataToBrain, DataToShell, EventId, PageEvent, PageOf, ThreadCursor, ThreadId, ThreadRow,
+    DataToBrain, DataToShell, EventId, PageEvent, PageOf, SettingsView, ThreadCursor, ThreadId,
+    ThreadKind, ThreadRow,
 };
 
 #[cfg(test)]
@@ -13,6 +16,7 @@ enum Read {
     First,
     More,
     Repair,
+    Renamed(Option<ThreadCursor>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +26,7 @@ struct Pending {
     read: Read,
     /// A `RunState` arrived while this list read was in flight, so its reply may predate it.
     stale: bool,
+    after: Option<ThreadCursor>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -36,6 +41,7 @@ pub(crate) enum SearchError {
     reason = "independent facts about the panel and its reads, not a state machine"
 )]
 pub(crate) struct Threads {
+    pub(crate) settings: Option<SettingsView>,
     pub(crate) rows: Vec<ThreadRow>,
     pub(crate) next: Option<ThreadCursor>,
     pub(crate) open: Option<ThreadId>,
@@ -65,6 +71,9 @@ pub(crate) struct Threads {
     list_needed: Option<Read>,
     event_needed: Option<Read>,
     deferred_search: Option<u64>,
+    cached: HashMap<ThreadId, ThreadRow>,
+    pages: HashMap<ThreadId, Option<ThreadCursor>>,
+    reread: VecDeque<Option<ThreadCursor>>,
 }
 
 impl std::fmt::Debug for Threads {
@@ -78,6 +87,25 @@ impl std::fmt::Debug for Threads {
 }
 
 impl Threads {
+    pub(crate) fn set_settings(&mut self, settings: SettingsView) {
+        self.settings = Some(settings);
+    }
+
+    pub(crate) fn row(&self, thread: ThreadId) -> Option<&ThreadRow> {
+        self.cached
+            .get(&thread)
+            .or_else(|| self.rows.iter().find(|row| row.id == thread))
+    }
+
+    pub(crate) fn renamed(&mut self, thread: ThreadId) {
+        // shortcut: the re-read can race the rename across the two pipes and show the old title
+        // until the next refresh; upgrade when PR 16's ThreadsChanged is sent after every committed SetTitle.
+        let after = self.pages.get(&thread).copied().flatten();
+        if !self.reread.contains(&after) {
+            self.reread.push_back(after);
+        }
+    }
+
     pub(crate) fn online(&self) -> bool {
         self.connected
     }
@@ -87,7 +115,7 @@ impl Threads {
     }
 
     pub(crate) fn listing(&self) -> bool {
-        self.list_pending.is_some() || self.list_needed.is_some()
+        self.list_pending.is_some() || self.list_needed.is_some() || !self.reread.is_empty()
     }
 
     pub(crate) fn reading(&self) -> bool {
@@ -121,9 +149,11 @@ impl Threads {
         self.list_needed = None;
         self.event_needed = None;
         self.deferred_search = None;
+        self.reread.clear();
     }
 
     pub(crate) fn refresh(&mut self) {
+        self.reread.clear();
         self.deferred_search = None;
         self.list_revision = self.list_revision.wrapping_add(1);
         self.list_needed = self.search_error.is_none().then_some(Read::First);
@@ -150,6 +180,7 @@ impl Threads {
             .then_some(SearchError::TooLong);
         self.search = search;
         self.rows.clear();
+        self.pages.clear();
         self.next = None;
         self.listed = false;
         self.refresh();
@@ -179,6 +210,8 @@ impl Threads {
     /// `thread` was hidden or removed: its row, its open messages and every read in flight
     /// about it go, so no reply sent before the brain hid it lands.
     pub(crate) fn deleted(&mut self, thread: ThreadId) {
+        self.cached.remove(&thread);
+        self.pages.remove(&thread);
         self.rows.retain(|row| row.id != thread);
         self.list_revision = self.list_revision.wrapping_add(1);
         if self.list_pending.is_some() && self.list_needed.is_none() {
@@ -229,20 +262,30 @@ impl Threads {
         let mut requests = Vec::new();
         if self.list_pending.is_none()
             && self.deferred_search.is_none()
-            && let Some(read) = self.list_needed.take()
+            && let Some(read) = self
+                .reread
+                .pop_front()
+                .map(Read::Renamed)
+                .or_else(|| self.list_needed.take())
         {
             let request = self.number();
+            let after = match read {
+                Read::More => self.next,
+                Read::Renamed(after) => after,
+                Read::First | Read::Repair => None,
+            };
             self.list_pending = Some(Pending {
                 request,
                 revision: self.list_revision,
                 read,
                 stale: false,
+                after,
             });
             requests.push(DataToBrain::PageRequest {
                 request,
                 page: PageOf::Threads {
                     search: self.search.clone(),
-                    after: if read == Read::More { self.next } else { None },
+                    after,
                 },
             });
         }
@@ -256,6 +299,7 @@ impl Threads {
                 revision: self.event_revision,
                 read,
                 stale: false,
+                after: None,
             });
             requests.push(DataToBrain::PageRequest {
                 request,
@@ -285,47 +329,7 @@ impl Threads {
                 request,
                 threads,
                 next,
-            } => {
-                let Some(pending) = self
-                    .list_pending
-                    .filter(|pending| pending.request == request)
-                else {
-                    return;
-                };
-                self.list_pending = None;
-                if pending.stale && self.list_needed.is_none() {
-                    self.list_needed = Some(Read::Repair);
-                }
-                if pending.revision != self.list_revision {
-                    return;
-                }
-                match pending.read {
-                    Read::First => {
-                        self.rows = threads;
-                        self.next = next;
-                    }
-                    Read::More => {
-                        for row in threads {
-                            if !self.rows.iter().any(|old| old.id == row.id) {
-                                self.rows.push(row);
-                            }
-                        }
-                        self.next = next;
-                    }
-                    Read::Repair => {
-                        if !self.listed {
-                            self.next = next;
-                        }
-                        // shortcut: over 50 changed threads can remain out of order until reopen;
-                        // revisit when more than one user turn can update many threads at once.
-                        self.rows
-                            .retain(|old| !threads.iter().any(|row| row.id == old.id));
-                        self.rows.splice(0..0, threads);
-                    }
-                }
-                self.listed = true;
-                self.failed = false;
-            }
+            } => self.apply_list(request, threads, next),
             DataToShell::Page {
                 request,
                 thread,
@@ -381,6 +385,62 @@ impl Threads {
         }
     }
 
+    fn apply_list(&mut self, request: u32, threads: Vec<ThreadRow>, next: Option<ThreadCursor>) {
+        let Some(pending) = self
+            .list_pending
+            .filter(|pending| pending.request == request)
+        else {
+            return;
+        };
+        self.list_pending = None;
+        if pending.stale && self.list_needed.is_none() {
+            self.list_needed = Some(Read::Repair);
+        }
+        if pending.revision != self.list_revision {
+            return;
+        }
+        if pending.read == Read::First {
+            self.pages.clear();
+        }
+        for row in &threads {
+            self.cached.insert(row.id, row.clone());
+            self.pages.insert(row.id, pending.after);
+        }
+        match pending.read {
+            Read::First => {
+                self.rows = threads;
+                self.next = next;
+            }
+            Read::More => {
+                for row in threads {
+                    if !self.rows.iter().any(|old| old.id == row.id) {
+                        self.rows.push(row);
+                    }
+                }
+                self.next = next;
+            }
+            Read::Repair => {
+                if !self.listed {
+                    self.next = next;
+                }
+                // shortcut: over 50 changed threads can remain out of order until reopen;
+                // revisit when more than one user turn can update many threads at once.
+                self.rows
+                    .retain(|old| !threads.iter().any(|row| row.id == old.id));
+                self.rows.splice(0..0, threads);
+            }
+            Read::Renamed(_) => {
+                for row in threads {
+                    if let Some(old) = self.rows.iter_mut().find(|old| old.id == row.id) {
+                        *old = row;
+                    }
+                }
+            }
+        }
+        self.listed = true;
+        self.failed = false;
+    }
+
     /// Frees the failed request's slot, and shows the failure only when the request was still
     /// current. No retry here: the next refresh, selection or `RunState` reads again.
     fn read_failed(&mut self, request: u32) {
@@ -405,5 +465,15 @@ impl Threads {
     fn number(&mut self) -> u32 {
         self.counter = self.counter.wrapping_add(1);
         self.counter
+    }
+}
+
+pub(crate) fn row_label(row: &ThreadRow, settings: Option<&SettingsView>) -> String {
+    if row.kind == ThreadKind::Main {
+        settings.map_or_else(String::new, |settings| {
+            settings.assistant_name.as_str().to_owned()
+        })
+    } else {
+        row.title.clone()
     }
 }

@@ -5,7 +5,7 @@ use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent};
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div,
+    Render, Styled as _, WeakEntity, Window, div,
 };
 
 use super::{
@@ -13,7 +13,9 @@ use super::{
     PresenceEvent, PresenceSurface, SharedString, configure_surface, constants, diagnostics,
     options, platform, send,
 };
+use crate::runs::{Refused, Target};
 use crate::strings::{Strings, Text};
+use crate::threads::row_label;
 
 #[derive(Clone, Copy)]
 pub(super) enum Hide {
@@ -126,6 +128,7 @@ impl Presence {
         let stop = self.escape_hold.shows_stop();
         let events = self.events.clone();
         let close_events = self.events.clone();
+        let owner = cx.weak_entity();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
@@ -139,7 +142,7 @@ impl Presence {
                 steps: Vec::new(),
                 answer: SharedString::default(),
                 deleting: false,
-                notice: None,
+                owner,
                 events,
             })
         })
@@ -249,8 +252,36 @@ impl Presence {
 }
 
 impl Presence {
+    pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let Some(text) = &self.text else {
+            return Ok(());
+        };
+        let draft = text.input.read(cx).value();
+        let (link, session) = (&self.link, &self.session);
+        let result = self.runs.submit(&draft, |turn| {
+            session
+                .as_ref()
+                .is_some_and(|session| link.send_data(session, turn))
+        });
+        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
+        if result.is_ok() {
+            let input = text.input.clone();
+            text.window
+                .update(cx, |_, window, cx| {
+                    input.update(cx, |state, cx| state.set_value("", window, cx));
+                })
+                .map_err(|error| OpenError::Gpui(error.into()))?;
+        }
+        submission_notice(&mut self.error, result, cx.global::<Strings>());
+        self.refresh_dock(cx);
+        self.runs_changed(cx)
+    }
+
     /// Shows the drawing's steps and the end of the newest answer in the typing panel.
     pub(super) fn refresh_conversation(&self, cx: &mut Context<'_, Self>) {
+        if let Some(panel) = &self.thread_panel {
+            panel.view.update(cx, |_, cx| cx.notify());
+        }
         let Some(text) = &self.text else {
             return;
         };
@@ -274,8 +305,8 @@ impl Presence {
                 view.steps = steps;
                 view.answer = answer;
                 view.deleting = deleting;
-                cx.notify();
             }
+            cx.notify();
         });
     }
 }
@@ -288,15 +319,41 @@ pub(super) struct TextView {
     pub(super) stop: bool,
     steps: Vec<SharedString>,
     answer: SharedString,
-    /// The answer's thread is being deleted, so the next turn starts a new thread.
+    /// The answer's task is being deleted.
     deleting: bool,
-    pub(super) notice: Option<SharedString>,
+    owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
 }
 
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
+        let owner = self.owner.upgrade();
+        let presence = owner.as_ref().map(|owner| owner.read(cx));
+        let notice = presence.and_then(|owner| owner.error.clone());
+        let context = presence
+            .filter(|owner| owner.runs.target() != Target::Kumo)
+            .map(|owner| {
+                let threads = owner.threads.read(cx);
+                let strings = cx.global::<Strings>();
+                let label = match owner.runs.target() {
+                    Target::Task(thread) => threads.row(thread).map_or_else(
+                        || strings.get(Text::TaskFallback),
+                        |row| row_label(row, threads.settings.as_ref()),
+                    ),
+                    Target::New => strings.get(Text::NewThread),
+                    Target::Kumo => String::new(),
+                };
+                strings.focus(&label)
+            });
+        let back_owner = self.owner.clone();
+        let back_label = cx.global::<Strings>().back_to_kumo(
+            presence
+                .and_then(|owner| owner.threads.read(cx).settings.as_ref())
+                .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {
+                    settings.assistant_name.as_str()
+                }),
+        );
         let stop = self.stop.then(|| {
             let events = self.events.clone();
             Button::new("stop")
@@ -329,6 +386,18 @@ impl Render for TextView {
             .flex_col()
             .gap_2()
             .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
+            .children(context.map(|context| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(context))
+                    .child(Button::new("back-to-kumo").label(back_label).on_click(
+                        move |_, _, cx| {
+                            let _gone = back_owner.update(cx, Presence::back_to_kumo);
+                        },
+                    ))
+            }))
             .child(
                 div()
                     .flex_1()
@@ -352,14 +421,25 @@ impl Render for TextView {
                     .text_xs()
                     .child(cx.global::<Strings>().get(Text::ThreadDeleting))
             }))
-            .children(
-                self.notice
-                    .clone()
-                    .map(|notice| div().text_xs().child(notice)),
-            )
+            .children(notice.map(|notice| div().text_xs().child(notice)))
             .child(Input::new(&self.input))
             .children(stop)
     }
+}
+
+fn submission_notice(
+    notice: &mut Option<SharedString>,
+    result: Result<(), Refused>,
+    strings: &Strings,
+) {
+    let text = match result {
+        Ok(()) => None,
+        Err(Refused::Blank) => return,
+        Err(Refused::Busy) => Some(Text::TurnBusy),
+        Err(Refused::Offline) => Some(Text::TurnOffline),
+        Err(Refused::TooLong) => Some(Text::TurnTooLong),
+    };
+    *notice = text.map(|text| strings.get(text).into());
 }
 
 /// The end of an answer the typing panel has room for [guess], cut at a character boundary.
@@ -375,6 +455,32 @@ fn answer_tail(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Hide, Typing, answer_tail};
+
+    #[test]
+    fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
+        let strings = crate::strings::Strings::english();
+        let mut notice = Some(gpui_kit::SharedString::from(
+            "Couldn't save that setting. Try again.",
+        ));
+        super::submission_notice(&mut notice, Err(crate::runs::Refused::Blank), &strings);
+        assert_eq!(
+            notice.as_deref(),
+            Some("Couldn't save that setting. Try again.")
+        );
+        super::submission_notice(&mut notice, Ok(()), &strings);
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn a_local_refusal_replaces_the_retained_notice() {
+        let strings = crate::strings::Strings::english();
+        let mut notice = Some(gpui_kit::SharedString::from("An earlier error"));
+        super::submission_notice(&mut notice, Err(crate::runs::Refused::Offline), &strings);
+        assert_eq!(
+            notice.as_deref(),
+            Some("Not sent: the background process isn't connected.")
+        );
+    }
 
     #[test]
     fn a_short_answer_shows_whole() {

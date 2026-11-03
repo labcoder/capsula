@@ -1,6 +1,162 @@
 use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
+fn settings(name: &str) -> SettingsView {
+    SettingsView {
+        assistant_name: kumochi_protocol::message::AssistantName::new(name).expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(1),
+    }
+}
+
+#[test]
+fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
+    let mut state = loaded();
+    state.more_threads();
+    let first = state.requests().remove(0);
+    let DataToBrain::PageRequest {
+        page: PageOf::Threads { after: cursor, .. },
+        ..
+    } = first
+    else {
+        panic!("list")
+    };
+    state.apply(reply(request_id(&first), &[1], None));
+    state.renamed(ThreadId(1));
+    assert_eq!(
+        state.row(ThreadId(1)).expect("cached").title,
+        "private title 1"
+    );
+    assert_eq!(state.rows[2].title, "private title 1");
+    let reread = state.requests().remove(0);
+    assert_eq!(
+        reread,
+        DataToBrain::PageRequest {
+            request: 3,
+            page: PageOf::Threads {
+                search: None,
+                after: cursor
+            }
+        }
+    );
+    let mut renamed = row(1);
+    renamed.title = "confirmed new title".to_owned();
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&reread),
+        threads: vec![renamed.clone()],
+        next: None,
+    });
+    assert_eq!(state.row(ThreadId(1)), Some(&renamed));
+    assert_eq!(state.rows[2], renamed);
+    state.renamed(ThreadId(1));
+    let failed_write = state.requests().remove(0);
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&failed_write),
+        threads: vec![renamed.clone()],
+        next: None,
+    });
+    assert_eq!(
+        state.rows[2], renamed,
+        "a refused write never invents a title"
+    );
+}
+
+#[test]
+fn a_rename_during_a_page_read_waits_then_rereads_after_the_op() {
+    let mut state = loaded();
+    state.refresh();
+    let old = state.requests().remove(0);
+    state.renamed(ThreadId(3));
+    assert_eq!(state.requests(), []);
+    state.apply(reply(request_id(&old), &[3, 2], Some(2)));
+    assert_eq!(
+        state.row(ThreadId(3)).expect("row").title,
+        "private title 3"
+    );
+    assert_eq!(
+        state.requests().len(),
+        1,
+        "the pre-op reply didn't confirm the rename"
+    );
+}
+
+#[test]
+fn kumo_in_search_and_the_cache_uses_only_the_latest_settings_name() {
+    let mut state = loaded();
+    state.set_settings(settings("Kumo"));
+    state.search("a remembered phrase");
+    let request = state.requests().remove(0);
+    let mut main = row(1);
+    main.kind = ThreadKind::Main;
+    main.title.clear();
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&request),
+        threads: vec![row(9), main],
+        next: None,
+    });
+    assert_eq!(row_label(&state.rows[1], state.settings.as_ref()), "Kumo");
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(1)).expect("cached"),
+            state.settings.as_ref()
+        ),
+        "Kumo"
+    );
+    assert_eq!(
+        row_label(&state.rows[0], state.settings.as_ref()),
+        "private title 9"
+    );
+    state.set_settings(settings("Cloud"));
+    assert_eq!(row_label(&state.rows[1], state.settings.as_ref()), "Cloud");
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(1)).expect("cached"),
+            state.settings.as_ref()
+        ),
+        "Cloud"
+    );
+    assert_eq!(state.requests(), [], "a name update needs no list read");
+}
+
+#[test]
+fn viewing_keeps_focus_and_switch_uses_the_received_title_and_choice() {
+    use crate::runs::{Runs, Target};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug};
+    let mut state = loaded();
+    let mut chosen = row(9);
+    chosen.choice = Some(ModelChoice {
+        model: ModelSlug::new("stored-model").expect("valid"),
+        effort: Effort::High,
+    });
+    state.refresh();
+    let request = state.requests().remove(0);
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&request),
+        threads: vec![chosen.clone()],
+        next: None,
+    });
+    let mut runs = Runs::default();
+    runs.settings(ThreadId(1));
+    let revision = runs.revision();
+    state.select(Some(ThreadId(9)));
+    assert_eq!(runs.target(), Target::Kumo);
+    assert_eq!(runs.revision(), revision);
+    assert!(runs.select_row(&chosen));
+    state.search("another query");
+    assert_eq!(state.row(ThreadId(9)), Some(&chosen));
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(9)).expect("cache"),
+            state.settings.as_ref()
+        ),
+        "private title 9"
+    );
+    assert_eq!(state.row(ThreadId(9)).expect("cache").choice, chosen.choice);
+    assert_eq!(runs.target(), Target::Task(ThreadId(9)));
+    assert_eq!(runs.revision(), revision + 1);
+}
+
 #[test]
 fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early() {
     let mut state = Threads::default();

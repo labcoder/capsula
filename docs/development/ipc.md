@@ -121,6 +121,8 @@ flowchart LR
 
 - Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
+  The shell confirms a task's displayed title by an authoritative page reread, not by sending
+  the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries
@@ -293,8 +295,10 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
   a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
   id out again, and the answer and scenes still shown belong to none of the new brain's runs.
-  The next turn goes to a new thread unless the shell knows its thread is stored: picked from
-  the threads list, or answered by a run, which starts only after its turn is stored.
+  A non-durable input target returns to Kumo; a stored task target stays. Disconnect clears
+  the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
+  a row only views it: explicit switches and per-turn selection revisions govern targeting,
+  as described in [runs](runs.md#the-shells-input-target).
 
 ## Starting and reconnecting
 

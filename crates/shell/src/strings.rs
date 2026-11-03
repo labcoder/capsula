@@ -56,11 +56,21 @@ pub(crate) enum Text {
     ThreadDeleting,
     ThreadDeleteFailed,
     ThreadDeletesFull,
+    BackToKumo,
+    SwitchThread,
+    RenameThread,
+    SaveRename,
+    CancelRename,
+    RenameEmpty,
+    RenameTooLong,
+    RenameNameTooLong,
+    RenameOneLine,
+    TaskFallback,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 46] = [
+    const ALL: [Self; 56] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -107,6 +117,16 @@ impl Text {
         Self::ThreadDeleting,
         Self::ThreadDeleteFailed,
         Self::ThreadDeletesFull,
+        Self::BackToKumo,
+        Self::SwitchThread,
+        Self::RenameThread,
+        Self::SaveRename,
+        Self::CancelRename,
+        Self::RenameEmpty,
+        Self::RenameTooLong,
+        Self::RenameNameTooLong,
+        Self::RenameOneLine,
+        Self::TaskFallback,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -169,6 +189,16 @@ impl Text {
             Self::ThreadDeleting => "thread-deleting",
             Self::ThreadDeleteFailed => "thread-delete-failed",
             Self::ThreadDeletesFull => "thread-deletes-full",
+            Self::BackToKumo => "action-back-to-kumo",
+            Self::SwitchThread => "action-switch-task",
+            Self::RenameThread => "action-rename-task",
+            Self::SaveRename => "action-save-rename",
+            Self::CancelRename => "action-cancel-rename",
+            Self::RenameEmpty => "rename-empty",
+            Self::RenameTooLong => "rename-task-too-long",
+            Self::RenameNameTooLong => "rename-name-too-long",
+            Self::RenameOneLine => "rename-one-line",
+            Self::TaskFallback => "task-fallback",
         }
     }
 }
@@ -193,6 +223,7 @@ impl Strings {
             .expect("the bundled English catalog parses; strings::tests checks it");
         let language: LanguageIdentifier = "en".parse().expect("\"en\" is a valid language id");
         let mut bundle = FluentBundle::new(vec![language]);
+        bundle.set_use_isolating(false);
         bundle
             .add_resource(resource)
             .expect("the bundled catalog has no duplicate ids; strings::tests checks it");
@@ -202,6 +233,24 @@ impl Strings {
     /// The text for `text`. A missing entry shows its id, which the unit test rules out.
     pub(crate) fn get(&self, text: Text) -> String {
         self.format(text.id(), None)
+    }
+
+    pub(crate) fn assistant(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        self.format(Text::BackToKumo.id(), Some(&args))
+    }
+
+    pub(crate) fn focus(&self, task: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("task", task);
+        self.format("task-focus", Some(&args))
     }
 
     /// The text for an error the brain sent, with its typed arguments.
@@ -288,6 +337,7 @@ mod tests {
         let ftl = format!("{id} = Wait {{ $seconds }} s for {{ $count }} more\n");
         let resource = FluentResource::try_new(ftl).expect("the test message parses");
         let mut bundle = FluentBundle::new(vec!["en".parse().expect("valid")]);
+        bundle.set_use_isolating(false);
         bundle.add_resource(resource).expect("one message");
         let strings = Strings { bundle };
         let error = UserError::new(
@@ -296,10 +346,14 @@ mod tests {
             Vec::new(),
         )
         .expect("within the limits");
-        // Isolation stays on, as in the shipped bundle, so each value is wrapped in FSI and PDI.
-        assert_eq!(
-            strings.error(&error),
-            "Wait \u{2068}30\u{2069} s for \u{2068}3\u{2069} more"
-        );
+        assert_eq!(strings.error(&error), "Wait 30 s for 3 more");
+    }
+
+    #[test]
+    fn names_and_task_context_have_no_isolation_marks() {
+        let strings = Strings::english();
+        assert_eq!(strings.assistant("Cloud"), "Cloud");
+        assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
+        assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
     }
 }

@@ -38,7 +38,7 @@ use crate::platform::{
     self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
     PresenceNative, PresenceSurface,
 };
-use crate::runs::{Refused, Runs};
+use crate::runs::Runs;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
@@ -317,7 +317,15 @@ impl Presence {
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let panel = if self.threads_focused() {
-            EscapePanel::Threads
+            if self
+                .thread_panel
+                .as_ref()
+                .is_some_and(|panel| panel.view.read(cx).editing())
+            {
+                EscapePanel::Rename
+            } else {
+                EscapePanel::Threads
+            }
         } else if self.text_open() {
             EscapePanel::Open
         } else {
@@ -336,6 +344,19 @@ impl Presence {
                     self.dismiss_threads(cx)?;
                 } else {
                     self.dismiss_text(cx)?;
+                }
+                None
+            }
+            Escape::CancelEdit => {
+                if let Some(panel) = &self.thread_panel {
+                    panel
+                        .window
+                        .update(cx, |_, window, cx| {
+                            panel
+                                .view
+                                .update(cx, |view, cx| view.cancel_rename(window, cx));
+                        })
+                        .map_err(|error| OpenError::Gpui(error.into()))?;
                 }
                 None
             }
@@ -373,47 +394,6 @@ impl Presence {
         }
         self.activity = activity;
         self.sync_escape(cx)
-    }
-
-    /// Enter in the typing panel: sends the draft as a turn and empties the box, or keeps the
-    /// draft and says why it wasn't sent.
-    pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let Some(text) = &self.text else {
-            return Ok(());
-        };
-        let draft = text.input.read(cx).value();
-        let (link, session) = (&self.link, &self.session);
-        let result = self.runs.submit(&draft, |turn| {
-            session
-                .as_ref()
-                .is_some_and(|session| link.send_data(session, turn))
-        });
-        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
-        let notice = match result {
-            Ok(()) => {
-                let input = text.input.clone();
-                text.window
-                    .update(cx, |_, window, cx| {
-                        input.update(cx, |state, cx| state.set_value("", window, cx));
-                    })
-                    .map_err(|error| OpenError::Gpui(error.into()))?;
-                if self.error.take().is_some() {
-                    self.refresh_dock(cx);
-                }
-                None
-            }
-            Err(Refused::Blank) => None,
-            Err(Refused::Busy) => Some(Text::TurnBusy),
-            Err(Refused::Offline) => Some(Text::TurnOffline),
-            Err(Refused::TooLong) => Some(Text::TurnTooLong),
-        };
-        let notice: Option<SharedString> =
-            notice.map(|notice| cx.global::<Strings>().get(notice).into());
-        text.view.update(cx, |view, cx| {
-            view.notice = notice;
-            cx.notify();
-        });
-        self.runs_changed(cx)
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows

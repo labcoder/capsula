@@ -4,8 +4,7 @@ use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
 use crate::strings::Strings;
-use gpui_kit::SharedString;
-use kumochi_protocol::message::{ControlToBrain, DataToShell, UserError};
+use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.
@@ -23,6 +22,9 @@ impl Presence {
                 LinkEvent::Connected(session) => {
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
+                }
+                LinkEvent::Settings { generation, view } => {
+                    self.settings_changed(generation, view, cx);
                 }
                 LinkEvent::RunState { run, thread, phase } => {
                     let applied = self.runs.apply_state(run, thread, phase);
@@ -110,16 +112,29 @@ impl Presence {
         self.runs_changed(cx)
     }
 
+    fn settings_changed(
+        &mut self,
+        generation: u64,
+        view: SettingsView,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.generation() != generation)
+        {
+            return;
+        }
+        self.runs.settings(view.main_thread);
+        self.threads.update(cx, |state, cx| {
+            state.set_settings(view);
+            cx.notify();
+        });
+    }
+
     /// Shows the brain's error in the typing panel and on the dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
-        let text: SharedString = cx.global::<Strings>().error(error).into();
-        if let Some(panel) = &self.text {
-            panel.view.update(cx, |view, cx| {
-                view.notice = Some(text.clone());
-                cx.notify();
-            });
-        }
-        self.error = Some(text);
+        self.error = Some(cx.global::<Strings>().error(error).into());
         self.refresh_dock(cx);
     }
 
