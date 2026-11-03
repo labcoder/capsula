@@ -82,11 +82,13 @@ pub(crate) enum Text {
     SettingsNotSaved,
     SettingsSaveHelp,
     DockBrainError,
+    MaxFrameRate,
+    FrameRateAutomatic,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 72] = [
+    const ALL: [Self; 74] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -159,6 +161,8 @@ impl Text {
         Self::SettingsNotSaved,
         Self::SettingsSaveHelp,
         Self::DockBrainError,
+        Self::MaxFrameRate,
+        Self::FrameRateAutomatic,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -247,6 +251,8 @@ impl Text {
             Self::SettingsNotSaved => "settings-not-saved",
             Self::SettingsSaveHelp => "settings-save-help",
             Self::DockBrainError => "dock-brain-error",
+            Self::MaxFrameRate => "settings-max-frame-rate",
+            Self::FrameRateAutomatic => "settings-frame-rate-automatic",
         }
     }
 }
@@ -294,6 +300,12 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::BackToKumo.id(), Some(&args))
+    }
+
+    pub(crate) fn frame_rate(&self, fps: f64) -> String {
+        let mut args = FluentArgs::new();
+        args.set("fps", (fps * 10.0).round() / 10.0);
+        self.format("settings-frame-rate-now", Some(&args))
     }
 
     pub(crate) fn focus(&self, task: &str) -> String {
@@ -414,5 +426,22 @@ mod tests {
         assert_eq!(strings.assistant("Cloud"), "Cloud");
         assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
         assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+    }
+
+    #[test]
+    fn the_frame_rate_shows_its_fraction() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.frame_rate(72.0),
+            "Drawing at 72 frames a second on this display."
+        );
+        assert_eq!(
+            strings.frame_rate(28.8),
+            "Drawing at 28.8 frames a second on this display."
+        );
+        assert_eq!(
+            strings.frame_rate(170.0 / 3.0),
+            "Drawing at 56.7 frames a second on this display."
+        );
     }
 }

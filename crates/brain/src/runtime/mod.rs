@@ -5,6 +5,7 @@
 //! waits behind a write (CAPS-8 finding 1). Esc reaches the coordinator even while the data
 //! writer is blocked on a shell that stopped reading.
 
+pub(crate) mod account;
 mod controls;
 mod data;
 mod recovery;
@@ -29,12 +30,14 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use crate::config::Config;
+use crate::connections::account::Input as AccountInput;
 use crate::coordinator::{Coordinator, Effect, Input};
 use crate::engines::{self, Cancel, Engine};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
-use controls::{control_input, read_control};
+use account::Accounts;
+use controls::read_control;
 use data::{DataQueue, Owner};
 use recovery::Recovery;
 use store_thread::StoreThread;
@@ -120,6 +123,8 @@ pub(crate) struct Brain {
     settings_ops: VecDeque<settings::Queued>,
     /// The settings write in flight, off the core loop: a durable replace can take any time.
     config_write: Option<settings::Write>,
+    /// The account system; its credential work runs on its own thread.
+    account: Accounts,
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
@@ -177,6 +182,7 @@ impl Brain {
         scenes: Vec<SceneState>,
         engine: Box<dyn Engine>,
         config: Config,
+        account: Accounts,
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
@@ -212,6 +218,7 @@ impl Brain {
             config,
             settings_ops: VecDeque::new(),
             config_write: None,
+            account,
             #[cfg(test)]
             config_gate: None,
             #[cfg(test)]
@@ -322,6 +329,7 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        self.account.close(deadline).await;
         if cleared && !undeleted {
             Quit::Complete
         } else {
@@ -360,6 +368,7 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        self.account.close(deadline).await;
     }
 
     /// Keeps runs that ended moving through the store, and settings changes being written,
@@ -374,6 +383,11 @@ impl Brain {
                 done = settings::written(&mut self.config_write) => {
                     let settled = self.settings_done(done, None);
                     debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+                    continue;
+                }
+                input = self.account.next() => {
+                    let applied = self.account_input(input, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
                     continue;
                 }
             };
@@ -476,27 +490,26 @@ impl Brain {
         ended
     }
 
-    /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
-    fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
-        tap.record(Pipe::Control, Direction::ToBrain, &message, len);
-        if let ControlToBrain::Settings(op) = message {
-            // Still written; the shell that sent it is gone, so nothing answers it.
-            self.settings_ops.push_back(settings::Queued {
-                op,
-                epoch: self.epoch,
-            });
-            return;
-        }
-        if let Ok(Some(input)) = control_input(message) {
-            #[cfg(test)]
-            self.control_taken(&input);
-            self.offline(input);
-        }
-    }
-
     /// The core loop: frames from the shell, completions from the systems, the deadline and
     /// the watchdog, each turned into coordinator inputs and their effects applied. Nothing in
     /// it awaits a pipe, the store or an engine. Control and store replies are always taken.
+    /// A page read from an older connection is dropped, and one that arrives while the data
+    /// queue is full is held until it has room; any other input passes.
+    fn admit_page(&mut self, input: Input, link: &mut Link<'_, '_>) -> Option<Input> {
+        if let Input::PageRead { epoch, .. } = &input {
+            if *epoch != self.epoch {
+                return None;
+            }
+            if link.queue.borrow().bytes() >= DATA_CAP {
+                link.held_pages.push_back(input);
+                #[cfg(test)]
+                self.observer.send(Seen::PageHeld).ok();
+                return None;
+            }
+        }
+        Some(input)
+    }
+
     /// New turns wait while too many runs are ending or the data queue is full, and engine
     /// events while the data queue is full, so memory stays bounded however slow the store or
     /// the shell is. A turn is the only way to add a run, and so a `RunEnd`, so the frames
@@ -560,6 +573,12 @@ impl Brain {
                     }
                     continue;
                 }
+                input = self.account.next() => {
+                    if self.account_input(input, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
                 Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
@@ -588,17 +607,9 @@ impl Brain {
                     }
                 }
             };
-            if let Input::PageRead { epoch, .. } = &input {
-                if *epoch != self.epoch {
-                    continue;
-                }
-                if !take_engine {
-                    link.held_pages.push_back(input);
-                    #[cfg(test)]
-                    self.observer.send(Seen::PageHeld).ok();
-                    continue;
-                }
-            }
+            let Some(input) = self.admit_page(input, &mut link) else {
+                continue;
+            };
             #[cfg(test)]
             self.control_taken(&input);
             let Ok(effects) = self.coordinator.handle(input) else {
@@ -615,40 +626,17 @@ impl Brain {
         }
     }
 
-    /// A connection's first frames: the settings, then anything owed from while no shell was
-    /// connected.
+    /// A connection's first frames: the settings and the account, then anything owed from while
+    /// no shell was connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+        self.account_input(AccountInput::Connected, Some(link))
+            .map_err(|Full| Ended::Lost)?;
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
         self.apply(retried, Some(link)).map_err(|_| Ended::Lost)
-    }
-
-    /// A control frame from the connected shell: recorded, then a settings change, a pong, or
-    /// an input for the coordinator.
-    fn control_frame(
-        &mut self,
-        message: ControlToBrain,
-        len: usize,
-        link: &mut Link<'_, '_>,
-        ping_sent: &mut Option<Instant>,
-    ) -> Result<Option<Input>, Ended> {
-        link.tap
-            .record(Pipe::Control, Direction::ToBrain, &message, len);
-        if message == ControlToBrain::Pong {
-            *ping_sent = None;
-        }
-        if let ControlToBrain::Settings(op) = message {
-            self.settings_ops.push_back(settings::Queued {
-                op,
-                epoch: self.epoch,
-            });
-            self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
-            return Ok(None);
-        }
-        control_input(message)
     }
 
     /// New turns wait while too many runs are ending or too many writes are owed.

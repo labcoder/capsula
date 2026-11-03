@@ -71,6 +71,9 @@ pub enum BrainError {
     /// The helpers' Job Object or a helper couldn't be created.
     #[error("can't start the helpers")]
     Helpers(#[source] io::Error),
+    /// The account's credential thread couldn't be started.
+    #[error("can't start the credential thread")]
+    Accounts(#[source] io::Error),
 }
 
 /// Ends the runtime [`run`] ran on without waiting for blocking work. Quit and close already
@@ -106,6 +109,8 @@ pub async fn run() -> Result<(), BrainError> {
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
     let config = config::Config::load(platform::config_dir(), main_thread);
+    // Before the capability is stored, so its write never overlaps the vault's first reads.
+    let account = accounts().map_err(BrainError::Accounts)?;
     let mut brain = Brain::new(
         store,
         main_thread,
@@ -113,6 +118,7 @@ pub async fn run() -> Result<(), BrainError> {
         scenes,
         Box::new(fixture()?),
         config,
+        account,
     )
     .map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
@@ -146,6 +152,24 @@ pub async fn run() -> Result<(), BrainError> {
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
     ended.map(|_| ()).map_err(BrainError::from)
+}
+
+/// The account system on the real credential store, browser, clock and network.
+fn accounts() -> io::Result<runtime::account::Accounts> {
+    use std::sync::Arc;
+
+    use connections::account::Worker;
+    use connections::clock::SystemClock;
+    use connections::http_client::{self, SharedHttp};
+    use connections::oauth::SystemBrowser;
+
+    let worker = Worker::system(Arc::new(SystemClock));
+    let net = runtime::account::Net {
+        http: Arc::new(|| http_client::build().map(SharedHttp::new)),
+        launcher: Arc::new(SystemBrowser),
+        clock: Arc::new(SystemClock),
+    };
+    runtime::account::Accounts::spawn(worker, net)
 }
 
 /// The script the fixture engine plays: the built-in one, or in a dev build the file

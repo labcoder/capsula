@@ -21,6 +21,7 @@ xtask/             dev tasks in Rust; no scripts in other languages
 docs/development/  how Kumochi works inside
 docs/user/         how people use Kumochi
 locales/en/        every user-facing string (Fluent)
+THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
 ```
 
 ## Code rules
