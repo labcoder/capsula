@@ -19,9 +19,9 @@ pub struct Usage {
     pub marks: usize,
     /// Flattened path segments.
     pub segments: usize,
-    /// Motion property owners, including reserved generated motion.
+    /// Explicit motion property owners; generated effects are bounded by object count.
     pub tracks: usize,
-    /// Key storage reserved for those owners.
+    /// Key storage reserved for explicit owners.
     pub keys: usize,
     /// Committed, uncleared scene lifetimes.
     pub scenes: usize,

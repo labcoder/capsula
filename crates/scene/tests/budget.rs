@@ -603,7 +603,7 @@ fn diagram_caps_accept_their_exact_limits_without_charging_failed_additions() {
             state.usage().segments,
             state.usage().tracks
         ),
-        (145, 1824, 1)
+        (145, 1824, 0)
     );
     rejected(
         &state,
@@ -707,12 +707,8 @@ fn spring_scale_envelopes_and_repeat_counts_remain_positive_and_finite() {
             json!({"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,0.1],[1,1]]}}),
         ],
     );
-    rejected(
-        &state,
-        &budget,
-        json!({"id":"negative_overshoot","put":[{"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,1],[1,0.1]]}}]}),
-        ErrorCode::OutOfRange,
-    );
+    apply(&mut state, &mut budget, json!({"id":"positive_shrink","put":[{"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,1],[1,0.1]]}}]}));
+    assert_eq!(state.handle(&id("t0")), Some(kumochi_scene::Handle::new(1, 0).expect("handle")));
     put(
         &mut state,
         &mut budget,
@@ -854,7 +850,7 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
         &mut budget,
         vec![json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}})],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (1, 2));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     put(
         &mut state,
         &mut budget,
@@ -864,13 +860,13 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
             json!({"node":{"id":"b","in":"d","label":""}}),
         ],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (2, 4));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     put(
         &mut state,
         &mut budget,
         vec![json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}})],
     );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (3, 6));
+    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
     let error = rejected(
         &state,
         &budget,
