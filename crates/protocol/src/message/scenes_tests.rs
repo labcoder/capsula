@@ -98,6 +98,10 @@ fn descriptor_checks_visible_counts_and_lifetime_log_bounds() {
         })
         .expect("valid descriptor");
         assert_eq!(
+            SceneDescriptorV1::new(SceneId(1), revision, committed, log_entries),
+            Ok(value)
+        );
+        assert_eq!(
             (value.revision, value.committed, value.log_entries),
             (revision, committed, log_entries)
         );
@@ -111,6 +115,10 @@ fn descriptor_checks_visible_counts_and_lifetime_log_bounds() {
         (2, 1, 5),
         (u32::MAX, 1, 1),
     ] {
+        assert_eq!(
+            SceneDescriptorV1::new(SceneId(1), revision, committed, log_entries),
+            Err(SceneDataError::Descriptor)
+        );
         assert!(
             decode::<SceneDescriptorV1>(&RawDescriptor {
                 scene: SceneId(1),
@@ -144,7 +152,9 @@ fn cuts_bound_scenes_and_handles_on_construction_and_decode() {
         assert_eq!(SceneCuts::new(invalid.clone()), Err(SceneDataError::Cuts));
         assert!(decode::<SceneCuts>(&invalid).is_err());
     }
-    let handles = vec![Handle::new(64, 0).expect("valid"); 601];
+    let handles = (0..601)
+        .map(|slot| Handle::new(64, slot).expect("valid distinct slot"))
+        .collect();
     assert!(
         decode::<SceneCuts>(&vec![RawCut {
             scene: SceneId(1),
@@ -180,6 +190,14 @@ fn chunks_validate_local_shape_without_cross_chunk_replay() {
     let mut raw = chunk();
     raw.events = vec![step(64); MAX_SCENE_LOG_ENTRIES];
     let value = decode::<SceneSnapshotChunk>(&raw).expect("at log bound");
+    assert_eq!(
+        SceneSnapshotChunk {
+            header: None,
+            ..value.clone()
+        }
+        .checked(),
+        Err(SceneDataError::Chunk)
+    );
     assert_eq!(value.events.len(), 128);
     assert_eq!(decode::<SceneSnapshotChunk>(&value), Ok(value));
     raw.events.push(step(1));

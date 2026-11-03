@@ -2,7 +2,8 @@
 
 `kumochi-scene` is the shared, synchronous drawing format. It depends on neither
 GPUI nor tokio. The brain parses model JSON; the shell decodes the same validated
-types from postcard. There is no renderer or scene-state caller yet; preparation is synchronous and host-independent.
+types from postcard. The brain's drawing reducer owns canonical scene state; preparation is
+synchronous and host-independent, and rendering is not wired yet.
 
 ## Records
 
@@ -39,6 +40,9 @@ Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors and all 3D operations are absent, not ignored.
+
+JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
+the original f64 chart values, rather than changing a final bit during recovery.
 
 All relative timing fields, including delays, entrances, edge flow, after-step
 offsets and animation key times, are milliseconds in 0–60,000. `Ms` validates on

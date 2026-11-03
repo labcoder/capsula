@@ -15,6 +15,7 @@ path = "src/main.rs"
 base64 = "0.22"
 fluent-bundle.workspace = true
 kumochi-protocol.workspace = true
+kumochi-scene.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
 # hooks: the progress handler that stops a purge's copy.

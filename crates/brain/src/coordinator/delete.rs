@@ -24,6 +24,10 @@ pub(super) struct Deleting {
 }
 
 impl Coordinator {
+    pub(super) fn deleting_thread(&self, thread: ThreadId) -> bool {
+        self.deleting.iter().any(|entry| entry.thread == thread)
+    }
+
     /// A delete is waiting on the store.
     pub fn deletes_pending(&self) -> bool {
         !self.deleting.is_empty()
@@ -178,8 +182,10 @@ impl Coordinator {
                 last_run: None,
             };
             effects.push(Effect::Control(answer));
+            self.drawing_not_deleted(thread, effects);
             return Ok(());
         }
+        self.drawing_deleted(thread, effects);
         // Before the runs retire: a turn still held behind an older outcome has no row yet.
         let named = self
             .current

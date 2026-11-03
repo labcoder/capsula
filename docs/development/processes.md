@@ -46,15 +46,17 @@ no `scene_cleared` event. Every way a scene leaves the set writes that event, so
 back at start the set it held in memory:
 
 - the user clears it (`ClearDrawing`);
-- a fifth scene begins: the oldest's `scene_cleared` commits in the same transaction as the new
-  scene's `scene_begin` and first step, so a crash leaves the old four or the new four;
-- a Stop keeps none of a scene's steps: its `scene_cleared` commits with the run's outcome;
+- a fifth scene begins: labelled placeholders clear the oldest in the new first step's
+  transaction; typed v1 drawings instead wait for that clear and every earlier typed clear
+  to be acknowledged before writing the new first step;
+- a Stop keeps none of a scene's steps: a labelled scene clears with the run's outcome;
+  a typed scene's zero cut commits before its acknowledgement, followed by its clear;
 - the user quits.
 
 So only a crash, or a shell that restarts, brings drawings back. A scene's id leaves the brain
 only once its first step has committed; the run's later steps wait for it without blocking the
-core loop. shortcut: a crash between a Stop and its outcome loses which steps the Stop kept, so
-all of them come back; fixed once Stop is stored earlier.
+core loop. shortcut: on the staged labelled path, a crash between Stop and its outcome loses
+which steps Stop kept; typed v1 cuts are already durable before acknowledgement.
 
 ```mermaid
 sequenceDiagram
@@ -79,6 +81,9 @@ sequenceDiagram
   the same absolute deadline, and none restarts a budget. Only a committed clear is a complete
   quit. A timeout or a failed write is logged, without content, as incomplete: the scenes come
   back at the next start, as after a crash. The shell isn't relaunched either way.
+- **Typed work.** Quit drains in-flight typed lookups, steps and cuts even after their run
+  ended. A failed cut has no reply to wait for: clear-all supersedes that debt and Quit waits
+  for the resulting durable clear instead. A clear that is not acknowledged is incomplete.
 
 The dock's status panel is transient: closing it isn't Quit. Quit lives in the tray and status
 panel and follows the same bounded, idempotent link shutdown. See [presence](presence.md).

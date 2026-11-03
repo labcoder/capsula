@@ -71,6 +71,9 @@ pub struct Hello {
 /// The most steps one run may draw (architecture v1 §5.2).
 pub const MAX_STEPS: usize = 64;
 
+/// New scene v1 steps committed by one run, independently of a scene's lifetime step cap.
+pub const MAX_DRAW_STEPS_PER_RUN: usize = 64;
+
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
 
@@ -175,7 +178,7 @@ pub enum ControlToBrain {
     StopScenes {
         /// The run fenced locally; scene cuts are not restricted to this run's commits.
         run: RunId,
-        /// Each scene's activated revision and finished objects.
+        /// Every known visible v1 scene's activated revision and finished objects.
         cuts: SceneCuts,
     },
     /// The first paint containing a step; ordered before later cuts on this control pipe.

@@ -10,6 +10,7 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod delete;
+mod drawing;
 mod run;
 mod scenes;
 mod store_op;
@@ -41,6 +42,22 @@ const TITLE_CHARS: usize = 80;
 /// Something that happened, for the coordinator to act on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
+    /// Fence a run immediately and apply scene-wide activated cuts in control-pipe order.
+    StopScenes {
+        /// The locally fenced run.
+        run: RunId,
+        /// Cuts independent of whichever run last appended to each scene.
+        cuts: kumochi_protocol::message::SceneCuts,
+    },
+    /// Direct v1 records and observations; the fixture producer switches in B3.
+    Drawing(crate::drawing::Input),
+    /// The store answered the drawing reducer's one outstanding operation.
+    DrawingWritten {
+        /// The outstanding operation identity.
+        serial: u64,
+        /// A typed result, or a content-free failure.
+        reply: Result<crate::drawing::Reply, ()>,
+    },
     /// Read a page for one shell connection, without changing any run.
     ReadPage {
         /// The connection that requested the page.
@@ -257,6 +274,10 @@ struct Run {
 
 /// How an ended run is being written.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the independent store and delivery fences can each settle separately"
+)]
 struct Ending {
     outcome: RunEnd,
     revealed: Option<Vec<u32>>,
@@ -269,6 +290,8 @@ struct Ending {
     clear: Option<SceneId>,
     /// The Stop's selection was applied to the visible set; it stays for every outcome write.
     trimmed: bool,
+    /// V1 durable scene frames must precede this interrupted run's final data frame.
+    deferred_data: bool,
 }
 
 impl Run {
@@ -283,8 +306,10 @@ impl Run {
 }
 
 /// The core loop's state.
-#[derive(Debug)]
 pub struct Coordinator {
+    drawing: crate::drawing::Drawing,
+    drawing_results: Vec<crate::drawing::CallEnd>,
+    drawing_held: Vec<(ThreadId, DataToShell)>,
     /// Never deleted or renamed.
     main_thread: ThreadId,
     last_thread: ThreadId,
@@ -320,6 +345,21 @@ pub struct Coordinator {
     refused_delete: bool,
 }
 
+impl std::fmt::Debug for Coordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Coordinator")
+            .field("current_run", &self.current_run())
+            .field("ending", &self.ending.len())
+            .field("scenes", &self.scenes.len())
+            .field("drawing", &self.drawing)
+            .field("drawing_held", &self.drawing_held.len())
+            .field("clearing", &self.clearing.len())
+            .field("keeping", &self.keeping.len())
+            .field("deleting", &self.deleting.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Coordinator {
     /// Starts from the store's main thread and high-water marks, so ids keep growing across
     /// restarts, and from the visible set the store recovered.
@@ -330,6 +370,9 @@ impl Coordinator {
         scenes: Vec<SceneState>,
     ) -> Self {
         Self {
+            drawing: crate::drawing::Drawing::default(),
+            drawing_results: Vec::new(),
+            drawing_held: Vec::new(),
             main_thread,
             last_thread,
             last_run,
@@ -367,9 +410,24 @@ impl Coordinator {
     ///
     /// # Panics
     /// Only if a run in the ending list has no ending record, which `end` never allows.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive input router; handlers live in dedicated modules"
+    )]
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
+            Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
+                return Err(Stale);
+            }
+            Input::StopScenes { run, cuts } => self.stop_drawings(run, cuts, &mut effects)?,
+            Input::Drawing(input) => self.drawing_input(input, &mut effects)?,
+            Input::DrawingWritten { serial, reply } => {
+                self.drawing_input(
+                    crate::drawing::Input::Written { serial, reply },
+                    &mut effects,
+                )?;
+            }
             Input::ReadPage {
                 epoch,
                 request,
@@ -439,10 +497,16 @@ impl Coordinator {
                 let over = RunEnd::Failed(Failure::Budget);
                 self.end(current, over, None, Notify::Shell, &mut effects);
             }
-            Input::Clear { scenes } => self.clear(&scenes, &mut effects),
+            Input::Clear { scenes } => {
+                self.drawing_clear(scenes.clone(), &mut effects);
+                self.clear(&scenes, &mut effects);
+            }
             Input::ScenesCleared { scenes, ok: true } => self.cleared(&scenes),
             Input::ScenesCleared { scenes, ok: false } => self.clear_failed(&scenes),
-            Input::ClearVisible => self.clear_visible(&mut effects),
+            Input::ClearVisible => {
+                self.drawing_input(crate::drawing::Input::ClearVisible, &mut effects)?;
+                self.clear_visible(&mut effects);
+            }
             Input::SceneKept { scene, ok: true } => self.kept(scene),
             Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
             Input::Retry => self.retry_now(&mut effects),
@@ -451,6 +515,7 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
         }
+        self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);
@@ -635,6 +700,7 @@ impl Coordinator {
         notify: Notify,
         effects: &mut Vec<Effect>,
     ) {
+        self.drawing_closed(run.id, effects);
         if run.turn_stored && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
         }
@@ -650,12 +716,18 @@ impl Coordinator {
             effects.push(Effect::Revoke { run: run.id });
         }
         run.held.clear();
+        let deferred_data =
+            notify == Notify::Shell && outcome != RunEnd::Done && self.drawing.pending_for(run.id);
         if notify == Notify::Shell && outcome != RunEnd::Done {
             let phase = match outcome {
                 RunEnd::Interrupted(_) => Phase::Interrupted,
                 RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
             };
-            told(&run, phase, effects);
+            if deferred_data {
+                effects.push(run_state(&run, phase));
+            } else {
+                told(&run, phase, effects);
+            }
         }
         run.ending = Some(Ending {
             outcome,
@@ -665,6 +737,7 @@ impl Coordinator {
             written: false,
             clear: None,
             trimmed: false,
+            deferred_data,
         });
         let id = run.id;
         self.ending.push(run);
@@ -675,6 +748,9 @@ impl Coordinator {
     /// set becomes its scene's kept set here, once every step write has settled; a scene left
     /// with nothing kept is cleared in the same transaction.
     fn settle(&mut self, run: RunId, effects: &mut Vec<Effect>) {
+        if self.drawing.pending_for(run) {
+            return;
+        }
         let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) else {
             return;
         };
@@ -686,6 +762,9 @@ impl Coordinator {
             return;
         };
         ending.written = true;
+        if std::mem::take(&mut ending.deferred_data) && ending.notify == Notify::Shell {
+            effects.push(Effect::Data(DataToShell::RunEnd { run }));
+        }
         if let (Some(revealed), Some(scene)) = (&ending.revealed, scene)
             && !ending.trimmed
         {

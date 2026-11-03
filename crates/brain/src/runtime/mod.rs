@@ -5,6 +5,7 @@
 //! waits behind a write (CAPS-8 finding 1). Esc reaches the coordinator even while the data
 //! writer is blocked on a shell that stopped reading.
 
+mod controls;
 mod data;
 mod recovery;
 mod settings;
@@ -33,6 +34,7 @@ use crate::engines::{self, Cancel, Engine};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
+use controls::{control_input, read_control};
 use data::{DataQueue, Owner};
 use recovery::Recovery;
 use store_thread::StoreThread;
@@ -132,7 +134,7 @@ pub(crate) struct Brain {
 
 /// What a test can wait for instead of sleeping.
 #[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Seen {
     /// The core queued this op for the store thread.
     StoreOpQueued(crate::coordinator::StoreOp),
@@ -189,10 +191,13 @@ impl Brain {
             gates: Some(gates_heard),
             ..store_thread::Schedule::default()
         };
+        let drawing_scenes = store.drawing_scenes();
+        let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
+        let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
-        Ok(Self {
-            coordinator: Coordinator::new(main_thread, last_thread, last_run, scenes),
+        let mut brain = Self {
+            coordinator,
             store: Some(store),
             engine,
             inputs_tx,
@@ -203,7 +208,7 @@ impl Brain {
             deadline: None,
             retry_at: None,
             epoch: 0,
-            chunk_target: recovery::CHUNK_TARGET,
+            chunk_target: crate::drawing::CHUNK_TARGET,
             config,
             settings_ops: VecDeque::new(),
             config_write: None,
@@ -215,7 +220,11 @@ impl Brain {
             seen: Some(seen),
             #[cfg(test)]
             gates,
-        })
+        };
+        brain
+            .apply(recovery_clears, None)
+            .expect("offline effects cannot fill a shell queue");
+        Ok(brain)
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -272,6 +281,7 @@ impl Brain {
             while self.coordinator.ending_runs() > 0
                 || self.coordinator.clears_in_flight()
                 || self.coordinator.deletes_pending()
+                || self.coordinator.drawing_in_flight()
             {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
@@ -288,7 +298,7 @@ impl Brain {
                 self.offline(input);
             }
             self.offline(Input::ClearVisible);
-            while self.coordinator.clears_in_flight() {
+            while self.coordinator.clears_in_flight() || self.coordinator.drawing_in_flight() {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
                 };
@@ -298,7 +308,9 @@ impl Brain {
                     return false;
                 }
             }
-            true
+            self.coordinator.settled()
+                && !self.coordinator.deletes_pending()
+                && self.coordinator.drawing_available()
         })
         .await
         .unwrap_or(false);
@@ -515,7 +527,7 @@ impl Brain {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
                 };
-                link.recovery = Some(described);
+                link.recovery = described;
             }
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
@@ -645,11 +657,27 @@ impl Brain {
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
-    fn describe(&self, link: &mut Link<'_, '_>) -> Result<Recovery, Full> {
+    fn describe(&mut self, link: &mut Link<'_, '_>) -> Result<Option<Recovery>, Full> {
+        let drawings = self.coordinator.drawing_snapshot().map_err(|_| Full)?;
+        if !drawings.skipped.is_empty() {
+            let effects = self.coordinator.failed_drawings(drawings.skipped);
+            self.apply(effects, None)
+                .expect("offline effects cannot fill a shell queue");
+            return Ok(None);
+        }
+        if !drawings.scenes.is_empty() {
+            link.control(&ControlToShell::ScenesV1 {
+                scenes: drawings.scenes,
+            })?;
+            self.coordinator.drawing_described();
+            return Ok(Some(Recovery::drawings(drawings.chunks)));
+        }
         let visible = self.coordinator.visible();
         let scenes = visible.iter().map(descriptor).collect();
         link.control(&ControlToShell::Scenes { scenes })?;
-        Ok(Recovery::new(visible, self.chunk_target))
+        let recovery = Recovery::new(visible, self.chunk_target);
+        self.coordinator.drawing_described();
+        Ok(Some(recovery))
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
@@ -687,6 +715,17 @@ impl Brain {
                     }
                 }
                 Effect::Data(message) => {
+                    if link.as_ref().is_some_and(|shell| shell.recovery.is_none())
+                        && matches!(
+                            message,
+                            DataToShell::SceneBegin { .. }
+                                | DataToShell::SceneStepCommit { .. }
+                                | DataToShell::SceneCutApplied { .. }
+                                | DataToShell::SceneEnd { .. }
+                        )
+                    {
+                        continue;
+                    }
                     if let Some(shell) = link.as_deref_mut()
                         && shell.data(&message).is_err()
                     {
@@ -755,68 +794,6 @@ fn watchdog(
     Ok(running
         .filter(|_| link.queue.borrow().stalled(now.into_std()))
         .map(|run| Input::Stalled { run }))
-}
-
-/// Reads the control pipe. A `Quitting` latches `quit` before the reader returns, so the
-/// connection ends as a quit whatever ends first.
-async fn read_control(
-    pipe: &mut (impl AsyncRead + Unpin),
-    frames: &mpsc::Sender<(ControlToBrain, usize)>,
-    quit: &Cell<Option<Instant>>,
-) -> Ended {
-    loop {
-        match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some((ControlToBrain::Hello(_), _))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some((ControlToBrain::Quitting, _))) => {
-                let deadline = Instant::now() + CLOSE_WAIT;
-                quit.set(Some(deadline));
-                return Ended::Quit { deadline };
-            }
-            Ok(Some(sized)) => {
-                if frames.send(sized).await.is_err() {
-                    return Ended::Lost;
-                }
-            }
-            Ok(None) => return Ended::Lost,
-            Err(error) => {
-                tracing::warn!(%error, "control pipe failed");
-                return Ended::Lost;
-            }
-        }
-    }
-}
-
-/// The input a control frame asks of the coordinator, if any; a clear of more scenes than can
-/// be visible breaks the connection. The readers end the connection on Hello and Quitting, and
-/// the core answers Pong itself.
-fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
-    Ok(match message {
-        ControlToBrain::Stop { run, revealed } => Some(Input::Stop { run, revealed }),
-        ControlToBrain::ClearDrawing { scene_ids } if scene_ids.len() > MAX_VISIBLE_SCENES => {
-            return Err(Ended::Broken("more scenes cleared than can be visible"));
-        }
-        ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
-        ControlToBrain::DeleteThread {
-            thread,
-            after_turns,
-            resend,
-        } => Some(Input::Delete {
-            thread,
-            after_turns,
-            resend,
-        }),
-        ControlToBrain::ThreadOp(op) => Some(Input::ThreadOp(op)),
-        // shortcut: B2 consumes v1 control; B3 switches the production fixture to v1.
-        ControlToBrain::StopScenes { .. }
-        | ControlToBrain::StepShown { .. }
-        | ControlToBrain::StepFailed { .. } => {
-            return Err(Ended::Broken("scene v1 control before its consumer"));
-        }
-        ControlToBrain::Pong
-        | ControlToBrain::Hello(_)
-        | ControlToBrain::Quitting
-        | ControlToBrain::Settings(_) => None,
-    })
 }
 
 /// A visible scene as `Scenes` names it.
