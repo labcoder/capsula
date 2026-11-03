@@ -145,6 +145,21 @@ flowchart LR
 - `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
   Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
 
+## Account
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
+| `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
+
+- No token, code or account identifier crosses the pipe. The only identity is the display
+  email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
+- `AccountOp` is on the tap's content-free list. `Account` isn't, because it carries the email.
+- The view is authoritative: every op is answered by one `Account`, a refused one included, and
+  the shell never moves the account on its own. See [accounts](accounts.md).
+- shortcut: until slice 3 PR 9b wires the account system the brain ignores `AccountOp`, and the
+  shell ignores `Account` until Settings → Accounts (PR 19).
+
 ## Scenes and recovery
 
 A drawing is a **scene**, named by a `SceneId`: the id of the store event that began it. At most

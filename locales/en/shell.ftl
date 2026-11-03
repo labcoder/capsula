@@ -83,3 +83,13 @@ dock-brain-error = Needs attention
 
 error-settings-refused = Couldn't save that setting. Try again.
 error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
+error-sign-in-timed-out = Sign-in took too long. Try again.
+error-sign-in-failed = Couldn't finish signing in to ChatGPT. Try again.
+error-sign-in-other-account = That's a different ChatGPT account from the one this computer signed in with. Sign in with the same account.
+error-browser-unavailable = Couldn't open your browser to sign in.
+error-account-offline = Can't reach ChatGPT right now. Try again.
+error-credentials-unavailable = Windows Credential Manager couldn't read or save your ChatGPT sign-in. Try again.
+error-revocation-backlog = Still trying to end earlier ChatGPT sessions, so a new sign-in can't start yet. Retry tries now, and the app tries again the next time it starts. A session that can't be ended is normally dropped from this list about 32 days after it was added, once it has expired; if this computer's clock was changed, restart the app with the right time first. You can also disconnect this app in your ChatGPT settings.
+error-trust-store-unavailable = Couldn't load trusted certificates from Windows, so the app can't connect to ChatGPT safely.
+error-plan-not-enabled = Plan use wasn't turned on. Enable it to use your ChatGPT plan.
+error-account-misconfigured = ChatGPT didn't accept this app's sign-in. Trying again won't help.

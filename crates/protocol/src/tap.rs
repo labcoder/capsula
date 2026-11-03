@@ -50,6 +50,7 @@ impl Tapped for ControlToBrain {
             Self::StopScenes { .. } => "StopScenes",
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
+            Self::AccountOp(_) => "AccountOp",
         }
     }
 
@@ -70,6 +71,7 @@ impl Tapped for ControlToBrain {
                     after_turns: _,
                     resend: _
                 }
+                | Self::AccountOp(_)
         )
     }
 }
@@ -88,9 +90,11 @@ impl Tapped for ControlToShell {
             Self::Error(_) => "Error",
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
+            Self::Account(_) => "Account",
         }
     }
 
+    /// `Account` isn't listed: its view carries the display email.
     fn content_free(&self) -> bool {
         // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(
