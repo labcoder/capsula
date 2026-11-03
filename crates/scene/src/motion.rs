@@ -579,7 +579,7 @@ impl SceneView {
             return Err(PrepareError::Stale);
         }
         out.clear();
-        let source = step.step();
+        let source = step.run();
         let say = source.say.as_ref().map_or("", Text::as_str);
         let words = word_count(say);
         let origin = |word: Option<u16>, delay: Option<Ms>| {
@@ -861,7 +861,7 @@ fn births(
     origin: impl Fn(Option<u16>, Option<Ms>) -> u64,
 ) -> BTreeMap<Handle, Timing> {
     let mut born = BTreeMap::new();
-    for op in &*step.step().put {
+    for op in &*step.run().put {
         if let Some(visual) = object::visual(op)
             && let Some(handle) = step.after.handle(visual.id)
         {

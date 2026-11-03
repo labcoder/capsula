@@ -135,9 +135,14 @@ impl PreparedStep {
         }
         Ok(())
     }
-    /// Original committed input for entrance and explicit-track compilation in A7.
+    /// Original committed input, exactly as the model sent it.
     pub fn step(&self) -> &crate::Step {
         &self.ticket.step
+    }
+    /// Compiled input for entrance and explicit-track compilation in A7; the original unless
+    /// it held Mermaid.
+    pub(crate) fn run(&self) -> &crate::Step {
+        &self.ticket.run
     }
     /// Whether this result was prepared on exactly `before`'s layout version.
     pub(crate) fn is_based_on(&self, before: &LayoutState) -> bool {

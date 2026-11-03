@@ -3,10 +3,15 @@ use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
     display::Item,
     geom::{Affine, Vec2},
+    mermaid::Extra,
     record::{KeyValue, Rgb, Track},
     theme::Theme,
 };
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 /// Resting values of explicit tracks; `None` means no explicit owner, so the base applies.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +74,8 @@ pub(super) struct Placed {
     pub chart_basis: Option<Arc<super::chart::Basis>>,
     /// Resting opacity of ancestors a cut detached; `item.opacity` stays the object's own base.
     pub inherited_opacity: f32,
+    /// The measured size of a group's private title, which its band reserves.
+    pub title: Option<Vec2>,
 }
 
 impl Placed {
@@ -86,6 +93,7 @@ impl Placed {
             motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
             chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
             inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
+            title: cached.and_then(|old| old.title),
         }
     }
 }
@@ -99,6 +107,8 @@ pub struct LayoutState {
     pub(super) version: Arc<()>,
     pub(super) objects: BTreeMap<WireId, Placed>,
     pub(super) handles: BTreeMap<Handle, WireId>,
+    /// Private compiled facts, shared per revision that created them.
+    pub(super) extras: BTreeMap<u32, Arc<BTreeMap<usize, Extra>>>,
 }
 impl fmt::Debug for LayoutState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -118,7 +128,21 @@ impl LayoutState {
             version: Arc::new(()),
             objects: BTreeMap::new(),
             handles: BTreeMap::new(),
+            extras: BTreeMap::new(),
         }
+    }
+    /// The private facts the step that created `handle` compiled for it.
+    pub(super) fn extra(&self, handle: Handle) -> Option<&Extra> {
+        self.extras.get(&handle.revision())?.get(&handle.slot())
+    }
+    /// Drops compiled facts once nothing their step created survives.
+    pub(super) fn prune_extras(&mut self) {
+        let live: BTreeSet<u32> = self
+            .handles
+            .keys()
+            .map(|handle| handle.revision())
+            .collect();
+        self.extras.retain(|revision, _| live.contains(revision));
     }
     /// Every placed item with its resting values and inherited opacity, for activation.
     pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32)> {
@@ -229,6 +253,7 @@ impl LayoutState {
             .iter()
             .map(|(id, object)| (object.item.handle, id.clone()))
             .collect();
+        after.prune_extras();
         after.revision = scene.revision();
         after.cut_revision = scene.preparation_cut();
         after.version = Arc::new(());
