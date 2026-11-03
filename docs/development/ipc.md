@@ -83,8 +83,9 @@ flowchart LR
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it. Even on control it keeps only each frame's op and
   length unless the op is on its content-free list (see Debugging).
-- **Settings** go to the shell once per connection before `Scenes`, and once for every
-  `Settings` change the shell sends, in order, applied or refused. See
+- **Settings** go to the shell once per connection before `Scenes`, once for every
+  `Settings` change the shell sends, in order, applied or refused (`answer: true`), and when a
+  change an earlier connection sent is saved (`answer: false`). See
   [settings.md](settings.md).
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never

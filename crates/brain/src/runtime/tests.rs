@@ -112,7 +112,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                         frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
-                Some(ControlToShell::Settings(view)) => self.views.push(view),
+                Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
                 other => return other,
             }
         }
@@ -144,7 +144,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
-                ControlToShell::Settings(view) => self.views.push(view),
+                ControlToShell::Settings { view, .. } => self.views.push(view),
                 other => panic!("unexpected {other:?}"),
             }
         }

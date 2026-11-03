@@ -21,7 +21,7 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SettingsOp, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
 };
 use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -116,12 +116,12 @@ pub(crate) struct Brain {
     /// The settings, owned here: they never touch runs or the store.
     config: Config,
     /// Settings changes waiting for the one write in flight, answered in order.
-    settings_ops: VecDeque<SettingsOp>,
+    settings_ops: VecDeque<settings::Queued>,
     /// The settings write in flight, off the core loop: a durable replace can take any time.
     config_write: Option<settings::Write>,
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
-    config_gate: Option<std::sync::mpsc::Receiver<()>>,
+    config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
     /// Hears what tests wait on instead of sleeping.
     #[cfg(test)]
     observer: mpsc::UnboundedSender<Seen>,
@@ -218,7 +218,7 @@ impl Brain {
     /// Holds the next settings write before it touches the file, until the returned sender
     /// sends or drops.
     #[cfg(test)]
-    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<()> {
+    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<settings::Gate> {
         let (release, held) = std::sync::mpsc::channel();
         self.config_gate = Some(held);
         release
@@ -270,6 +270,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.pump_settings_offline();
         let mut undeleted = self.coordinator.refused_delete();
         let cleared = tokio::time::timeout_at(deadline, async {
             while self.coordinator.ending_runs() > 0
@@ -312,6 +313,7 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
         if cleared && !undeleted {
             Quit::Complete
         } else {
@@ -327,6 +329,8 @@ impl Brain {
     /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
+        let deadline = Instant::now() + CLOSE_WAIT;
+        self.pump_settings_offline();
         let settled = tokio::time::timeout(CLOSE_WAIT, async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {
@@ -347,16 +351,23 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
     }
 
-    /// Keeps runs that ended moving through the store while no shell is connected. Never
-    /// returns; drop it when a shell connects.
+    /// Keeps runs that ended moving through the store, and settings changes being written,
+    /// while no shell is connected. Never returns; drop it when a shell connects.
     pub(crate) async fn idle(&mut self) {
+        self.pump_settings_offline();
         loop {
             let input = tokio::select! {
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
+                done = settings::written(&mut self.config_write) => {
+                    let settled = self.settings_done(done, None);
+                    debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+                    continue;
+                }
             };
             self.offline(input);
         }
@@ -461,8 +472,11 @@ impl Brain {
     fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
         if let ControlToBrain::Settings(op) = message {
-            // Answered by the next connection's view; the shell that sent it is gone.
-            self.settings_ops.push_back(op);
+            // Still written; the shell that sent it is gone, so nothing answers it.
+            self.settings_ops.push_back(settings::Queued {
+                op,
+                epoch: self.epoch,
+            });
             return;
         }
         if let Ok(Some(input)) = control_input(message) {
@@ -533,7 +547,7 @@ impl Brain {
                     continue;
                 }
                 written = settings::written(&mut self.config_write) => {
-                    if self.settings_done(written, &mut link).is_err() {
+                    if self.settings_done(written, Some(&mut link)).is_err() {
                         return Ended::Lost;
                     }
                     continue;
@@ -597,7 +611,7 @@ impl Brain {
     /// connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
-        self.pump_settings(link).map_err(|Full| Ended::Lost)?;
+        self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
@@ -619,8 +633,11 @@ impl Brain {
             *ping_sent = None;
         }
         if let ControlToBrain::Settings(op) = message {
-            self.settings_ops.push_back(op);
-            self.pump_settings(link).map_err(|Full| Ended::Lost)?;
+            self.settings_ops.push_back(settings::Queued {
+                op,
+                epoch: self.epoch,
+            });
+            self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }
         control_input(message)

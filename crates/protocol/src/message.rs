@@ -225,9 +225,16 @@ pub enum ControlToShell {
         /// The thread the submit named.
         thread: Option<ThreadId>,
     },
-    /// The settings: once per connection before `Scenes`, and after every
-    /// [`ControlToBrain::Settings`].
-    Settings(SettingsView),
+    /// The settings: once per connection before `Scenes`, once per
+    /// [`ControlToBrain::Settings`] from this connection, in order, and after a change an earlier
+    /// connection sent is saved.
+    Settings {
+        /// The settings as saved.
+        view: SettingsView,
+        /// It answers this connection's oldest unanswered change. Otherwise it's the settled
+        /// settings, sent on its own.
+        answer: bool,
+    },
 }
 
 /// Shell to brain, on the data pipe.
