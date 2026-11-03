@@ -1409,9 +1409,10 @@ fn row_only_rebuild_preserves_the_detached_tables_absorbed_opacity() {
     );
     let next = picture(&scene, next, &detached, &mut Measure::default()).expect("row update");
     let mut view = kumochi_scene::motion::SceneView::new(&detached, scene.activated());
-    view.activate(next, 0, 800).expect("row activation");
     let mut frame = kumochi_scene::motion::Frame::new();
-    view.frame(0, &mut frame);
+    view.activate(next, 0, 800, &mut frame)
+        .expect("row activation");
+    view.frame(0, &mut frame).expect("row frame");
     let table = frame
         .items()
         .iter()
@@ -1441,6 +1442,7 @@ fn measured_entrance_pivots_bound_child_motion_outside_the_resting_union() {
         );
         picture(&scene, step, &before, &mut Measure::default())
     };
+    // The parent pivot adds 676.6: offset 8000 bounds 19894.5, but 8100 bounds 20001.3.
     assert!(
         prepare_case(8000).is_ok(),
         "the measured parent pivot and child envelope fit"
@@ -1451,6 +1453,25 @@ fn measured_entrance_pivots_bound_child_motion_outside_the_resting_union() {
             Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange
         ),
         "only the measured parent pivot pushes the child envelope beyond the canvas"
+    );
+}
+
+#[test]
+fn chart_title_admission_reserves_the_origin_but_preparation_checks_its_height() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let step = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"title","put":[
+            {"chart":{"id":"chart","box":[0,19985,300,15],"title":"Title"}}
+        ]}),
+    );
+    assert!(
+        matches!(picture(&scene, step, &before, &mut Measure::default()),
+        Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange),
+        "the title starts at 19997 but its measured height extends beyond 20000"
     );
 }
 

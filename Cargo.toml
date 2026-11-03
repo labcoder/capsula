@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 kumochi-protocol = { path = "crates/protocol" }
+kumochi-scene = { path = "crates/scene" }
 fluent-bundle = "0.16"
 getrandom = { version = "0.3", features = ["std"] }
 gpui-kit = "0.8.1"

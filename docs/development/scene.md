@@ -255,10 +255,13 @@ painter is implemented here.
 at-rest view with the layout and `SceneState::activated()`, not the layout's committed
 revision: a cut can leave a higher dropped revision in that layout. Live Stop and
 recovery use this same at-rest construction. `activate` accepts only the matching
-prepared predecessor, applies removals, and rebuilds parent-first sampling order.
-It may allocate; `frame` does not allocate or lock. A caller-owned `Frame` reserves
+prepared predecessor, clears its caller-owned frame outside paint, applies removals,
+and rebuilds parent-first sampling order. Pass that frame into `activate`.
+Activation may allocate or free; `frame` does neither and takes no locks. A `Frame` reserves
 space for the per-scene object cap and reuses it. Its items share immutable primitive
-Arcs, so the host must clear the frame when clearing its scene.
+Arcs, so the host must clear the frame outside paint when clearing its scene or
+constructing a replacement view after a cut. A frame binds to one activated view
+generation; sampling with a stale binding returns `Stale` without releasing its data.
 
 The host supplies monotonic `u64` milliseconds. Absolute additions saturate; `Ms`
 remains a bounded duration, never an absolute timestamp. Every activation establishes
@@ -266,8 +269,8 @@ a 60-second motion deadline, independent of narration length. Delays, entrances,
 glides and repeats are clipped to that deadline. A stopped view returns only handles
 whose own entrance and every ancestor's entrance have finished, each clipped to the
 deadline; the host passes those handles into the authoritative `StopCut`.
-Entrance origins are per object: a delayed parent can hide a child's already-running
-entrance, so that child may first appear at rest with its parent.
+Each child's entrance starts no earlier than its parent's start, retaining its own
+duration, so delayed diagrams do not hide their children's entrances.
 
 After painting at `t`, request another frame when `animating(t)` is true, otherwise
 wake at `next_wake(t)`. This paints the final frame without continuously polling
@@ -297,7 +300,28 @@ Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with
 use integer proportional placement within that segment, with u128 multiplication.
 Speech-driven timing and painting belong to their later slices.
 
-<!-- shortcut: Esc during an explicit opacity fade-in without enter reveals its final opacity; exact interrupted recovery needs timestamps in the log. -->
+Esc during an explicit opacity fade-in without `enter` reveals its final opacity.
+Exact interrupted recovery needs timestamps in the log; use entrances for reveals.
+
+```mermaid
+flowchart LR
+    P[Prepared step] --> A[Activate and clear Frame]
+    A --> F[Sample and paint Frame]
+    F --> M{Animating?}
+    M -->|yes| F
+    M -->|no| W[Wake at next_wake]
+    W --> F
+    F --> S[Stop and semantic cut]
+    S --> C[Clear Frame and construct at-rest view]
+    C --> P
+```
+
+The ignored `frame_four_views_max` and `activation_at_caps` tests measure CPU sampling
+and activation with deterministic text measurement, not a painter or real fonts.
+Run their release binaries at normal priority on Rez under `runs/measuring.lock`,
+after 30 seconds without cargo/rustc, and record priority and lock release.
+The original frame numbers are after-only because main then had no sampler; follow-up
+comparisons retain that original workload and label the wider glide/property variant.
 
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
@@ -443,7 +467,8 @@ pie series color affects its first slice. Grouped bars with numeric x coordinate
 assume evenly spaced values, so uneven gaps can produce overlapping bars.
 Area fill and its open top stroke are both reserved; native dots need no flattened
 segments. The explicit chart box wins, otherwise the viewport supplies the origin
-and width with height capped at 300. No chart animation is sampled here; A7 owns it.
+and width with height capped at 300. Chart data changes apply instantly at activation;
+animating them is later work.
 Explicit titled charts reserve their 12 px label-origin inset at admission, including
 at the positive canvas edge; measured text still receives preparation's bounds check.
 The ignored `measure_prepare_charts_at_mark_and_pie_segment_caps` fixture updates

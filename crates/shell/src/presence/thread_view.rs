@@ -348,12 +348,16 @@ impl ThreadsView {
                     ControlToBrain::Settings(SettingsOp::SetAssistantName(name)) => {
                         owner.rename_assistant(name, cx)
                     }
-                    message => owner
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| owner.link.send_control(session, message)),
+                    message => match owner.session.as_ref() {
+                        Some(session) => owner
+                            .link
+                            .send_control(session, message)
+                            .then_some(())
+                            .ok_or(Text::SettingsUnavailable),
+                        None => Err(Text::TurnOffline),
+                    },
                 };
-                if sent && kind == ThreadKind::Thread {
+                if sent.is_ok() && kind == ThreadKind::Thread {
                     owner.threads.update(cx, |state, cx| {
                         state.renamed(thread);
                         cx.notify();
@@ -362,12 +366,13 @@ impl ThreadsView {
                 }
                 sent
             })
-            .unwrap_or(false);
-        if sent {
-            self.cancel_rename(window, cx);
-        } else {
-            self.rename_error = Some(Text::TurnOffline);
-            cx.notify();
+            .unwrap_or(Err(Text::TurnOffline));
+        match sent {
+            Ok(()) => self.cancel_rename(window, cx),
+            Err(error) => {
+                self.rename_error = Some(error);
+                cx.notify();
+            }
         }
     }
 
@@ -819,7 +824,7 @@ fn rename_message(
 mod tests {
     use super::*;
 
-    fn rename_message(
+    fn changed_rename_message(
         thread: ThreadId,
         kind: ThreadKind,
         text: &str,
@@ -847,32 +852,32 @@ mod tests {
     #[test]
     fn rename_uses_the_kind_and_validates_before_sending() {
         assert_eq!(
-            rename_message(ThreadId(4), ThreadKind::Main, " Cloud "),
+            changed_rename_message(ThreadId(4), ThreadKind::Main, " Cloud "),
             Ok(ControlToBrain::Settings(SettingsOp::SetAssistantName(
                 AssistantName::new("Cloud").expect("valid name")
             )))
         );
         assert_eq!(
-            rename_message(ThreadId(5), ThreadKind::Thread, " Birthday "),
+            changed_rename_message(ThreadId(5), ThreadKind::Thread, " Birthday "),
             Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
                 thread: ThreadId(5),
                 title: ThreadTitle::new("Birthday").expect("valid title")
             }))
         );
         assert_eq!(
-            rename_message(ThreadId(4), ThreadKind::Main, ""),
+            changed_rename_message(ThreadId(4), ThreadKind::Main, ""),
             Err(Text::RenameEmpty)
         );
         assert_eq!(
-            rename_message(ThreadId(4), ThreadKind::Main, &"a".repeat(25)),
+            changed_rename_message(ThreadId(4), ThreadKind::Main, &"a".repeat(25)),
             Err(Text::RenameNameTooLong)
         );
         assert_eq!(
-            rename_message(ThreadId(5), ThreadKind::Thread, &"a".repeat(81)),
+            changed_rename_message(ThreadId(5), ThreadKind::Thread, &"a".repeat(81)),
             Err(Text::RenameTooLong)
         );
         assert_eq!(
-            rename_message(ThreadId(5), ThreadKind::Thread, "two\nlines"),
+            changed_rename_message(ThreadId(5), ThreadKind::Thread, "two\nlines"),
             Err(Text::RenameOneLine)
         );
     }
@@ -881,14 +886,14 @@ mod tests {
     fn assistant_names_and_task_titles_have_different_character_limits() {
         let name = "🌥".repeat(24);
         assert_eq!(
-            rename_message(ThreadId(4), ThreadKind::Main, &name),
+            changed_rename_message(ThreadId(4), ThreadKind::Main, &name),
             Ok(ControlToBrain::Settings(SettingsOp::SetAssistantName(
                 AssistantName::new(&name).expect("24 characters")
             ))),
         );
         let title = "🌥".repeat(80);
         assert_eq!(
-            rename_message(ThreadId(5), ThreadKind::Thread, &title),
+            changed_rename_message(ThreadId(5), ThreadKind::Thread, &title),
             Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
                 thread: ThreadId(5),
                 title: ThreadTitle::new(&title).expect("80 characters")
@@ -896,14 +901,14 @@ mod tests {
         );
         let title = "a".repeat(25);
         assert_eq!(
-            rename_message(ThreadId(5), ThreadKind::Thread, &title),
+            changed_rename_message(ThreadId(5), ThreadKind::Thread, &title),
             Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
                 thread: ThreadId(5),
                 title: ThreadTitle::new(&title).expect("25 characters")
             })),
         );
         assert_eq!(
-            rename_message(ThreadId(4), ThreadKind::Main, "Cloud\u{7}"),
+            changed_rename_message(ThreadId(4), ThreadKind::Main, "Cloud\u{7}"),
             Err(Text::RenameOneLine)
         );
     }

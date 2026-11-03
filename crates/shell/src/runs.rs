@@ -502,7 +502,12 @@ impl Runs {
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
-            | DataToShell::ScenesRemoved { .. } => {}
+            | DataToShell::ScenesRemoved { .. }
+            | DataToShell::SceneBegin { .. }
+            | DataToShell::SceneStepCommit { .. }
+            | DataToShell::SceneSnapshotV1 { .. }
+            | DataToShell::SceneCutApplied { .. }
+            | DataToShell::SceneEnd { .. } => {}
         }
     }
 
@@ -557,7 +562,12 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         | DataToShell::Page { .. }
         | DataToShell::PageFailed { .. }
         | DataToShell::SceneSnapshot { .. }
-        | DataToShell::ScenesRemoved { .. } => None,
+        | DataToShell::ScenesRemoved { .. }
+        | DataToShell::SceneBegin { .. }
+        | DataToShell::SceneStepCommit { .. }
+        | DataToShell::SceneSnapshotV1 { .. }
+        | DataToShell::SceneCutApplied { .. }
+        | DataToShell::SceneEnd { .. } => None,
     }
 }
 

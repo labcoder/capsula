@@ -806,6 +806,12 @@ fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
             resend,
         }),
         ControlToBrain::ThreadOp(op) => Some(Input::ThreadOp(op)),
+        // shortcut: B2 consumes v1 control; B3 switches the production fixture to v1.
+        ControlToBrain::StopScenes { .. }
+        | ControlToBrain::StepShown { .. }
+        | ControlToBrain::StepFailed { .. } => {
+            return Err(Ended::Broken("scene v1 control before its consumer"));
+        }
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::Quitting
@@ -968,7 +974,12 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
             DataToShell::ScenesRemoved { .. } => Owner::Marker,
-            DataToShell::SceneSnapshot { scene, .. } => Owner::Scene(*scene),
+            DataToShell::SceneSnapshot { scene, .. }
+            | DataToShell::SceneBegin { scene, .. }
+            | DataToShell::SceneStepCommit { scene, .. }
+            | DataToShell::SceneCutApplied { scene, .. }
+            | DataToShell::SceneEnd { scene, .. } => Owner::Scene(*scene),
+            DataToShell::SceneSnapshotV1 { chunk } => Owner::Scene(chunk.scene),
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");

@@ -86,6 +86,7 @@ impl SettingsView {
                     input.update(cx, |input, cx| input.set_value(value, window, cx));
                 }
             }
+            let _gone = view.owner.update(cx, |owner, cx| owner.refresh_dock(cx));
             cx.notify();
         });
         Self {
@@ -139,7 +140,11 @@ impl SettingsView {
             Error::Validation(NameError::TooLong) => strings.get(Text::RenameNameTooLong),
             Error::Validation(NameError::NotOneLine) => strings.get(Text::RenameOneLine),
             Error::Brain(error) => strings.error(error),
-            Error::Offline => strings.get(Text::SettingsOffline),
+            Error::Offline => strings.get(if state.view().is_none() {
+                Text::SettingsOffline
+            } else {
+                Text::SettingsUnavailable
+            }),
         });
         let ix = usize::from(field == Field::User);
         div()
@@ -244,6 +249,12 @@ impl Render for SettingsView {
                                     }))
                                     .child(self.field(Field::Assistant, cx))
                                     .child(self.field(Field::User, cx))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(strings.get(Text::SettingsSaveHelp)),
+                                    )
                             })),
                     ),
             )

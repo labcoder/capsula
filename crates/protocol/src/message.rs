@@ -10,6 +10,7 @@ use crate::Secret;
 
 mod error;
 mod pages;
+mod scenes;
 #[macro_use]
 mod settings;
 mod threads;
@@ -17,6 +18,10 @@ pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
+pub use scenes::{
+    MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_SCENE_STAGING_BYTES, SceneCut, SceneCuts,
+    SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
+};
 pub use settings::{AssistantName, MAX_NAME_CHARS, NameError, SettingsOp, SettingsView, UserName};
 pub use threads::{
     Effort, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelSlug, SlugError, ThreadKind,
@@ -166,6 +171,35 @@ pub enum ControlToBrain {
     Settings(SettingsOp),
     /// Rename a task or set a thread's model; nothing answers it.
     ThreadOp(ThreadOp),
+    /// A scene-wide Stop, applied even when a later run appended to one of its scenes.
+    StopScenes {
+        /// The run fenced locally; scene cuts are not restricted to this run's commits.
+        run: RunId,
+        /// Each scene's activated revision and finished objects.
+        cuts: SceneCuts,
+    },
+    /// The first paint containing a step; ordered before later cuts on this control pipe.
+    StepShown {
+        /// The run that committed the step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Zero-based lifetime commit index, not an index into the kept steps.
+        index: u32,
+    },
+    /// Preparation failed; the entire scene stops at this cut, through the ordinary cut FIFO.
+    StepFailed {
+        /// The run that committed the failed step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// The failed step's zero-based lifetime index.
+        index: u32,
+        /// A content-free reason; never a parser diagnostic or model text.
+        reason: SceneFailure,
+        /// The activated revision and finished objects; zero activation clears the scene.
+        cut: kumochi_scene::StopCut,
+    },
 }
 
 /// What a thread's delete came to.
@@ -242,6 +276,16 @@ pub enum ControlToShell {
     /// Something the user should know went wrong. A refused settings change from this
     /// connection sends it just before that change's answer.
     Error(UserError),
+    /// Authoritative v1 scene membership before snapshots, replacing `Scenes` at the B3 switch.
+    ScenesV1 {
+        /// At most four descriptors; each full recovery log has its own advertised length.
+        scenes: kumochi_scene::text::Bounded<SceneDescriptorV1, MAX_VISIBLE_SCENES>,
+    },
+    /// A requested drawing never produced a visual outcome; separate from preparation errors.
+    NoVisual {
+        /// The run that requested a drawing.
+        run: RunId,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -272,7 +316,7 @@ pub enum DataToBrain {
 }
 
 /// Brain to shell, on the data pipe.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DataToShell {
     /// More of the assistant's answer.
     AssistantText {
@@ -339,7 +383,52 @@ pub enum DataToShell {
         /// At most [`MAX_VISIBLE_SCENES`].
         scenes: Vec<SceneId>,
     },
+    /// A live scene's immutable header, on the same FIFO before its first typed step.
+    SceneBegin {
+        /// The scene, allocated by the brain.
+        scene: SceneId,
+        /// Typed header and layout version used for live and recovery preparation.
+        header: SceneHeader,
+    },
+    /// One durable v1 step. Scene ownership preserves it across Stop's run revocation.
+    SceneStepCommit {
+        /// The run that committed the step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Zero-based lifetime commit index.
+        index: u32,
+        /// Original input, never a normalized or pre-expanded replacement.
+        step: kumochi_scene::Step,
+    },
+    /// A bounded chunk of the complete ordered step/cut log; install only on the last chunk.
+    SceneSnapshotV1 {
+        /// Chunk zero includes the header; later chunks omit it.
+        chunk: SceneSnapshotChunk,
+    },
+    /// The brain accepted this scene-wide cut, after delivering every prior durable step.
+    SceneCutApplied {
+        /// The scene whose outstanding-cut hold may now be released.
+        scene: SceneId,
+        /// The last committed revision before the cut, not the cut's activated bound.
+        revision: u32,
+        /// The authoritative cut applied to the mirror at exactly that revision.
+        cut: kumochi_scene::StopCut,
+    },
+    /// A draw call ended; committed steps remain even when its suffix was incomplete.
+    SceneEnd {
+        /// The originating run.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// False after malformed, truncated, invalid or differing final arguments.
+        complete: bool,
+    },
 }
+
+#[cfg(test)]
+#[path = "message/scene_frame_tests.rs"]
+mod scene_frame_tests;
 
 #[cfg(test)]
 mod tests {

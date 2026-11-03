@@ -149,12 +149,14 @@ impl PreparedStep {
 }
 
 /// Content-free preparation failures; the host routes these through its ordinary cut.
+/// A `Stale` from [`crate::SceneView::frame`] instead requires clearing the frame
+/// outside paint, not cutting the scene.
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
     /// Cancellation was observed before publication.
     #[error("scene.PrepareCancelled")]
     Cancelled,
-    /// The scene or layout changed across preparation.
+    /// The scene or layout changed, or a frame belongs to another view generation.
     #[error("scene.StalePreparation")]
     Stale,
     /// Host text shaping failed.

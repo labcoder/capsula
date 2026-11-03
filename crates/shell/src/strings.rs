@@ -77,11 +77,16 @@ pub(crate) enum Text {
     SettingsSaving,
     SettingsOffline,
     DockError,
+    RenameBusy,
+    SettingsUnavailable,
+    SettingsNotSaved,
+    SettingsSaveHelp,
+    DockBrainError,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 67] = [
+    const ALL: [Self; 72] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -149,6 +154,11 @@ impl Text {
         Self::SettingsSaving,
         Self::SettingsOffline,
         Self::DockError,
+        Self::RenameBusy,
+        Self::SettingsUnavailable,
+        Self::SettingsNotSaved,
+        Self::SettingsSaveHelp,
+        Self::DockBrainError,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -232,6 +242,11 @@ impl Text {
             Self::SettingsSaving => "settings-saving",
             Self::SettingsOffline => "settings-offline",
             Self::DockError => "dock-error",
+            Self::RenameBusy => "rename-busy",
+            Self::SettingsUnavailable => "settings-unavailable",
+            Self::SettingsNotSaved => "settings-not-saved",
+            Self::SettingsSaveHelp => "settings-save-help",
+            Self::DockBrainError => "dock-brain-error",
         }
     }
 }

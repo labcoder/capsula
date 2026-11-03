@@ -92,10 +92,13 @@ flowchart LR
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
   them breaks the connection like any malformed frame. The settings model retains the brain
   error and its field attribution; Presence caches its localized presentation for the typing
-  panel and tasks panel, with a short **Check settings** dock label.
+  panel and tasks panel, with a short **Check settings** dock label for settings keys and
+  **Needs attention** for any other brain error.
   It clears when a turn is successfully sent or a successful answer settles a retry of the
   settings field that produced it. An unsolicited view, reconnect, or another field's success
-  cannot clear it. The settings FIFO attributes each refusal to the unanswered head operation.
+  cannot clear it. Only `SettingsRefused` and `ConfigUnreadable` are attributed to the settings
+  FIFO's unanswered head operation. Other keys remain general brain errors and never fail a
+  pending settings save.
   A failed submit leaves that error intact. Local submission refusals are separate, shown only
   in the typing panel in preference to the retained brain error. Reconnecting or accepting a
   `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
@@ -307,6 +310,74 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
   a row only views it: explicit switches and per-turn selection revisions govern targeting,
   as described in [runs](runs.md#the-shells-input-target).
+
+## Scene v1 wire contract
+
+The v1 messages are staged alongside the labelled placeholder protocol. B2 builds the brain
+path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
+the placeholder at both ends and deletes its development-only store rows. Until its consumer
+lands, receiving a v1 message ends the connection rather than ignoring it: B2 replaces the
+brain's `StopScenes`, `StepShown` and `StepFailed` rejection; B4 replaces the shell's v1 data
+and `ScenesV1` rejection; B8 replaces `NoVisual`. These variants are appended; the handshake
+tags and bytes do not change. Mixed builds still fail their build-id handshake.
+
+| Pipe | Messages | Meaning |
+| --- | --- | --- |
+| Control, shell to brain | `StopScenes { run, cuts }` | Fence the run and apply each scene's activated revision and finished handles. A scene can span runs. |
+| Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut. Control order keeps these observations ahead of later Stop cuts. |
+| Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
+| Control, brain to shell | `NoVisual` | The requested drawing had no visual outcome; preparation errors are reported separately. |
+| Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |
+| Data, brain to shell | `SceneSnapshotV1` | Complete ordered original steps and effective cuts, packed as whole events. Chunk zero alone carries the header. |
+| Data, brain to shell | `SceneCutApplied` | Authoritative cut, after every step committed before it; the last committed revision is included for a cheap consistency check. |
+| Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
+
+`SceneStepCommit` and `StepShown` indices are zero-based lifetime indices; scene revisions and `StopCut.activated`
+are one-based bounds. They are not dense indices into the kept steps. The per-run 64-step
+budget and scene's 64 lifetime committed-step cap are distinct. A recovery log contains every
+original committed step, even one dropped by a cut, and every effective cut, with at most 128
+entries. Descriptors advertise log length separately from retained count. The consumer checks
+unique membership, consecutive chunk ordinals, matching revision, exact log/kept counts and
+semantic replay, and installs only on `last` from the describing connection, provided no clear
+generation changed. A wrong index, bad cut acknowledgement or rejected cut ends the connection;
+ordinary reconnect recovery rebuilds all four scenes together, not one against a new budget.
+
+The data FIFO orders removal of an evicted scene before the next scene's header and first
+step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are
+scene-owned, not run-owned: Stop never revokes them. A durable step whose store acknowledgement
+arrives after Stop still travels before the cut acknowledgement. `ScenesRemoved` remains the
+non-revocable FIFO removal marker, so clearing the scene cannot discard the removal itself.
+The shell drains fenced commits into its semantic mirror without preparing or activating them,
+then applies the acknowledged cut. While any cut is outstanding, no run activates more work in
+that scene. A cut for an already removed scene is stale. The shell sends at most one cut per
+scene between commits. A replaced run alone does not cut its committed scenes.
+Every accepted cut receives `SceneCutApplied`, including a cut that changes nothing and adds
+no recovery-log entry, so the shell can release its outstanding-cut hold.
+
+Before B6 supplies a conductor, B4 can cut only at its current activation (zero for a fresh
+scene, or the recovered bound) and sends no `StepShown`; pending removals stay conservatively
+charged. Only v1 scenes send v1 cuts during staging. After B3 and before B5/B6 paints, development
+builds have no visible drawings. Drawings are intended to remain until Esc; a fifth overlay
+scene retires the oldest first and leaves it in history. That is the recommended default while
+the owner's retention question remains open.
+
+The 32 KiB chunk packing target is not a cap on a legal step's binary form: number-dense JSON
+expands in postcard. One whole event may travel alone up to the 256 KiB data-payload cap.
+Bounded sequence decoding limits entries before extending a list. Return data credit per staged
+chunk, not only on final install; a log may exceed the 512 KiB credit window. Chunks received
+before membership withhold credit and are thereby bounded by that window. Encoded staging is
+limited to 32 MiB per scene and 128 MiB across four, including frame headers, independently of
+the 64 MiB prepared-geometry residency budget. B4 enforces accumulated counts/bytes and measures
+heap residency; these wire-policy caps are not a measured heap bound.
+
+Every new scene message is excluded from the tap's content-free allow-list. The tap records
+only its operation and byte count, never headers, steps, speech, model ids or parser diagnostics.
+Even a forged recording's payload flag does not authorize contentful fields in `pipe-dump`.
+
+The 32 KiB JSON cap applies to original model records, not to persisted typed JSON. Numeric
+values such as `0` can reserialize as `0.0`, expanding a legal record. Store typed steps in
+the event body (never the FTS text column), then deserialize the bounded typed log on reload;
+do not feed reserialized storage JSON back through the model-record byte cap in `parse_record`.
 
 ## Starting and reconnecting
 

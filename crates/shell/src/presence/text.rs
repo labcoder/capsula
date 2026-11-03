@@ -265,9 +265,11 @@ impl Presence {
         diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
         let previous = (self.error.clone(), self.refusal);
         submission_notice(&mut self.error, &mut self.refusal, result);
-        self.notices_changed(&previous, cx);
         if result.is_ok() {
             self.settings.update(cx, |state, _| state.clear_notice());
+        }
+        self.notices_changed(&previous, cx);
+        if result.is_ok() {
             let input = text.input.clone();
             text.window
                 .update(cx, |_, window, cx| {
