@@ -348,12 +348,14 @@ impl ThreadsView {
                     ControlToBrain::Settings(SettingsOp::SetAssistantName(name)) => {
                         owner.rename_assistant(name, cx)
                     }
-                    message => owner
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| owner.link.send_control(session, message))
-                        .then_some(())
-                        .ok_or(Text::SettingsUnavailable),
+                    message => match owner.session.as_ref() {
+                        Some(session) => owner
+                            .link
+                            .send_control(session, message)
+                            .then_some(())
+                            .ok_or(Text::SettingsUnavailable),
+                        None => Err(Text::TurnOffline),
+                    },
                 };
                 if sent.is_ok() && kind == ThreadKind::Thread {
                     owner.threads.update(cx, |state, cx| {
