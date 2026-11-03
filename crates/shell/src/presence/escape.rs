@@ -38,7 +38,13 @@ impl Presence {
             Escape::Clear => {
                 let effect = self.runs.clear();
                 self.grant(effect.credit);
-                effect.clear
+                if self.presenter.holds_scenes() {
+                    let effects = self.presenter.clear(std::time::Instant::now());
+                    self.scene_effects(effects, cx);
+                    None
+                } else {
+                    effect.clear
+                }
             }
             Escape::Dismiss => {
                 if panel == EscapePanel::Settings {
@@ -72,7 +78,7 @@ impl Presence {
         // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
         if let Some(message) = tell {
-            self.tell(message);
+            self.stop_run(message, cx);
         }
         self.escape_fixture = false;
         self.sync_escape(cx)

@@ -3,6 +3,7 @@
 
 mod deletes;
 pub(crate) mod diagnostics;
+mod drawings;
 mod escape;
 mod geometry;
 mod gesture;
@@ -22,7 +23,7 @@ mod threads;
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::component::input::InputState;
@@ -87,6 +88,9 @@ struct Presence {
     /// What `runs` and the typing panel last made Esc see.
     activity: Activity,
     runs: Runs,
+    presenter: crate::presenter::Presenter,
+    scene_timer: Option<Task<()>>,
+    scene_deadline: Option<Instant>,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
@@ -327,14 +331,12 @@ impl Presence {
         }
     }
 
-    /// What's moving or on screen, as Esc sees it. shortcut: the placeholder steps show only in
-    /// the typing panel, so they count as a drawing only while it's open; slice 4 draws on the
-    /// overlay.
+    /// Recovery and mirrored scenes remain clearable even before a renderer is attached.
     fn activity(&self) -> Activity {
         Activity {
             working: self.runs.working(),
             speaking: false,
-            drawing: self.runs.drawing() && self.text_open(),
+            drawing: self.presenter.holds_scenes() || (self.runs.drawing() && self.text_open()),
         }
     }
 
@@ -435,10 +437,13 @@ impl Presence {
         Ok(())
     }
 
-    fn quit(&self, cx: &mut Context<'_, Self>) {
+    fn quit(&mut self, cx: &mut Context<'_, Self>) {
         if !self.link.begin_quit() {
             return;
         }
+        self.presenter.disconnected();
+        self.scene_timer = None;
+        self.scene_deadline = None;
         let link = self.link.clone();
         diagnostics::record(cx, format_args!("stretch totals {}", self.stretch.totals()));
         let diagnostics = diagnostics::release(cx);
@@ -656,6 +661,8 @@ fn dock_label(state: LinkState, cx: &App) -> SharedString {
 /// A native surface or GPUI window couldn't be initialized or placed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OpenError {
+    #[error("GPUI has no display for scene preparation")]
+    DisplayUnavailable,
     #[error("GPUI couldn't create or update a presence surface")]
     Gpui(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
@@ -790,6 +797,14 @@ pub(crate) fn open(
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
+    let display = cx.primary_display().ok_or(OpenError::DisplayUnavailable)?;
+    let display_size = display.bounds().size;
+    let presenter = crate::presenter::Presenter::new(
+        kumochi_scene::layout::SurfaceGeometry::Overlay {
+            logical_size: [display_size.width.into(), display_size.height.into()],
+        },
+        std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
+    );
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -810,6 +825,9 @@ pub(crate) fn open(
             gesture: Rc::clone(&gesture),
             activity: Activity::default(),
             runs: Runs::default(),
+            presenter,
+            scene_timer: None,
+            scene_deadline: None,
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout {
@@ -861,7 +879,7 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(delay).await;
-            let _closed = weak.update(cx, |this, cx| this.quit(cx));
+            let _closed = weak.update(cx, Presence::quit);
         })
         .detach();
     }

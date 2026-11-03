@@ -3459,6 +3459,7 @@ dependencies = [
  "keyring",
  "kumochi-brain",
  "kumochi-protocol",
+ "kumochi-scene",
  "raw-window-handle",
  "thiserror 2.0.21",
  "tracing",
