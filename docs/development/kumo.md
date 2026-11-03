@@ -90,3 +90,29 @@ and 0.46 at 168. The extra texel is the bilinear footprint and the 3 pixels are 
 next pixel centre and the snap pixel. Pixels between a span's ends are hull gaps, allowed and
 not measured. The tests also cover the inclusive cutoff, a zero-size source, empty images and
 placements, and a single texel.
+
+## Expressions
+
+`expression.rs`'s `Animator` turns a `Mood` (idle, listening, thinking, speaking) into frames.
+Each mood is a target pose, a set of eye, lid, gaze and inner-light numbers, and a mood change
+eases every number toward it, so any mood can follow any other.
+
+Kumo is still unless something engages it. `engage` (hover, listening or speaking beginning)
+starts one blink, and `disengage` cuts a blink under way. Listening and speaking move
+continuously while they last: the body breathes and squashes with the voice level, the light
+orbits, and blinks recur on a seeded schedule. Idle and thinking hold their pose. There's no
+idle timer: the owner asks GPUI for a frame only while `is_animating` is true, and draws every
+frame it asks for. A change that the next frame must show (a cut blink, a reduced-motion switch,
+a mood change) keeps it true for exactly that frame, and an ease snaps to its target pose on its
+last frame, so once it's false every later frame is the same and a settled Kumo costs nothing.
+Blinks count their own age and countdown, and motion phases wrap per turn on an f64 clock, so
+a long run or a huge step can't stall a blink; a negative or non-finite step counts as none. `set_motion(Motion::Reduced)`
+follows the operating system's reduced-motion setting: each mood shows its static pose, a blink
+under way stops at once, and nothing moves.
+
+Tests drive the animator the way its owner will, drawing only while `is_animating` is true.
+They cover each mood's still pose against the spike's numbers, a minute of idle asking for no
+frame, exactly one 13-frame blink per engagement, disengaging and re-engaging, reduced motion
+switched on mid-blink and during a mood change, a voice mood's squash, orbit and blinks, a late
+switch between voice moods waiting a whole gap, an ease's halfway value and exact landing, a
+mood change mid-blink, and a huge, zero, negative and non-finite step.

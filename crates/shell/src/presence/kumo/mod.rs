@@ -9,6 +9,7 @@
 )]
 
 mod coverage;
+mod expression;
 mod frame;
 mod look;
 mod math;
