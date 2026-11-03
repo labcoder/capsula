@@ -1,10 +1,11 @@
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
-    ThreadCursor, ThreadId, ThreadRow,
+    ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
 use rusqlite::{Connection, Row, params};
 
+use super::threads::{choice_of, kind_of};
 use super::{StoreError, row_id};
 
 #[cfg(test)]
@@ -23,7 +24,9 @@ impl super::Store {
 
 impl Pages<'_> {
     /// Reads one page, including its continuation, within the full encoded-frame budget.
-    /// A single oversized title or event is shortened at a character boundary to make progress.
+    /// A single oversized title or event is shortened at a character boundary to make progress;
+    /// on the plain list's first page that's the task after the pinned main thread, so the page
+    /// always reaches a task while one exists.
     ///
     /// # Errors
     /// Fails with a content-free error when reading or encoding fails.
@@ -31,12 +34,11 @@ impl Pages<'_> {
         let mut cursors = Vec::new();
         let mut reply = match page {
             PageOf::Threads { search, after } => {
-                let rows = match search {
-                    Some(words) => self.search_rows(&words, after, MAX_PAGE_ROWS)?,
+                let (threads, next);
+                (threads, cursors, next) = match search {
+                    Some(words) => paged(self.search_rows(&words, after, MAX_PAGE_ROWS)?, MAX_PAGE_ROWS),
                     None => self.thread_rows(after, MAX_PAGE_ROWS)?,
                 };
-                let (threads, next);
-                (threads, cursors, next) = paged(rows, MAX_PAGE_ROWS);
                 DataToShell::ThreadList {
                     request,
                     threads,
@@ -74,7 +76,8 @@ impl Pages<'_> {
         };
         while !fits(&reply)? {
             match &mut reply {
-                DataToShell::ThreadList { threads, next, .. } if threads.len() > 1 => {
+                // A pinned main thread has no cursor, so it's never popped and one task stays.
+                DataToShell::ThreadList { threads, next, .. } if cursors.len() > 1 => {
                     threads.pop();
                     cursors.pop();
                     *next = cursors.last().copied();
@@ -103,23 +106,26 @@ impl Pages<'_> {
         after: Option<ThreadCursor>,
         limit: usize,
     ) -> Result<(Vec<ThreadRow>, Option<ThreadCursor>), StoreError> {
-        let limit = limit.clamp(1, MAX_PAGE_ROWS);
-        let (rows, _, next) = paged(self.thread_rows(after, limit)?, limit);
+        let (rows, _, next) = self.thread_rows(after, limit.clamp(1, MAX_PAGE_ROWS))?;
         Ok((rows, next))
     }
 
-    /// Up to `limit + 1` live threads after `after`, each with its own continuation key.
+    /// Up to `limit` live threads after `after`, the keys of its tasks, and the continuation. The
+    /// first page starts with the main thread, which counts toward `limit` but leaves room for a
+    /// task; later pages leave it out, so it never repeats and its own updates never move a
+    /// cursor. One statement reads them all.
     fn thread_rows(
         &self,
         after: Option<ThreadCursor>,
         limit: usize,
-    ) -> Result<Vec<(ThreadRow, ThreadCursor)>, StoreError> {
+    ) -> Result<(Vec<ThreadRow>, Vec<ThreadCursor>, Option<ThreadCursor>), StoreError> {
         let mut query = self
             .0
             .prepare(
-                "SELECT id, title, updated_ms FROM threads
-             WHERE state = 'live' AND (?1 IS NULL OR (updated_ms, id) < (?1, ?2))
-             ORDER BY updated_ms DESC, id DESC LIMIT ?3",
+                "SELECT id, title, updated_ms, kind, model, effort FROM threads
+             WHERE state = 'live' AND CASE WHEN ?1 IS NULL THEN 1
+                 ELSE kind = 'thread' AND (updated_ms, id) < (?1, ?2) END
+             ORDER BY kind = 'main' DESC, updated_ms DESC, id DESC LIMIT ?3",
             )
             .map_err(|_| StoreError::Read)?;
         let rows = query
@@ -127,7 +133,8 @@ impl Pages<'_> {
                 params![
                     after.map(|key| key.updated_ms),
                     after.map(|key| bounded_id(key.id.0)),
-                    i64::try_from(limit + 1).map_err(|_| StoreError::Read)?
+                    // The main thread's place, and one more task to tell whether more follow.
+                    i64::try_from(limit + 2).map_err(|_| StoreError::Read)?
                 ],
                 |row| {
                     let thread = thread_row(row)?;
@@ -140,7 +147,23 @@ impl Pages<'_> {
                 },
             )
             .map_err(|_| StoreError::Read)?;
-        rows.collect::<Result<_, _>>().map_err(|_| StoreError::Read)
+        let mut rows: Vec<_> = rows
+            .collect::<Result<_, _>>()
+            .map_err(|_| StoreError::Read)?;
+        let main = rows
+            .first()
+            .is_some_and(|(row, _)| row.kind == ThreadKind::Main)
+            .then(|| rows.remove(0).0);
+        let tasks = if main.is_some() {
+            limit.saturating_sub(1).max(1)
+        } else {
+            limit
+        };
+        let (mut threads, cursors, next) = paged(rows, tasks);
+        if let Some(main) = main {
+            threads.insert(0, main);
+        }
+        Ok((threads, cursors, next))
     }
 
     /// Phrase matches with titles, best rank first and descending id for equal ranks.
@@ -197,8 +220,8 @@ impl Pages<'_> {
             .0
             .prepare(
                 "WITH matches AS MATERIALIZED (
-                 SELECT t.id, t.title, t.updated_ms, t.state = 'live' AS live,
-                 min(f.rank) AS score
+                 SELECT t.id, t.title, t.updated_ms, t.kind, t.model, t.effort,
+                 t.state = 'live' AS live, min(f.rank) AS score
                  FROM events_fts f JOIN events e ON e.id = f.rowid
                  JOIN threads t ON t.id = e.thread
                  WHERE events_fts MATCH ?1 GROUP BY t.id
@@ -206,7 +229,8 @@ impl Pages<'_> {
              anchor AS (
                  SELECT coalesce((SELECT score FROM matches WHERE id = ?2), ?3) AS score
              )
-             SELECT m.id, m.title, m.updated_ms, m.score FROM matches m, anchor a
+             SELECT m.id, m.title, m.updated_ms, m.kind, m.model, m.effort, m.score
+             FROM matches m, anchor a
              WHERE m.live AND (?2 IS NULL OR m.score > a.score OR (m.score = a.score AND m.id < ?2))
              ORDER BY m.score, m.id DESC LIMIT ?4",
             )
@@ -221,7 +245,7 @@ impl Pages<'_> {
                 ],
                 |row| {
                     let thread = thread_row(row)?;
-                    let rank: f64 = row.get(3)?;
+                    let rank: f64 = row.get(6)?;
                     if !rank.is_finite() {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
@@ -316,11 +340,17 @@ fn bounded_id(id: u64) -> i64 {
     i64::try_from(id).unwrap_or(i64::MAX)
 }
 
+/// A row of `id, title, updated_ms, kind, model, effort`.
 fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     Ok(ThreadRow {
         id: ThreadId(row_id(row.get(0)?)),
         title: row.get(1)?,
         updated_ms: row.get(2)?,
+        kind: kind_of(row.get_ref(3)?.as_str()?)?,
+        choice: choice_of(
+            row.get_ref(4)?.as_str_or_null()?,
+            row.get_ref(5)?.as_str_or_null()?,
+        )?,
     })
 }
 
@@ -364,7 +394,7 @@ fn fits(reply: &DataToShell) -> Result<bool, StoreError> {
 
 fn single_text(reply: &mut DataToShell) -> Result<&mut String, StoreError> {
     match reply {
-        DataToShell::ThreadList { threads, .. } => threads.first_mut().map(|row| &mut row.title),
+        DataToShell::ThreadList { threads, .. } => threads.last_mut().map(|row| &mut row.title),
         DataToShell::Page { events, .. } => events.first_mut().map(|event| {
             event.cut = true;
             &mut event.text

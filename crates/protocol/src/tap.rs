@@ -46,9 +46,11 @@ impl Tapped for ControlToBrain {
             Self::ClearDrawing { .. } => "ClearDrawing",
             Self::DeleteThread { .. } => "DeleteThread",
             Self::Settings(_) => "Settings",
+            Self::ThreadOp(_) => "ThreadOp",
         }
     }
 
+    /// `ThreadOp` isn't listed: a rename carries the user's title.
     fn content_free(&self) -> bool {
         matches!(
             self,

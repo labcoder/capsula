@@ -15,7 +15,7 @@ use crate::platform::{PipeClient, test_pair};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
-    EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow,
+    EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadKind, ThreadRow,
 };
 
 #[test]
@@ -38,6 +38,8 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
             id: ThreadId(3),
             title: "a private title".to_owned(),
             updated_ms: 9,
+            kind: ThreadKind::Thread,
+            choice: None,
         }],
         next: Some(ThreadCursor {
             id: ThreadId(3),

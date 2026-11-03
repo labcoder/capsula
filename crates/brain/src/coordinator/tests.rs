@@ -11,6 +11,8 @@ use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 mod deletes;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "thread_op_tests.rs"]
+mod thread_ops;
 
 const T: ThreadId = ThreadId(4);
 const R: RunId = RunId(10);
@@ -63,7 +65,7 @@ fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
 
 /// A coordinator whose last ids were thread 3 and run 9, with nothing visible.
 fn fresh() -> Coordinator {
-    Coordinator::new(ThreadId(3), RunId(9), Vec::new())
+    Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new())
 }
 
 fn run_end(run: RunId) -> Effect {

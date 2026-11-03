@@ -9,9 +9,15 @@ use serde::{Deserialize, Serialize};
 use crate::Secret;
 
 mod pages;
+#[macro_use]
 mod settings;
+mod threads;
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use settings::{AssistantName, MAX_NAME_CHARS, NameError, SettingsOp, SettingsView, UserName};
+pub use threads::{
+    Effort, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelSlug, SlugError, ThreadKind,
+    ThreadOp, ThreadTitle,
+};
 
 /// The most rows one page carries [guess].
 pub const MAX_PAGE_ROWS: usize = 50;
@@ -154,6 +160,8 @@ pub enum ControlToBrain {
     },
     /// Change a setting; answered by exactly one [`ControlToShell::Settings`].
     Settings(SettingsOp),
+    /// Rename a task or set a thread's model; nothing answers it.
+    ThreadOp(ThreadOp),
 }
 
 /// What a thread's delete came to.
@@ -323,8 +331,10 @@ pub enum DataToShell {
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Deleted, Hello, Incarnation, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, RunId,
-        SceneDescriptor, SceneId, Secret, Step, ThreadId,
+        Deleted, Effort, Hello, Incarnation, MAX_PAGE_BYTES, MAX_PAGE_ROWS, MAX_SLUG_BYTES,
+        MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, MAX_VISIBLE_SCENES, ModelChoice, ModelSlug,
+        RunId, SceneDescriptor, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
+        ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -413,6 +423,37 @@ mod tests {
             scenes: vec![SCENE; MAX_VISIBLE_SCENES],
         };
         assert_eq!(payload(&removed, Pipe::Data), 2 + 4 * 10);
+    }
+
+    /// Titles are at most 80 characters when written, so only an older or planted one ever needs
+    /// the page budget's shortening.
+    #[test]
+    fn a_full_page_of_the_longest_titles_and_choices_fits_the_page_cap() {
+        let row = ThreadRow {
+            id: ThreadId(u64::MAX),
+            title: "🌥".repeat(MAX_TITLE_CHARS),
+            updated_ms: i64::MIN,
+            kind: ThreadKind::Thread,
+            choice: Some(ModelChoice {
+                model: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
+                effort: Effort::XHigh,
+            }),
+        };
+        let list = DataToShell::ThreadList {
+            request: u32::MAX,
+            threads: vec![row; MAX_PAGE_ROWS],
+            next: Some(ThreadCursor {
+                updated_ms: i64::MIN,
+                id: ThreadId(u64::MAX),
+                rank_bits: u64::MAX,
+            }),
+        };
+        // Per row: id, a 2-byte length and 320 bytes of title, time, kind, Some, a 1-byte length
+        // and 64 bytes of slug, effort.
+        let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1;
+        let payload = payload(&list, Pipe::Data);
+        assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
+        assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
     }
 
     #[test]

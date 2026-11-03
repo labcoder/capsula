@@ -2,7 +2,9 @@
 //! answer, an answer the shell never read, and a hide that never committed.
 
 use kumochi_protocol::frame::{self, Pipe};
-use kumochi_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, RunId, ThreadId};
+use kumochi_protocol::message::{
+    ControlToBrain, ControlToShell, Deleted, Phase, RunId, ThreadId, ThreadKind,
+};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
@@ -14,7 +16,8 @@ use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::Scratch;
 
-const T: ThreadId = ThreadId(1);
+/// The first task: a fresh store's thread 1 is the main thread.
+const T: ThreadId = ThreadId(2);
 
 fn delete(after_turns: u32) -> ControlToBrain {
     ControlToBrain::DeleteThread {
@@ -65,7 +68,12 @@ fn live_threads(scratch: &Scratch) -> Vec<ThreadId> {
     store
         .pages()
         .thread_page(None, 50)
-        .map(|(rows, _)| rows.into_iter().map(|row| row.id).collect())
+        .map(|(rows, _)| {
+            rows.into_iter()
+                .filter(|row| row.kind == ThreadKind::Thread)
+                .map(|row| row.id)
+                .collect()
+        })
         .expect("threads")
 }
 

@@ -88,6 +88,16 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         match *input {
+            // The main thread is never deleted: nothing is interrupted, fenced or sent to the store.
+            Input::Delete { thread, .. } if thread == self.main_thread => {
+                let refused = ControlToShell::ThreadDeleted {
+                    thread,
+                    outcome: Deleted::NotHidden,
+                    last_run: None,
+                };
+                effects.push(Effect::Control(refused));
+                Ok(())
+            }
             Input::Delete {
                 thread,
                 after_turns,

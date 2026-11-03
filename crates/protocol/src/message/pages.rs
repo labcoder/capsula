@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{RunId, ThreadId};
+use super::{ModelChoice, RunId, ThreadId, ThreadKind};
 
 /// One stored event, ordered within a thread by its id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -66,6 +66,11 @@ pub struct ThreadRow {
     pub title: String,
     /// Unix milliseconds when it last changed.
     pub updated_ms: i64,
+    /// The main thread or a task; the shell labels the main thread from its settings, since its
+    /// stored title is empty.
+    pub kind: ThreadKind,
+    /// The stored model and effort, even one the catalog no longer offers.
+    pub choice: Option<ModelChoice>,
 }
 
 impl fmt::Debug for ThreadRow {
@@ -73,6 +78,8 @@ impl fmt::Debug for ThreadRow {
         f.debug_struct("ThreadRow")
             .field("id", &self.id)
             .field("updated_ms", &self.updated_ms)
+            .field("kind", &self.kind)
+            .field("choice", &self.choice)
             .finish_non_exhaustive()
     }
 }
@@ -132,6 +139,8 @@ mod tests {
             id: ThreadId(1),
             title: title.to_owned(),
             updated_ms: 2,
+            kind: ThreadKind::Thread,
+            choice: None,
         };
         let event = PageEvent {
             id: EventId(3),

@@ -13,6 +13,9 @@ mod schema;
 mod side;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod thread_tests;
+mod threads;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,6 +33,7 @@ pub(crate) use purge::{Pause, Pauses, Point};
 pub(crate) use scenes::cleared_body;
 pub use scenes::{SceneState, SceneTarget};
 pub use side::Side;
+pub use threads::TitleSource;
 
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
@@ -320,8 +324,9 @@ impl Store {
         self.purge_pending
     }
 
-    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`, and
-    /// deletions left pending finish. An owed purge is only reported: the store's thread runs
+    /// The recovery scan (architecture v1 §2.3): runs left active become `failed(crash)`,
+    /// deletions left pending finish, and the main thread is created if it's missing, so it exists
+    /// before [`Store::high_water`] is read. An owed purge is only reported: the store's thread runs
     /// it once no run is active, so a slow or failing purge can't hold up the start. Run it
     /// once at start, before any new run.
     ///
@@ -355,6 +360,7 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
+        self.create_main()?;
         recovered.purge_pending = self.purge_pending;
         Ok(recovered)
     }

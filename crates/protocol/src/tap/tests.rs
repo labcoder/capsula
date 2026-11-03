@@ -3,7 +3,7 @@ use crate::Secret;
 use crate::frame::{FrameError, HEADER_LEN, Pipe, encode};
 use crate::message::{
     AssistantName, ControlToBrain, ControlToShell, Hello, Incarnation, SettingsOp, SettingsView,
-    UserName,
+    ThreadId, ThreadOp, ThreadTitle, UserName,
 };
 
 const NAME: &str = "Zqxassistant";
@@ -28,6 +28,7 @@ fn view() -> ControlToShell {
         assistant_name: AssistantName::new(NAME).expect("valid"),
         user_name: Some(UserName::new(USER).expect("valid")),
         onboarded: true,
+        main_thread: ThreadId(1),
     })
 }
 
@@ -88,6 +89,28 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     let mut reader = &file[MAGIC.len()..];
     let read_back: Vec<_> = std::iter::from_fn(|| read(&mut reader).expect("reads")).collect();
     assert_eq!(read_back, records);
+}
+
+#[test]
+fn a_rename_keeps_only_its_op_name_and_length() {
+    const TITLE: &str = "Zqxrenamedtitle";
+    let rename = ControlToBrain::ThreadOp(ThreadOp::Rename {
+        thread: ThreadId(2),
+        title: ThreadTitle::new(TITLE).expect("valid"),
+    });
+    let record = record(Direction::ToBrain, &rename);
+    assert_eq!(record.payload, None);
+    let file = recording(&[record]);
+    assert!(!contains(&file, TITLE.as_bytes()), "the title was recorded");
+    let mut out = Vec::new();
+    dump(&mut file.as_slice(), &mut out).expect("dumps");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        format!(
+            "    0 Control shell -> brain  ThreadOp ({} bytes)\n1 frames\n",
+            wire_len(&rename, Pipe::Control)
+        )
+    );
 }
 
 #[test]

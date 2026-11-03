@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::message::{AssistantName, SettingsOp, UserName};
+use kumochi_protocol::message::{AssistantName, SettingsOp, ThreadId, UserName};
 
 use super::{Config, ConfigError};
 use crate::test_support::Scratch;
@@ -26,14 +26,14 @@ fn apply(config: &mut Config, op: SettingsOp) {
 fn a_missing_file_gives_the_defaults_and_is_created_on_the_first_change() {
     let scratch = Scratch::new("config-missing");
     let dir = dir(&scratch).join("not yet");
-    let mut config = Config::load(Some(dir.clone()));
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     let view = config.view();
     assert_eq!(view.assistant_name.as_str(), DEFAULT_ASSISTANT_NAME);
     assert_eq!(view.user_name, None);
     assert!(!view.onboarded);
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
     apply(&mut config, SettingsOp::FinishOnboarding);
-    let reloaded = Config::load(Some(dir));
+    let reloaded = Config::load(Some(dir), ThreadId(1));
     assert_eq!(reloaded.view().assistant_name.as_str(), "Nimbus");
     assert!(reloaded.view().onboarded);
 }
@@ -48,7 +48,7 @@ fn unknown_keys_survive_a_write_and_clearing_the_user_name_removes_it() {
         "future_key = 3\nuser_name = \"Oscar\"\n\n[later]\nmodel = \"x\"\n",
     )
     .expect("seeded");
-    let mut config = Config::load(Some(dir.clone()));
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     assert_eq!(
         config.view().user_name,
         Some(UserName::new("Oscar").expect("valid"))
@@ -59,7 +59,7 @@ fn unknown_keys_survive_a_write_and_clearing_the_user_name_removes_it() {
     assert_eq!(table.get("future_key"), Some(&toml::Value::Integer(3)));
     assert_eq!(table["later"]["model"].as_str(), Some("x"));
     assert!(!table.contains_key("user_name"));
-    assert_eq!(Config::load(Some(dir)).view().user_name, None);
+    assert_eq!(Config::load(Some(dir), ThreadId(1)).view().user_name, None);
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn an_unparseable_file_is_never_written_and_refuses_changes() {
     let path = dir.join(CONFIG_FILE);
     let broken = "assistant_name = \"Zqx\nnot toml [";
     std::fs::write(&path, broken).expect("seeded");
-    let config = Config::load(Some(dir));
+    let config = Config::load(Some(dir), ThreadId(1));
     assert_eq!(
         config.view().assistant_name.as_str(),
         DEFAULT_ASSISTANT_NAME
@@ -86,7 +86,7 @@ fn an_unreadable_file_refuses_changes_like_a_broken_one() {
     let scratch = Scratch::new("config-unreadable");
     let dir = dir(&scratch);
     std::fs::create_dir(dir.join(CONFIG_FILE)).expect("a folder where the file goes");
-    let config = Config::load(Some(dir));
+    let config = Config::load(Some(dir), ThreadId(1));
     assert!(matches!(
         config.stage(SettingsOp::FinishOnboarding),
         Err(ConfigError::Unreadable)
@@ -95,7 +95,7 @@ fn an_unreadable_file_refuses_changes_like_a_broken_one() {
 
 #[test]
 fn no_home_refuses_changes() {
-    let config = Config::load(None);
+    let config = Config::load(None, ThreadId(1));
     assert_eq!(
         config.view().assistant_name.as_str(),
         DEFAULT_ASSISTANT_NAME
@@ -117,7 +117,7 @@ fn invalid_known_values_read_as_defaults_and_stay_until_set() {
         format!("assistant_name = \"{long}\"\nuser_name = 5\nonboarded = \"yes\"\n"),
     )
     .expect("seeded");
-    let mut config = Config::load(Some(dir));
+    let mut config = Config::load(Some(dir), ThreadId(1));
     assert_eq!(
         config.view().assistant_name.as_str(),
         DEFAULT_ASSISTANT_NAME
@@ -139,7 +139,7 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     let scratch = Scratch::new("config-failed");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    let mut config = Config::load(Some(dir.clone()));
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
     let before = std::fs::read_to_string(&path).expect("readable");
     // A folder where the temp file goes makes the write fail before the replace.

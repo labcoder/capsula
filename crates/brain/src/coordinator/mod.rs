@@ -11,6 +11,7 @@
 mod delete;
 mod scenes;
 mod store_op;
+mod thread_op;
 #[cfg(test)]
 mod tests;
 
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, MAX_STEP_LABEL, MAX_STEPS, PageOf, Phase, RunId, SceneId,
-    Step, ThreadId,
+    Step, ThreadId, ThreadOp,
 };
 
 use crate::store::{Failure, Interruption, RunEnd, SceneState, SceneTarget};
@@ -156,6 +157,8 @@ pub enum Input {
         /// The thread's newest stored run, read before its rows went.
         last_run: Option<RunId>,
     },
+    /// The shell renamed a task or set a thread's model.
+    ThreadOp(ThreadOp),
 }
 
 /// What an engine produces.
@@ -292,6 +295,8 @@ impl Run {
 /// The core loop's state.
 #[derive(Debug)]
 pub struct Coordinator {
+    /// Never deleted or renamed.
+    main_thread: ThreadId,
     last_thread: ThreadId,
     last_run: RunId,
     current: Option<Run>,
@@ -326,10 +331,16 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    /// Starts from the store's high-water marks, so ids keep growing across restarts, and from
-    /// the visible set the store recovered.
-    pub fn new(last_thread: ThreadId, last_run: RunId, scenes: Vec<SceneState>) -> Self {
+    /// Starts from the store's main thread and high-water marks, so ids keep growing across
+    /// restarts, and from the visible set the store recovered.
+    pub fn new(
+        main_thread: ThreadId,
+        last_thread: ThreadId,
+        last_run: RunId,
+        scenes: Vec<SceneState>,
+    ) -> Self {
         Self {
+            main_thread,
             last_thread,
             last_run,
             current: None,
@@ -459,6 +470,7 @@ impl Coordinator {
             input @ (Input::Delete { .. } | Input::Deleted { .. }) => {
                 self.deletion(&input, &mut effects)?;
             }
+            Input::ThreadOp(op) => self.thread_op(op, &mut effects),
         }
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);

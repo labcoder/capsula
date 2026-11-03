@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants;
+use kumochi_protocol::message::ThreadId;
 
 use crate::config::Config;
 use crate::runtime::Brain;
@@ -36,9 +37,10 @@ impl Scratch {
         self.0.join("store.db")
     }
 
-    /// Settings kept in this folder, so a test never touches the user's.
+    /// Settings kept in this folder, so a test never touches the user's, naming the main thread
+    /// a fresh store creates.
     pub(crate) fn config(&self) -> Config {
-        Config::load(Some(self.0.clone()))
+        Config::load(Some(self.0.clone()), ThreadId(1))
     }
 }
 
@@ -65,10 +67,12 @@ impl Drop for Scratch {
 pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
+    let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
     let fixture = Fixture::parse(script).expect("script");
-    Brain::new(store, high_water, scenes, fixture, scratch.config()).expect("brain")
+    let config = Config::load(Some(scratch.0.clone()), main_thread);
+    Brain::new(store, main_thread, high_water, scenes, fixture, config).expect("brain")
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.
