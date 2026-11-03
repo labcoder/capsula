@@ -69,7 +69,10 @@ reads ids, labels, shapes and links, with typed refusals for unsupported syntax.
 The grammar builds ordered nodes, parent-first groups and links, assigning node
 membership to the first closing group. Its tests cover complete-input parsing,
 direction, metadata and refusal boundaries. Admission still rejects Mermaid;
-this grammar layer alone does not enable it.
+these grammar and compiler layers alone do not enable it. The test-linked compiler
+expands sources in place into a private root, groups, nodes and edges. It checks
+expanded slots and per-diagram counts, reserves collision-free names, and keeps
+original-slot diagnostics and private drawing facts alongside the executable step.
 
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary
