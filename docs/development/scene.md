@@ -164,8 +164,10 @@ kept prefix is considered activated; its removals are retired. The selected glob
 budget strategy is **validate the combined final replayed result once**, rather
 than replay independent scenes against unrelated historical peaks. The budget
 layer implements this through `SceneState::replay_all`, returning the restored
-scenes and their shared budget atomically. Standalone `replay` returns an unbound
-scene; its next mutation must install its entire remaining charge. During replay,
+scenes and their shared budget atomically. The shell's layout-aware counterpart,
+`layout::recover_all`, returns an outcome per scene instead (see Preparation).
+Standalone `replay` returns an unbound scene; its next mutation must install its
+entire remaining charge. During replay,
 each commit releases removal/replacement charges without advancing the activated
 bound, so a later `Stop(1)` still works after replaying steps 1 and 2. Undo metadata
 stays available until actual activation or a cut.
@@ -421,13 +423,22 @@ flowchart LR
 ```
 
 `PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
-host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
+host surface and theme. A rejected join returns `(PrepareError, Preparation)`, handing
+the ticket back: `Stale` for a foreign, nonconsecutive or pre-cut predecessor, or a
+layout error for invalid host dimensions, so the same ticket can join the right
+predecessor. `prepare` resolves primitives, text, callouts, highlights,
 nodes, edges, tables, rows, charts and series, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
 `PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
 mutates an earlier picture. The host calls `PreparedStep::validate` against the current
 scene and predecessor immediately before accepting the result.
+
+`Stale` only ever means the inputs moved on: a join or result superseded by a commit
+or cut, a layout from another scene, or a frame from another view generation. Inside
+`prepare`, a placement that admission guarantees but the prefix lacks, or holds as
+another kind, is an internal invariant failure. It fails the step as
+`Layout(UnknownRef)`, so the host cuts instead of retrying it as stale.
 
 A diagram gets at most one generated position glide per step, targeting its last
 resting position plus the shift. Motion captures the sampled start at activation and
@@ -441,23 +452,41 @@ authoritative survivor handles and parents after semantic reference pruning. A d
 its ancestor's static and final activated transforms, including generated glides and
 opacity. No per-revision layout undo deltas or persisted geometry are needed.
 A cut fences both old results and old predecessor states, even when a result's
-objects survive the cut.
+objects survive the cut. `cut` rejects a layout prepared past the kept prefix (a
+revision above both its own last cut and `SceneState::activated()`) with
+`Layout(OutOfRange)`, because it would keep a dropped step's edits.
 Resting and sampled transforms scale, rotate, then translate by `pos + (x, y)`.
 
 `layout::recover` shares semantic replay's ordered traversal. Every original step
 and effective cut is semantically validated, but layout skips any step dropped by
 its first following cut. Thus a deterministically failing dropped preparation cannot
 block recovery. A failing kept preparation returns its revision in `RecoveryError`;
-the host applies the ordinary failure cut before that revision. B4 owns the total
-recovery time budget.
+revision zero rejects the whole scene (an invalid header or log, or the batch caps
+below). Recovered steps carry no run, so the shell clears a failed scene through its
+ordinary clear path, keeping its history, instead of cutting it.
 
-`resident_bytes` estimates new primitive/vertex payload plus the full layout index
-for every result, including entries for unchanged objects. Older shared geometry is
-excluded from that result's new-payload charge. The index estimate does not include
-all referenced heap storage, and summing result estimates is not an exact retained
-or recovered-scene total. Preparation rejects a single estimate over 64 MiB; B4
-must complete retained/queued accounting and enforce the global residency cap,
-independently of logical admission.
+`layout::recover_all` recovers a visible batch for the shell: one result per source,
+in input order, and one new `GlobalBudget`. Each scene recovers alone. Scenes that
+recover are charged in input order and bound to that budget privately, so `stop`,
+`clear` and `admit` accept only it; there is no public adopt or bind call. A failed
+scene charges nothing, and neither does a recovered scene that would take the batch
+past a global cap with the scenes before it: it fails whole, with revision zero and
+`OverBudget`. Once `cancel` is set, the scenes still preparing fail with `Cancelled`.
+The shell's recovery deadline is sized from the measurement below.
+
+`PreparedStep::resident_bytes` charges what a result adds to its predecessor: new
+primitive and vertex arrays, chart bases and plots, and the layout's own `Op` source
+copies, plus the result's full index, because every result holds its own copy of the
+maps. `LayoutState::resident_bytes()` charges everything a retained layout holds,
+counting each shared allocation once by pointer. So the retained layout plus the
+queued results make up the scene's residency, and a recovered layout charges exactly
+what the live one did. Source copies are counted field by field for each record
+type: each string's bytes and each sequence's elements at their own size, which
+matches what they allocate because cloned records have exact capacities. The index
+charge is a fixed allowance per object for its two map entries, plus both heap copies
+of its id; map node overhead, motion maps and allocator headers aren't counted beyond
+it. Preparation rejects a single estimate over 64 MiB, and the shell enforces the
+64 MiB cap across visible scenes.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
 to 600 existing text objects, using fixed deterministic measurement rather than GPUI.
@@ -467,6 +496,15 @@ test below normal priority, then run its executable at normal priority under the
 exclusive Rez lock after 30 seconds without cargo/rustc. Main had no preparation
 pipeline, so there is no before speedup baseline. Results are not painter, frame,
 real-font or end-to-end timings.
+
+The ignored `recover_at_the_caps` test in `tests/compound.rs` sizes recovery. It
+recovers the 14-diagram chain fixture grown one batch per step through a 64-step
+history, in its control and cross-group forms; a 600-object scene of 306 clusters
+(17 clusters of 17 single-node clusters); the chain plus that scene as one
+`recover_all` batch; and four scenes with the chain, clusters and two 150-object
+local/cross views at the shared 1,500-object cap. Three warm-ups precede 16 timed recoveries per workload; building
+the histories, resident-byte totals and result destruction are outside the timer, and
+text measurement is the fixed fake. Run it like the preparation measurement above.
 
 ### Tables
 
@@ -538,6 +576,56 @@ silently clipped to a table cap. The ignored
 `measure_prepare_table_at_column_and_row_caps` fixture rebuilds one table with eight
 columns, forty rows and 400 characters per cell using deterministic measurement.
 It follows the exclusive-lock release timing method above, not a real-font/frame test.
+
+## Shell mirror and preparation
+
+The shell's `presenter` owns one canonical budget and revalidates each durable typed step
+at its exact lifetime index. Live suffixes wait behind the complete recovery batch; fenced
+steps still enter the semantic mirror but never prepare. The snapshot assembler checks
+membership, ordinals, full log and retained counts, and every received frame byte including
+its header. It returns credit per consumed chunk so recovery can exceed the data window;
+only pre-membership chunks and the waiting live suffix withhold bounded credit.
+
+```mermaid
+flowchart LR
+    Pipe[Typed pipe frames] --> Assembly[Bounded log assembly]
+    Assembly --> Recovery[Scene-local batch recovery]
+    Recovery --> Mirror[Canonical mirror and shared budget]
+    Mirror --> Worker[Serial immutable preparation jobs]
+    Worker --> Publish[Validate job, cut, index and residency]
+    Watchdog[Independent deadline timer] --> Mirror
+```
+
+GPUI's shared text system crosses to the background executor; each worker constructs its
+own `WindowTextSystem` and uses the shell theme's font family. No window crosses threads.
+A host with no resolvable UI or fallback font aborts the shell under the release panic
+policy; drawings cannot select fonts, and ordinary shaping errors fail only their scene.
+
+Live preparation targets 50 ms and fails at 250 ms, including a queued step waiting for a
+worker slot; time behind its serial predecessor is excluded. A watchdog independent of
+completion sets cooperative cancellation and rejects
+late results. At most eight jobs or undelivered answers retain worker slots; dropping an
+unspawned job releases its slot too. Recovered layouts and queued results share a 64 MiB
+residency charge, with shared geometry and layout-owned source copies counted by identity.
+Clearing, removal and disconnect release ownership; cancelled workers keep their slots until
+their answer is applied or dropped. Cancellation never claims to kill a thread.
+
+Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
+a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
+fixed text measurement). Full cap recovery
+with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
+A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+allowing successful scenes to install. If the whole batch misses its deadline, its pending
+scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
+then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
+acknowledgement reaches the exact final committed revision. One new commit permits one new
+effective cut; stale acknowledgements for removed scenes do nothing.
+Clear intent made while scenes are mirrored survives brain restarts because scene ids are
+durable event ids; membership
+that still names a locally cleared scene causes its idempotent clear to be sent again.
+
+No fresh scene activates and no `StepShown` is sent yet. Production still uses placeholders
+until B3 switches both ends; B6 supplies painting and activation.
 
 ## Incremental drawing input
 

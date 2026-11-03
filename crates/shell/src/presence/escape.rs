@@ -1,6 +1,6 @@
 //! Local Esc routing for the focused surface.
 
-use super::{Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
+use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
 use crate::escape;
 
 impl Presence {
@@ -32,13 +32,19 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let action = escape::decide(self.activity, panel);
+        let action = local_decision(self.activity, panel, &self.presenter);
         let tell = match action {
             Escape::Stop => self.runs.stop(),
             Escape::Clear => {
                 let effect = self.runs.clear();
                 self.grant(effect.credit);
-                effect.clear
+                if self.presenter.holds_scenes() {
+                    let effects = self.presenter.clear(std::time::Instant::now());
+                    self.scene_effects(effects, cx);
+                    None
+                } else {
+                    effect.clear
+                }
             }
             Escape::Dismiss => {
                 if panel == EscapePanel::Settings {
@@ -67,14 +73,28 @@ impl Presence {
             }
             Escape::Ignore => None,
         };
-        self.activity = self.activity();
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        self.activity = Self::activity(&self.runs, panel, &self.presenter);
         self.refresh_conversation(cx);
         // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
         if let Some(message) = tell {
-            self.tell(message);
+            self.stop_run(message, cx);
         }
         self.escape_fixture = false;
         self.sync_escape(cx)
     }
+}
+
+pub(super) fn local_decision(
+    mut activity: Activity,
+    panel: EscapePanel,
+    presenter: &crate::presenter::Presenter,
+) -> Escape {
+    activity.drawing |= matches!(panel, EscapePanel::Open) && presenter.holds_scenes();
+    escape::decide(activity, panel)
 }

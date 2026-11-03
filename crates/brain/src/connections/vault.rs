@@ -18,6 +18,7 @@ use crate::platform::credential::{
     get_chunks, set_chunks,
 };
 use crate::platform::{self, SessionLock};
+use lane_store::LaneStore;
 
 /// A save's durable outcome, separate from cleanup after its manifest commit.
 #[derive(Debug)]
@@ -76,7 +77,7 @@ struct Manifest {
 /// Move the vault into blocking work, rather than dropping its guard when an async waiter ends.
 #[must_use = "the vault must retain its session lock until all blocking work ends"]
 pub struct Vault<S: CredentialStore> {
-    store: S,
+    store: LaneStore<S>,
     service: String,
     clean: [[bool; 2]; 2],
     _session: SessionLock,
@@ -93,15 +94,15 @@ impl<S: CredentialStore> Vault<S> {
     ///
     /// # Errors
     /// Returns typed Busy for contention, or a path/lock failure otherwise.
-    pub fn open(store: S) -> Result<Self, VaultError> {
+    pub(in crate::connections) fn open(store: S) -> Result<Self, VaultError> {
         let path = platform::session_lock_path().ok_or(VaultError::NoDataDir)?;
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 
-    fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
+    pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
         Ok(Self {
-            store,
+            store: LaneStore::new(store),
             service: service.to_owned(),
             clean: [[false; 2]; 2],
             _session: session,
@@ -526,5 +527,8 @@ fn valid_host(host: &str) -> bool {
         && b"89ab".contains(&host.as_bytes()[28])
 }
 
+#[cfg(test)]
+pub(crate) mod fake;
+mod lane_store;
 #[cfg(test)]
 mod tests;

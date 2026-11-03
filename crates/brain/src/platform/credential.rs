@@ -4,7 +4,10 @@ use kumochi_protocol::Secret;
 use zeroize::Zeroizing;
 
 #[cfg(windows)]
-pub use super::windows::WindowsCredentialStore;
+pub(crate) use super::windows::WindowsCredentialStore;
+
+#[cfg(all(test, windows))]
+pub(crate) mod fixture;
 
 /// Secret bytes whose owned allocation is wiped on drop and whose debug output is redacted.
 pub type SecretBytes = Secret<Zeroizing<Vec<u8>>>;
@@ -44,6 +47,10 @@ pub enum CredentialStoreError {
     /// A chunk is oversized, empty, or short before the final chunk.
     #[error("invalid credential chunk length")]
     InvalidChunkLength,
+    /// The store contradicted the account lane's own write or delete of this name, even
+    /// after retries.
+    #[error("credential store did not settle")]
+    Unsettled,
 }
 
 /// Synchronous storage by exact target name, with no enumeration or implicit name mapping.
