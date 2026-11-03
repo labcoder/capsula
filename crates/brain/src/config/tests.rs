@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::message::{AssistantName, SettingsOp, ThreadId, UserName};
+use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsOp, ThreadId, UserName};
 
 use super::{Config, ConfigError};
 use crate::test_support::Scratch;
@@ -153,4 +153,39 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
     let staged = config.stage(SettingsOp::FinishOnboarding).expect("staged");
     assert_eq!(staged.view.assistant_name.as_str(), "Nimbus");
+}
+
+#[test]
+fn debug_prints_neither_names_nor_unknown_values() {
+    let scratch = Scratch::new("config-debug");
+    let dir = dir(&scratch);
+    std::fs::write(
+        dir.join(CONFIG_FILE),
+        "assistant_name = \"Zqxassistant\"\nfuture_key = \"Zqxunknown\"\n",
+    )
+    .expect("seeded");
+    let config = Config::load(Some(dir), ThreadId(1));
+    let pending = config
+        .stage(SettingsOp::SetUserName(Some(
+            UserName::new("Zqxuser").expect("valid"),
+        )))
+        .expect("staged");
+    assert_eq!(
+        format!("{config:?}"),
+        "Config { loaded: true, keys: 2, .. }"
+    );
+    assert_eq!(format!("{pending:?}"), "Pending { keys: 3, .. }");
+    let broken = Config::load(None, ThreadId(1));
+    assert_eq!(
+        format!("{broken:?}"),
+        "Config { loaded: false, keys: 0, .. }"
+    );
+}
+
+#[test]
+fn only_an_unreadable_file_asks_the_user_to_fix_it() {
+    assert_eq!(ConfigError::Unreadable.key(), ErrorKey::ConfigUnreadable);
+    assert_eq!(ConfigError::NoHome.key(), ErrorKey::SettingsRefused);
+    let write = ConfigError::Write(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert_eq!(write.key(), ErrorKey::SettingsRefused);
 }

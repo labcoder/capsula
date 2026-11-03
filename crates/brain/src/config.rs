@@ -43,7 +43,6 @@ impl ConfigError {
 }
 
 /// The settings and the file they came from.
-#[derive(Debug)]
 pub(crate) struct Config {
     path: Option<PathBuf>,
     /// `Err` when the file can't be written over: no home, or unreadable.
@@ -58,11 +57,29 @@ enum Refusal {
 }
 
 /// A change staged for writing. [`Pending::write`] blocks, so it runs off the core loop.
-#[derive(Debug)]
 pub(crate) struct Pending {
     path: PathBuf,
     table: Table,
     view: SettingsView,
+}
+
+/// Only the table's shape: its values and the path can hold names.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("loaded", &self.table.is_ok())
+            .field("keys", &self.table.as_ref().map_or(0, Table::len))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Only the table's size: its values and the path can hold names.
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("keys", &self.table.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {

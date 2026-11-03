@@ -181,12 +181,13 @@ async fn play(lines: Arc<[Line]>, mut out: Outbox) {
 mod tests {
     use std::time::Duration;
 
-    use kumochi_protocol::message::{RunId, ThreadId};
+    use kumochi_protocol::message::{ControlToShell, Phase, RunId, Step, ThreadId};
     use tokio::sync::mpsc;
 
     use super::{DEFAULT, Fixture, Line, call, step};
     use crate::coordinator::{Coordinator, Effect, Input, StoreOp};
     use crate::engines::{Engine, EngineFailure, Finish, RunRequest, ToolName, TurnEvent, start};
+    use crate::store::SceneTarget;
 
     fn request() -> RunRequest {
         RunRequest {
@@ -298,13 +299,25 @@ mod tests {
         let started = received.recv().await.expect("the call starts");
         assert_eq!(core.handle(started), Ok(Vec::new()));
         let first = received.recv().await.expect("the first step");
-        let effects = core.handle(first).expect("current");
-        assert!(
-            effects.iter().any(|effect| matches!(
-                effect,
-                Effect::Store(StoreOp::CommitStep { index: 0, step, .. }) if step.label == "first"
-            )),
-            "{effects:?}"
+        assert_eq!(
+            core.handle(first),
+            Ok(vec![
+                Effect::Control(ControlToShell::RunState {
+                    run: RunId(3),
+                    thread: ThreadId(1),
+                    phase: Phase::Answering,
+                }),
+                Effect::Store(StoreOp::CommitStep {
+                    thread: ThreadId(1),
+                    run: RunId(3),
+                    text: None,
+                    scene: SceneTarget::New { evict: None },
+                    index: 0,
+                    step: Step {
+                        label: "first".to_owned(),
+                    },
+                }),
+            ])
         );
         assert!(
             received.is_empty(),

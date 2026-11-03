@@ -54,11 +54,13 @@ no shell is connected, and Quit and close write what's left before they end.
   logged: it sends no `Error` and no view. So a new shell's own changes are answered only by `answer: true`, and nothing from a
   gone shell can pass for one.
 - **Quit** writes the queue within its one absolute deadline (2 s from the accepted Quit). A
-  change still unsaved then is logged by count, with no value. The runtime then shuts down
-  without waiting for a write stuck on a slow disk, so Quit still ends on time. The process may
-  end mid-write; `config.toml` stays whole because it's only ever replaced, and that change is
-  lost.
-- **Close** (the shell gone for good, or from another build) does the same within 2 s.
+  change still unconfirmed then is logged by count, with no value. The runtime then shuts down
+  without waiting for a write stuck on a slow disk, so Quit still ends on time. That save is
+  unconfirmed, not lost: the write may still finish before the process exits. Either way
+  `config.toml` is the whole old file or the whole new one, because it's only ever replaced.
+- **Close** (the shell gone for good, or from another build) gives the settings the same 2 s
+  budget. Its waits for ended runs and for the store each keep their own 2 s, so closing as a
+  whole can take longer.
 - A change becomes the settings only once the file is replaced, so a failed write changes
   neither memory nor disk. A leftover `config.toml.tmp` is never read; the next write overwrites
   it.

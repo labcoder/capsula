@@ -158,6 +158,8 @@ pub(crate) enum Seen {
     DeleteAnswered,
     /// A quit ended the current run and now waits for the store.
     QuitDraining,
+    /// A settings write is on disk and became the settings.
+    SettingsCommitted,
 }
 
 impl Brain {
@@ -214,15 +216,6 @@ impl Brain {
             #[cfg(test)]
             gates,
         })
-    }
-
-    /// Holds the next settings write before it touches the file, until the returned sender
-    /// sends or drops.
-    #[cfg(test)]
-    pub(crate) fn hold_config_write(&mut self) -> std::sync::mpsc::Sender<settings::Gate> {
-        let (release, held) = std::sync::mpsc::channel();
-        self.config_gate = Some(held);
-        release
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
