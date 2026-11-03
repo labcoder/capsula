@@ -6,6 +6,9 @@ use zeroize::Zeroizing;
 #[cfg(windows)]
 pub use super::windows::WindowsCredentialStore;
 
+#[cfg(all(test, windows))]
+pub(crate) mod fixture;
+
 /// Secret bytes whose owned allocation is wiped on drop and whose debug output is redacted.
 pub type SecretBytes = Secret<Zeroizing<Vec<u8>>>;
 

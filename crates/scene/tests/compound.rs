@@ -1,8 +1,7 @@
 //! Compound graph admission, placement and legal-cap preparation measurements.
 use kumochi_scene::{
     Admission, Budget, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
-    WireId,
-    display::{MeasureError, Prim, TextMeasure, TextStyle},
+    display::Prim,
     geom::{Rect, Vec2},
     layout::{
         LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover, recover_all,
@@ -16,61 +15,12 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 #[path = "support/compound.rs"]
 mod fixtures;
+#[path = "support/scene.rs"]
+mod scene_support;
 
-struct Measure;
-
-impl TextMeasure for Measure {
-    fn measure(
-        &mut self,
-        text: &str,
-        _style: TextStyle,
-        max_width: Option<f32>,
-    ) -> Result<[f32; 2], MeasureError> {
-        let width = f32::from(u16::try_from(text.chars().count()).expect("bounded text")) * 8.0;
-        Ok([max_width.map_or(width, |limit| width.min(limit)), 10.0])
-    }
-}
-
-fn id(value: &str) -> WireId {
-    value.to_owned().try_into().expect("fixture id")
-}
-
-fn picture(
-    scene: &mut SceneState,
-    budget: &mut GlobalBudget,
-    before: &LayoutState,
-    value: Value,
-) -> PreparedStep {
-    picture_on(scene, budget, before, value, SurfaceGeometry::default())
-}
-
-fn picture_on(
-    scene: &mut SceneState,
-    budget: &mut GlobalBudget,
-    before: &LayoutState,
-    value: Value,
-    surface: SurfaceGeometry,
-) -> PreparedStep {
-    let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
-    let bytes = serde_json::to_vec(&envelope).expect("step JSON");
-    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-        panic!("step fixture");
-    };
-    let Admission::New(candidate) = scene.admit(&step, budget).expect("admitted step") else {
-        panic!("new step");
-    };
-    let committed = scene.commit(candidate, budget).expect("fresh admission");
-    let input = PrepareInput::new(
-        committed.preparation,
-        before.clone(),
-        surface,
-        Arc::new(Theme::default()),
-    )
-    .expect("consecutive preparation");
-    let prepared = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture");
-    prepared.validate(scene, before).expect("current picture");
-    prepared
-}
+use scene_support::{
+    Measure, id, new_scene as named_scene, prepared as picture, prepared_on as picture_on,
+};
 
 fn bounds(layout: &LayoutState, name: &str) -> Rect {
     layout
@@ -126,17 +76,6 @@ fn rejected(scene: &SceneState, budget: &GlobalBudget, value: Value, code: Error
 
 fn scene() -> SceneState {
     named_scene("compound")
-}
-
-fn named_scene(name: &str) -> SceneState {
-    let bytes = serde_json::to_vec(&json!({"begin":{
-        "v":1,"scene":name,"surface":"inline","alt":""
-    }}))
-    .expect("header JSON");
-    let Record::Begin(begin) = parse_record(&bytes).expect("begin record") else {
-        panic!("begin fixture");
-    };
-    SceneState::begin(begin).expect("scene")
 }
 
 fn groups() -> Vec<Value> {
@@ -294,9 +233,7 @@ fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() 
         let left = bounds(&prepared.after, "left");
         let right = bounds(&prepared.after, "right");
         if table {
-            let height = (15.0_f32 * 0.9) * 1.3 + 14.0;
-            let y = (36.0 - height.midpoint(32.0) + 16.0) + 16.0;
-            assert_rect(left, [19.0, y], [180.0, (y + height) - y]);
+            assert_rect(left, [19.0, 36.225], [180.0, 31.549_995]);
             assert_rect(right, [261.0, 32.0], [80.0, 40.0]);
         } else {
             assert_rect(left, [19.0, 32.0], [180.0, 120.0]);

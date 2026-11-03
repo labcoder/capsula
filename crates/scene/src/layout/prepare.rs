@@ -196,7 +196,7 @@ pub fn prepare(
     } else {
         0
     };
-    let (mut glides, owned_edges) =
+    let (mut glides, prebuilt) =
         nodes::place(&sources, &order, &rests, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
         after
@@ -228,7 +228,7 @@ pub fn prepare(
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
-        .filter(|id| !owned_edges.contains(*id))
+        .filter(|id| !prebuilt.contains(*id))
         .filter(|id| {
             !matches!(
                 &*sources[*id].1,

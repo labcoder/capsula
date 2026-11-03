@@ -145,10 +145,11 @@ impl Drop for ReadCredential {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{self, AssertUnwindSafe};
+    use std::thread;
 
     use kumochi_protocol::constants::CREDENTIAL_SERVICE;
 
+    use crate::platform::credential::fixture::Fixture;
     use crate::platform::credential::{
         CHUNK_SIZE, MAX_CHUNKS, delete_chunks, get_chunks, set_chunks,
     };
@@ -158,17 +159,12 @@ mod tests {
     fn isolated(test: impl FnOnce(&str)) {
         let nonce = getrandom::u64().expect("random test service");
         let service = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| test(&service)));
-        let store = WindowsCredentialStore;
-        let mut cleanup = store.delete(&service);
-        for index in 0..MAX_CHUNKS {
-            let result = store.delete(&format!("{service}/{index}"));
-            cleanup = cleanup.and(result);
-        }
-        cleanup.expect("clean up only this test's exact random names");
-        if let Err(payload) = outcome {
-            panic::resume_unwind(payload);
-        }
+        let _fixture = Fixture::new(
+            std::iter::once(service.clone())
+                .chain((0..MAX_CHUNKS).map(|index| format!("{service}/{index}")))
+                .collect(),
+        );
+        test(&service);
     }
 
     #[test]
@@ -192,6 +188,60 @@ mod tests {
                 "persisted secret matches"
             );
         });
+    }
+
+    #[test]
+    fn a_write_on_one_thread_reads_back_on_another() {
+        isolated(|target| {
+            let planted = b"test-only-cross-thread-sentinel";
+            let secret = Secret::new(Zeroizing::new(planted.to_vec()));
+            WindowsCredentialStore
+                .set(target, &secret)
+                .expect("write on the test thread");
+            thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let actual = WindowsCredentialStore
+                            .get(target)
+                            .expect("read on another thread")
+                            .expect("credential exists");
+                        assert!(
+                            actual.expose().as_slice() == planted,
+                            "the planted bytes read back exactly"
+                        );
+                    })
+                    .join()
+                    .expect("reader thread");
+            });
+        });
+    }
+
+    #[test]
+    fn a_real_credential_fixture_cleans_up_while_unwinding() {
+        let nonce = getrandom::u64().expect("random test service");
+        let target = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
+        let outcome: Result<(), _> = std::panic::catch_unwind(|| {
+            let _fixture = Fixture::new(vec![target.clone()]);
+            let secret = Secret::new(Zeroizing::new(vec![42]));
+            WindowsCredentialStore
+                .set(&target, &secret)
+                .expect("plant owned fixture data");
+            panic!("intentional fixture unwind");
+        });
+        assert_eq!(
+            outcome
+                .expect_err("intentional unwind")
+                .downcast_ref::<&str>(),
+            Some(&"intentional fixture unwind")
+        );
+        let _fixture = Fixture::new(vec![target.clone()]);
+        assert!(
+            WindowsCredentialStore
+                .get(&target)
+                .expect("read exact owned name")
+                .is_none(),
+            "Drop cleaned up during unwinding"
+        );
     }
 
     #[test]
