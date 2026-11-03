@@ -294,9 +294,9 @@ flowchart LR
 
 `PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
 host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
-nodes, edges, tables and rows, then validates measured/generated bounds and conservative motion
+nodes, edges, tables, rows, charts and series, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
-Charts remain unsupported until the chart layer of A6. `PreparedStep` contains owned display changes,
+`PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
 mutates an earlier picture. The host calls `PreparedStep::validate` against the current
 scene and predecessor immediately before accepting the result.
@@ -364,6 +364,31 @@ absorbed ancestor transform, including when later cell/color/emphasis updates ar
 Emphasis changes rebuild both the text weight and the colored background band.
 The existing shared detachment path does not yet preserve inherited opacity across
 later updates; A7 must retain that factor independently of the object's own opacity.
+
+Chart series use the same frozen-detachment rule: an immutable shared basis retains
+the plot rectangle, linear/log domains, categories, palette slot, bar group position,
+signed stack baselines and the series' allocated pie span. A cut carries the existing
+Arc; attached preparation replaces it and charges each new plot once and each new
+series basis once. Detached updates reuse it without charging its payload again.
+One drawing path serves attached and detached series. Values outside a retained
+domain map to its boundary, so a detached update cannot refit the discarded chart.
+Pie updates redistribute their retained span; a formerly zero-total series that
+becomes positive gets a full-circle fallback because it had no allocated span.
+These are placement facts only, never wire/persisted fields; ordered recovery
+rebuilds them from the original kept chart preparations and cuts.
+
+Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
+labels. Numeric point pairs retain their x coordinates; scalar points use indices.
+Stacks accumulate positive and negative bar values separately. Pie normalization
+includes every attached series, not only the first. Empty/zero-range/zero-total
+data is valid; admission rejects nonpositive log values and negative pie values.
+Area fill and its open top stroke are both reserved; native dots need no flattened
+segments. The explicit chart box wins, otherwise the viewport supplies the origin
+and width with height capped at 300. No chart animation is sampled here; A7 owns it.
+The ignored `measure_prepare_charts_at_mark_and_pie_segment_caps` fixture updates
+five eight-series scatter charts at 20,000 marks and an eight-series pie at 19,886
+segments (163 slices); another pie slice would exceed the shared 20,000 segment cap.
+It uses the same deterministic, exclusive-lock timing method as the table fixture.
 
 The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
 `alignment_defaults_and_explicit_override` retain their names. Preparation replaces
