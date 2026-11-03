@@ -312,6 +312,7 @@ async fn slow_partial_header_has_an_absolute_two_second_limit() {
         .await
         .expect("partial header");
     assert_eq!(seen.recv().await, Some(Event::Reading));
+    let read_started = tokio::time::Instant::now();
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::time::resume();
@@ -321,6 +322,11 @@ async fn slow_partial_header_has_an_absolute_two_second_limit() {
         .expect("more partial data");
     tokio::time::pause();
     tokio::time::advance(Duration::from_millis(1100)).await;
+    assert_eq!(seen.recv().await, Some(Event::ReadTimedOut));
+    assert!(
+        tokio::time::Instant::now() - read_started < Duration::from_millis(2200),
+        "read timed out on the advanced clock, not a renewed per-chunk deadline"
+    );
     tokio::time::resume();
     assert_eq!(seen.recv().await, Some(Event::Rejected));
     assert!(
@@ -361,6 +367,7 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
     let task = tokio::spawn(attempt.receive());
     let mut idle = TcpStream::connect(address).await.expect("idle preconnect");
     assert_eq!(seen.recv().await, Some(Event::Reading));
+    let read_started = tokio::time::Instant::now();
     let mut callback = TcpStream::connect(address).await.expect("queued callback");
     callback
         .write_all(valid.as_bytes())
@@ -368,6 +375,11 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
         .expect("send valid callback behind idle socket");
     tokio::time::pause();
     tokio::time::advance(Duration::from_millis(2100)).await;
+    assert_eq!(seen.recv().await, Some(Event::ReadTimedOut));
+    assert!(
+        tokio::time::Instant::now() - read_started < Duration::from_millis(2200),
+        "idle read timed out on the advanced clock"
+    );
     tokio::time::resume();
     assert_eq!(seen.recv().await, Some(Event::Rejected));
     assert!(

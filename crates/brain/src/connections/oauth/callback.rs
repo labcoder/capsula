@@ -28,6 +28,7 @@ pub(super) enum Page {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Event {
     Reading,
+    ReadTimedOut,
     Rejected,
 }
 
@@ -44,11 +45,15 @@ impl SignIn {
             #[cfg(test)]
             self.event(Event::Reading);
             let read = tokio::time::timeout_at(deadline, read_header(&mut socket)).await;
+            #[cfg(test)]
+            if read.is_err() {
+                self.event(Event::ReadTimedOut);
+            }
             if tokio::time::Instant::now() >= self.deadline {
                 return Err(SignInError::Expired);
             }
             let result = match read {
-                Ok(Ok(header)) => parse(
+                Ok(Ok(header)) if tokio::time::Instant::now() < deadline => parse(
                     &header,
                     &self.redirect,
                     self.state.expose(),
