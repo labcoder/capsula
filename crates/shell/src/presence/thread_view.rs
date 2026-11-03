@@ -334,10 +334,15 @@ impl ThreadsView {
         let sent = self
             .owner
             .update(cx, |owner, cx| {
-                let sent = owner
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| owner.link.send_control(session, message));
+                let sent = match message {
+                    ControlToBrain::Settings(SettingsOp::SetAssistantName(name)) => {
+                        owner.rename_assistant(name, cx)
+                    }
+                    message => owner
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| owner.link.send_control(session, message)),
+                };
                 if sent && kind == ThreadKind::Thread {
                     owner.threads.update(cx, |state, cx| {
                         state.renamed(thread);

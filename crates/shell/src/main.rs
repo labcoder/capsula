@@ -10,6 +10,7 @@ mod logging;
 mod platform;
 mod presence;
 mod runs;
+mod settings;
 mod strings;
 mod threads;
 

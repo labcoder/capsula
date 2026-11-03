@@ -3,6 +3,7 @@
 
 mod deletes;
 pub(crate) mod diagnostics;
+mod escape;
 mod geometry;
 mod gesture;
 mod launch;
@@ -11,6 +12,8 @@ pub(crate) mod observer;
 mod outline;
 mod paint;
 mod panels;
+mod settings;
+mod settings_view;
 mod stretch;
 mod text;
 mod thread_view;
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::{ActiveTheme as _, button::Button};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
@@ -31,7 +34,7 @@ use gpui_kit::{
 };
 use kumochi_protocol::constants;
 
-use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
+use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::{
@@ -39,6 +42,7 @@ use crate::platform::{
     PresenceNative, PresenceSurface,
 };
 use crate::runs::Runs;
+use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
@@ -49,6 +53,7 @@ pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
 use outline::Outline;
 use paint::{OutlinePaint, PanelStamp, Target};
+use settings::SettingsPanel;
 use stretch::Stretch;
 use text::TextPanel;
 use threads::ThreadsPanel;
@@ -68,6 +73,8 @@ struct Presence {
     /// Created on the first double tap, then hidden and reused so its draft survives.
     text: Option<TextPanel>,
     thread_panel: Option<ThreadsPanel>,
+    settings_panel: Option<SettingsPanel>,
+    settings: Entity<Settings>,
     threads: Entity<Threads>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
@@ -91,6 +98,7 @@ struct Presence {
     delete_retry: Option<Task<()>>,
     /// The brain's last error, on the dock while connected until the next turn is sent.
     error: Option<SharedString>,
+    error_field: Option<Field>,
 }
 
 impl Presence {
@@ -170,7 +178,11 @@ impl Presence {
         if visibility != self.panel_visibility {
             self.set_panel(visibility, cx)?;
         }
-        if self.text_open() || self.threads_open() || self.escape_hold.shows_stop() {
+        if self.text_open()
+            || self.threads_open()
+            || self.settings_open()
+            || self.escape_hold.shows_stop()
+        {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -216,12 +228,8 @@ impl Presence {
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let label: SharedString = if self.gesture.get().listening() {
             cx.global::<Strings>().get(Text::Listening).into()
-        } else if let Some(error) = self
-            .error
-            .clone()
-            .filter(|_| self.state == LinkState::Connected)
-        {
-            error
+        } else if self.error.is_some() && self.state == LinkState::Connected {
+            cx.global::<Strings>().get(Text::DockError).into()
         } else {
             dock_label(self.state, cx)
         };
@@ -288,7 +296,8 @@ impl Presence {
         }
         let text = self.text.as_ref().map(|text| text.window);
         let threads = self.thread_panel.as_ref().map(|panel| panel.window);
-        for window in [Some(self.panel_window), text, threads]
+        let settings = self.settings_panel.as_ref().map(|panel| panel.window);
+        for window in [Some(self.panel_window), text, threads, settings]
             .into_iter()
             .flatten()
         {
@@ -311,66 +320,6 @@ impl Presence {
             }
             Capture::Allowed => diagnostics::record(cx, format_args!("hold ended restored={all}")),
         }
-    }
-
-    /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
-    /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
-    fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let panel = if self.threads_focused() {
-            if self
-                .thread_panel
-                .as_ref()
-                .is_some_and(|panel| panel.view.read(cx).editing())
-            {
-                EscapePanel::Rename
-            } else {
-                EscapePanel::Threads
-            }
-        } else if self.text_open() {
-            EscapePanel::Open
-        } else {
-            EscapePanel::Closed
-        };
-        let action = escape::decide(self.activity, panel);
-        let tell = match action {
-            Escape::Stop => self.runs.stop(),
-            Escape::Clear => {
-                let effect = self.runs.clear();
-                self.grant(effect.credit);
-                effect.clear
-            }
-            Escape::Dismiss => {
-                if panel == EscapePanel::Threads {
-                    self.dismiss_threads(cx)?;
-                } else {
-                    self.dismiss_text(cx)?;
-                }
-                None
-            }
-            Escape::CancelEdit => {
-                if let Some(panel) = &self.thread_panel {
-                    panel
-                        .window
-                        .update(cx, |_, window, cx| {
-                            panel
-                                .view
-                                .update(cx, |view, cx| view.cancel_rename(window, cx));
-                        })
-                        .map_err(|error| OpenError::Gpui(error.into()))?;
-                }
-                None
-            }
-            Escape::Ignore => None,
-        };
-        self.activity = self.activity();
-        self.refresh_conversation(cx);
-        // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
-        diagnostics::record(cx, format_args!("escape action={action:?}"));
-        if let Some(message) = tell {
-            self.tell(message);
-        }
-        self.escape_fixture = false;
-        self.sync_escape(cx)
     }
 
     /// What's moving or on screen, as Esc sees it. shortcut: the placeholder steps show only in
@@ -423,6 +372,12 @@ impl Presence {
             });
         }
         if let Some(panel) = &self.thread_panel {
+            panel.view.update(cx, |view, cx| {
+                view.stop = stop;
+                cx.notify();
+            });
+        }
+        if let Some(panel) = &self.settings_panel {
             panel.view.update(cx, |view, cx| {
                 view.stop = stop;
                 cx.notify();
@@ -587,9 +542,11 @@ impl Render for Panel {
         let strings = cx.global::<Strings>();
         let quit_events = self.events.clone();
         let threads_owner = self.threads.clone();
+        let settings_owner = self.threads.clone();
         let retry = (self.state == LinkState::Failed).then(|| {
             let events = self.events.clone();
             Button::new("retry")
+                .small()
                 .label(strings.get(Text::Retry))
                 .on_click(move |_, _, _| {
                     send(&events, PresenceEvent::Retry);
@@ -599,6 +556,7 @@ impl Render for Panel {
             let events = self.events.clone();
             Target(
                 Button::new("stop")
+                    .small()
                     .label(strings.get(Text::Stop))
                     .on_click(move |_, _, _| {
                         send(&events, PresenceEvent::Escape);
@@ -623,11 +581,13 @@ impl Render for Panel {
             .child(
                 div()
                     .flex()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_1()
                     .children(stop)
                     .children(retry)
                     .child(
                         Button::new("threads")
+                            .small()
                             .label(strings.get(Text::OpenThreads))
                             .on_click(move |_, _, cx| {
                                 if let Some(owner) = threads_owner.clone() {
@@ -641,7 +601,16 @@ impl Render for Panel {
                                 }
                             }),
                     )
-                    .child(Button::new("quit").label(strings.get(Text::Quit)).on_click(
+                    .child(Button::new("settings").small().label(strings.get(Text::OpenSettings)).on_click(move |_, _, cx| {
+                        if let Some(owner) = settings_owner.clone() {
+                            cx.defer(move |cx| {
+                                if let Ok(Err(error)) = owner.update(cx, Presence::toggle_settings) {
+                                    tracing::error!(%error, "can't open the settings panel");
+                                }
+                            });
+                        }
+                    }))
+                    .child(Button::new("quit").small().label(strings.get(Text::Quit)).on_click(
                         move |_, _, _| {
                             send(&quit_events, PresenceEvent::Quit);
                         },
@@ -804,6 +773,7 @@ pub(crate) fn open(
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let owner_gesture = Rc::clone(&gesture);
     let threads = cx.new(|_| Threads::default());
+    let settings = cx.new(|_| Settings::default());
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -814,6 +784,8 @@ pub(crate) fn open(
             panel,
             text: None,
             thread_panel: None,
+            settings_panel: None,
+            settings,
             threads,
             events,
             link,
@@ -834,6 +806,7 @@ pub(crate) fn open(
             pointer_settle: None,
             delete_retry: None,
             error: None,
+            error_field: None,
             stretch,
         }
     });
@@ -912,6 +885,9 @@ fn listen(
                         if this.state == LinkState::Failed {
                             this.link.retry();
                         }
+                    }
+                    PresenceEvent::DismissPanel if this.settings_open() => {
+                        this.dismiss_settings(cx)?;
                     }
                     PresenceEvent::DismissPanel if this.threads_open() => {
                         this.dismiss_threads(cx)?;

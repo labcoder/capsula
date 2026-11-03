@@ -64,5 +64,17 @@ rename-one-line = Use one line without control characters.
 task-fallback = a task
 task-focus = You're in: { $task }
 
+settings-title = Settings
+action-settings = Settings…
+settings-close = Close
+settings-general = General
+settings-accounts = Accounts
+settings-assistant-name = Assistant's name
+settings-user-name = Your name
+settings-user-name-help = Leave blank to unset. Press Enter or leave a field to save.
+settings-saving = Saving…
+settings-offline = Reconnect to change settings.
+dock-error = Check settings
+
 error-settings-refused = Couldn't save that setting. Try again.
 error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.

@@ -23,8 +23,12 @@ impl Presence {
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
-                LinkEvent::Settings { generation, view } => {
-                    self.settings_changed(generation, view, cx);
+                LinkEvent::Settings {
+                    generation,
+                    view,
+                    answer,
+                } => {
+                    self.settings_changed(generation, view, answer, cx);
                 }
                 LinkEvent::RunState { run, thread, phase } => {
                     let applied = self.runs.apply_state(run, thread, phase);
@@ -116,6 +120,7 @@ impl Presence {
         &mut self,
         generation: u64,
         view: SettingsView,
+        answer: bool,
         cx: &mut Context<'_, Self>,
     ) {
         if self
@@ -126,6 +131,14 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
+        let completion = self.settings.update(cx, |state, cx| {
+            let completion = state.set_view(view.clone(), answer);
+            cx.notify();
+            completion
+        });
+        if super::settings::settle_notice(&mut self.error, &mut self.error_field, completion) {
+            self.refresh_dock(cx);
+        }
         self.threads.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
@@ -134,6 +147,11 @@ impl Presence {
 
     /// Shows the brain's error in the typing panel and on the dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
+        self.error_field = self.settings.update(cx, |state, cx| {
+            let field = state.error(error.clone());
+            cx.notify();
+            field
+        });
         self.error = Some(cx.global::<Strings>().error(error).into());
         self.refresh_dock(cx);
     }
@@ -191,6 +209,10 @@ impl Presence {
             });
             self.request_pages(cx);
         } else {
+            self.settings.update(cx, |state, cx| {
+                state.disconnected();
+                cx.notify();
+            });
             self.runs.disconnected();
             self.sync_deletes(cx);
             self.threads.update(cx, |state, cx| {

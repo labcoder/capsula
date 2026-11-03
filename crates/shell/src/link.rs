@@ -67,6 +67,7 @@ pub(crate) enum LinkEvent {
     Settings {
         generation: u64,
         view: SettingsView,
+        answer: bool,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -731,9 +732,13 @@ fn watch(
                     tracing::warn!("the control queue is full; the brain isn't reading");
                 }
             }
-            Ok(Some(ControlToShell::Settings { view, .. })) => {
+            Ok(Some(ControlToShell::Settings { view, answer })) => {
                 if events
-                    .send_blocking(LinkEvent::Settings { generation, view })
+                    .send_blocking(LinkEvent::Settings {
+                        generation,
+                        view,
+                        answer,
+                    })
                     .is_err()
                 {
                     return;

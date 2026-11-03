@@ -4,6 +4,38 @@ The brain owns the user's settings and keeps them in `config.toml`, in the `Kumo
 under `%APPDATA%` (`Kumochi Dev` for debug builds, so a dev build never touches an install).
 The shell shows them and asks for changes; it never reads the file.
 
+## Shell editor
+
+The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
+with the same work-area clamping. Kit's tabs expose **General** and an empty **Accounts**
+placeholder. `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
+`presence/settings.rs` owns the window and session sends, and `presence/settings_view.rs`
+owns the retained Kit inputs and subscriptions. The shell's UI thread never waits for a save.
+
+Enter or blur validates with the protocol's name types and queues the change. An unchanged
+field without an error does nothing. While saving, that field is readonly and says Saving…;
+the other field remains usable. A refused save restores its authoritative value and keeps its
+inline error until that field changes again. Cancelling an edit restores the last received
+value without sending it. The user-name field maps blank input to `None`.
+
+Every accepted field operation, including an inline assistant rename from Tasks, enters one
+FIFO. Only `answer: true` consumes its head and clears that field's saving state. The preceding
+`UserError` belongs to that head; `answer: false` updates saved values but never completes an
+operation. Errors remain after the refused answer. An answer to another field cannot erase
+them. A successful retry of the field that produced the dock notice clears that notice and
+its full typing-panel explanation; an unsolicited view or reconnect does not. The dock shows
+only **Check settings**, not recovery prose inside its small pill. The full explanation remains
+beside the field and in the typing panel. A new turn also clears the retained typing/dock notice.
+Disconnect drops all in-flight slots; the replacement connection must first supply its view
+before new saves are available. A late answer from another generation is ignored.
+
+Settings stays visible when deactivated. Esc stops work, then clears a drawing, then cancels
+the active field edit; another Esc dismisses. The close button and Settings… again also
+dismiss it. Dismissal saves an active edit as a blur would, hides the window, and uses the
+existing platform presence functions to restore the previous foreground when still owned.
+No additional platform-specific code is needed. See [panels](panels.md#settings-panel) and
+the [user guide](../user/settings.md).
+
 | Key | Type | Default |
 |---|---|---|
 | `assistant_name` | 1–24 characters | `Kumo` |

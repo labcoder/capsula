@@ -272,6 +272,9 @@ impl Presence {
                 })
                 .map_err(|error| OpenError::Gpui(error.into()))?;
         }
+        if !matches!(result, Err(Refused::Blank)) {
+            self.error_field = None;
+        }
         submission_notice(&mut self.error, result, cx.global::<Strings>());
         self.refresh_dock(cx);
         self.runs_changed(cx)

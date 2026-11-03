@@ -1,4 +1,28 @@
-# The tasks panel
+# Panels
+
+## Settings panel
+
+The status surface also has **Settings…**. It opens a separate retained panel with the same
+48-by-34-rem initial size and `Layout::anchored_panel` placement as Tasks. **General** contains
+the assistant's name and your optional name; **Accounts** is reserved and empty for now.
+Labels, inline validation, saving and offline feedback use the shell's Fluent catalog.
+App identity continues to come from `protocol::constants`; assistant labels use the name
+received from the brain as a Fluent argument, not the product name.
+
+Settings does not hide on deactivation. Esc operates only when Settings is focused: stop,
+clear, cancel the active field edit, then dismiss on the next Esc. Stop and clear leave the
+edit intact. Its close button and **Settings…** again dismiss it too. On dismissal, an active
+field saves as on blur, and the previous foreground is restored through the existing platform
+presence interface. The native focus handoff requires a real Window and remains an owner
+hand check; pure Esc and save ordering are unit-tested. A new Settings panel inherits the
+current capture exclusion, just like Tasks and typing.
+
+`presence/settings.rs` owns this lifetime, `presence/settings_view.rs` composes Kit's TabBar
+and Inputs, and `shell/settings.rs` owns drafts and ordered answers. See
+[settings](settings.md#shell-editor) for the FIFO and error lifetime, and
+[using Settings](../user/settings.md) for the workflow.
+
+## Tasks workflow
 
 The dock's **Tasks…** command opens an interactive surface anchored against the dock,
 clamped to the work area like the typing panel. Opening a task changes only the viewed history,

@@ -12,7 +12,7 @@ use super::{
 use crate::strings::{Strings, Text};
 
 /// The initial native window size, in interface rems [guess].
-const PANEL_REMS: [f32; 2] = [48.0, 34.0];
+pub(super) const PANEL_REMS: [f32; 2] = [48.0, 34.0];
 
 pub(super) struct ThreadsPanel {
     pub(super) window: AnyWindowHandle,
