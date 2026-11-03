@@ -126,14 +126,14 @@ in each phase; typical, then worst:
 
 | Store | Delete, drain | Delete, inside the snapshot | Turn behind it, worst | Delete with nothing running, worst |
 |---|---|---|---|---|
-| 46 MiB | 3.1–3.3, 8.2 ms | 4.7–5.3 ms | 10.6 ms | 9.8 ms |
+| 46 MiB | 3.1–6.1, 8.2 ms | 4.7–5.3 ms | 10.6 ms | 9.8 ms |
 | 232 MiB | 4.5–4.9, 18.7 ms | 6.6–7.1 ms | 19.7 ms | 21.1 ms |
 | 515 MiB | 3.0–3.2, 8.5 ms | 4.6–5.1 ms | 9.4 ms | 18.5 ms |
 | 984 MiB | 3.0–3.2, 20.1 ms | 4.9–5.3 ms | 31.4 ms | 11.5 ms |
 
-Three of the four slow drain samples, 8–19 ms, were their run's first; the fourth, at 984 MiB,
-took 20.1 ms with its turn at 31.4 ms. The rest stay within a few milliseconds of an ordinary
-delete.
+Each store's first drain sample was a slow one: 8.2, 18.7, 8.5 and 8.1 ms. The only other slow
+sample was the fifth at 984 MiB, 20.1 ms, with its turn at 31.4 ms. The rest stay within a few
+milliseconds of an ordinary delete.
 
 A write queued behind a page read no longer waits for it (`measure_page_reads`, release build on
 Rez, 30 rounds; medians, worst in brackets):
