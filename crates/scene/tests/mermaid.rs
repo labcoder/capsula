@@ -1119,6 +1119,50 @@ fn a_title_only_subgraph_has_a_single_literal_band() {
 }
 
 #[test]
+fn retained_prefix_residency_keeps_private_title_text() {
+    let mut bytes = Vec::new();
+    for title in ["X", "Title"] {
+        let mut scene = scene();
+        let before = LayoutState::new(&scene);
+        let prepared = picture(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            &graph(&format!("flowchart TB\nsubgraph g[{title}]\nA\nend\n")),
+        );
+        assert_eq!(scene.object_count(), 4);
+        bytes.push(prepared.after.resident_bytes());
+    }
+    assert_eq!(
+        bytes[1] - bytes[0],
+        8,
+        "four more bytes in paint and four in retained private facts"
+    );
+}
+
+#[test]
+fn prepared_residency_keeps_the_private_compiled_node_text() {
+    let mut bytes = Vec::new();
+    for label in ["X", "Label"] {
+        let mut scene = scene();
+        let before = LayoutState::new(&scene);
+        let prepared = picture(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            &graph(&format!("flowchart TB\nA[{label}]\n")),
+        );
+        assert_eq!(scene.object_count(), 3);
+        bytes.push(prepared.resident_bytes);
+    }
+    assert_eq!(
+        bytes[1] - bytes[0],
+        12,
+        "four more bytes in paint, the layout source and the compiled ticket"
+    );
+}
+
+#[test]
 fn the_connected_mermaid_measurement_really_prepares_600_objects() {
     let mut scene = scene();
     let before = LayoutState::new(&scene);

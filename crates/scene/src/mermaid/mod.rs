@@ -142,7 +142,7 @@ pub(crate) fn expand(
             break id;
         }
     };
-    let mut put = Vec::new();
+    let mut put = Vec::with_capacity(MAX_STEP_OPS - slots);
     let mut origins = Vec::new();
     let mut extras = BTreeMap::new();
     let mut charts = charts.into_iter();

@@ -10,7 +10,7 @@
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, encode};
-use crate::message::{ControlToBrain, ControlToShell, DataToBrain, DataToShell};
+use crate::message::{AccountOp, ControlToBrain, ControlToShell, DataToBrain, DataToShell};
 
 /// The start of every recording, with the format's version.
 pub const MAGIC: [u8; 5] = *b"KTAP\x02";
@@ -50,6 +50,7 @@ impl Tapped for ControlToBrain {
             Self::StopScenes { .. } => "StopScenes",
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
+            Self::AccountOp(_) => "AccountOp",
         }
     }
 
@@ -70,6 +71,13 @@ impl Tapped for ControlToBrain {
                     after_turns: _,
                     resend: _
                 }
+                | Self::AccountOp(
+                    AccountOp::SignIn
+                        | AccountOp::CancelSignIn
+                        | AccountOp::SignOut
+                        | AccountOp::EnablePlan
+                        | AccountOp::Retry
+                )
         )
     }
 }
@@ -88,9 +96,11 @@ impl Tapped for ControlToShell {
             Self::Error(_) => "Error",
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
+            Self::Account(_) => "Account",
         }
     }
 
+    /// `Account` isn't listed: its view carries the display email.
     fn content_free(&self) -> bool {
         // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(

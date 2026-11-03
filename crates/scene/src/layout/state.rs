@@ -157,6 +157,28 @@ impl LayoutState {
     pub fn revision(&self) -> u32 {
         self.revision
     }
+    /// Bytes this prefix retains, counting each shared primitive array, vertex array, chart
+    /// basis, plot, source copy and private compiled facts once, plus the per-object index.
+    pub fn resident_bytes(&self) -> usize {
+        let items = self.objects.values().map(|object| &object.item);
+        super::prepare::residency(std::iter::empty(), items)
+            + super::chart::retained_bytes(self)
+            + super::heap::source_bytes(std::iter::empty(), self.objects.values())
+            + self
+                .extras
+                .values()
+                .flat_map(|extras| extras.values())
+                .map(Extra::bytes)
+                .sum::<usize>()
+            + self.index_bytes()
+    }
+    /// Index and placement records, which every prepared result holds its own copy of,
+    /// including the two heap copies of each object's id.
+    pub(super) fn index_bytes(&self) -> usize {
+        let ids: usize = self.objects.keys().map(|id| id.as_str().len()).sum();
+        self.objects.len() * (size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3)
+            + 2 * ids
+    }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {
         self.objects.get(id).map(|object| object.item.handle)
@@ -215,10 +237,14 @@ impl LayoutState {
     }
     /// Applies semantic Stop's result to the last activated `after` state.
     /// # Errors
-    /// Rejects another scene's state, a missing survivor or unsafe frozen geometry.
+    /// Rejects another scene's state, a layout prepared past the kept prefix, a missing
+    /// survivor or unsafe frozen geometry.
     pub fn cut(&self, scene: &SceneState) -> Result<Self, PrepareError> {
         if !Arc::ptr_eq(&self.owner, &scene.preparation_owner()) {
             return Err(PrepareError::Stale);
+        }
+        if self.revision > self.cut_revision.max(scene.activated()) {
+            return Err(primitives::layout_error(ErrorCode::OutOfRange));
         }
         let mut after = self.clone();
         let mut retained = BTreeMap::new();
@@ -241,7 +267,7 @@ impl LayoutState {
                         .handles
                         .get(&handle)
                         .and_then(|id| self.objects.get(id))
-                        .ok_or(PrepareError::Stale)?;
+                        .ok_or_else(primitives::invariant)?;
                     object.inherited_opacity *= ancestor.inherited_opacity
                         * ancestor.rest.opacity.unwrap_or(ancestor.item.opacity);
                     next = ancestor.item.parent;

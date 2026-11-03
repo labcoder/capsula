@@ -228,7 +228,18 @@ fn chunks_validate_local_shape_without_cross_chunk_replay() {
 
 #[test]
 fn debug_keeps_model_ids_and_text_out_of_headers_and_logs() {
-    let value = decode::<SceneSnapshotChunk>(&chunk()).expect("valid chunk");
+    let mut raw = chunk();
+    let kumochi_scene::Record::Step(step) = kumochi_scene::parse_record(
+        br#"{"step":{"id":"private-step-id","say":"private-speech","put":[{"text":{"id":"private-object-id","at":[13337.25,0],"text":"private-text"}}]}}"#,
+    )
+    .expect("valid step") else {
+        panic!("step record")
+    };
+    raw.events = vec![SceneEvent::Step {
+        revision: 1,
+        step: Arc::new(step),
+    }];
+    let value = decode::<SceneSnapshotChunk>(&raw).expect("valid chunk");
     let debug = format!("{value:?}");
     for private in [
         "private-model-id",
@@ -236,6 +247,9 @@ fn debug_keeps_model_ids_and_text_out_of_headers_and_logs() {
         "private-alt",
         "private-step-id",
         "private-speech",
+        "private-object-id",
+        "private-text",
+        "13337.25",
     ] {
         assert!(!debug.contains(private));
     }

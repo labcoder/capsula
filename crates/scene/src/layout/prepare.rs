@@ -1,11 +1,11 @@
 use super::{
-    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SurfaceGeometry,
-    compound, nodes,
-    primitives::{Build, layout_error, rect},
+    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
+    SurfaceGeometry, compound, heap, nodes,
+    primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
 use crate::{
-    Begin, ErrorCode, Handle, Op, SceneEvent, SceneState, WireId,
+    Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
     mermaid::Extra,
@@ -71,10 +71,7 @@ pub fn prepare(
         let (handle, source) = if let Some((handle, source)) = sources.get(&change.target) {
             (*handle, Arc::clone(source))
         } else {
-            let previous = after
-                .objects
-                .get(&change.target)
-                .ok_or(PrepareError::Stale)?;
+            let previous = after.objects.get(&change.target).ok_or_else(invariant)?;
             (previous.item.handle, Arc::clone(&previous.source))
         };
         tables |= matches!(&*source, Op::Table(_) | Op::Row(_));
@@ -106,7 +103,7 @@ pub fn prepare(
         } else if let Some((handle, _)) = sources.get(id) {
             removed.push(*handle);
         } else {
-            return Err(PrepareError::Stale);
+            return Err(invariant());
         }
         sources.remove(id);
     }
@@ -223,8 +220,8 @@ pub fn prepare(
         }
     }
     for Glide { target, to } in &glides {
-        let id = after.handles.get(target).ok_or(PrepareError::Stale)?;
-        let group = after.objects.get_mut(id).ok_or(PrepareError::Stale)?;
+        let id = after.handles.get(target).ok_or_else(invariant)?;
+        let group = after.objects.get_mut(id).ok_or_else(invariant)?;
         let old = group.rest.pos;
         group.rest.pos = *to;
         let glide = work::Motion {
@@ -288,7 +285,7 @@ pub fn prepare(
         after
             .objects
             .get_mut(&id)
-            .ok_or(PrepareError::Stale)?
+            .ok_or_else(invariant)?
             .motion
             .insert(property, motion);
     }
@@ -307,11 +304,12 @@ pub fn prepare(
         .map(|(_, object)| object.item.clone())
         .collect();
     items.sort_by_key(|item| item.handle);
-    let resident_bytes = residency(&items, &before)
+    let resident_bytes = residency(before.objects.values().map(|object| &object.item), &items)
+        + heap::source_bytes(before.objects.values(), after.objects.values())
+        + heap::compiled_bytes(&ticket.step, &ticket.run)
         + chart_bytes
         + ticket.extras.values().map(Extra::bytes).sum::<usize>()
-        + after.objects.len()
-            * (size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3);
+        + after.index_bytes();
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
     }
@@ -367,13 +365,14 @@ pub fn recover(
             match event {
                 SceneEvent::Step { revision, .. } if !skipped.contains(revision) => {
                     let result = (|| {
-                        let committed = committed.ok_or(PrepareError::Stale)?;
+                        let committed = committed.ok_or_else(invariant)?;
                         let input = PrepareInput::new(
                             committed.preparation,
                             before.clone(),
                             surface,
                             Arc::clone(theme),
-                        )?;
+                        )
+                        .map_err(|(error, _)| error)?;
                         let prepared = prepare(input, measure, cancel)?;
                         prepared.validate(scene, before)?;
                         Ok::<_, PrepareError>(prepared.after)
@@ -396,6 +395,31 @@ pub fn recover(
     )?;
     let layout = layout.unwrap_or_else(|| LayoutState::new(&scene));
     Ok((scene, layout))
+}
+
+/// Recovers a visible batch scene by scene and binds the survivors to one new budget.
+///
+/// Results follow input order. A failed scene charges nothing, and so does a recovered one
+/// that would take the batch past a global cap with the scenes before it: that one fails
+/// whole, with revision zero.
+pub fn recover_all(
+    sources: &[(&Begin, &[SceneEvent])],
+    surface: SurfaceGeometry,
+    theme: &Arc<Theme>,
+    measure: &mut dyn TextMeasure,
+    cancel: &AtomicBool,
+) -> (Vec<SceneRecovery>, GlobalBudget) {
+    let mut global = GlobalBudget::default();
+    let results = sources
+        .iter()
+        .map(|(header, log)| -> Result<_, RecoveryError> {
+            let (mut scene, layout) =
+                recover((*header).clone(), log, surface, theme, measure, cancel)?;
+            scene.bind(&mut global)?;
+            Ok((scene, layout))
+        })
+        .collect();
+    (results, global)
 }
 
 fn parent(
@@ -628,12 +652,16 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
     Ok(())
 }
 
-fn residency(items: &[Item], before: &LayoutState) -> usize {
+/// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once.
+pub(super) fn residency<'a>(
+    shared: impl IntoIterator<Item = &'a Item>,
+    items: impl IntoIterator<Item = &'a Item>,
+) -> usize {
     let mut shared_arrays = HashSet::new();
     let mut vertices = HashSet::new();
-    for object in before.objects.values() {
-        shared_arrays.insert(object.item.primitives.as_ptr());
-        for primitive in &*object.item.primitives {
+    for item in shared {
+        shared_arrays.insert(item.primitives.as_ptr());
+        for primitive in &*item.primitives {
             if let Prim::Fill { points, .. } | Prim::Line { points, .. } = primitive {
                 vertices.insert(points.as_ptr());
             }
@@ -694,7 +722,10 @@ mod tests {
             ]),
         };
         assert_eq!(
-            residency(std::slice::from_ref(&item), &before),
+            residency(
+                before.objects.values().map(|o| &o.item),
+                std::slice::from_ref(&item)
+            ),
             2 * size_of::<Prim>() + 3 * size_of::<Vec2>()
         );
         let crate::Record::Step(step) = crate::parse_record(
@@ -707,11 +738,20 @@ mod tests {
             "p".to_owned().try_into().expect("id"),
             Placed::new(item.clone(), Arc::new(step.put[0].clone()), None),
         );
-        assert_eq!(residency(std::slice::from_ref(&item), &before), 0);
+        assert_eq!(
+            residency(
+                before.objects.values().map(|o| &o.item),
+                std::slice::from_ref(&item)
+            ),
+            0
+        );
         let recolored = Item {
             primitives: item.primitives.to_vec().into(),
             ..item
         };
-        assert_eq!(residency(&[recolored], &before), 2 * size_of::<Prim>());
+        assert_eq!(
+            residency(before.objects.values().map(|o| &o.item), &[recolored]),
+            2 * size_of::<Prim>()
+        );
     }
 }

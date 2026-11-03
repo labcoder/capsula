@@ -5,6 +5,7 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
+use std::time::Instant;
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.
@@ -43,7 +44,7 @@ impl Presence {
                     let applied = self.runs.apply_state(run, thread, phase);
                     diagnostics::record(cx, format_args!("run phase={phase:?}"));
                     if let Some(stop) = applied.stop {
-                        self.tell(stop);
+                        self.stop_run(stop, cx);
                     }
                     self.grant(applied.credit);
                     self.threads.update(cx, |state, cx| {
@@ -61,10 +62,25 @@ impl Presence {
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
                     Ok(effect) => {
                         self.effect(effect);
+                        if let Some(session) = &self.session {
+                            let effects = self.presenter.described(
+                                session.generation(),
+                                &kumochi_scene::text::Bounded::default(),
+                                Instant::now(),
+                            );
+                            self.scene_effects(effects, cx);
+                        }
                         self.send_deletes(cx);
                     }
                     Err(error) => self.end(&error),
                 },
+                LinkEvent::ScenesV1 { generation, scenes } => {
+                    let effects = self
+                        .presenter
+                        .described(generation, &scenes, Instant::now());
+                    self.scene_effects(effects, cx);
+                    self.send_deletes(cx);
+                }
                 LinkEvent::ThreadDeleted {
                     thread,
                     outcome,
@@ -92,6 +108,25 @@ impl Presence {
             .as_ref()
             .is_some_and(|session| session.generation() == generation)
         {
+            if matches!(
+                &message,
+                DataToShell::SceneSnapshotV1 { .. }
+                    | DataToShell::SceneBegin { .. }
+                    | DataToShell::SceneStepCommit { .. }
+                    | DataToShell::SceneCutApplied { .. }
+                    | DataToShell::SceneEnd { .. }
+                    | DataToShell::ScenesRemoved { .. }
+            ) {
+                if let DataToShell::ScenesRemoved { scenes } = &message {
+                    let credit = self.runs.remove_scenes(scenes);
+                    self.grant(credit);
+                }
+                let effects = self
+                    .presenter
+                    .data(generation, message, bytes, Instant::now());
+                self.scene_effects(effects, cx);
+                return;
+            }
             let credit = match message {
                 message @ (DataToShell::ThreadList { .. }
                 | DataToShell::Page { .. }
@@ -123,9 +158,6 @@ impl Presence {
                             0
                         }
                     }
-                }
-                DataToShell::ScenesRemoved { scenes } => {
-                    bytes.saturating_add(self.runs.remove_scenes(&scenes))
                 }
                 message => self.runs.apply_data(message, bytes),
             };
@@ -219,12 +251,16 @@ impl Presence {
         {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
+            self.presenter.connected(session.generation());
             self.threads.update(cx, |state, cx| {
                 state.connected();
                 cx.notify();
             });
             self.request_pages(cx);
         } else {
+            self.presenter.disconnected();
+            self.scene_timer = None;
+            self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {
                 state.disconnected();
                 cx.notify();

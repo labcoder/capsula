@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::constants::{INSTANCE_SERVICE, SESSION_LOCK};
 
+use super::fake::{FakeStore, Fault, Mutation};
 use super::*;
 use crate::connections::marker::SignOut;
 use crate::connections::records::{Origin, Revocable, Tokens};
@@ -14,117 +13,10 @@ use crate::test_support::Scratch;
 mod bounds;
 mod marker;
 
-#[derive(Debug, Clone, Copy)]
-enum Fault {
-    Refuse,
-    CrashAfter,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Replacement {
     Tokens,
     Registration,
-}
-
-#[derive(Debug, Clone)]
-enum Mutation {
-    Set(String),
-    Delete,
-}
-
-#[derive(Debug, Default)]
-struct FakeState {
-    values: BTreeMap<String, SecretBytes>,
-    mutations: Vec<Mutation>,
-    fault: Option<(usize, Fault)>,
-    denied_read: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct FakeStore(Arc<Mutex<FakeState>>);
-
-impl FakeStore {
-    fn fork(&self) -> Self {
-        let values = self.0.lock().expect("fake lock").values.clone();
-        Self(Arc::new(Mutex::new(FakeState {
-            values,
-            ..FakeState::default()
-        })))
-    }
-
-    fn names(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .expect("fake lock")
-            .values
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    fn arm(&self, index: usize, fault: Fault) {
-        let mut state = self.0.lock().expect("fake lock");
-        state.mutations.clear();
-        state.fault = Some((index, fault));
-    }
-
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "fault injection deliberately models process death after a durable mutation"
-    )]
-    fn mutate(
-        &self,
-        target: &str,
-        value: Option<&SecretBytes>,
-    ) -> Result<(), CredentialStoreError> {
-        let fault = {
-            let mut state = self.0.lock().expect("fake lock");
-            let index = state.mutations.len();
-            state
-                .mutations
-                .push(value.map_or(Mutation::Delete, |_| Mutation::Set(target.to_owned())));
-            let fault = if state.fault.is_some_and(|(at, _)| at == index) {
-                state.fault.take().map(|(_, fault)| fault)
-            } else {
-                None
-            };
-            if !matches!(fault, Some(Fault::Refuse)) {
-                if let Some(value) = value {
-                    state.values.insert(target.to_owned(), value.clone());
-                } else {
-                    state.values.remove(target);
-                }
-            }
-            fault
-        };
-        match fault {
-            Some(Fault::Refuse) => Err(if value.is_some() {
-                CredentialStoreError::Write(5)
-            } else {
-                CredentialStoreError::Delete(5)
-            }),
-            Some(Fault::CrashAfter) => panic!("simulated process crash"),
-            None => Ok(()),
-        }
-    }
-}
-
-impl CredentialStore for FakeStore {
-    fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
-        let state = self.0.lock().expect("fake lock");
-        if state.denied_read.as_deref() == Some(target) {
-            return Err(CredentialStoreError::Read(5));
-        }
-        Ok(state.values.get(target).cloned())
-    }
-
-    fn set(&self, target: &str, secret: &SecretBytes) -> Result<(), CredentialStoreError> {
-        self.mutate(target, Some(secret))
-    }
-
-    fn delete(&self, target: &str) -> Result<(), CredentialStoreError> {
-        self.mutate(target, None)
-    }
 }
 
 fn setup(name: &str) -> (Scratch, PathBuf, String, FakeStore) {
@@ -397,7 +289,7 @@ fn save_changed_after_fault(
                                 CredentialStoreError::Write(5)
                             ))
                         ) | (
-                            Mutation::Delete,
+                            Mutation::Delete(_),
                             SaveResult::NotCommitted(VaultError::Store(
                                 CredentialStoreError::Delete(5)
                             ))
@@ -555,6 +447,62 @@ fn outside_sign_out_only_an_empty_revocation_list_may_be_deleted() {
     );
 }
 
+/// L6: "not found" for a name the vault just wrote is a store miss: retried, never absence.
+#[test]
+fn a_missed_read_of_the_vaults_own_write_is_retried_and_never_reads_as_absent() {
+    let (_scratch, path, service, store) = setup("missed-read");
+    let mut vault = open(&store, &service, &path);
+    let saved = account("one");
+    committed(vault.save_account(&saved));
+    store.0.lock().expect("fake lock").missed_reads = lane_store::TRIES - 1;
+    assert!(
+        vault
+            .load_account()
+            .expect("a retried read")
+            .expect("the account")
+            .expose()
+            == saved.expose(),
+        "misses short of the bound are retried"
+    );
+    store.0.lock().expect("fake lock").missed_reads = lane_store::TRIES;
+    assert!(
+        matches!(
+            vault.load_account(),
+            Err(VaultError::Store(CredentialStoreError::Unsettled))
+        ),
+        "a lasting miss is an error, not a signed-out account"
+    );
+    assert_eq!(store.0.lock().expect("fake lock").missed_reads, 0);
+    assert!(vault.load_account().expect("read").is_some());
+}
+
+/// L6: a delete is confirmed by reading the name back, and retried while the name stays.
+#[test]
+fn a_delete_that_does_not_stick_is_retried_and_never_reported_gone() {
+    let (_scratch, path, service, store) = setup("sticky-delete");
+    let mut vault = open(&store, &service, &path);
+    let empty = Secret::new(RevocationList::default());
+    committed(vault.save_revocations(&empty));
+    store.0.lock().expect("fake lock").sticky_deletes = lane_store::TRIES - 1;
+    gone(vault.delete_revocations());
+    assert_record_absent(&store, &service, "revoke");
+    committed(vault.save_revocations(&empty));
+    store.0.lock().expect("fake lock").sticky_deletes = lane_store::TRIES;
+    assert!(
+        matches!(
+            vault.delete_revocations(),
+            DeleteResult::Refused(VaultError::Store(CredentialStoreError::Unsettled))
+        ),
+        "a name that outlives every delete is reported"
+    );
+    assert!(
+        store.names().contains(&format!("{service}/revoke/0/0")),
+        "the surviving chunk is still there"
+    );
+    gone(vault.delete_revocations());
+    assert_record_absent(&store, &service, "revoke");
+}
+
 #[test]
 fn sign_out_reader_exposes_the_fenced_record_only_while_a_sign_out_is_pending() {
     let (_scratch, path, service, store) = setup("sign-out-reader");
@@ -648,55 +596,49 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
 #[test]
 fn windows_vault_persists_only_under_its_random_test_service() {
     use crate::platform::credential::WindowsCredentialStore;
+    use crate::platform::credential::fixture::Fixture;
 
     let (_scratch, path, service, _) = setup("windows-vault");
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut vault =
-            Vault::with_service(WindowsCredentialStore, &service, &path).expect("test vault");
-        let host = vault.host_id().expect("host");
-        committed(vault.save_account(&account("old")));
-        committed(vault.save_revocations(&list("one")));
-        drop(vault);
-        let mut vault =
-            Vault::with_service(WindowsCredentialStore, &service, &path).expect("reopen vault");
-        assert!(
-            vault.host_id().expect("persisted host").expose() == host.expose(),
-            "same host"
-        );
-        assert!(
-            vault
-                .load_account()
-                .expect("account")
-                .expect("exists")
-                .expose()
-                == account("old").expose(),
-            "persisted account"
-        );
-        assert!(
-            vault
-                .load_revocations()
-                .expect("list")
-                .expect("exists")
-                .expose()
-                == list("one").expose(),
-            "persisted revocation record"
-        );
-    }));
-    let mut cleanup = Ok(());
-    for name in ["host", "signout", "chatgpt", "revoke"] {
-        cleanup = cleanup.and(WindowsCredentialStore.delete(&format!("{service}/{name}")));
-    }
+    let mut targets: Vec<_> = ["host", "signout", "chatgpt", "revoke"]
+        .into_iter()
+        .map(|name| format!("{service}/{name}"))
+        .collect();
     for record in ["chatgpt", "revoke"] {
         for slot in 0..2 {
             for index in 0..MAX_CHUNKS {
-                cleanup = cleanup.and(
-                    WindowsCredentialStore.delete(&format!("{service}/{record}/{slot}/{index}")),
-                );
+                targets.push(format!("{service}/{record}/{slot}/{index}"));
             }
         }
     }
-    cleanup.expect("remove every exact name in this test service");
-    if let Err(payload) = outcome {
-        panic::resume_unwind(payload);
-    }
+    let _fixture = Fixture::new(targets);
+    let mut vault =
+        Vault::with_service(WindowsCredentialStore, &service, &path).expect("test vault");
+    let host = vault.host_id().expect("host");
+    committed(vault.save_account(&account("old")));
+    committed(vault.save_revocations(&list("one")));
+    drop(vault);
+    let mut vault =
+        Vault::with_service(WindowsCredentialStore, &service, &path).expect("reopen vault");
+    assert!(
+        vault.host_id().expect("persisted host").expose() == host.expose(),
+        "same host"
+    );
+    assert!(
+        vault
+            .load_account()
+            .expect("account")
+            .expect("exists")
+            .expose()
+            == account("old").expose(),
+        "persisted account"
+    );
+    assert!(
+        vault
+            .load_revocations()
+            .expect("list")
+            .expect("exists")
+            .expose()
+            == list("one").expose(),
+        "persisted revocation record"
+    );
 }
