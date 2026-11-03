@@ -35,6 +35,10 @@ impl Coordinator {
             || self.keeping.iter().any(|(_, _, writing)| *writing)
     }
 
+    pub(crate) fn drawing_in_flight(&self) -> bool {
+        self.drawing.in_flight()
+    }
+
     /// Writes again every clear whose write failed. A timer armed before is forgotten: the
     /// connection that would have heard it is gone.
     pub fn retry_clears(&mut self) -> Vec<Effect> {
@@ -42,6 +46,7 @@ impl Coordinator {
         let mut effects = Vec::new();
         self.retry(&mut effects);
         self.drawing_retry(&mut effects);
+        self.drawing_settle(&mut effects);
         self.arm_retry(&mut effects);
         effects
     }
@@ -69,7 +74,7 @@ impl Coordinator {
     /// is tried again even when nothing else reaches the store, such as while turns wait on the
     /// debt. A deadline longer than the current wait, armed before a commit reset it, is replaced.
     pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
-        if self.clearing.is_empty() && self.keeping.is_empty() {
+        if self.clearing.is_empty() && self.keeping.is_empty() && !self.drawing.cut_pending() {
             self.retry_after = FIRST_RETRY;
         }
         let unwritten = self.clearing.iter().any(|(_, writing)| !writing)

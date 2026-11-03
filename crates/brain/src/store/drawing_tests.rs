@@ -1,13 +1,13 @@
 use std::{error::Error as _, sync::Arc};
 
-use kumochi_protocol::message::{RunId, SceneHeader, SceneId, ThreadId};
+use kumochi_protocol::message::{MAX_SCENE_LOG_ENTRIES, RunId, SceneHeader, SceneId, ThreadId};
 use kumochi_scene::{
     Admission, GlobalBudget, Handle, Op, SceneEvent, SceneState, Step, StopCut, WireId,
-    record::Point,
-    text::{Bounded, Number},
+    record::Point, text::Bounded,
 };
+use rusqlite::params;
 
-use super::{MAX_BODY_BYTES, Store, StoreError};
+use super::{DrawingRecovery, MAX_BODY_BYTES, Store, StoreError};
 use crate::{
     drawing::{Reply, Target, Write},
     test_support::Scratch,
@@ -24,7 +24,7 @@ fn begin(store: &mut Store) -> (ThreadId, RunId) {
 
 #[test]
 #[ignore = "manual quiet-Rez release measurement, not a CI latency assertion"]
-fn measure_dense_scene_append_at_lifetime_cap() {
+fn measure_dense_scene_append_and_cut_at_lifetime_cap() {
     use std::time::Instant;
     let mut put = vec![serde_json::json!({"chart":{"id":"c","kind":"line","box":[0,0,100,100]}})];
     let mut patches = Vec::new();
@@ -93,20 +93,24 @@ fn measure_dense_scene_append_at_lifetime_cap() {
         )
         .expect("cap step");
         let cap_ns = start.elapsed().as_nanos();
+        let start = Instant::now();
+        cut(&mut store, scene, 64, 64).expect("cap cut");
+        let cut_ns = start.elapsed().as_nanos();
         let stored = store.drawing_scenes().expect("full log");
-        assert_eq!(stored[0].log.len(), 64);
-        let replayed = SceneState::replay(stored[0].header.begin.clone(), &stored[0].log)
+        let stored = &stored.scenes[0];
+        assert_eq!(stored.log.len(), 65);
+        let replayed = SceneState::replay(stored.header.begin.clone(), &stored.log)
             .expect("valid canonical scene");
         assert_eq!(replayed.revision(), 64);
         if sample >= 8 {
-            samples.push((sample - 8, first_ns, cap_ns));
+            samples.push((sample - 8, first_ns, cap_ns, cut_ns));
         }
     }
     println!(
-        "dense_scene_append points=1600 lifetime_steps=64 warmups=8 samples=8 includes_transaction=true"
+        "dense_scene_append_and_cut points=1600 lifetime_steps=64 cut_revision=64 warmups=8 samples=8 includes_transaction=true"
     );
-    for (sample, first_ns, cap_ns) in samples {
-        println!("sample,{sample},{first_ns},{cap_ns}");
+    for (sample, first_ns, cap_ns, cut_ns) in samples {
+        println!("sample,{sample},{first_ns},{cap_ns},{cut_ns}");
     }
 }
 
@@ -181,20 +185,6 @@ fn count(store: &Store, kind: &str) -> i64 {
         .expect("count")
 }
 
-fn corrupt_step(store: &Store, body: &str) {
-    store
-        .conn
-        .execute_batch("DROP TRIGGER events_append_only")
-        .expect("allow fixture mutation");
-    store
-        .conn
-        .execute(
-            "UPDATE events SET body = ?1 WHERE kind = 'scene_step'",
-            [body],
-        )
-        .expect("corrupt");
-}
-
 fn drawing_error<T>(result: Result<T, StoreError>) {
     let Err(error) = result else {
         panic!("expected drawing failure")
@@ -220,7 +210,10 @@ fn first_step_failure_rolls_back_header_and_hides_sql_error_content() {
     ));
     assert_eq!(count(&store, "scene_begin"), 0);
     assert_eq!(count(&store, "scene_step"), 0);
-    assert_eq!(store.drawing_scenes().expect("empty"), Vec::new());
+    assert_eq!(
+        store.drawing_scenes().expect("empty"),
+        DrawingRecovery::default()
+    );
     store
         .conn
         .execute_batch("DROP TRIGGER fail_drawing")
@@ -267,7 +260,10 @@ fn cleared_names_survive_reopen_but_are_not_recovered_or_reused() {
             .expect("lookup"),
         Reply::Lookup(Some(scene))
     );
-    assert!(store.drawing_scenes().expect("recovery").is_empty());
+    assert_eq!(
+        store.drawing_scenes().expect("recovery"),
+        DrawingRecovery::default()
+    );
     drawing_error(write(
         &mut store,
         ids,
@@ -275,17 +271,10 @@ fn cleared_names_survive_reopen_but_are_not_recovered_or_reused() {
         1,
         step("b"),
     ));
-    drawing_error(write(
-        &mut store,
-        ids,
-        Target::Existing(scene),
-        2,
-        step("b"),
-    ));
 }
 
 #[test]
-fn thread_run_membership_revision_and_layout_are_guarded() {
+fn thread_and_run_membership_are_guarded() {
     let scratch = Scratch::new("typed-guards");
     let mut store = Store::open(&scratch.db()).expect("store");
     let ids = begin(&mut store);
@@ -308,21 +297,6 @@ fn thread_run_membership_revision_and_layout_are_guarded() {
         ),
         Err(StoreError::NoRun)
     ));
-    drawing_error(write(
-        &mut store,
-        ids,
-        Target::Existing(scene),
-        3,
-        step("b"),
-    ));
-    drawing_error(store.drawing_write(&Write::Step {
-        thread: ids.0,
-        run: ids.1,
-        target: Target::Existing(scene),
-        revision: 2,
-        layout_version: 2,
-        step: step("b"),
-    }));
     store
         .end_run(ids.0, ids.1, &[], super::super::RunEnd::Done)
         .expect("end");
@@ -361,7 +335,10 @@ fn thread_run_membership_revision_and_layout_are_guarded() {
         Err(StoreError::NoThread)
     ));
     drawing_error(cut(&mut store, scene, 2, 1));
-    assert!(store.drawing_scenes().expect("hidden").is_empty());
+    assert_eq!(
+        store.drawing_scenes().expect("hidden"),
+        DrawingRecovery::default()
+    );
 }
 
 #[test]
@@ -376,52 +353,7 @@ fn cut_retries_are_idempotent_even_after_a_later_step() {
     write(&mut store, ids, Target::Existing(scene), 2, step("b")).expect("next");
     assert_eq!(cut(&mut store, scene, 1, 1).expect("old retry"), Reply::Cut);
     drawing_error(cut(&mut store, scene, 1, 0));
-    drawing_error(cut(&mut store, scene, 3, 1));
     assert_eq!(count(&store, "scene_cut"), 1);
-}
-
-#[test]
-fn redundant_direct_cut_is_rejected_without_a_recovery_log_event() {
-    let scratch = Scratch::new("typed-redundant-cut");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let ids = begin(&mut store);
-    let scene = first(&mut store, ids, "scene");
-    drawing_error(store.drawing_write(&Write::Cut {
-        scene,
-        revision: 1,
-        cut: StopCut {
-            activated: 1,
-            revealed: Bounded::new(vec![Handle::new(1, 0).expect("handle")]).expect("handles"),
-        },
-    }));
-    assert_eq!(count(&store, "scene_cut"), 0);
-    assert_eq!(
-        store.drawing_scenes().expect("unchanged log")[0].log.len(),
-        1
-    );
-    cut(&mut store, scene, 1, 1).expect("effective cut");
-    assert_eq!(count(&store, "scene_cut"), 1);
-}
-
-#[test]
-fn empty_typed_history_does_not_query_threads_but_typed_history_still_fails_closed() {
-    let scratch = Scratch::new("typed-empty-threads-missing");
-    let store = Store::open(&scratch.db()).expect("store");
-    store
-        .conn
-        .execute_batch("DROP TABLE threads")
-        .expect("remove empty threads table");
-    assert!(store.drawing_scenes().expect("no typed history").is_empty());
-
-    let typed_scratch = Scratch::new("typed-nonempty-threads-missing");
-    let mut typed_store = Store::open(&typed_scratch.db()).expect("store");
-    let ids = begin(&mut typed_store);
-    first(&mut typed_store, ids, "scene");
-    typed_store
-        .conn
-        .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE threads;")
-        .expect("corrupt typed store");
-    drawing_error(typed_store.drawing_scenes());
 }
 
 #[test]
@@ -456,7 +388,7 @@ fn original_steps_and_cuts_replay_with_gaps_and_reserved_ids() {
         .expect("second cut");
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopen");
-    let recovered = store.drawing_scenes().expect("scenes");
+    let recovered = store.drawing_scenes().expect("scenes").scenes;
     assert_eq!(recovered.len(), 1);
     let expected = vec![
         SceneEvent::Step {
@@ -500,105 +432,108 @@ fn original_steps_and_cuts_replay_with_gaps_and_reserved_ids() {
     };
 }
 
-#[test]
-fn malformed_truncated_oversized_and_wrong_schema_bodies_are_content_free() {
-    for body in [
-        "{\"scene\":",
-        "{\"scene\":2,\"revision\":\"privatecontent\"}",
-        "{}",
-    ] {
-        let scratch = Scratch::new("typed-corrupt");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let ids = begin(&mut store);
-        let scene = first(&mut store, ids, "scene");
-        corrupt_step(&store, body);
-        drawing_error(store.drawing_scenes());
-        drawing_error(write(
-            &mut store,
-            ids,
-            Target::Existing(scene),
-            2,
-            step("b"),
-        ));
-    }
-    let scratch = Scratch::new("typed-oversized");
+/// Scenes in two threads, oldest first: one in the second thread, two in the first, then one
+/// more in the second.
+fn four_scenes() -> (Scratch, Store, [SceneId; 4]) {
+    let scratch = Scratch::new("typed-isolation");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let ids = begin(&mut store);
-    first(&mut store, ids, "scene");
-    corrupt_step(&store, &" ".repeat(MAX_BODY_BYTES + 1));
-    drawing_error(store.drawing_scenes());
+    let (one, two) = (begin(&mut store), begin(&mut store));
+    let scenes = [
+        first(&mut store, two, "b1"),
+        first(&mut store, one, "a1"),
+        first(&mut store, one, "a2"),
+        first(&mut store, two, "b2"),
+    ];
+    (scratch, store, scenes)
+}
+
+/// The recovered scenes and the skipped ones.
+fn recovered_ids(store: &Store) -> (Vec<SceneId>, Vec<SceneId>) {
+    let recovery = store.drawing_scenes().expect("recovery");
+    let scenes = recovery.scenes.iter().map(|scene| scene.scene).collect();
+    (scenes, recovery.skipped)
+}
+
+/// A step body whose `scene` field reads as `value`.
+fn naming(body: &str, value: &str) -> String {
+    format!(
+        "{{\"scene\":{value}{}",
+        &body[body.find(',').expect("more fields")..]
+    )
 }
 
 #[test]
-fn header_and_step_versions_and_revisions_are_validated_on_reload() {
-    for change in [
-        serde_json::json!({"revision": 2}),
-        serde_json::json!({"layout_version": 2}),
-        serde_json::json!({"unexpected": "privatecontent"}),
-        serde_json::json!({"step": {"id":"x", "say": "privatecontent", "remove":[""]}}),
-    ] {
-        let scratch = Scratch::new("typed-schema");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let ids = begin(&mut store);
-        first(&mut store, ids, "scene");
-        let body: String = store
+fn a_bad_scene_is_left_out_while_the_other_three_recover() {
+    type Rewrite = fn(&str) -> String;
+    let rewrites: [(&str, Rewrite); 10] = [
+        ("scene_begin", |body| {
+            body.replace(r#""layout_version":1"#, r#""layout_version":2"#)
+        }),
+        ("scene_begin", |_| "{".to_owned()),
+        ("scene_begin", |_| " ".repeat(MAX_BODY_BYTES + 1)),
+        ("scene_step", |body| {
+            body.replace(r#""revision":1"#, r#""revision":2"#)
+        }),
+        ("scene_step", |body| {
+            body.replace(r#""step":"#, r#""extra":0,"step":"#)
+        }),
+        // The rest name no scene, so they fail only the scenes their thread began before them.
+        ("scene_step", |_| r#"{"scene":"#.to_owned()),
+        ("scene_step", |_| " ".repeat(MAX_BODY_BYTES + 1)),
+        ("scene_step", |body| naming(body, r#""privatecontent""#)),
+        ("scene_step", |body| naming(body, "99999999999999999999")),
+        ("scene_step", |body| naming(body, "0")),
+    ];
+    for (kind, rewrite) in rewrites {
+        let (_scratch, store, scenes) = four_scenes();
+        let (row, body): (i64, String) = store
             .conn
             .query_row(
-                "SELECT body FROM events WHERE kind = 'scene_step'",
-                [],
-                |row| row.get(0),
+                "SELECT id, body FROM events WHERE kind = ?1 AND id >= ?2 ORDER BY id LIMIT 1",
+                params![kind, i64::try_from(scenes[1].0).expect("row id")],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("body");
-        let mut body: serde_json::Value = serde_json::from_str(&body).expect("json");
-        for (key, value) in change.as_object().expect("object") {
-            body[key] = value.clone();
-        }
-        corrupt_step(&store, &body.to_string());
-        drawing_error(store.drawing_scenes());
-    }
-    for body in [
-        "{",
-        r#"{"begin":{"v":2,"scene":"scene","surface":"overlay","alt":"privatecontent"},"layout_version":1}"#,
-        r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"privatecontent"},"layout_version":2}"#,
-        r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"privatecontent"},"layout_version":1,"unexpected":true}"#,
-    ] {
-        let scratch = Scratch::new("typed-header");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let ids = begin(&mut store);
-        first(&mut store, ids, "scene");
+            .expect("scene row");
         store
             .conn
             .execute_batch("DROP TRIGGER events_append_only")
-            .expect("mutation");
+            .expect("allow fixture mutation");
         store
             .conn
             .execute(
-                "UPDATE events SET body = ?1 WHERE kind = 'scene_begin'",
-                [body],
+                "UPDATE events SET body = ?1 WHERE id = ?2",
+                params![rewrite(&body), row],
             )
-            .expect("corrupt");
-        drawing_error(store.drawing_scenes());
+            .expect("rewrite");
+        assert_eq!(
+            recovered_ids(&store),
+            (vec![scenes[0], scenes[2], scenes[3]], vec![scenes[1]])
+        );
     }
+    let (_scratch, mut store, scenes) = four_scenes();
+    cut(&mut store, scenes[1], 1, 1).expect("cut");
+    let copy = "INSERT INTO events (thread, kind, body, created_ms)
+         SELECT thread, kind, body, created_ms FROM events WHERE kind = 'scene_cut'
+         ORDER BY id LIMIT 1";
+    for _ in 2..MAX_SCENE_LOG_ENTRIES {
+        store.conn.execute(copy, []).expect("copy");
+    }
+    let full = store.drawing_scenes().expect("full log");
+    assert!(full.skipped.is_empty());
+    assert_eq!(full.scenes[1].log.len(), MAX_SCENE_LOG_ENTRIES);
+    store.conn.execute(copy, []).expect("copy past the bound");
+    assert_eq!(
+        recovered_ids(&store),
+        (vec![scenes[0], scenes[2], scenes[3]], vec![scenes[1]])
+    );
 }
 
 #[test]
-fn invalid_cut_handles_and_cut_sql_failures_do_not_append() {
+fn cut_sql_failures_do_not_append() {
     let scratch = Scratch::new("typed-cut-failures");
     let mut store = Store::open(&scratch.db()).expect("store");
     let ids = begin(&mut store);
     let scene = first(&mut store, ids, "scene");
-    let handle = Handle::new(1, 0).expect("handle");
-    for (activated, handles) in [(2, vec![]), (0, vec![handle]), (1, vec![handle, handle])] {
-        drawing_error(store.drawing_write(&Write::Cut {
-            scene,
-            revision: 1,
-            cut: StopCut {
-                activated,
-                revealed: Bounded::new(handles).expect("bounded"),
-            },
-        }));
-    }
-    assert_eq!(count(&store, "scene_cut"), 0);
     store.conn.execute_batch("CREATE TRIGGER fail_cut BEFORE INSERT ON events WHEN NEW.kind = 'scene_cut' BEGIN SELECT RAISE(ABORT, 'privatecontent'); END;").expect("trap");
     drawing_error(cut(&mut store, scene, 1, 1));
     assert_eq!(count(&store, "scene_cut"), 0);
@@ -612,11 +547,9 @@ fn invalid_cut_handles_and_cut_sql_failures_do_not_append() {
         0,
         "the core owns the clear debt"
     );
-    assert!(
-        store
-            .drawing_scenes()
-            .expect("terminal cut is hidden")
-            .is_empty()
+    assert_eq!(
+        store.drawing_scenes().expect("terminal cut is hidden"),
+        DrawingRecovery::default()
     );
     assert_eq!(count(&store, "scene_cut"), 1);
 }
@@ -639,6 +572,7 @@ fn zero_cut_survives_crash_before_clear_without_crowding_out_the_fourth_scene() 
         store
             .drawing_scenes()
             .expect("visible scenes")
+            .scenes
             .iter()
             .map(|scene| scene.scene)
             .collect::<Vec<_>>(),
@@ -659,13 +593,6 @@ fn zero_cut_survives_crash_before_clear_without_crowding_out_the_fourth_scene() 
         Target::New(header("terminal")),
         1,
         step("new"),
-    ));
-    drawing_error(write(
-        &mut store,
-        ids,
-        Target::Existing(terminal),
-        2,
-        step("later"),
     ));
     assert_eq!(
         cut(&mut store, terminal, 1, 0).expect("cut retry"),
@@ -697,6 +624,7 @@ fn newest_four_typed_scenes_ignore_legacy_and_cleared_begins() {
         store
             .drawing_scenes()
             .expect("four")
+            .scenes
             .iter()
             .map(|scene| scene.scene)
             .collect::<Vec<_>>(),
@@ -725,36 +653,6 @@ fn typed_scene_begins_do_not_crowd_legacy_recovery_during_staging() {
     assert_eq!(scenes.len(), 1);
     assert_eq!(scenes[0].scene, legacy);
     assert_eq!(scenes[0].kept[0].label, "legacy");
-}
-
-#[test]
-fn lifetime_log_is_bounded_before_extension_and_recovery() {
-    let scratch = Scratch::new("typed-log-cap");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let ids = begin(&mut store);
-    let scene = first(&mut store, ids, "scene");
-    cut(&mut store, scene, 1, 1).expect("cut");
-    for revision in 2..=64 {
-        write(
-            &mut store,
-            ids,
-            Target::Existing(scene),
-            revision,
-            step(&format!("s{revision}")),
-        )
-        .expect("step");
-        cut(&mut store, scene, revision, revision).expect("cut");
-    }
-    assert_eq!(store.drawing_scenes().expect("bounded")[0].log.len(), 128);
-    drawing_error(write(
-        &mut store,
-        ids,
-        Target::Existing(scene),
-        65,
-        step("excess"),
-    ));
-    store.conn.execute("INSERT INTO events (thread,kind,body,created_ms) SELECT thread,kind,body,created_ms FROM events WHERE kind = 'scene_cut' ORDER BY id DESC LIMIT 1", []).expect("extra row");
-    drawing_error(store.drawing_scenes());
 }
 
 #[test]
@@ -810,45 +708,69 @@ fn expanded_typed_json_above_wire_record_cap_reloads_exactly() {
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopen");
     assert_eq!(
-        store.drawing_scenes().expect("reloaded")[0].log,
+        store.drawing_scenes().expect("reloaded").scenes[0].log,
         vec![SceneEvent::Step {
             revision: 1,
             step: dense
         }]
     );
-    assert_eq!(store.drawing_scenes().expect("scene")[0].scene, scene);
+    assert_eq!(
+        store.drawing_scenes().expect("scene").scenes[0].scene,
+        scene
+    );
 }
 
 #[test]
-fn f64_data_recovers_without_changing_one_bit() {
+fn f64_data_from_model_text_recovers_without_changing_one_bit() {
+    let values = [
+        "51.248178375505404",
+        "1.7976931348623157e308",
+        "5e-324",
+        "-0.0",
+    ];
+    let record = [
+        r#"{"step":{"id":"a","put":[{"chart":{"id":"c","kind":"line","box":[0,0,100,100]}},"#,
+        r#"{"series":{"id":"s","in":"c","data":["#,
+        values.join(",").as_str(),
+        "]}}]}}",
+    ]
+    .concat();
+    let kumochi_scene::Record::Step(parsed) =
+        kumochi_scene::parse_record(record.as_bytes()).expect("legal record")
+    else {
+        panic!("step")
+    };
     let scratch = Scratch::new("typed-f64");
     let mut store = Store::open(&scratch.db()).expect("store");
     let ids = begin(&mut store);
-    let mut series =
-        serde_json::from_str::<kumochi_scene::record::Series>(r#"{"id":"data","in":"chart"}"#)
-            .expect("series");
-    series.data = Bounded::new(vec![Point::Value(
-        Number::try_from(51.248_178_375_505_404_f64).expect("finite"),
-    )])
-    .expect("data");
-    let mut original = step("a").as_ref().clone();
-    original.put = Bounded::new(vec![Op::Series(series)]).expect("ops");
-    let original = Arc::new(original);
     write(
         &mut store,
         ids,
         Target::New(header("scene")),
         1,
-        Arc::clone(&original),
+        Arc::new(parsed),
     )
     .expect("write");
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopen");
-    assert_eq!(
-        store.drawing_scenes().expect("recovery")[0].log,
-        vec![SceneEvent::Step {
-            revision: 1,
-            step: original
-        }]
-    );
+    let recovery = store.drawing_scenes().expect("recovery");
+    let SceneEvent::Step { step, .. } = &recovery.scenes[0].log[0] else {
+        panic!("step")
+    };
+    let Op::Series(series) = &step.put[1] else {
+        panic!("series")
+    };
+    let bits: Vec<u64> = series
+        .data
+        .iter()
+        .map(|point| match point {
+            Point::Value(value) => value.get().to_bits(),
+            Point::Pair(_) => panic!("value"),
+        })
+        .collect();
+    let expected: Vec<u64> = values
+        .iter()
+        .map(|value| value.parse::<f64>().expect("std parse").to_bits())
+        .collect();
+    assert_eq!(bits, expected);
 }

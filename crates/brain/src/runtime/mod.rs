@@ -191,16 +191,12 @@ impl Brain {
             gates: Some(gates_heard),
             ..store_thread::Schedule::default()
         };
-        let drawing_scenes = store
-            .drawing_scenes()
-            .map_err(|_| std::io::Error::other("stored drawing recovery failed"))?;
+        let drawing_scenes = store.drawing_scenes();
         let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
-        coordinator
-            .restore_drawings(drawing_scenes)
-            .map_err(|_| std::io::Error::other("stored drawing replay failed"))?;
+        let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
-        Ok(Self {
+        let mut brain = Self {
             coordinator,
             store: Some(store),
             engine,
@@ -212,7 +208,7 @@ impl Brain {
             deadline: None,
             retry_at: None,
             epoch: 0,
-            chunk_target: recovery::CHUNK_TARGET,
+            chunk_target: crate::drawing::CHUNK_TARGET,
             config,
             settings_ops: VecDeque::new(),
             config_write: None,
@@ -224,7 +220,11 @@ impl Brain {
             seen: Some(seen),
             #[cfg(test)]
             gates,
-        })
+        };
+        brain
+            .apply(recovery_clears, None)
+            .expect("offline effects cannot fill a shell queue");
+        Ok(brain)
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -281,6 +281,7 @@ impl Brain {
             while self.coordinator.ending_runs() > 0
                 || self.coordinator.clears_in_flight()
                 || self.coordinator.deletes_pending()
+                || self.coordinator.drawing_in_flight()
             {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
@@ -297,7 +298,7 @@ impl Brain {
                 self.offline(input);
             }
             self.offline(Input::ClearVisible);
-            while self.coordinator.clears_in_flight() {
+            while self.coordinator.clears_in_flight() || self.coordinator.drawing_in_flight() {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
                 };
@@ -307,7 +308,9 @@ impl Brain {
                     return false;
                 }
             }
-            true
+            self.coordinator.settled()
+                && !self.coordinator.deletes_pending()
+                && self.coordinator.drawing_available()
         })
         .await
         .unwrap_or(false);
@@ -524,7 +527,7 @@ impl Brain {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
                 };
-                link.recovery = Some(described);
+                link.recovery = described;
             }
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
@@ -654,21 +657,27 @@ impl Brain {
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
-    fn describe(&mut self, link: &mut Link<'_, '_>) -> Result<Recovery, Full> {
+    fn describe(&mut self, link: &mut Link<'_, '_>) -> Result<Option<Recovery>, Full> {
         let drawings = self.coordinator.drawing_snapshot().map_err(|_| Full)?;
+        if !drawings.skipped.is_empty() {
+            let effects = self.coordinator.failed_drawings(drawings.skipped);
+            self.apply(effects, None)
+                .expect("offline effects cannot fill a shell queue");
+            return Ok(None);
+        }
         if !drawings.scenes.is_empty() {
             link.control(&ControlToShell::ScenesV1 {
                 scenes: drawings.scenes,
             })?;
             self.coordinator.drawing_described();
-            return Ok(Recovery::drawings(drawings.chunks));
+            return Ok(Some(Recovery::drawings(drawings.chunks)));
         }
         let visible = self.coordinator.visible();
         let scenes = visible.iter().map(descriptor).collect();
         link.control(&ControlToShell::Scenes { scenes })?;
         let recovery = Recovery::new(visible, self.chunk_target);
         self.coordinator.drawing_described();
-        Ok(recovery)
+        Ok(Some(recovery))
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the

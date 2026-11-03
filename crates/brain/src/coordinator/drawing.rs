@@ -12,17 +12,6 @@ impl Coordinator {
         self.drawing_held.clear();
     }
 
-    pub(super) fn drawing_written(
-        &mut self,
-        serial: u64,
-        reply: Result<crate::drawing::Reply, ()>,
-        effects: &mut Vec<Effect>,
-    ) -> Result<(), Stale> {
-        self.drawing_input(Input::Written { serial, reply }, effects)?;
-        self.drawing_settle(effects);
-        Ok(())
-    }
-
     pub(super) fn stop_drawings(
         &mut self,
         run: RunId,
@@ -42,15 +31,50 @@ impl Coordinator {
         self.drawing_input(Input::StopScenes { run, cuts }, effects)
     }
 
-    /// Restores the complete visible v1 batch before any run is accepted.
-    /// # Errors
-    /// Rejects invalid stored histories or final global usage.
+    /// Restores the valid visible v1 scenes and owes durable clears for the omitted scenes.
     pub fn restore_drawings(
         &mut self,
-        scenes: Vec<crate::drawing::StoredScene>,
-    ) -> Result<(), kumochi_scene::StepError> {
-        self.drawing = Drawing::recover(scenes)?;
-        Ok(())
+        recovery: Result<crate::store::DrawingRecovery, crate::store::StoreError>,
+    ) -> Vec<Effect> {
+        let Ok(recovery) = recovery else {
+            tracing::warn!("stored drawing recovery was unavailable");
+            self.drawing = Drawing::unavailable();
+            return Vec::new();
+        };
+        let (drawing, mut skipped) = Drawing::recover(recovery.scenes);
+        self.drawing = drawing;
+        skipped.extend(recovery.skipped);
+        skipped.sort_unstable();
+        skipped.dedup();
+        self.failed_drawings(skipped)
+    }
+
+    pub(crate) fn failed_drawings(&mut self, scenes: Vec<SceneId>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for scene in &scenes {
+            tracing::warn!(row = scene.0, "skipped while recovering drawing scene");
+        }
+        self.drawing_clear(scenes.clone(), &mut effects);
+        let scenes: Vec<_> = scenes
+            .into_iter()
+            .filter(|scene| !self.clearing.iter().any(|(owed, _)| owed == scene))
+            .collect();
+        if !scenes.is_empty() {
+            let output = self.drawing.clears_pending(scenes.len());
+            self.drawing_output(output, &mut effects);
+            self.drawing_output(
+                Output {
+                    effects: vec![Effect::Store(StoreOp::ClearScenes { scenes })],
+                    calls: Vec::new(),
+                },
+                &mut effects,
+            );
+        }
+        effects
+    }
+
+    pub(crate) fn drawing_available(&self) -> bool {
+        self.drawing.available()
     }
 
     /// Completed call outcomes for the caller, never diagnostic text.
@@ -60,14 +84,14 @@ impl Coordinator {
 
     /// A frozen, validated v1 snapshot for the next connection's data FIFO.
     /// # Errors
-    /// Rejects an inconsistent producer-built descriptor or chunk.
+    /// Rejects a visible set whose earlier writes have not settled.
     pub fn drawing_snapshot(
         &self,
     ) -> Result<crate::drawing::Snapshot, kumochi_protocol::message::SceneDataError> {
         if !self.drawing.settled() || !self.clearing.is_empty() || !self.keeping.is_empty() {
             return Err(kumochi_protocol::message::SceneDataError::Descriptor);
         }
-        self.drawing.snapshot()
+        Ok(self.drawing.snapshot())
     }
 
     pub(super) fn drawing_input(
@@ -161,6 +185,8 @@ impl Coordinator {
     }
 
     pub(super) fn drawing_settle(&mut self, effects: &mut Vec<Effect>) {
+        let output = self.drawing.clears_pending(self.clearing.len());
+        self.drawing_output(output, effects);
         let done = self
             .current
             .as_ref()

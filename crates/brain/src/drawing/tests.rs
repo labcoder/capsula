@@ -8,12 +8,14 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{
-    Budget, ErrorCode, Handle, Record, SceneEvent, Step, StopCut, TokenError, WireId, parse_record,
+    Budget, ErrorCode, Handle, Record, SceneEvent, SceneState, Step, StopCut, TokenError, WireId,
+    parse_record,
 };
 
 use super::call::MAX_CALL_RECORDS;
 use super::{
-    CallEnd, CallError, Drawing, Input, MAX_QUEUED_JOBS, Output, Reply, StoredScene, Target, Write,
+    CallEnd, CallError, Drawing, Held, Input, MAX_QUEUED_JOBS, Output, Reply, StoredScene, Target,
+    Write,
 };
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
@@ -69,10 +71,7 @@ fn stop_cuts_every_visible_scene_and_acknowledges_three_no_ops_without_logging_t
             .collect::<Vec<_>>(),
         [3, 1, 1, 1]
     );
-    assert_eq!(
-        drawing.snapshot().expect("all remain visible").scenes.len(),
-        4
-    );
+    assert_eq!(drawing.snapshot().scenes.len(), 4);
 }
 
 fn wire(id: &str) -> WireId {
@@ -306,28 +305,36 @@ impl Store {
         visible
     }
 
-    /// Answers every drawing write until none is pending, as the store thread would.
+    /// Answers every drawing write and clear until none is pending, as the store thread and the
+    /// coordinator's clearing ledger would.
     fn settle(&mut self, drawing: &mut Drawing, mut out: Output) -> Output {
         let mut seen = 0;
         loop {
-            let next = sent(&Output {
+            let fresh = Output {
                 effects: out.effects[seen..].to_vec(),
                 calls: Vec::new(),
-            });
-            for effect in &out.effects[seen..] {
+            };
+            seen = out.effects.len();
+            if fresh.effects.is_empty() {
+                return out;
+            }
+            let mut cleared = false;
+            for effect in &fresh.effects {
                 if let Effect::Store(StoreOp::ClearScenes { scenes }) = effect {
                     self.cleared.extend(scenes);
+                    cleared = true;
                 }
             }
-            seen = out.effects.len();
-            let Some((serial, write)) = next else {
-                return out;
-            };
-            let reply = Ok(self.answer(&write));
-            let more = drawing
-                .handle(Input::Written { serial, reply })
-                .expect("the pending write");
-            merge(&mut out, more);
+            if cleared {
+                merge(&mut out, drawing.clears_pending(0));
+            }
+            if let Some((serial, write)) = sent(&fresh) {
+                let reply = Ok(self.answer(&write));
+                let more = drawing
+                    .handle(Input::Written { serial, reply })
+                    .expect("the pending write");
+                merge(&mut out, more);
+            }
         }
     }
 
@@ -537,7 +544,8 @@ fn recovery_rebuilds_the_live_log_handles_and_reserved_ids() {
     let out = store.run(&mut drawing, call(3, "c3", args("s", &[text("e", "y")])));
     assert_eq!(error(&out.calls[0]), ErrorCode::IdReused);
 
-    let recovered = Drawing::recover(store.visible()).expect("the log replays");
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert!(skipped.is_empty(), "the log replays");
     let (live, again) = (&drawing.scenes[0].state, &recovered.scenes[0].state);
     assert_eq!(
         again.recovery_log(),
@@ -567,7 +575,7 @@ fn a_cut_to_nothing_is_durable_before_the_scene_leaves() {
     store.run(&mut drawing, call(1, "c", args("s", &[text("a", "x")])));
     let out = store.run(&mut drawing, stop(1, 1, cut(0, Vec::new())));
     assert_eq!(trace(&out), ["write cut 1@1:0", "cut 1@1:0", "clear 1"]);
-    assert!(!drawing.holds(SceneId(1)), "the scene left");
+    assert!(drawing.live(SceneId(1)).is_none(), "the scene left");
     assert_eq!(drawing.global.usage().scenes, 0);
     assert!(
         matches!(store.scenes[0].log.last(), Some(SceneEvent::Stop(stored)) if stored.activated == 0),
@@ -585,12 +593,13 @@ fn recovery_leaves_out_a_scene_whose_clear_never_landed() {
         .expect("a stop");
     // The cut is durable, then the brain dies before its clear is written.
     store.answer(&sent(&out).expect("the cut").1);
-    let recovered = Drawing::recover(store.visible()).expect("the log replays");
+    let (recovered, skipped) = Drawing::recover(store.visible());
     assert!(
         recovered.scenes.is_empty(),
         "a scene cut to nothing isn't visible"
     );
-    let snapshot = recovered.snapshot().expect("a valid snapshot");
+    assert_eq!(skipped, [SceneId(1)], "its clear is owed again");
+    let snapshot = recovered.snapshot();
     assert!(snapshot.scenes.is_empty() && snapshot.chunks.is_empty());
 }
 
@@ -671,8 +680,9 @@ fn a_stop_before_a_new_scene_reached_the_shell_cuts_it_to_nothing() {
             "clear 1"
         ]
     );
-    let recovered = Drawing::recover(store.visible()).expect("the log replays");
+    let (recovered, skipped) = Drawing::recover(store.visible());
     assert!(recovered.scenes.is_empty(), "the Esc survives a restart");
+    assert!(skipped.is_empty(), "its clear landed");
 }
 
 #[test]
@@ -764,7 +774,7 @@ fn a_scene_names_its_thread_until_it_leaves() {
     drawing
         .handle(Input::ThreadDeleted { thread: THREAD })
         .expect("a deletion");
-    assert!(!drawing.holds(SceneId(1)));
+    assert!(drawing.live(SceneId(1)).is_none());
     assert_eq!(
         drawing.thread(SceneId(1)),
         Some(THREAD),
@@ -1072,8 +1082,12 @@ fn a_failed_fifth_scene_write_keeps_its_eviction_and_the_retry_fits() {
     let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
     assert_eq!(
         trace(&out),
-        ["revoke 1", "removed 1", "clear 1", "write step 1"]
+        ["revoke 1", "removed 1", "clear 1"],
+        "the new scene's first step waits for the eviction's clear"
     );
+    assert!(drawing.clears_pending(1).effects.is_empty());
+    let out = drawing.clears_pending(0);
+    assert_eq!(trace(&out), ["write step 1"]);
     let out = reply(&mut drawing, &out, Err(()));
     assert_eq!(out.calls[0].error, Some(CallError::Store));
     assert_eq!(drawing.scenes.len(), 3, "the eviction isn't undone");
@@ -1088,6 +1102,20 @@ fn a_failed_fifth_scene_write_keeps_its_eviction_and_the_retry_fits() {
             "end 5 true"
         ]
     );
+}
+
+#[test]
+fn unavailable_recovery_refuses_drawing_calls_without_writing_beside_unknown_scenes() {
+    let mut drawing = Drawing::unavailable();
+    let out = drawing
+        .handle(call(1, "c", args("s", &[text("a", "x")])))
+        .expect("call outcome");
+    assert!(out.effects.is_empty());
+    assert_eq!(out.calls.len(), 1);
+    assert_eq!(out.calls[0].error, Some(CallError::Store));
+    assert!(!out.calls[0].complete());
+    assert!(!drawing.available());
+    assert!(drawing.settled());
 }
 
 #[test]
@@ -1196,16 +1224,272 @@ fn a_step_stored_into_a_scene_cleared_meanwhile_spends_the_run_s_step_budget() {
     let out = drawing
         .handle(call(1, "c2", args("s", &[text("b", "y")])))
         .expect("a fresh call");
-    drawing
+    let clearing = drawing
         .handle(Input::Clear {
             scenes: vec![SceneId(1)],
         })
         .expect("a clear");
+    store.settle(&mut drawing, clearing);
     let write = sent(&out).expect("the last step the run may draw").1;
     reply(&mut drawing, &out, Ok(store.answer(&write)));
     let out = store.run(&mut drawing, call(1, "c3", args("t", &[text("c", "z")])));
     assert_eq!(error(&out.calls[0]), ErrorCode::OverBudget(Budget::Steps));
     assert_eq!(store.scenes.len(), 1, "the run drew its whole budget");
+}
+
+/// A streamed record that doesn't parse, so it's a rejected record.
+const UNPARSED: &str = r#"{"step":{"id":"c","put":[],"colour":1}}"#;
+
+/// Runs each streamed record through the store and gathers the calls that ended.
+fn ends(store: &mut Store, drawing: &mut Drawing, records: &[(&str, u32, &str)]) -> Vec<CallEnd> {
+    records
+        .iter()
+        .flat_map(|(call, index, record)| store.run(drawing, streamed(call, *index, record)).calls)
+        .collect()
+}
+
+#[test]
+fn rejections_in_calls_opened_before_any_failed_share_the_run_s_eight() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let names: Vec<(String, String)> = (1..=9)
+        .map(|n| (format!("c{n}"), format!("s{n}")))
+        .collect();
+    let begins: Vec<String> = names.iter().map(|(_, scene)| begin(scene, "")).collect();
+    let mut records: Vec<(&str, u32, &str)> = names
+        .iter()
+        .zip(&begins)
+        .map(|((call, _), begin)| (call.as_str(), 0, begin.as_str()))
+        .collect();
+    records.extend(
+        names[..8]
+            .iter()
+            .map(|(call, _)| (call.as_str(), 1, UNPARSED)),
+    );
+    let valid = step(&text("a", "x"));
+    records.push(("c9", 1, valid.as_str()));
+    let ends = ends(&mut store, &mut drawing, &records);
+    let errors: Vec<Option<CallError>> = ends.iter().map(|end| end.error.clone()).collect();
+    assert_eq!(errors.len(), 9, "every call ended");
+    assert!(
+        errors[..8]
+            .iter()
+            .all(|error| matches!(error, Some(CallError::Step(_)))),
+        "eight rejected records"
+    );
+    assert_eq!(errors[8], Some(CallError::Exhausted));
+    assert!(store.scenes.is_empty(), "the ninth call drew nothing");
+}
+
+#[test]
+fn a_failure_in_one_open_repair_call_ends_the_other_s_round() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let begins = [begin("s1", ""), begin("s2", ""), begin("s3", "")];
+    let valid = step(&text("a", "x"));
+    let records = [
+        ("c1", 0, begins[0].as_str()),
+        ("c1", 1, UNPARSED),
+        ("c2", 0, begins[1].as_str()),
+        ("c3", 0, begins[2].as_str()),
+        ("c2", 1, UNPARSED),
+        ("c3", 1, valid.as_str()),
+    ];
+    let ends = ends(&mut store, &mut drawing, &records);
+    let errors: Vec<Option<CallError>> = ends.iter().map(|end| end.error.clone()).collect();
+    assert_eq!(errors.len(), 3, "every call ended");
+    assert!(
+        matches!(errors[0], Some(CallError::Step(_))),
+        "the first failure"
+    );
+    assert!(
+        matches!(errors[1], Some(CallError::Step(_))),
+        "the repair round's failure"
+    );
+    assert_eq!(errors[2], Some(CallError::Exhausted));
+    assert!(
+        store.scenes.is_empty(),
+        "the other repair call drew nothing"
+    );
+}
+
+#[test]
+fn clearing_everything_supersedes_a_failed_cut() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
+    store.run(&mut drawing, call(1, "c2", args("t", &[text("b", "y")])));
+    let out = drawing
+        .handle(stop(1, 1, cut(0, Vec::new())))
+        .expect("a stop");
+    reply(&mut drawing, &out, Err(()));
+    assert!(drawing.needs_retry() && drawing.cut_pending() && !drawing.in_flight());
+    let out = drawing.handle(Input::ClearVisible).expect("a quit");
+    assert_eq!(
+        trace(&out),
+        ["clear 1,2"],
+        "nothing waits behind the owed cut"
+    );
+    assert!(
+        !drawing.needs_retry() && !drawing.cut_pending(),
+        "the clear supersedes the cut"
+    );
+    assert!(drawing.settled() && drawing.scenes.is_empty());
+}
+
+#[test]
+fn clearing_everything_during_a_first_step_write_clears_its_scene_once_it_lands() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
+    let out = drawing
+        .handle(call(1, "c2", args("t", &[text("b", "y")])))
+        .expect("a fresh call");
+    let lookup = sent(&out).expect("a lookup").1;
+    let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
+    let quit = drawing.handle(Input::ClearVisible).expect("a quit");
+    assert_eq!(
+        trace(&quit),
+        ["clear 1"],
+        "the visible scene clears at once"
+    );
+    let write = sent(&out).expect("the first step").1;
+    let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
+    assert_eq!(
+        trace(&out),
+        ["begin 2", "step 2#0", "end 2 true", "clear 2"],
+        "the scene the write began is cleared after it"
+    );
+    assert!(drawing.settled() && drawing.scenes.is_empty());
+}
+
+#[test]
+fn a_scene_whose_log_doesn_t_replay_is_left_out_and_the_others_recover() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s1", &[text("a", "x")])));
+    store.run(&mut drawing, call(1, "c2", args("s2", &[text("a", "x")])));
+    let mut stored = store.visible();
+    let repeated = stored[0].log[0].clone();
+    stored[0].log.push(repeated);
+    let (recovered, skipped) = Drawing::recover(stored);
+    assert_eq!(skipped, [SceneId(1)]);
+    let visible: Vec<SceneId> = recovered.scenes.iter().map(|held| held.scene).collect();
+    assert_eq!(visible, [SceneId(2)]);
+    assert_eq!(
+        recovered.global.usage(),
+        recovered.scenes[0].state.usage(),
+        "the budget holds only the scene that recovered"
+    );
+}
+
+/// A stored scene of 600 objects, its own cap, put by two steps of 300 texts.
+fn wide(scene: u64) -> StoredScene {
+    let Ok(Record::Begin(begin)) = parse_record(begin(&format!("s{scene}"), "").as_bytes()) else {
+        panic!("a valid begin");
+    };
+    let log = (0..2_u32)
+        .map(|revision| {
+            let puts: Vec<String> = (0..300)
+                .map(|n| format!(r#"{{"text":{{"id":"o{revision}_{n}","text":"","at":[0,0]}}}}"#))
+                .collect();
+            let record = format!(
+                r#"{{"step":{{"id":"w{revision}","put":[{}]}}}}"#,
+                puts.join(",")
+            );
+            let Ok(Record::Step(step)) = parse_record(record.as_bytes()) else {
+                panic!("a valid step");
+            };
+            SceneEvent::Step {
+                revision: revision + 1,
+                step: Arc::new(step),
+            }
+        })
+        .collect();
+    StoredScene {
+        scene: SceneId(scene),
+        thread: THREAD,
+        header: SceneHeader {
+            begin,
+            layout_version: 1,
+        },
+        log,
+    }
+}
+
+#[test]
+fn scenes_that_fit_alone_but_not_together_lose_the_oldest() {
+    let stored: Vec<StoredScene> = (1..=3).map(wide).collect();
+    let (recovered, skipped) = Drawing::recover(stored.clone());
+    assert_eq!(skipped, [SceneId(1)], "1,800 objects pass the global 1,500");
+    let visible: Vec<SceneId> = recovered.scenes.iter().map(|held| held.scene).collect();
+    assert_eq!(visible, [SceneId(2), SceneId(3)]);
+    assert_eq!(
+        recovered.global.usage().objects,
+        1_200,
+        "one budget holds both"
+    );
+    for (held, stored) in recovered.scenes.iter().zip(&stored[1..]) {
+        assert_eq!(
+            held.state.recovery_log(),
+            stored.log.as_slice(),
+            "the log is kept whole"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s1", &[text("a", "x")])));
+    let begin = drawing.scenes[0].state.header().clone();
+    // A producer bug: a visible scene with no committed step has no valid descriptor.
+    drawing.scenes.push(Held {
+        scene: SceneId(9),
+        thread: THREAD,
+        layout_version: 1,
+        state: SceneState::begin(begin).expect("a valid header"),
+        committers: Vec::new(),
+        gone: false,
+    });
+    let snapshot = drawing.snapshot();
+    assert_eq!(snapshot.skipped, [SceneId(9)]);
+    let described: Vec<SceneId> = snapshot.scenes.iter().map(|scene| scene.scene).collect();
+    assert_eq!(described, [SceneId(1)]);
+    assert!(
+        snapshot
+            .chunks
+            .iter()
+            .all(|chunk| chunk.scene == SceneId(1)),
+        "nothing of the refused scene is sent"
+    );
+    assert_eq!(snapshot.chunks.len(), 1);
+    for id in 2..=5 {
+        let mut begin = drawing.scenes[0].state.header().clone();
+        begin.scene = wire(&format!("s{id}"));
+        let state = SceneState::replay(begin, drawing.scenes[0].state.recovery_log())
+            .expect("a valid scene");
+        drawing.scenes.push(Held {
+            scene: SceneId(id),
+            thread: THREAD,
+            layout_version: 1,
+            state,
+            committers: vec![None],
+            gone: false,
+        });
+    }
+    let snapshot = drawing.snapshot();
+    assert_eq!(
+        snapshot
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [SceneId(1), SceneId(2), SceneId(3), SceneId(4)]
+    );
+    assert_eq!(snapshot.skipped, [SceneId(9), SceneId(5)]);
+    assert_eq!(snapshot.chunks.len(), 4);
 }
 
 #[test]
@@ -1277,7 +1561,8 @@ fn snapshots_carry_whole_logs_in_checked_chunks() {
         })
         .collect();
     store.run(&mut drawing, call(1, "c", args("s", &steps)));
-    let snapshot = drawing.snapshot().expect("a valid snapshot");
+    let snapshot = drawing.snapshot();
+    assert!(snapshot.skipped.is_empty());
     assert_eq!(snapshot.scenes.len(), 1);
     assert_eq!(
         (

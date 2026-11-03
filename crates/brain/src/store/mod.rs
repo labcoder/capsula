@@ -27,6 +27,7 @@ use kumochi_protocol::constants;
 use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
+pub use drawing::DrawingRecovery;
 pub(crate) use pages::Pages;
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
 #[cfg(test)]

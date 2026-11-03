@@ -182,9 +182,7 @@ impl Drawing {
         }));
         if self.scenes[at].state.is_cleared() {
             self.scenes[at].gone = true;
-            out.effects.push(Effect::Store(StoreOp::ClearScenes {
-                scenes: vec![scene],
-            }));
+            self.clear_stored(vec![scene], out);
         }
     }
 
@@ -221,6 +219,12 @@ impl Drawing {
         out.effects.push(Effect::Data(DataToShell::ScenesRemoved {
             scenes: scenes.clone(),
         }));
+        self.clear_stored(scenes, out);
+    }
+
+    /// Writes a clear, which every new scene's first step then waits for.
+    fn clear_stored(&mut self, scenes: Vec<SceneId>, out: &mut Output) {
+        self.clearing = true;
         out.effects
             .push(Effect::Store(StoreOp::ClearScenes { scenes }));
     }
@@ -235,16 +239,14 @@ impl Drawing {
         out.effects.push(Effect::RevokeScenes {
             scenes: left.clone(),
         });
-        out.effects
-            .push(Effect::Store(StoreOp::ClearScenes { scenes: left }));
+        self.clear_stored(left, out);
     }
 
-    /// Quit: every scene, including one a write just began, is cleared.
+    /// Quit: every scene is cleared now, superseding any cut owed for it.
     pub(super) fn clear_visible(&mut self, out: &mut Output) {
         let left = self.leave(|_| true);
         if !left.is_empty() {
-            out.effects
-                .push(Effect::Store(StoreOp::ClearScenes { scenes: left }));
+            self.clear_stored(left, out);
         }
     }
 

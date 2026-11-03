@@ -1,18 +1,58 @@
 //! Typed drawing events, isolated from searchable text and content-bearing errors.
+//!
+//! The reducer is the one writer and has checked every write, so a write here checks only that
+//! its thread, run and scene belong together. Recovery leaves out a scene whose rows don't read,
+//! not the whole batch.
 
 use std::sync::Arc;
 
 use kumochi_protocol::message::{
-    MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, RunId, SceneHeader, SceneId, ThreadId,
+    MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_VISIBLE_SCENES, RunId, SceneHeader,
+    SceneId, ThreadId,
 };
 use kumochi_scene::{Begin, SceneEvent, Step, StopCut, WireId, limits};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use super::{EventKind, Store, StoreError, insert_event, insert_events, now_ms, row_id, sql_id};
-use crate::drawing::{Reply, StoredScene, Target, Write};
+use crate::drawing::{LAYOUT_VERSION, Reply, StoredScene, Target, Write};
 
 const MAX_BODY_BYTES: usize = 256 * limits::MAX_RECORD_BYTES;
+
+/// The newest uncleared typed scenes of live threads, newest first. A durable cut to nothing
+/// hides its scene even when the clear after it never landed. `octet_length` of the bare column
+/// reads only the stored length, so SQLite never loads an oversized body.
+const CANDIDATES: &str = "SELECT b.id, b.thread FROM events b
+     JOIN threads t ON t.id = b.thread AND t.state = 'live'
+     WHERE b.kind = 'scene_begin' AND b.body IS NOT NULL AND NOT EXISTS (
+         SELECT 1 FROM events c WHERE c.thread = b.thread AND c.id > b.id
+         AND c.kind IN ('scene_cleared', 'scene_cut')
+         AND CASE WHEN octet_length(c.body) <= ?1 THEN CASE WHEN json_valid(c.body)
+             THEN json_extract(c.body, '$.scene') = b.id
+                 AND (c.kind = 'scene_cleared' OR json_extract(c.body, '$.cut.activated') = 0)
+         END END)
+     ORDER BY b.id DESC LIMIT ?2";
+
+/// A thread's steps and cuts after its oldest candidate, in order: each row's kind, the
+/// scene it names if that reads, and its body only when it names a candidate.
+const LOG_ROWS: &str = "SELECT id, kind,
+         CASE WHEN octet_length(body) <= ?3 THEN CASE WHEN json_valid(body)
+             THEN json_extract(body, '$.scene') END END,
+         CASE WHEN octet_length(body) <= ?3 THEN CASE WHEN json_valid(body)
+             THEN CASE WHEN json_extract(body, '$.scene') IN (SELECT value FROM json_each(?4))
+                 THEN CAST(body AS BLOB) END END END
+     FROM events WHERE thread = ?1 AND id > ?2 AND kind IN ('scene_step', 'scene_cut')
+     ORDER BY id";
+
+/// What recovery read: the scenes to restore, and the scenes it left out for a bad row, whose
+/// clears are owed so they don't come back.
+#[derive(Debug, Default, PartialEq)]
+pub struct DrawingRecovery {
+    /// Scenes whose rows all read, oldest first.
+    pub scenes: Vec<StoredScene>,
+    /// Scenes left out, oldest first, named by id alone.
+    pub skipped: Vec<SceneId>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +76,14 @@ struct CutBody {
     scene: SceneId,
     revision: u32,
     cut: StopCut,
+}
+
+/// A candidate scene as recovery reads its rows.
+struct Reading {
+    header: SceneHeader,
+    log: Vec<SceneEvent>,
+    bytes: usize,
+    revision: u32,
 }
 
 impl Store {
@@ -87,47 +135,17 @@ impl Store {
         Ok(reply)
     }
 
-    /// Reads the newest four uncleared typed scenes of live threads, oldest first.
+    /// Reads the newest four uncleared typed scenes of live threads. A scene whose header or
+    /// rows don't read is left out and logged by row id, and so is every scene its thread began
+    /// before a row that names no scene; the others still recover.
     ///
     /// # Errors
-    /// Returns a fixed error for corrupt or excessive typed data, without its source.
-    pub fn drawing_scenes(&self) -> Result<Vec<StoredScene>, StoreError> {
+    /// A fixed, content-free error when SQLite fails.
+    pub fn drawing_scenes(&self) -> Result<DrawingRecovery, StoreError> {
         if !self.serving {
             return Err(StoreError::Closed);
         }
-        let read = || -> Result<Vec<StoredScene>, StoreError> {
-            let typed: bool = self.conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'scene_begin' AND body IS NOT NULL LIMIT 1)",
-                [],
-                |row| row.get(0),
-            )?;
-            if !typed {
-                return Ok(Vec::new());
-            }
-            let max_body_bytes = i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Drawing)?;
-            let mut query = self.conn.prepare(
-                "SELECT b.id FROM events b JOIN threads t ON t.id = b.thread AND t.state = 'live'
-                 WHERE b.kind = 'scene_begin' AND b.body IS NOT NULL AND NOT EXISTS (
-                     SELECT 1 FROM events c WHERE c.thread = b.thread AND c.id > b.id
-                     AND c.kind = 'scene_cleared' AND CASE WHEN length(CAST(c.body AS BLOB)) <= ?1
-                     THEN CASE WHEN json_valid(c.body) THEN json_extract(c.body, '$.scene') END END = b.id)
-                 AND NOT EXISTS (
-                     SELECT 1 FROM events c WHERE c.thread = b.thread AND c.id > b.id
-                     AND c.kind = 'scene_cut' AND CASE
-                         WHEN length(CAST(c.body AS BLOB)) <= ?1 THEN CASE WHEN json_valid(c.body)
-                         THEN json_extract(c.body, '$.scene') = b.id
-                             AND json_extract(c.body, '$.cut.activated') = 0 END END)
-                 ORDER BY b.id DESC LIMIT 4",
-            )?;
-            let ids = query
-                .query_map([max_body_bytes], |row| row.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            ids.into_iter()
-                .rev()
-                .map(|id| load(&self.conn, SceneId(drawing_id(id)?)))
-                .collect()
-        };
-        read().map_err(redact)
+        recover(&self.conn).map_err(redact)
     }
 }
 
@@ -142,16 +160,9 @@ fn write_step(
     let thread = sql_id(thread.0, StoreError::NoThread)?;
     let run = sql_id(run.0, StoreError::NoRun)?;
     insert_events(conn, thread, run, &[], now)?;
-    if !usize::try_from(revision).is_ok_and(|r| (1..=limits::MAX_STEPS).contains(&r)) {
-        return Err(StoreError::Drawing);
-    }
     let scene = match target {
         Target::New(header) => {
-            check_header(header)?;
-            if revision != 1
-                || header.layout_version != layout_version
-                || lookup(conn, thread, &header.begin.scene)?.is_some()
-            {
+            if lookup(conn, thread, &header.begin.scene)?.is_some() {
                 return Err(StoreError::Drawing);
             }
             let body = encode(header)?;
@@ -167,17 +178,7 @@ fn write_step(
             SceneId(row_id(conn.last_insert_rowid()))
         }
         Target::Existing(scene) => {
-            // shortcut: reload bounded history per append; use indexed metadata if cap latency warrants it.
-            let stored = load(conn, *scene)?;
-            if stored.thread.0 != row_id(thread)
-                || stored.header.layout_version != layout_version
-                || next_revision(&stored.log) != Some(revision)
-                || stored.log.len() >= MAX_SCENE_LOG_ENTRIES
-                || stored
-                    .log
-                    .iter()
-                    .any(|event| matches!(event, SceneEvent::Stop(cut) if cut.activated == 0))
-            {
+            if typed_thread(conn, *scene)? != thread {
                 return Err(StoreError::Drawing);
             }
             *scene
@@ -208,33 +209,15 @@ fn write_cut(
     cut: &StopCut,
     now: i64,
 ) -> Result<Reply, StoreError> {
-    let stored = load(conn, scene)?;
-    let current = next_revision(&stored.log)
-        .and_then(|r| r.checked_sub(1))
-        .ok_or(StoreError::Drawing)?;
-    let mut at = 0;
-    let previous = stored.log.iter().find_map(|event| match event {
-        SceneEvent::Step { revision, .. } => {
-            at = *revision;
-            None
-        }
-        SceneEvent::Stop(previous) if at == revision => Some(previous),
-        SceneEvent::Stop(_) => None,
-    });
-    if let Some(previous) = previous {
-        if previous != cut {
-            return Err(StoreError::Drawing);
-        }
-        return Ok(Reply::Cut);
+    let thread = typed_thread(conn, scene)?;
+    // A retry after a commit that reported failure finds its own cut; any other is refused.
+    if let Some(stored) = cut_at(conn, thread, scene, revision)? {
+        return if stored == *cut {
+            Ok(Reply::Cut)
+        } else {
+            Err(StoreError::Drawing)
+        };
     }
-    if revision != current || stored.log.len() >= MAX_SCENE_LOG_ENTRIES {
-        return Err(StoreError::Drawing);
-    }
-    check_cut(cut, revision)?;
-    let mut log = stored.log;
-    log.push(SceneEvent::Stop(cut.clone()));
-    kumochi_scene::SceneState::replay(stored.header.begin, &log)
-        .map_err(|_| StoreError::Drawing)?;
     let body = encode(&CutBody {
         scene,
         revision,
@@ -242,7 +225,7 @@ fn write_cut(
     })?;
     insert_event(
         conn,
-        sql_id(stored.thread.0, StoreError::Drawing)?,
+        thread,
         None,
         EventKind::SceneCut,
         None,
@@ -269,135 +252,219 @@ fn live(conn: &Connection, thread: i64) -> Result<(), StoreError> {
     .ok_or(StoreError::NoThread)
 }
 
+/// The live thread a typed scene began in, read without its header or log.
+fn typed_thread(conn: &Connection, scene: SceneId) -> Result<i64, StoreError> {
+    conn.query_row(
+        "SELECT b.thread FROM events b JOIN threads t ON t.id = b.thread AND t.state = 'live'
+         WHERE b.id = ?1 AND b.kind = 'scene_begin' AND b.body IS NOT NULL",
+        [sql_id(scene.0, StoreError::Drawing)?],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or(StoreError::Drawing)
+}
+
+/// The cut already stored for `scene` at `revision`, if any.
+fn cut_at(
+    conn: &Connection,
+    thread: i64,
+    scene: SceneId,
+    revision: u32,
+) -> Result<Option<StopCut>, StoreError> {
+    let bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT CAST(body AS BLOB) FROM events
+             WHERE thread = ?1 AND id > ?2 AND kind = 'scene_cut'
+             AND CASE WHEN octet_length(body) <= ?4 THEN CASE WHEN json_valid(body)
+                 THEN json_extract(body, '$.scene') = ?2 AND json_extract(body, '$.revision') = ?3
+             END END
+             ORDER BY id LIMIT 1",
+            params![
+                thread,
+                sql_id(scene.0, StoreError::Drawing)?,
+                revision,
+                body_cap()?
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    bytes
+        .map(|bytes| {
+            serde_json::from_slice::<CutBody>(&bytes)
+                .map(|body| body.cut)
+                .map_err(|_| StoreError::Drawing)
+        })
+        .transpose()
+}
+
 fn lookup(conn: &Connection, thread: i64, name: &WireId) -> Result<Option<SceneId>, StoreError> {
-    let max_body_bytes = i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Drawing)?;
     let id = conn
         .query_row(
             "SELECT id FROM events WHERE thread = ?1 AND kind = 'scene_begin'
-         AND CASE WHEN length(CAST(body AS BLOB)) <= ?3 THEN CASE WHEN json_valid(body)
-         THEN json_extract(body, '$.begin.scene') END END = ?2 ORDER BY id LIMIT 1",
-            params![thread, name.as_str(), max_body_bytes],
+             AND CASE WHEN octet_length(body) <= ?3 THEN CASE WHEN json_valid(body)
+             THEN json_extract(body, '$.begin.scene') END END = ?2 ORDER BY id LIMIT 1",
+            params![thread, name.as_str(), body_cap()?],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
-    id.map(|id| drawing_id(id).map(SceneId)).transpose()
+    Ok(id.map(|id| SceneId(row_id(id))))
 }
 
-fn load(conn: &Connection, scene: SceneId) -> Result<StoredScene, StoreError> {
-    let id = sql_id(scene.0, StoreError::Drawing)?;
-    let max_body_bytes = i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Drawing)?;
-    let (thread, bytes): (i64, Option<Vec<u8>>) = conn.query_row(
-        "SELECT b.thread, CASE WHEN length(CAST(b.body AS BLOB)) <= ?2
-         THEN substr(CAST(b.body AS BLOB), 1, ?2) END FROM events b
-         JOIN threads t ON t.id = b.thread AND t.state = 'live'
-         WHERE b.id = ?1 AND b.kind = 'scene_begin' AND NOT EXISTS (
-             SELECT 1 FROM events c WHERE c.thread = b.thread AND c.id > b.id
-             AND c.kind = 'scene_cleared' AND CASE WHEN length(CAST(c.body AS BLOB)) <= ?2
-             THEN CASE WHEN json_valid(c.body) THEN json_extract(c.body, '$.scene') END END = b.id)",
-        params![id, max_body_bytes],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let body: HeaderBody = decode(bytes)?;
-    let thread_id = ThreadId(drawing_id(thread)?);
-    let header = SceneHeader {
-        begin: body.begin,
-        layout_version: body.layout_version,
-    };
-    check_header(&header)?;
-    let mut query = conn.prepare(
-        "SELECT kind, CASE WHEN length(CAST(body AS BLOB)) <= ?3
-         THEN substr(CAST(body AS BLOB), 1, ?3) END FROM events
-         WHERE thread = ?1 AND id > ?2 AND kind IN ('scene_step', 'scene_cut')
-         AND CASE WHEN length(CAST(body AS BLOB)) <= ?3 THEN CASE WHEN json_valid(body)
-             THEN coalesce(json_extract(body, '$.scene') = ?2, 1) ELSE 1 END ELSE 1 END
-         ORDER BY id LIMIT 129",
-    )?;
-    let mut rows = query.query(params![thread, id, max_body_bytes])?;
-    let mut log = Vec::new();
-    let mut body_bytes = 0;
-    let mut revision = 0;
-    let mut cut_revision = None;
-    while let Some(row) = rows.next()? {
-        if log.len() == MAX_SCENE_LOG_ENTRIES {
-            return Err(StoreError::Drawing);
+/// Reads the candidates' headers, then each thread's rows once, oldest first. A scene's log
+/// stays within the entry and byte bounds, so no more of it is kept than recovery may send.
+fn recover(conn: &Connection) -> Result<DrawingRecovery, StoreError> {
+    let cap = body_cap()?;
+    let limit = i64::try_from(MAX_VISIBLE_SCENES).map_err(|_| StoreError::Drawing)?;
+    let mut begins: Vec<(i64, i64)> = conn
+        .prepare(CANDIDATES)?
+        .query_map(params![cap, limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    begins.reverse();
+    let mut readings = begins
+        .iter()
+        .map(|&(id, _)| header(conn, id, cap))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut threads: Vec<i64> = begins.iter().map(|&(_, thread)| thread).collect();
+    threads.sort_unstable();
+    threads.dedup();
+    for thread in threads {
+        let members: Vec<usize> = (0..begins.len())
+            .filter(|&at| begins[at].1 == thread && readings[at].is_some())
+            .collect();
+        let named: Vec<i64> = members.iter().map(|&at| begins[at].0).collect();
+        let Some(&oldest) = named.first() else {
+            continue;
+        };
+        let named = serde_json::to_string(&named).map_err(|_| StoreError::Drawing)?;
+        let mut query = conn.prepare(LOG_ROWS)?;
+        let mut rows = query.query(params![thread, oldest, cap, named])?;
+        while members.iter().any(|&at| readings[at].is_some()) {
+            let Some(row) = rows.next()? else {
+                break;
+            };
+            let id: i64 = row.get(0)?;
+            let kind = row.get_ref(1)?.as_str().map_err(|_| StoreError::Drawing)?;
+            // A row can only belong to a scene that began before it.
+            let scene = row
+                .get_ref(2)?
+                .as_i64()
+                .ok()
+                .filter(|scene| (1..id).contains(scene));
+            let bytes = row.get_ref(3)?.as_blob().ok();
+            let mut bad = false;
+            for &at in &members {
+                let begin = begins[at].0;
+                let Some(reading) = readings[at].as_mut() else {
+                    continue;
+                };
+                if begin > id || scene.is_some_and(|scene| scene != begin) {
+                    continue;
+                }
+                // A row that names no scene might be any earlier one's, so each of them goes.
+                if scene.is_none() || reading.append(kind, bytes).is_none() {
+                    readings[at] = None;
+                    bad = true;
+                }
+            }
+            if bad {
+                skipped(id);
+            }
         }
-        let kind: String = row.get(0)?;
-        let bytes: Option<Vec<u8>> = row.get(1)?;
-        body_bytes += bytes.as_ref().map_or(0, Vec::len);
-        if body_bytes > MAX_SCENE_SNAPSHOT_BYTES {
-            return Err(StoreError::Drawing);
+    }
+    let mut recovery = DrawingRecovery::default();
+    for ((begin, thread), reading) in begins.into_iter().zip(readings) {
+        let scene = SceneId(row_id(begin));
+        match reading {
+            Some(reading) if reading.revision > 0 => recovery.scenes.push(StoredScene {
+                scene,
+                thread: ThreadId(row_id(thread)),
+                header: reading.header,
+                log: reading.log,
+            }),
+            Some(_) => {
+                skipped(begin);
+                recovery.skipped.push(scene);
+            }
+            None => recovery.skipped.push(scene),
+        }
+    }
+    Ok(recovery)
+}
+
+/// A candidate's header; `None`, logged, when it's too big, doesn't decode or names another
+/// layout.
+fn header(conn: &Connection, id: i64, cap: i64) -> Result<Option<Reading>, StoreError> {
+    let body: Option<HeaderBody> = conn.query_row(
+        "SELECT CASE WHEN octet_length(body) <= ?2 THEN CAST(body AS BLOB) END
+         FROM events WHERE id = ?1",
+        params![id, cap],
+        |row| {
+            Ok(row
+                .get_ref(0)?
+                .as_blob()
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok()))
+        },
+    )?;
+    let Some(HeaderBody {
+        begin,
+        layout_version,
+    }) = body.filter(|body| body.layout_version == LAYOUT_VERSION)
+    else {
+        skipped(id);
+        return Ok(None);
+    };
+    Ok(Some(Reading {
+        header: SceneHeader {
+            begin,
+            layout_version,
+        },
+        log: Vec::new(),
+        bytes: 0,
+        revision: 0,
+    }))
+}
+
+impl Reading {
+    /// Adds one of the scene's rows; `None` when it doesn't decode, is out of order or passes a
+    /// bound. The replay after recovery checks what its steps and cuts mean.
+    fn append(&mut self, kind: &str, bytes: Option<&[u8]>) -> Option<()> {
+        let bytes = bytes?;
+        self.bytes += bytes.len();
+        if self.log.len() == MAX_SCENE_LOG_ENTRIES || self.bytes > MAX_SCENE_SNAPSHOT_BYTES {
+            return None;
         }
         if kind == "scene_step" {
-            let body: StepBody<Step> = decode(bytes)?;
-            if body.scene != scene
-                || body.revision != revision + 1
-                || body.revision
-                    > u32::try_from(limits::MAX_STEPS).map_err(|_| StoreError::Drawing)?
-                || body.layout_version != header.layout_version
+            let body: StepBody<Step> = serde_json::from_slice(bytes).ok()?;
+            if body.revision != self.revision + 1
+                || body.layout_version != self.header.layout_version
             {
-                return Err(StoreError::Drawing);
+                return None;
             }
-            revision = body.revision;
-            log.push(SceneEvent::Step {
-                revision,
+            self.revision = body.revision;
+            self.log.push(SceneEvent::Step {
+                revision: body.revision,
                 step: Arc::new(body.step),
             });
         } else {
-            let body: CutBody = decode(bytes)?;
-            if body.scene != scene || body.revision != revision || cut_revision == Some(revision) {
-                return Err(StoreError::Drawing);
+            let body: CutBody = serde_json::from_slice(bytes).ok()?;
+            if body.revision != self.revision {
+                return None;
             }
-            check_cut(&body.cut, revision)?;
-            cut_revision = Some(revision);
-            log.push(SceneEvent::Stop(body.cut));
+            self.log.push(SceneEvent::Stop(body.cut));
         }
+        Some(())
     }
-    if revision == 0 {
-        return Err(StoreError::Drawing);
-    }
-    Ok(StoredScene {
-        scene,
-        thread: thread_id,
-        header,
-        log,
-    })
 }
 
-fn next_revision(log: &[SceneEvent]) -> Option<u32> {
-    log.iter().rev().find_map(|event| match event {
-        SceneEvent::Step { revision, .. } => revision.checked_add(1),
-        SceneEvent::Stop(_) => None,
-    })
+/// Logs a typed row recovery left out, by its id only: its body holds user content.
+fn skipped(row: i64) {
+    let error = StoreError::SceneRow(row);
+    tracing::warn!(%error, "skipped while recovering drawings");
 }
 
-fn drawing_id(raw: i64) -> Result<u64, StoreError> {
-    u64::try_from(raw)
-        .ok()
-        .filter(|id| *id != 0)
-        .ok_or(StoreError::Drawing)
-}
-
-fn check_header(header: &SceneHeader) -> Result<(), StoreError> {
-    if header.layout_version != 1 {
-        return Err(StoreError::Drawing);
-    }
-    Ok(())
-}
-
-fn check_cut(cut: &StopCut, revision: u32) -> Result<(), StoreError> {
-    if revision == 0
-        || cut.activated > revision
-        || cut.revealed.iter().enumerate().any(|(at, handle)| {
-            handle.revision() > cut.activated || cut.revealed[..at].contains(handle)
-        })
-    {
-        return Err(StoreError::Drawing);
-    }
-    Ok(())
-}
-
-fn decode<T: DeserializeOwned>(bytes: Option<Vec<u8>>) -> Result<T, StoreError> {
-    serde_json::from_slice(&bytes.ok_or(StoreError::Drawing)?).map_err(|_| StoreError::Drawing)
+fn body_cap() -> Result<i64, StoreError> {
+    i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Drawing)
 }
 
 fn encode(value: &impl Serialize) -> Result<String, StoreError> {

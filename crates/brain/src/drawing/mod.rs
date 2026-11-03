@@ -20,15 +20,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use kumochi_protocol::message::{RunId, SceneCuts, SceneId, ThreadId};
-use kumochi_scene::{
-    Admitted, Begin, GlobalBudget, Record, SceneState, Step, StepError, StopCut, TokenError,
-};
+use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut, TokenError};
 
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError};
 pub use io::{Reply, StoredScene, Target, Write};
+pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
 
 use call::{Call, RunLedger};
@@ -144,6 +143,7 @@ pub struct Output {
 /// The drawing system's state.
 #[derive(Default)]
 pub struct Drawing {
+    unavailable: bool,
     global: GlobalBudget,
     /// Visible scenes, oldest first.
     scenes: Vec<Held>,
@@ -155,6 +155,9 @@ pub struct Drawing {
     queue: VecDeque<Job>,
     pending: Option<Pending>,
     serial: u64,
+    /// A v1 clear isn't acknowledged yet, so no new scene's first step is written: the store then
+    /// never holds more than four uncleared scenes.
+    clearing: bool,
 }
 
 /// A visible scene.
@@ -253,39 +256,73 @@ enum Pend {
 }
 
 impl Drawing {
-    /// Rebuilds the visible scenes the store kept, binding them to one budget together. A cleared
-    /// state charges nothing, so leaving it out keeps the budget exact.
-    ///
-    /// # Errors
-    /// A content-free [`StepError`] when a log doesn't replay or the batch is over budget.
-    pub fn recover(mut stored: Vec<StoredScene>) -> Result<Self, StepError> {
+    pub(crate) fn unavailable() -> Self {
+        Self {
+            unavailable: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn available(&self) -> bool {
+        !self.unavailable
+    }
+
+    /// Rebuilds the visible scenes the store kept, bound to one budget together. A scene is the
+    /// unit of failure: one whose log doesn't replay, whose layout this build can't prepare or that
+    /// doesn't fit beside the others is left out, and its id returned for a durable clear. So is
+    /// a scene a crash left cut to nothing before its clear landed.
+    pub fn recover(mut stored: Vec<StoredScene>) -> (Self, Vec<SceneId>) {
         stored.sort_by_key(|scene| scene.scene);
-        let (states, global) = {
-            let sources: Vec<_> = stored
+        let mut skipped = Vec::new();
+        stored.retain(|scene| {
+            let known = scene.header.layout_version == LAYOUT_VERSION;
+            if !known {
+                skipped.push(scene.scene);
+            }
+            known
+        });
+        let (states, global) = loop {
+            let batch = {
+                let sources: Vec<_> = stored
+                    .iter()
+                    .map(|scene| (&scene.header.begin, scene.log.as_slice()))
+                    .collect();
+                SceneState::replay_all(&sources)
+            };
+            if let Ok(batch) = batch {
+                break batch;
+            }
+            // The scene that doesn't replay alone, else the oldest, which the others crowd out.
+            let bad = stored
                 .iter()
-                .map(|scene| (&scene.header.begin, scene.log.as_slice()))
-                .collect();
-            SceneState::replay_all(&sources)?
+                .position(|scene| {
+                    SceneState::replay(scene.header.begin.clone(), &scene.log).is_err()
+                })
+                .unwrap_or(0);
+            skipped.push(stored.remove(bad).scene);
         };
-        // A crash between a cut to nothing and its clear leaves a cleared log: it isn't visible.
-        let scenes = stored
-            .into_iter()
-            .zip(states)
-            .filter(|(_, state)| !state.is_cleared())
-            .map(|(stored, state)| Held {
+        let mut scenes = Vec::new();
+        for (stored, state) in stored.into_iter().zip(states) {
+            if state.is_cleared() {
+                skipped.push(stored.scene);
+                continue;
+            }
+            scenes.push(Held {
                 scene: stored.scene,
                 thread: stored.thread,
                 layout_version: stored.header.layout_version,
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
                 state,
                 gone: false,
-            })
-            .collect();
-        Ok(Self {
+            });
+        }
+        skipped.sort_unstable();
+        let drawing = Self {
             global,
             scenes,
             ..Self::default()
-        })
+        };
+        (drawing, skipped)
     }
 
     /// Acts on one input.
@@ -349,7 +386,12 @@ impl Drawing {
                 }
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
-            Input::ClearVisible => self.enqueue(Job::ClearVisible, &mut out),
+            Input::ClearVisible => {
+                self.clear_visible(&mut out);
+                if !self.settled() {
+                    self.enqueue(Job::ClearVisible, &mut out);
+                }
+            }
             Input::RunClosed { run } => self.close(run),
             Input::ThreadDeleted { thread } => self.deleted(thread, &mut out),
             Input::Written { serial, reply } => self.written(serial, reply, &mut out)?,
@@ -415,9 +457,34 @@ impl Drawing {
         self.pending.is_none() && self.queue.is_empty()
     }
 
-    /// `scene` is a visible v1 scene.
-    pub fn holds(&self, scene: SceneId) -> bool {
-        self.live(scene).is_some()
+    /// A write is in the store; an owed cut whose write failed isn't.
+    pub fn in_flight(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.in_flight)
+    }
+
+    /// A cut is in the store or owed to it, so the shared retry backoff must keep growing.
+    pub fn cut_pending(&self) -> bool {
+        matches!(
+            self.pending,
+            Some(Pending {
+                wait: Wait::Cut { .. },
+                ..
+            })
+        )
+    }
+
+    /// Whether a v1 clear is still unacknowledged. A new scene's first step waits while one is,
+    /// and runs once none is.
+    pub fn clears_pending(&mut self, count: usize) -> Output {
+        let pending = count > 0;
+        let mut out = Output::default();
+        if self.clearing != pending {
+            self.clearing = pending;
+            self.pump(&mut out);
+        }
+        out
     }
 
     /// The thread a held scene belongs to, including a cleared or deleted scene still kept
@@ -434,6 +501,9 @@ impl Drawing {
     fn pump(&mut self, out: &mut Output) {
         while self.pending.is_none() {
             self.sweep();
+            if self.clearing && self.queue.front().is_some_and(|job| self.begins_scene(job)) {
+                return;
+            }
             let Some(job) = self.queue.pop_front() else {
                 return;
             };

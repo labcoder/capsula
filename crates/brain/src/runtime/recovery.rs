@@ -1,20 +1,17 @@
 //! One connection's recovery: after `Scenes`, the kept steps of every visible scene, copied so
 //! later changes can't alter a snapshot in flight, go to the data queue one chunk at a time.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{DataToShell, SceneId, SceneSnapshotChunk, Step};
 
-use crate::store::SceneState;
+use crate::{drawing::CHUNK_TARGET, store::SceneState};
 
-/// What a chunk packs up to [guess]. A target, not a maximum: a bigger step goes alone.
-pub(super) const CHUNK_TARGET: usize = 32 * 1024;
 /// A step's encoding beyond its label: the label's length prefix, at most 2 bytes for a label
 /// under 16 KiB.
 const STEP_OVERHEAD: usize = 2;
 
-#[derive(Debug)]
 pub(super) struct Recovery {
     drawings: VecDeque<SceneSnapshotChunk>,
     /// Each scene with the revision its descriptor named, oldest first.
@@ -22,6 +19,16 @@ pub(super) struct Recovery {
     /// How many of the front scene's steps have gone out.
     sent: usize,
     target: usize,
+}
+
+impl fmt::Debug for Recovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Recovery")
+            .field("drawings", &self.drawings.len())
+            .field("scenes", &self.scenes.len())
+            .field("sent", &self.sent)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Recovery {
@@ -109,7 +116,13 @@ impl Recovery {
 
 #[cfg(test)]
 mod tests {
-    use kumochi_protocol::message::{DataToShell, RunId, SceneId, Step, ThreadId};
+    use std::sync::Arc;
+
+    use kumochi_protocol::frame::{self, Pipe};
+    use kumochi_protocol::message::{
+        DataToShell, RunId, SceneHeader, SceneId, SceneSnapshotChunk, Step, ThreadId,
+    };
+    use kumochi_scene::{Handle, SceneEvent, StopCut, text::Bounded};
 
     use super::Recovery;
     use crate::store::SceneState;
@@ -181,6 +194,93 @@ mod tests {
             drain(&mut recovery),
             [(5, labels(&["d"]), false), (5, labels(&["e"]), true)]
         );
+    }
+
+    #[test]
+    fn typed_recovery_debug_is_count_only_and_clear_drops_remaining_scene_chunks() {
+        let header: SceneHeader = serde_json::from_value(serde_json::json!({
+            "begin": {"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"},
+            "layout_version":1
+        }))
+        .expect("typed header");
+        let event = |revision, id| {
+            SceneEvent::Step {
+            revision,
+            step: Arc::new(serde_json::from_value(serde_json::json!({
+                "id":id,"say":"private-narration",
+                "put":[{"shape":{"id":format!("object-{id}"),"kind":"rect","box":[13337.25,1,10,10]}}]
+            })).expect("typed step")),
+        }
+        };
+        let cut = SceneEvent::Stop(StopCut {
+            activated: 1,
+            revealed: Bounded::new(vec![Handle::new(1, 0).expect("handle")]).expect("handles"),
+        });
+        let chunk = |scene, ordinal, events, last| {
+            SceneSnapshotChunk {
+                scene: SceneId(scene),
+                revision: 3,
+                ordinal,
+                header: (ordinal == 0).then(|| header.clone()),
+                events: Bounded::new(events).expect("bounded events"),
+                last,
+            }
+            .checked()
+            .expect("valid snapshot chunk")
+        };
+        let first = chunk(3, 0, vec![event(1, "a1")], false);
+        let kept_first = chunk(5, 0, vec![event(1, "b1"), event(2, "b2")], false);
+        let mut put =
+            vec![serde_json::json!({"chart":{"id":"dense","kind":"line","box":[0,0,100,100]}})];
+        for index in 0..8 {
+            put.push(serde_json::json!({"series":{"id":format!("series-{index}"),"in":"dense","data":vec![51.248_178_375_505_404;200]}}));
+        }
+        let bytes = serde_json::to_vec(&serde_json::json!({"step":{"id":"b3","put":put}}))
+            .expect("model JSON");
+        let kumochi_scene::Record::Step(step) =
+            kumochi_scene::parse_record(&bytes).expect("legal dense model record")
+        else {
+            panic!("step")
+        };
+        let dense = SceneEvent::Step {
+            revision: 3,
+            step: Arc::new(step),
+        };
+        let kept_last = chunk(5, 1, vec![cut.clone(), dense.clone()], true);
+        let mut recovery = Recovery::drawings(vec![
+            first.clone(),
+            chunk(3, 1, vec![event(2, "a2"), cut.clone()], false),
+            kept_first.clone(),
+            chunk(3, 2, vec![event(3, "a3")], true),
+            kept_last.clone(),
+        ]);
+        assert_eq!(
+            format!("{recovery:?}"),
+            "Recovery { drawings: 5, scenes: 0, sent: 0, .. }"
+        );
+        assert_eq!(
+            recovery.next_chunk(),
+            Some(DataToShell::SceneSnapshotV1 { chunk: first })
+        );
+        recovery.drop_scenes(&[SceneId(3)]);
+        let mut log = Vec::new();
+        for expected in [kept_first, kept_last] {
+            let message = recovery.next_chunk().expect("surviving scene chunk");
+            let bytes = frame::encode(&message, Pipe::Data).expect("whole-event data frame");
+            let decoded = frame::read::<DataToShell>(&mut bytes.as_slice(), Pipe::Data)
+                .expect("decode snapshot frame")
+                .expect("one snapshot frame");
+            assert_eq!(decoded, DataToShell::SceneSnapshotV1 { chunk: expected });
+            let DataToShell::SceneSnapshotV1 { chunk } = decoded else {
+                panic!("only typed snapshots");
+            };
+            log.extend(chunk.events.iter().cloned());
+        }
+        assert_eq!(log, vec![event(1, "b1"), event(2, "b2"), cut, dense]);
+        kumochi_scene::SceneState::replay(header.begin, &log)
+            .expect("the survivor's full log replays with its cut and revision gap");
+        assert_eq!(recovery.next_chunk(), None);
+        assert!(!recovery.pending());
     }
 
     fn drain_one(recovery: &mut Recovery) -> (u64, Vec<String>, bool) {

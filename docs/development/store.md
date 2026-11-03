@@ -55,11 +55,24 @@ activated bound and finished handles. Identical cut retries are idempotent. All 
 have NULL `text`: drawing content never enters FTS or a page's text, and pages omit cut metadata.
 Every drawing SQL or JSON failure becomes a fixed, source-free error, never a parser diagnostic.
 
+The canonical reducer is the single writer and validates admission and cuts. The store checks
+run/thread membership, first-step name reservation, the encoded-body cap and retry identity
+by scene/revision; appends and cuts do not reload or replay earlier drawing content. A new
+scene's first step waits for every earlier typed clear to commit, including a failed user
+clear or eviction, so recovery never has to hide an uncleared visible scene to fit the cap.
+
 Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
-then replays the four together against one global budget. A durable zero cut excludes its
+then replays the survivors together against one global budget. A corrupt, oversized,
+unsupported or invalid scene is omitted whole, logged by row id only and cleared durably;
+other scenes still recover and drawing recovery never prevents the brain from starting.
+If the query itself fails, typed intake stays unavailable until restart and Quit reports
+incomplete: the brain cannot claim it cleared a visible set it never read.
+A row whose scene id cannot be read affects only candidate scenes in its own thread that
+began before it. A durable zero cut excludes its
 scene even if a crash prevented the following clear transaction. Names remain reserved in
 the thread's history after a clear or eviction. Reads cap each body at 8 MiB, each lifetime
-log at 128 entries and its aggregate bodies at 32 MiB before loading them. Typed storage is
+log at 128 entries and its aggregate bodies at 32 MiB. SQLite's `octet_length` checks a stored
+body's byte length before materializing it for JSON checks or copying it into Rust. Typed storage is
 decoded directly rather than through the model's 32 KiB record parser: canonical JSON can
 expand a legal record. Numeric decoding preserves exact f64 round trips.
 

@@ -41,7 +41,8 @@ the input draft, keyboard focus, viewed history, target or revision.
 ## Typed drawing admission
 
 `drawing/` is a deterministic reducer beside the coordinator. Direct complete calls and
-closed records share validation, repair and per-run step budgets. It owns one global scene
+closed records share validation, repair and per-run step budgets, including calls opened
+before another call exhausted the run. It owns one global scene
 budget and serializes store lookups, step transactions and effective cuts. A step is admitted
 without mutation, written, then committed to the canonical state only after its store reply;
 only then do `SceneBegin` and `SceneStepCommit` leave on the scene-owned data FIFO. A failed
@@ -54,14 +55,22 @@ An empty Stop received before the first scene id arrives cuts that run's unseen,
 scene to zero after the step commits. Effective cuts are durable before acknowledgement;
 failed cuts remain owed and block subsequent step writes. A no-op cut is acknowledged without
 adding a log entry. A fifth scene clears the oldest before attempting the new admission, and
-the clear remains owed even if the new step fails. Replacement alone does not cut old scenes.
+the new first step waits for that clear and any earlier typed clears to commit. A failed
+clear holds the queued first step, not an extra uncleared scene in the store. Replacement
+alone does not cut old scenes. Failed cut retries share the clear backoff, from 500 ms up to
+30 seconds [guess], without resetting while a cut is in flight.
 
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
 thread deletion holds late drawing frames until the outcome: a refusal releases them in
 order, while a hide or removal discards them and retires the canonical scenes. Reconnect
 waits for pending writes and clear debt before freezing checked descriptors and whole-event
-chunks. During staging, a v1 recovery is sent only when typed scenes exist; the production
+chunks. A scene whose producer-built descriptor or chunks fail validation or frame encoding
+is omitted whole and cleared durably before the remaining scenes are described. Any transition
+that drains or discards drawing work rechecks run completion, including clear and deletion.
+Quit drains in-flight typed writes, supersedes failed cut debt with its clear and waits for
+the clear acknowledgement within the existing deadline; an unconfirmed clear is incomplete.
+During staging, a v1 recovery is sent only when typed scenes exist; the production
 fixture and an empty placeholder-only recovery remain legacy until B3 switches both ends.
 
 ## Ids and staleness

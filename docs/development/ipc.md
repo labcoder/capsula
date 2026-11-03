@@ -341,6 +341,11 @@ unique membership, consecutive chunk ordinals, matching revision, exact log/kept
 semantic replay, and installs only on `last` from the describing connection, provided no clear
 generation changed. A wrong index, bad cut acknowledgement or rejected cut ends the connection;
 ordinary reconnect recovery rebuilds all four scenes together, not one against a new budget.
+If a stored scene cannot replay or the brain builds an invalid descriptor, chunk or encoded
+frame, that whole scene is omitted and cleared durably before membership is sent. Other scenes
+recover against one shared budget; the failure does not force a reconnect loop. A recovered
+scene that B4 cannot prepare is cleared through `ClearDrawing`, retaining its stored history,
+not cut through a stale run's `StepFailed` observation.
 
 The data FIFO orders removal of an evicted scene before the next scene's header and first
 step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are

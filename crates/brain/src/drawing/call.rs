@@ -331,6 +331,14 @@ impl Drawing {
         let Some(at) = self.open_call(run, id) else {
             return;
         };
+        if self.unavailable {
+            self.end(at, Some(CallError::Store), out);
+            return;
+        }
+        if self.exhausted(run) {
+            self.end(at, Some(CallError::Exhausted), out);
+            return;
+        }
         if let Err(error) = self.apply(at, record, out) {
             self.fail(at, CallError::Step(error), out);
         }
@@ -446,6 +454,15 @@ impl Drawing {
                 return Err(in_step(&step, ErrorCode::OverBudget(Budget::Steps)));
             }
             self.evict(out);
+            if self.clearing {
+                let job = Job::Record {
+                    run,
+                    call: self.calls[at].id.clone(),
+                    record: Box::new(Record::Step(step)),
+                };
+                self.queue.push_front(job);
+                return Ok(());
+            }
         }
         let admission = match (existing, &self.calls[at].scene) {
             (Some(scene), _) => {
@@ -581,6 +598,11 @@ impl Drawing {
     /// one repair round after a failed call.
     pub(super) fn fail(&mut self, at: usize, error: CallError, out: &mut Output) {
         let (run, repair) = (self.calls[at].run, self.calls[at].repair);
+        // Spent budgets end every later model error as exhausted, whichever call it is in.
+        let error = match error {
+            CallError::Step(_) | CallError::Token(_) if self.exhausted(run) => CallError::Exhausted,
+            error => error,
+        };
         if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == run) {
             if matches!(error, CallError::Step(_)) {
                 ledger.rejected = ledger.rejected.saturating_add(1);
@@ -644,6 +666,24 @@ impl Drawing {
             }
             Job::Cut { .. } | Job::Shown { .. } | Job::Unseen { .. } | Job::ClearVisible => true,
         });
+    }
+
+    /// `job` would write a new scene's first step.
+    pub(super) fn begins_scene(&self, job: &Job) -> bool {
+        let Job::Record { run, call, record } = job else {
+            return false;
+        };
+        matches!(**record, Record::Step(_))
+            && self
+                .open_call(*run, call)
+                .is_some_and(|at| matches!(self.calls[at].scene, Bound::New(_)))
+    }
+
+    /// The run spent its rejected records or its repair round.
+    fn exhausted(&self, run: RunId) -> bool {
+        self.runs
+            .iter()
+            .any(|ledger| ledger.run == run && ledger.exhausted)
     }
 
     pub(super) fn open_call(&self, run: RunId, id: &CallId) -> Option<usize> {

@@ -274,6 +274,10 @@ struct Run {
 
 /// How an ended run is being written.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the independent store and delivery fences can each settle separately"
+)]
 struct Ending {
     outcome: RunEnd,
     revealed: Option<Vec<u32>>,
@@ -287,7 +291,7 @@ struct Ending {
     /// The Stop's selection was applied to the visible set; it stays for every outcome write.
     trimmed: bool,
     /// V1 durable scene frames must precede this interrupted run's final data frame.
-    deferred_data: Option<RunId>,
+    deferred_data: bool,
 }
 
 impl Run {
@@ -302,7 +306,6 @@ impl Run {
 }
 
 /// The core loop's state.
-#[derive(Debug)]
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
     drawing_results: Vec<crate::drawing::CallEnd>,
@@ -340,6 +343,21 @@ pub struct Coordinator {
     turns_read: u32,
     /// A delete on this connection was refused for capacity, so its thread wasn't hidden.
     refused_delete: bool,
+}
+
+impl std::fmt::Debug for Coordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Coordinator")
+            .field("current_run", &self.current_run())
+            .field("ending", &self.ending.len())
+            .field("scenes", &self.scenes.len())
+            .field("drawing", &self.drawing)
+            .field("drawing_held", &self.drawing_held.len())
+            .field("clearing", &self.clearing.len())
+            .field("keeping", &self.keeping.len())
+            .field("deleting", &self.deleting.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Coordinator {
@@ -392,6 +410,10 @@ impl Coordinator {
     ///
     /// # Panics
     /// Only if a run in the ending list has no ending record, which `end` never allows.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive input router; handlers live in dedicated modules"
+    )]
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
@@ -401,7 +423,10 @@ impl Coordinator {
             Input::StopScenes { run, cuts } => self.stop_drawings(run, cuts, &mut effects)?,
             Input::Drawing(input) => self.drawing_input(input, &mut effects)?,
             Input::DrawingWritten { serial, reply } => {
-                self.drawing_written(serial, reply, &mut effects)?;
+                self.drawing_input(
+                    crate::drawing::Input::Written { serial, reply },
+                    &mut effects,
+                )?;
             }
             Input::ReadPage {
                 epoch,
@@ -490,6 +515,7 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
         }
+        self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);
@@ -690,16 +716,14 @@ impl Coordinator {
             effects.push(Effect::Revoke { run: run.id });
         }
         run.held.clear();
-        let deferred_data = (notify == Notify::Shell
-            && outcome != RunEnd::Done
-            && self.drawing.pending_for(run.id))
-        .then_some(run.id);
+        let deferred_data =
+            notify == Notify::Shell && outcome != RunEnd::Done && self.drawing.pending_for(run.id);
         if notify == Notify::Shell && outcome != RunEnd::Done {
             let phase = match outcome {
                 RunEnd::Interrupted(_) => Phase::Interrupted,
                 RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
             };
-            if deferred_data.is_some() {
+            if deferred_data {
                 effects.push(run_state(&run, phase));
             } else {
                 told(&run, phase, effects);
@@ -738,9 +762,7 @@ impl Coordinator {
             return;
         };
         ending.written = true;
-        if let Some(run) = ending.deferred_data.take()
-            && ending.notify == Notify::Shell
-        {
+        if std::mem::take(&mut ending.deferred_data) && ending.notify == Notify::Shell {
             effects.push(Effect::Data(DataToShell::RunEnd { run }));
         }
         if let (Some(revealed), Some(scene)) = (&ending.revealed, scene)
