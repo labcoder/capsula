@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::Secret;
 
 mod pages;
+mod settings;
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
+pub use settings::{AssistantName, MAX_NAME_CHARS, NameError, SettingsOp, SettingsView, UserName};
 
 /// The most rows one page carries [guess].
 pub const MAX_PAGE_ROWS: usize = 50;
@@ -49,17 +51,6 @@ pub struct Hello {
     pub build_id: String,
     /// The capability the shell read from Credential Manager.
     pub capability: Capability,
-}
-
-impl Hello {
-    /// A copy with the capability zeroed, for the pipe tap.
-    #[must_use]
-    pub fn redacted(&self) -> Self {
-        Self {
-            build_id: self.build_id.clone(),
-            capability: Secret::new([0; CAPABILITY_LEN]),
-        }
-    }
 }
 
 /// The most steps one run may draw (architecture v1 §5.2).
@@ -161,6 +152,8 @@ pub enum ControlToBrain {
         /// A resend, at a connection's start, of a delete the shell sent on an earlier one.
         resend: bool,
     },
+    /// Change a setting; answered by exactly one [`ControlToShell::Settings`].
+    Settings(SettingsOp),
 }
 
 /// What a thread's delete came to.
@@ -224,6 +217,9 @@ pub enum ControlToShell {
         /// The thread the submit named.
         thread: Option<ThreadId>,
     },
+    /// The settings: once per connection before `Scenes`, and after every
+    /// [`ControlToBrain::Settings`].
+    Settings(SettingsView),
 }
 
 /// Shell to brain, on the data pipe.

@@ -13,7 +13,6 @@ use kumochi_protocol::message::{
     Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
 };
 use kumochi_protocol::tap::Direction;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
@@ -191,18 +190,17 @@ impl Pipes {
         check_client(&self.control, &identity.shell_image)?;
         let first = timeout(
             HANDSHAKE_TIMEOUT,
-            read::<ControlToBrain>(&mut self.control, Pipe::Control),
+            read_sized::<ControlToBrain>(&mut self.control, Pipe::Control),
         )
         .await
         .map_err(|_| SessionError::Timeout)??;
-        let Some(ControlToBrain::Hello(hello)) = first else {
-            return Err(first.map_or(SessionError::ClosedEarly, |_| SessionError::NotHello));
+        let Some((first, len)) = first else {
+            return Err(SessionError::ClosedEarly);
         };
-        tap.record(
-            Pipe::Control,
-            Direction::ToBrain,
-            &ControlToBrain::Hello(hello.redacted()),
-        );
+        tap.record(Pipe::Control, Direction::ToBrain, &first, len);
+        let ControlToBrain::Hello(hello) = first else {
+            return Err(SessionError::NotHello);
+        };
         match check_hello(&hello, identity) {
             Verdict::WrongCapability => return Err(SessionError::WrongCapability),
             Verdict::BuildMismatch => {
@@ -226,18 +224,17 @@ impl Pipes {
         check_client(&self.data, &identity.shell_image)?;
         let first = timeout(
             HANDSHAKE_TIMEOUT,
-            read::<DataToBrain>(&mut self.data, Pipe::Data),
+            read_sized::<DataToBrain>(&mut self.data, Pipe::Data),
         )
         .await
         .map_err(|_| SessionError::Timeout)??;
-        let Some(DataToBrain::Hello(hello)) = first else {
+        let Some((first, len)) = first else {
             return Err(SessionError::ClosedEarly);
         };
-        tap.record(
-            Pipe::Data,
-            Direction::ToBrain,
-            &DataToBrain::Hello(hello.redacted()),
-        );
+        tap.record(Pipe::Data, Direction::ToBrain, &first, len);
+        let DataToBrain::Hello(hello) = first else {
+            return Err(SessionError::ClosedEarly);
+        };
         if check_hello(&hello, identity) != Verdict::Welcome {
             return Err(SessionError::WrongCapability);
         }
@@ -284,14 +281,19 @@ fn check_client(pipe: &PipeServer, shell_image: &Path) -> Result<(), SessionErro
     }
 }
 
-async fn send<T: Serialize>(
+async fn send(
     pipe: &mut PipeServer,
-    message: &T,
+    message: &ControlToShell,
     tap: &mut Tap,
 ) -> Result<(), SessionError> {
-    tap.record(Pipe::Control, Direction::ToShell, message);
-    pipe.write_all(&frame::encode(message, Pipe::Control)?)
-        .await?;
+    let frame = frame::encode(message, Pipe::Control)?;
+    tap.record(
+        Pipe::Control,
+        Direction::ToShell,
+        message,
+        frame.len() - HEADER_LEN,
+    );
+    pipe.write_all(&frame).await?;
     Ok(())
 }
 
@@ -301,6 +303,14 @@ pub(crate) async fn read<T: DeserializeOwned>(
     pipe: &mut (impl AsyncRead + Unpin),
     kind: Pipe,
 ) -> Result<Option<T>, FrameError> {
+    Ok(read_sized(pipe, kind).await?.map(|(message, _)| message))
+}
+
+/// Reads one frame, with its payload's length for the tap.
+pub(crate) async fn read_sized<T: DeserializeOwned>(
+    pipe: &mut (impl AsyncRead + Unpin),
+    kind: Pipe,
+) -> Result<Option<(T, usize)>, FrameError> {
     let closed = |e: &io::Error| {
         matches!(
             e.kind(),
@@ -326,7 +336,7 @@ pub(crate) async fn read<T: DeserializeOwned>(
         .map_err(truncated)?;
     let mut payload = vec![0; frame::payload_len(header, kind)?];
     pipe.read_exact(&mut payload).await.map_err(truncated)?;
-    frame::decode(&payload).map(Some)
+    frame::decode(&payload).map(|message| Some((message, payload.len())))
 }
 
 #[cfg(test)]

@@ -651,7 +651,8 @@ impl Link {
                 | ControlToShell::Ping
                 | ControlToShell::Scenes { .. }
                 | ControlToShell::ThreadDeleted { .. }
-                | ControlToShell::TurnRefused { .. },
+                | ControlToShell::TurnRefused { .. }
+                | ControlToShell::Settings(_),
             ) => {
                 return Err(LinkError::Rejected);
             }
@@ -718,6 +719,8 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
                     tracing::warn!("the control queue is full; the brain isn't reading");
                 }
             }
+            // shortcut: the shell shows no settings yet; slice 3's PRs 5 and 6 read the view.
+            Ok(Some(ControlToShell::Settings(_))) => {}
             Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
                 if events
                     .send_blocking(LinkEvent::RunState { run, thread, phase })

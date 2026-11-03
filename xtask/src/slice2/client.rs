@@ -369,6 +369,8 @@ fn control_reader(shared: Arc<Shared>, frames: Sender<Seen>) -> impl FnOnce() + 
                         continue;
                     }
                 }
+                // The slice 2 gate checks runs and deletes, not settings.
+                Ok(Some((ControlToShell::Settings(_), _))) => continue,
                 Ok(Some((message, _))) => Frame::Control(message),
                 Ok(None) | Err(_) => Frame::Closed,
             };

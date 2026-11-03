@@ -3,6 +3,7 @@
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
 
+mod config;
 pub mod coordinator;
 pub mod credential;
 pub mod ipc;
@@ -92,8 +93,9 @@ pub async fn run() -> Result<(), BrainError> {
     );
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
-    let mut brain =
-        Brain::new(store, high_water, scenes, fixture()?).map_err(BrainError::StoreThread)?;
+    let config = config::Config::load(platform::config_dir());
+    let mut brain = Brain::new(store, high_water, scenes, fixture()?, config)
+        .map_err(BrainError::StoreThread)?;
     let jobs = Job::new().map_err(BrainError::Helpers)?;
     // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
     let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
