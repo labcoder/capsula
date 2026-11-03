@@ -9,11 +9,13 @@ use super::{
 };
 use crate::{
     Handle, Op, WireId,
+    display::Prim,
     geom::{Rect, Vec2},
     limits::MAX_OBJECT_DEPTH,
+    mermaid::Extra,
     record::Direction,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Space between a cluster's contents and the rectangle its parent ranks.
 pub(super) const PAD: f32 = 16.0;
@@ -35,12 +37,13 @@ pub(super) fn is_cluster(state: &LayoutState, object: &Placed) -> bool {
             .is_some_and(|parent| matches!(&*parent.source, Op::Diagram(_)))
 }
 
-/// The nearest declared direction among diagram ancestors, else the surface default.
+/// The nearest declared direction among diagram ancestors, else the surface default, and
+/// whether a compiled flow runs it backwards.
 pub(super) fn direction(
     state: &LayoutState,
     mut group: Option<Handle>,
     surface: SurfaceGeometry,
-) -> Direction {
+) -> (Direction, bool) {
     for _ in 0..=MAX_OBJECT_DEPTH {
         let Some(object) = group.and_then(|handle| get(state, handle)) else {
             break;
@@ -49,14 +52,19 @@ pub(super) fn direction(
             break;
         };
         if let Some(dir) = diagram.dir {
-            return dir;
+            let reverse = matches!(
+                state.extra(object.item.handle),
+                Some(Extra::Group { reverse: true, .. })
+            );
+            return (dir, reverse);
         }
         group = object.item.parent;
     }
-    match surface {
+    let dir = match surface {
         SurfaceGeometry::Inline { .. } => Direction::Down,
         SurfaceGeometry::Overlay { .. } => Direction::Right,
-    }
+    };
+    (dir, false)
 }
 
 /// Number of ancestors, so deeper groups are placed before the groups that rank them.
@@ -125,6 +133,47 @@ pub(super) fn member_rect(object: &Placed) -> Rect {
         origin: contents.origin - Vec2::new(PAD, PAD),
         size: contents.size + Vec2::new(2.0 * PAD, 2.0 * PAD),
     }
+}
+
+/// A titled cluster's rectangle around its children's `contents`, and its title's origin: a band
+/// as tall as the title plus the padding sits above the contents, and the rectangle widens to fit
+/// a wider title. It is computed from the contents alone, so recomputing never adds a second band.
+pub(super) fn banded(contents: Rect, title: Vec2) -> (Rect, Vec2) {
+    let band = title.y + PAD;
+    let width = contents.size.x.max(title.x);
+    let bounds = Rect {
+        origin: Vec2::new(contents.center().x - width * 0.5, contents.origin.y - band),
+        size: Vec2::new(width, contents.size.y + band),
+    };
+    (
+        bounds,
+        Vec2::new(bounds.center().x - title.x * 0.5, bounds.origin.y),
+    )
+}
+
+/// A group's primitives with its title moved to `origin`.
+pub(super) fn retitle(primitives: &[Prim], origin: Vec2) -> Arc<[Prim]> {
+    primitives
+        .iter()
+        .map(|primitive| match primitive {
+            Prim::Text {
+                text,
+                style,
+                color,
+                max_width,
+                align,
+                ..
+            } => Prim::Text {
+                origin,
+                text: text.clone(),
+                style: *style,
+                color: *color,
+                max_width: *max_width,
+                align: *align,
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// Union of a diagram's children in its own space, as the final bounds pass computes it when
