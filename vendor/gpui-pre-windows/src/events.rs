@@ -1360,6 +1360,8 @@ impl WindowsWindowInner {
         let mut request_frame = self.state.callbacks.request_frame.take()?;
         // Validate before drawing: a frame requested during this draw re-invalidates the window,
         // and validating afterwards would erase it.
+        // SAFETY: `handle` is this window's live HWND, on the thread that owns it; a null rect
+        // validates the whole client area.
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         self.state.direct_manipulation.update();
