@@ -66,7 +66,24 @@ fn path_source(pkgid: &str) -> Option<(PathBuf, &str)> {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest,
         _ => url,
     };
-    Some((PathBuf::from(path), version))
+    Some((PathBuf::from(percent_decode(path)?), version))
+}
+
+/// Undoes a file URL's percent-encoding, as UTF-8.
+fn percent_decode(encoded: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut rest = encoded.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// The name and version in a manifest's `[package]` table.
@@ -108,6 +125,21 @@ mod tests {
         assert_eq!(
             path_source("path+file:///home/k/capsula/vendor/gpui#gpui-pre-windows@0.3.10"),
             Some((PathBuf::from("/home/k/capsula/vendor/gpui"), "0.3.10"))
+        );
+    }
+
+    #[test]
+    fn an_encoded_path_is_decoded() {
+        assert_eq!(
+            path_source("path+file:///C:/Kumo%20Work/100%25/caf%C3%A9/vendor/gpui#0.3.10"),
+            Some((
+                PathBuf::from("C:/Kumo Work/100%/café/vendor/gpui"),
+                "0.3.10"
+            ))
+        );
+        assert_eq!(
+            path_source("path+file:///C:/bad%2/vendor/gpui#0.3.10"),
+            None
         );
     }
 
