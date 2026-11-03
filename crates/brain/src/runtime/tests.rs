@@ -152,7 +152,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     /// The next control frame other than an account view, which every connection sends.
     async fn unaccounted(&mut self) -> std::io::Result<Option<ControlToShell>> {
         loop {
-            match ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control).await {
+            match self.next_control().await {
                 Ok(Some(ControlToShell::Account(_))) => {}
                 other => return other.map_err(std::io::Error::other),
             }
