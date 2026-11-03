@@ -167,6 +167,7 @@ impl Pose {
             self.glow.r - o.glow.r,
             self.glow.g - o.glow.g,
             self.glow.b - o.glow.b,
+            self.orbit_r - o.orbit_r,
         ]
         .into_iter()
         .fold(0.0, |a, d| a.max(d.abs()))
@@ -177,27 +178,33 @@ impl Pose {
 const BLINK_SECS: f32 = 0.17;
 /// How fast a mood change eases, per second.
 const EASE_RATE: f32 = 7.0;
-/// A mood change is done once no parameter is further than this from its target.
+/// A mood change snaps to its target once no parameter is further than this from it.
 const SETTLED: f32 = 1e-3;
+/// The surface drift's clock wraps after this many seconds of continuous voice.
+const DRIFT_WRAP: f64 = 4096.0;
 /// Constant parts of every pose.
 const EYE_GAP: f32 = 0.175;
 const GLOW_R: f32 = 0.52;
 const BREATHE_HZ: f32 = 0.28;
 
-/// Drives Kumo's face over time. Deterministic for a given seed and tick sequence; the owner
-/// asks for a frame only while [`Self::is_animating`] says the next one differs.
+/// Drives Kumo's face over time. Deterministic for a given seed and tick sequence. The owner
+/// asks for a frame only while [`Self::is_animating`] is true, and that frame is always drawn.
 #[derive(Clone, Debug)]
 pub(crate) struct Animator {
     mood: Mood,
     pose: Pose,
     reduced: bool,
-    t: f32,
+    /// Seconds of motion, in f64 so frame-sized steps still count after days.
+    t: f64,
     seed: u32,
     blinks: u32,
-    blink_at: Option<f32>,
-    /// When the next blink falls due while a voice mood moves.
-    next_blink: f32,
+    /// How far into the blink under way, seconds.
+    blink: Option<f32>,
+    /// Seconds until the next blink while a voice mood moves.
+    until_blink: f32,
     level: f32,
+    /// A change since the last frame that the next frame shows.
+    stale: bool,
 }
 
 impl Animator {
@@ -209,14 +216,11 @@ impl Animator {
             t: 0.0,
             seed,
             blinks: 0,
-            blink_at: None,
-            next_blink: f32::INFINITY,
+            blink: None,
+            until_blink: f32::INFINITY,
             level: 0.0,
+            stale: false,
         }
-    }
-
-    pub(crate) fn mood(&self) -> Mood {
-        self.mood
     }
 
     /// Eases toward `mood`; a voice mood starts its blink schedule.
@@ -225,7 +229,8 @@ impl Animator {
             return;
         }
         self.mood = mood;
-        self.next_blink = if mood.live() {
+        self.stale = true;
+        self.until_blink = if mood.live() {
             self.blink_gap()
         } else {
             f32::INFINITY
@@ -235,48 +240,62 @@ impl Animator {
     /// Follows the operating system's reduced-motion setting: when it's reduced, Kumo shows
     /// its mood's pose and nothing moves, and a blink under way stops at once.
     pub(crate) fn set_motion(&mut self, motion: Motion) {
-        self.reduced = motion == Motion::Reduced;
-        if self.reduced {
-            self.blink_at = None;
+        let reduced = motion == Motion::Reduced;
+        self.stale |= reduced != self.reduced;
+        self.reduced = reduced;
+        if reduced {
+            self.blink = None;
         }
     }
 
     /// Hover, listening or speaking began: one blink, unless motion is reduced.
     pub(crate) fn engage(&mut self) {
         if !self.reduced {
-            self.blink_at = Some(self.t);
+            self.blink = Some(0.0);
         }
     }
 
-    /// Engagement ended: a blink under way is cut, so nothing is left animating.
+    /// Engagement ended: a blink under way is cut, and the next frame opens the eyes.
     pub(crate) fn disengage(&mut self) {
-        self.blink_at = None;
+        self.stale |= self.blink.take().is_some();
     }
 
-    /// Whether the next frame differs from this one.
+    /// Whether the owner should draw another frame: true until the frame after the last
+    /// change has been drawn, and false only when every later frame would be the same.
     pub(crate) fn is_animating(&self) -> bool {
-        if self.reduced {
-            return false;
+        if self.stale || self.reduced {
+            return self.stale;
         }
-        self.blink_at.is_some()
-            || self.mood.live()
-            || self.pose.distance(&self.mood.pose()) > SETTLED
+        self.blink.is_some() || self.mood.live() || self.pose != self.mood.pose()
     }
 
-    /// Advances `dt` seconds with the current voice level (0..=1) and returns the frame.
+    /// Advances `dt` seconds with the current voice level (0..=1) and returns the frame. A
+    /// negative or non-finite step counts as no time.
     pub(crate) fn tick(&mut self, dt: f32, level_in: f32) -> FrameState {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        self.stale = false;
         let target = self.mood.pose();
         if self.reduced {
             self.pose = target;
             return frame(&target, 0.0, 1.0, 0.0, 0.0);
         }
-        self.t += dt;
-        self.pose = self.pose.lerp(&target, 1.0 - (-dt * EASE_RATE).exp());
+        self.t += f64::from(dt);
+        let eased = self.pose.lerp(&target, 1.0 - (-dt * EASE_RATE).exp());
+        self.pose = if eased.distance(&target) <= SETTLED {
+            target
+        } else {
+            eased
+        };
         let rate = if level_in > self.level { 30.0 } else { 9.0 };
         self.level += (level_in - self.level) * (1.0 - (-dt * rate).exp());
         let live = self.mood.live();
-        if live && self.blink_at.is_none() && self.t >= self.next_blink {
-            self.blink_at = Some(self.t);
+        if let Some(age) = &mut self.blink {
+            *age += dt;
+        } else if live {
+            self.until_blink -= dt;
+            if self.until_blink <= 0.0 {
+                self.blink = Some(0.0);
+            }
         }
         let open = self.blink_open();
         let moving = if live { 1.0 } else { 0.0 };
@@ -285,14 +304,14 @@ impl Animator {
 
     /// How open the eyes are during a blink, ending the blink once it's over.
     fn blink_open(&mut self) -> f32 {
-        let Some(start) = self.blink_at else {
+        let Some(age) = self.blink else {
             return 1.0;
         };
-        let s = (self.t - start) / BLINK_SECS;
+        let s = age / BLINK_SECS;
         if s >= 1.0 {
-            self.blink_at = None;
+            self.blink = None;
             if self.mood.live() {
-                self.next_blink = self.t + self.blink_gap();
+                self.until_blink = self.blink_gap();
             }
             return 1.0;
         }
@@ -316,21 +335,37 @@ impl Animator {
     }
 }
 
+/// The angle, in radians, of something turning `hz` times a second at time `t`, wrapped to
+/// one turn first so a long run keeps its precision.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "a fraction of one turn fits f32"
+)]
+fn turn(t: f64, hz: f32) -> f32 {
+    (t * f64::from(hz)).fract() as f32 * TAU
+}
+
 /// The frame for pose `p` at time `t`, eyes `open` (0..=1), voice `level` and `moving`
 /// (1 while a voice mood moves, else 0, which freezes every time-driven term).
-fn frame(p: &Pose, t: f32, open: f32, level: f32, moving: f32) -> FrameState {
-    let breathe = (t * BREATHE_HZ * TAU).sin() * p.breathe_amp * moving;
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the wrapped drift clock fits f32"
+)]
+fn frame(p: &Pose, t: f64, open: f32, level: f32, moving: f32) -> FrameState {
+    let breathe = turn(t, BREATHE_HZ).sin() * p.breathe_amp * moving;
     let sy = 1.0 + breathe + level * p.level_squash;
     let sx = 1.0 - (sy - 1.0) * 0.6;
-    let orbit = t * p.orbit_hz * TAU * moving;
+    let orbit = turn(t, p.orbit_hz) * moving;
     let glow_pos = v2(
         -0.05 + orbit.cos() * p.orbit_r,
         0.02 + orbit.sin() * p.orbit_r * 0.6,
     );
-    let pulse = 1.0 + 0.08 * (t * 0.9 * TAU).sin() * moving;
+    let pulse = 1.0 + 0.08 * turn(t, 0.9).sin() * moving;
     let opening = (1.0 + level * p.level_open).max(0.35);
     let half_h = mix(p.eye_w * 0.28, p.eye_h * opening, open);
-    let drift = (t * 0.35 * TAU).sin() * p.wander * moving;
+    let drift = turn(t, 0.35).sin() * p.wander * moving;
     let eye = |side: f32| Eye {
         center: v2(
             side * EYE_GAP + drift + p.gaze.x,
@@ -354,13 +389,16 @@ fn frame(p: &Pose, t: f32, open: f32, level: f32, moving: f32) -> FrameState {
         glow_r: GLOW_R * (1.0 + level * 0.25 * p.level_glow),
         glow_pos,
         rim_k: 1.0 + level * p.level_glow * 0.6,
-        time: t * moving,
+        // shortcut: the surface drift jumps once per wrap of continuous voice, unseen so far;
+        // wrap each noise octave on its own if it ever shows.
+        time: (t % DRIFT_WRAP) as f32 * moving,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Animator, BLINK_SECS, FrameState, Mood, Motion};
+    use crate::presence::kumo::math::hex;
 
     const FRAME: f32 = 1.0 / 72.0;
 
@@ -389,7 +427,20 @@ mod tests {
             && pairs
                 .into_iter()
                 .chain(eyes)
-                .all(|(x, y)| (x - y).abs() < 1e-6)
+                .all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// The owner's protocol: ask for frames only while `is_animating` says so. Returns the last
+    /// frame drawn and how many were drawn.
+    fn drive(a: &mut Animator, last: FrameState, max: usize) -> (FrameState, usize) {
+        let mut last = last;
+        let mut frames = 0;
+        while a.is_animating() {
+            last = a.tick(FRAME, 0.0);
+            frames += 1;
+            assert!(frames <= max, "still animating after {max} frames");
+        }
+        (last, frames)
     }
 
     /// Ticks at 72 fps for `secs` and counts the blinks: runs of frames with the eyes closing.
@@ -409,6 +460,94 @@ mod tests {
         count
     }
 
+    /// Seconds of 72 fps frames until the eyes start closing for the next blink.
+    fn until_blink(a: &mut Animator) -> f32 {
+        let mut open = a.tick(FRAME, 0.0).eyes[0].half_h;
+        let mut frames = 1_u16;
+        loop {
+            frames += 1;
+            let h = a.tick(FRAME, 0.0).eyes[0].half_h;
+            if h < open * 0.9 {
+                return f32::from(frames - 1) * FRAME;
+            }
+            open = h;
+            assert!(frames < 72 * 20, "no blink within 20 s");
+        }
+    }
+
+    fn eye(f: &FrameState, i: usize) -> [f32; 5] {
+        let e = f.eyes[i];
+        [e.center.x, e.center.y, e.half_w, e.half_h, e.lid]
+    }
+
+    fn near(got: &[f32], want: &[f32]) -> bool {
+        got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-5)
+    }
+
+    #[test]
+    fn each_mood_holds_its_spike_pose_when_still() {
+        // (mood, glow, glow strength, glow position, left eye, right eye): x, y, half width,
+        // half height and lid, from the approved spike's pose table.
+        let table = [
+            (
+                Mood::Idle,
+                0xB7_A4_FF,
+                0.7,
+                [0.07, 0.02],
+                [-0.175, -0.08, 0.055, 0.098, 0.0],
+                [0.175, -0.08, 0.055, 0.098, 0.0],
+            ),
+            (
+                Mood::Listening,
+                0x6F_E0_EE,
+                0.55,
+                [0.0, 0.02],
+                [-0.175, -0.036, 0.060, 0.118, 0.0],
+                [0.175, -0.084, 0.060, 0.118, 0.0],
+            ),
+            (
+                Mood::Thinking,
+                0x8C_78_FF,
+                1.0,
+                [0.25, 0.02],
+                [-0.105, -0.03, 0.055, 0.09, 0.3],
+                [0.245, -0.03, 0.055, 0.09, 0.3],
+            ),
+            (
+                Mood::Speaking,
+                0x86_A8_FF,
+                0.6,
+                [0.03, 0.02],
+                [-0.175, -0.07, 0.055, 0.104, 0.0],
+                [0.175, -0.07, 0.055, 0.104, 0.0],
+            ),
+        ];
+        for (mood, glow, glow_k, glow_pos, left, right) in table {
+            let mut a = Animator::new(mood, 7);
+            a.set_motion(Motion::Reduced);
+            let f = a.tick(FRAME, 1.0);
+            assert_eq!(f.glow, hex(glow), "{mood:?}");
+            assert!(
+                (f.glow_k - glow_k).abs() < 1e-5,
+                "{mood:?} glow {}",
+                f.glow_k
+            );
+            assert!(
+                near(&[f.glow_pos.x, f.glow_pos.y], &glow_pos),
+                "{mood:?} {:?}",
+                f.glow_pos
+            );
+            assert!(
+                near(&[f.body_scale.x, f.body_scale.y], &[1.0, 1.0]),
+                "{mood:?}"
+            );
+            assert!(near(&eye(&f, 0), &left), "{mood:?} left {:?}", eye(&f, 0));
+            assert!(near(&eye(&f, 1), &right), "{mood:?} right {:?}", eye(&f, 1));
+            assert!(!a.is_animating(), "{mood:?} is still");
+            assert_eq!(a.tick(FRAME, 1.0), f, "{mood:?} stays still, voice or not");
+        }
+    }
+
     #[test]
     fn an_idle_kumo_shows_the_still_pose_and_asks_for_nothing() {
         let mut a = Animator::new(Mood::Idle, 7);
@@ -425,50 +564,56 @@ mod tests {
         let mut a = Animator::new(Mood::Idle, 7);
         a.engage();
         assert!(a.is_animating());
-        assert_eq!(blinks_over(&mut a, BLINK_SECS + 2.0 * FRAME), 1);
-        assert!(!a.is_animating(), "settled once the blink is over");
+        let (last, frames) = drive(&mut a, FrameState::IDLE, 72);
+        assert_eq!(
+            frames, 13,
+            "one 0.17 s blink at 72 fps, then the open frame"
+        );
+        assert!(
+            close(&last, &FrameState::IDLE),
+            "it ends with the eyes open"
+        );
         assert_eq!(blinks_over(&mut a, 30.0), 0, "and it stays still");
     }
 
     #[test]
-    fn disengaging_mid_blink_cuts_it() {
+    fn disengaging_mid_blink_still_draws_the_open_eyes() {
         let mut a = Animator::new(Mood::Idle, 7);
         a.engage();
+        let mut last = FrameState::IDLE;
         for _ in 0..4 {
-            a.tick(FRAME, 0.0);
+            last = a.tick(FRAME, 0.0);
         }
+        assert!(last.eyes[0].half_h < 0.098, "mid-blink");
         a.disengage();
-        assert!(!a.is_animating());
-        assert!(
-            close(&a.tick(FRAME, 0.0), &FrameState::IDLE),
-            "eyes open again"
-        );
+        let (last, frames) = drive(&mut a, last, 2);
+        assert_eq!(frames, 1, "one more frame, to open the eyes");
+        assert!(close(&last, &FrameState::IDLE), "eyes open again");
     }
 
     #[test]
-    fn reduced_motion_is_a_static_pose_with_no_blink() {
-        let mut a = Animator::new(Mood::Listening, 7);
-        a.set_motion(Motion::Reduced);
-        a.engage();
-        assert!(!a.is_animating());
-        let first = a.tick(FRAME, 1.0);
-        for _ in 0..100 {
-            assert_eq!(
-                a.tick(FRAME, 1.0),
-                first,
-                "nothing moves, not even with a voice"
-            );
-        }
-    }
-
-    #[test]
-    fn turning_reduced_motion_on_mid_blink_stops_it_at_once() {
+    fn quick_disengage_and_reengage_blinks_once_from_the_start() {
         let mut a = Animator::new(Mood::Idle, 7);
         a.engage();
-        a.tick(4.0 * FRAME, 0.0);
+        a.tick(2.0 * FRAME, 0.0);
+        a.disengage();
+        a.engage();
+        let (last, frames) = drive(&mut a, FrameState::IDLE, 72);
+        assert_eq!(frames, 13);
+        assert!(close(&last, &FrameState::IDLE));
+    }
+
+    #[test]
+    fn turning_reduced_motion_on_mid_blink_draws_the_still_pose() {
+        let mut a = Animator::new(Mood::Idle, 7);
+        a.engage();
+        let last = a.tick(4.0 * FRAME, 0.0);
         a.set_motion(Motion::Reduced);
-        assert!(!a.is_animating());
-        assert!(close(&a.tick(FRAME, 0.0), &FrameState::IDLE));
+        let (last, frames) = drive(&mut a, last, 2);
+        assert_eq!(frames, 1);
+        assert!(close(&last, &FrameState::IDLE));
+        a.engage();
+        assert!(!a.is_animating(), "reduced motion doesn't blink");
         a.set_motion(Motion::Full);
         a.engage();
         assert!(
@@ -478,28 +623,113 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_mood_moves_while_it_lasts_and_blinks_on_its_schedule() {
+    fn a_mood_change_under_reduced_motion_draws_the_new_pose_once() {
+        let mut a = Animator::new(Mood::Idle, 7);
+        a.set_motion(Motion::Reduced);
+        a.set_mood(Mood::Thinking);
+        let (last, frames) = drive(&mut a, FrameState::IDLE, 2);
+        assert_eq!(frames, 1);
+        assert!((last.eyes[0].lid - 0.3).abs() < 1e-6, "thinking's lid");
+    }
+
+    #[test]
+    fn a_voice_mood_moves_its_body_and_light_and_blinks() {
         let mut a = Animator::new(Mood::Idle, 7);
         a.set_mood(Mood::Speaking);
         let first = a.tick(FRAME, 0.5);
         assert!(a.is_animating());
         let later = (0..36).map(|_| a.tick(FRAME, 0.5)).last().expect("frames");
-        assert_ne!(first, later, "the body breathes and the light drifts");
+        assert!(
+            (first.body_scale.y - later.body_scale.y).abs() > 1e-3,
+            "the body squashes"
+        );
+        assert!(
+            (first.glow_pos.x - later.glow_pos.x).abs() > 1e-3,
+            "the light orbits"
+        );
         assert!(blinks_over(&mut a, 20.0) >= 2, "a long turn still blinks");
     }
 
     #[test]
-    fn a_mood_change_eases_then_settles() {
-        let mut a = Animator::new(Mood::Speaking, 7);
+    fn switching_voice_moods_late_waits_a_whole_gap() {
+        // Without a blink under way: well past every possible gap, so a deadline stored as a
+        // bare gap would already have passed.
+        let mut a = Animator::new(Mood::Idle, 7);
+        a.set_mood(Mood::Speaking);
+        a.tick(10.0, 0.0);
+        a.tick(BLINK_SECS, 0.0);
+        a.tick(BLINK_SECS, 0.0);
+        a.set_mood(Mood::Listening);
+        let wait = until_blink(&mut a);
+        assert!(
+            (0.32..=7.5 + FRAME).contains(&wait),
+            "next blink {wait} s after the change"
+        );
+        // With a blink under way: the gap counts from its end.
+        a.engage();
+        a.tick(4.0 * FRAME, 0.0);
+        a.set_mood(Mood::Speaking);
+        a.tick(BLINK_SECS, 0.0);
+        let wait = until_blink(&mut a);
+        assert!(
+            (0.32 - FRAME..=5.4 + FRAME).contains(&wait),
+            "next blink {wait} s after it"
+        );
+    }
+
+    #[test]
+    fn a_mood_change_eases_then_settles_on_its_pose() {
+        let mut a = Animator::new(Mood::Idle, 7);
         a.set_mood(Mood::Thinking);
-        assert!(a.is_animating(), "easing toward thinking");
-        let mut frames = 0;
-        while a.is_animating() {
-            a.tick(FRAME, 0.0);
-            frames += 1;
-            assert!(frames < 144, "settles within two seconds");
-        }
-        assert_eq!(a.mood(), Mood::Thinking);
+        let f = a.tick(0.1, 0.0);
+        // 1 - e^(-0.7) of the way from lid 0 to 0.3.
+        assert!(
+            (f.eyes[0].lid - 0.151_02).abs() < 1e-4,
+            "lid {}",
+            f.eyes[0].lid
+        );
+        let (last, frames) = drive(&mut a, f, 144);
         assert!(frames > 36, "it eased rather than jumped: {frames} frames");
+        let mut still = Animator::new(Mood::Thinking, 7);
+        still.set_motion(Motion::Reduced);
+        assert!(
+            close(&last, &still.tick(FRAME, 0.0)),
+            "it lands exactly on thinking"
+        );
+        assert_eq!(a.tick(FRAME, 0.0), last, "and the next frame is the same");
+        a.engage();
+        let (after, _) = drive(&mut a, last, 72);
+        assert!(close(&after, &last), "a later blink resumes nothing");
+    }
+
+    #[test]
+    fn a_mood_change_mid_blink_finishes_the_blink() {
+        let mut a = Animator::new(Mood::Idle, 7);
+        a.engage();
+        let f = a.tick(4.0 * FRAME, 0.0);
+        a.set_mood(Mood::Thinking);
+        let (last, _) = drive(&mut a, f, 144);
+        assert!(
+            (last.eyes[0].half_h - 0.09).abs() < 1e-5,
+            "eyes open, at thinking's height"
+        );
+    }
+
+    #[test]
+    fn odd_time_steps_never_leave_it_stuck() {
+        let mut a = Animator::new(Mood::Idle, 7);
+        let f = a.tick(524_288.0, 0.0);
+        assert!(close(&f, &FrameState::IDLE));
+        a.engage();
+        let (last, frames) = drive(&mut a, f, 72);
+        assert_eq!(frames, 13, "a blink after a huge step still ends");
+        assert!(close(&last, &FrameState::IDLE));
+        a.engage();
+        let before = a.tick(FRAME, 0.0);
+        assert_eq!(a.tick(0.0, 0.0), before, "a zero step changes nothing");
+        assert_eq!(a.tick(f32::NAN, 0.0), before, "nor does a broken one");
+        assert_eq!(a.tick(-1.0, 0.0), before, "nor a backwards one");
+        let (_, frames) = drive(&mut a, before, 72);
+        assert_eq!(frames, 12, "the blink goes on where it was");
     }
 }
