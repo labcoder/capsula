@@ -18,11 +18,16 @@ the typing panel for a separate conversation, created only when you send its fir
 Closing the tasks panel doesn't erase anything or change where input goes. A switch affects
 future messages, never a message already sent.
 
+If you send again before a new task's first message is acknowledged, the second message stays
+in the typing box with a busy notice. Retry once the task is ready to continue it, or choose
+**New task** again to start a separate conversation.
+
 Choose **Rename** on the task you're viewing to edit its name inline. Enter sends the edit; invalid
 text shows an error beside the field. Task titles must be one line, 1–80 characters after
 trimming, with no control characters. The displayed title changes only after the saved title
-is read back. Renaming Kumo changes the assistant's name instead: it has the same rules with
-a 1–24-character limit, and the displayed name waits for confirmation from the background
+is read back; it can lag until the next refresh or until you reopen the panel. Renaming Kumo
+changes the assistant's name instead: it has the same rules with a 1–24-character limit, and
+the displayed name waits for confirmation from the background
 process. A name update keeps your draft and doesn't switch tasks or move keyboard focus.
 
 Esc stops work first, clears a drawing next, then cancels an active rename before it can

@@ -44,18 +44,10 @@ impl ThreadsDelegate {
         cx: &mut Context<'_, ListState<Self>>,
     ) -> ListState<Self> {
         let watch = cx.observe_in(&model, window, |list, _, window, cx| {
-            let delegate = list.delegate();
-            let ix = delegate
-                .selected
-                .and_then(|id| {
-                    delegate
-                        .model
-                        .read(cx)
-                        .rows
-                        .iter()
-                        .position(|row| row.id == id)
-                })
-                .map(IndexPath::new);
+            let delegate = list.delegate_mut();
+            let state = delegate.model.read(cx);
+            delegate.selected = state.open;
+            let ix = state.selected_index().map(IndexPath::new);
             list.set_selected_index(ix, window, cx);
             cx.notify();
         });
@@ -199,6 +191,7 @@ impl ListDelegate for ThreadsDelegate {
 pub(super) struct ThreadsView {
     pub(super) list: Entity<ListState<ThreadsDelegate>>,
     pub(super) stop: bool,
+    pub(super) target: Target,
     model: Entity<Threads>,
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
@@ -276,6 +269,7 @@ impl ThreadsView {
         Self {
             list,
             stop: false,
+            target: Target::Kumo,
             model,
             owner,
             events,
@@ -323,6 +317,9 @@ impl ThreadsView {
         let Some((thread, kind)) = self.rename else {
             return;
         };
+        if !self.model.read(cx).can_rename(thread) {
+            return;
+        }
         let message = match rename_message(thread, kind, &self.rename_input.read(cx).value()) {
             Ok(message) => message,
             Err(error) => {
@@ -361,10 +358,7 @@ impl ThreadsView {
         let close_events = self.events.clone();
         let strings = cx.global::<Strings>();
         let back_owner = self.owner.clone();
-        let back = self
-            .owner
-            .upgrade()
-            .is_some_and(|owner| owner.read(cx).runs.target() != Target::Kumo);
+        let back = self.target != Target::Kumo;
         let back_label = strings.back_to_kumo(self.model.read(cx).settings.as_ref().map_or(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
@@ -549,7 +543,7 @@ impl ThreadsView {
 
     fn rename_editor(&self, thread: ThreadId, cx: &mut Context<'_, Self>) -> gpui_kit::AnyElement {
         let state = self.model.read(cx);
-        let disabled = !state.online() || state.deleting.contains(&thread);
+        let disabled = !state.can_rename(thread);
         let strings = cx.global::<Strings>();
         let save_label = strings.get(Text::SaveRename);
         let cancel_label = strings.get(Text::CancelRename);
@@ -591,18 +585,14 @@ impl ThreadsView {
         let state = self.model.read(cx);
         let row = state.row(state.open?)?.clone();
         let title = row_label(&row, state.settings.as_ref());
-        let disabled = !state.online() || state.deleting.contains(&row.id);
+        let disabled = !state.can_rename(row.id);
         if self.rename.is_some() {
             return Some(self.rename_editor(row.id, cx));
         }
-        let target = self
-            .owner
-            .upgrade()
-            .map(|owner| owner.read(cx).runs.target());
         let strings = cx.global::<Strings>();
         let rename_label = strings.get(Text::RenameThread);
         let switch_label = strings.get(Text::SwitchThread);
-        let switch = target.is_some_and(|target| !row_is_target(&row, target));
+        let switch = !row_is_target(&row, self.target);
         let switch_owner = self.owner.clone();
         let thread = row.id;
         let kind = row.kind;

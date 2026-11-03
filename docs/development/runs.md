@@ -25,6 +25,12 @@ Each submit captures the target in `TextSubmit` and queues the current revision 
 even for New task. Disconnect clears the main id and pending submissions, so a previous
 connection's id cannot be reused before the new view arrives.
 
+While `Target::New` has a submission pending at the current revision, another submit is
+refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
+stays, so after the first `RunState` adopts the task, retrying continues that task. Pending
+turns from older selections don't block New task: explicitly choosing **New task** again
+advances the revision and permits a separate task.
+
 A new `RunState` answers the oldest pending turn. Only a matching queued revision while the
 target is still `New` can adopt that run's thread, without advancing the revision. An empty
 FIFO never adopts, and a task holding a delete slot cannot become the target. A delayed state

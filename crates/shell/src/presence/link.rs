@@ -126,16 +126,18 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
+        self.clear_refusal(cx);
         self.threads.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
         });
     }
 
-    /// Shows the brain's error in the typing panel and on the dock.
+    /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
+        let previous = (self.error.clone(), self.refusal);
         self.error = Some(cx.global::<Strings>().error(error).into());
-        self.refresh_dock(cx);
+        self.notices_changed(&previous, cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
@@ -173,6 +175,9 @@ impl Presence {
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        if state == LinkState::Connected {
+            self.clear_refusal(cx);
+        }
         if state == LinkState::Failed {
             self.native.enable_retry();
         } else {

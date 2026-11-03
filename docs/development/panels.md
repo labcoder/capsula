@@ -56,6 +56,11 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
 
+The list highlight follows `Threads.open`, including Back to Kumo and hide/reopen. Enter and
+Save share the same rename availability check, so an offline or deleting row cannot send an
+edit. Conversation and target presentation notify their views only when their content changes;
+an answer delta alone does not redraw the tasks panel.
+
 Search uses the store's literal FTS phrase matching, not query syntax, and settles for 150 ms
 [guess]. Results are ranked by the best matching event, with descending thread id breaking
 ties. Clearing the search restores updated-time ordering. Overlong searches are refused before

@@ -89,8 +89,10 @@ struct Presence {
     stretch: Stretch,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
-    /// The brain's last error, on the dock while connected until the next turn is sent.
+    /// The brain's last error, in both panels and on the connected dock until a turn is sent.
     error: Option<SharedString>,
+    /// A local submission refusal, shown only in the typing panel.
+    refusal: Option<Text>,
 }
 
 impl Presence {
@@ -418,14 +420,18 @@ impl Presence {
         });
         if let Some(text) = &self.text {
             text.view.update(cx, |view, cx| {
-                view.stop = stop;
-                cx.notify();
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
             });
         }
         if let Some(panel) = &self.thread_panel {
             panel.view.update(cx, |view, cx| {
-                view.stop = stop;
-                cx.notify();
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
             });
         }
         if changed {
@@ -802,7 +808,6 @@ pub(crate) fn open(
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let owner_gesture = Rc::clone(&gesture);
     let threads = cx.new(|_| Threads::default());
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
@@ -819,7 +824,7 @@ pub(crate) fn open(
             link,
             session: None,
             state: LinkState::Connecting,
-            gesture: owner_gesture,
+            gesture: Rc::clone(&gesture),
             activity: Activity::default(),
             runs: Runs::default(),
             escape_hold: EscapeHold::default(),
@@ -834,6 +839,7 @@ pub(crate) fn open(
             pointer_settle: None,
             delete_retry: None,
             error: None,
+            refusal: None,
             stretch,
         }
     });

@@ -223,6 +223,7 @@ impl Strings {
             .expect("the bundled English catalog parses; strings::tests checks it");
         let language: LanguageIdentifier = "en".parse().expect("\"en\" is a valid language id");
         let mut bundle = FluentBundle::new(vec![language]);
+        // shortcut: isolation is off because GPUI doesn't prove FSI/PDI render invisibly; revisit with the first right-to-left locale.
         bundle.set_use_isolating(false);
         bundle
             .add_resource(resource)
