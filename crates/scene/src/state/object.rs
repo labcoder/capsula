@@ -285,7 +285,22 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
         Op::Highlight(r) => positive(r.pad, "pad")?,
         Op::Diagram(r) => bounds(r.bounds)?,
         Op::Table(r) => bounds(r.bounds)?,
-        Op::Chart(r) => bounds(r.bounds)?,
+        Op::Chart(r) => {
+            bounds(r.bounds)?;
+            if r.title.is_some()
+                && let Some(bounds) = r.bounds
+            {
+                for (axis, origin) in bounds[..2].iter().enumerate() {
+                    if origin.get() + crate::limits::CHART_LABEL_INSET > crate::limits::MAX_COORD {
+                        return Err(StepError::in_step(
+                            &step.id,
+                            prefix.clone().field("box").index(axis),
+                            ErrorCode::OutOfRange,
+                        ));
+                    }
+                }
+            }
+        }
         Op::Edge(r) => {
             if r.flow.is_some_and(|period| period.get() == 0) {
                 return Err(StepError::in_step(&step.id, prefix.clone().field("flow"), ErrorCode::OutOfRange));
