@@ -10,6 +10,11 @@ name** blank to unset it. Settings are stored locally; changing a name doesn't s
 or discard your message draft. If the background process is disconnected, reconnect before
 editing. **Accounts** is empty for now.
 
+**Max frame rate** caps how fast the dock animates. **Automatic** picks 60 or 72, whichever
+suits your display; a higher cap is smoother and uses more power. Kumochi draws at a rate your
+display's refresh divides evenly, so motion stays steady, and Settings shows that rate. On a
+75–119 Hz display that's about half the refresh; choose 120 or 144 there for smoother motion.
+
 Settings stays open when you switch to another app. Esc first stops active work or clears a
 drawing. Otherwise it cancels the field you're editing without saving; press Esc again to
 close Settings. **Close** also closes it, saving an active edit as if
