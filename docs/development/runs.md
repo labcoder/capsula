@@ -284,6 +284,25 @@ yet committed may be lost. Fine while the store is local SQLite.
 
 On Quit the brain shuts down by one deadline instead, described in [processes](processes.md).
 
+### Shell crash containment
+
+The supervisor keeps the existing 200 ms, 1 s and 5 s relaunch delays, then gives up on
+the fourth death within 60 s. Each connection starts with no recovery membership; only a
+nonempty `ScenesV1` records native scene ids. A repeat death while recovery chunks are
+still queued, or within 10 s of queueing the final chunk, clears that connection's described
+drawings before relaunch. The 10 s value is a guess for preparation, not paint: B5/B6 must
+re-anchor it to actual painting. Pre-connect deaths cannot reuse the preceding membership.
+
+On give-up, the brain instead clears the union of every membership described in the rolling
+60 s window, regardless of the 10 s condition. Expired memberships and confirmed cleared ids
+are forgotten. Both paths use existing clear debt and asynchronously drain store replies under
+one 2 s deadline [guess]. Only a successful acknowledgement for every requested id and settled
+drawing work permits relaunch; failure, unavailable storage or timeout suppresses it. An
+empty new clear plan does not bypass this barrier: unavailable drawing recovery or
+unconfirmed earlier clear debt still suppresses automatic relaunch. An
+in-process hand-started connection still waits behind settlement before describe. Failed debt
+is memory-only and does not survive brain exit; typed drawing history is never deleted.
+
 The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting

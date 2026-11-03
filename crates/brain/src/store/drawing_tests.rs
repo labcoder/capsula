@@ -505,10 +505,19 @@ fn a_bad_scene_is_left_out_while_the_other_three_recover() {
                 params![rewrite(&body), row],
             )
             .expect("rewrite");
+        let captured = crate::test_support::Captured::default();
+        let guard = captured.install();
         assert_eq!(
             recovered_ids(&store),
             (vec![scenes[0], scenes[2], scenes[3]], vec![scenes[1]])
         );
+        drop(guard);
+        let warning = captured.text();
+        assert!(warning.contains(&format!("stored scene row {row} doesn't decode")));
+        assert!(warning.contains("skipped while recovering drawings"));
+        assert!(!warning.contains("privatecontent"));
+        assert!(!warning.contains("privatealt"));
+        assert!(!warning.contains("privatenarration"));
     }
     let (_scratch, mut store, scenes) = four_scenes();
     cut(&mut store, scenes[1], 1, 1).expect("cut");
@@ -522,6 +531,88 @@ fn a_bad_scene_is_left_out_while_the_other_three_recover() {
     assert!(full.skipped.is_empty());
     assert_eq!(full.scenes[1].log.len(), MAX_SCENE_LOG_ENTRIES);
     store.conn.execute(copy, []).expect("copy past the bound");
+    assert_eq!(
+        recovered_ids(&store),
+        (vec![scenes[0], scenes[2], scenes[3]], vec![scenes[1]])
+    );
+}
+
+#[test]
+fn aggregate_body_limit_accepts_exactly_32_mib_and_skips_only_one_scene_at_one_over() {
+    use kumochi_protocol::message::MAX_SCENE_SNAPSHOT_BYTES;
+
+    let (_scratch, mut store, scenes) = four_scenes();
+    cut(&mut store, scenes[1], 1, 1).expect("valid cut");
+    let (row, body): (i64, String) = store
+        .conn
+        .query_row(
+            "SELECT id, body FROM events WHERE kind='scene_cut' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("cut body");
+    let scene_row = i64::try_from(scenes[1].0).expect("native scene row");
+    let step_bytes: i64 = store
+        .conn
+        .query_row(
+            "SELECT octet_length(body) FROM events WHERE kind='scene_step' AND json_extract(body,'$.scene')=?1",
+            [scene_row],
+            |row| row.get(0),
+        )
+        .expect("step bytes");
+    store
+        .conn
+        .execute_batch("DROP TRIGGER events_append_only")
+        .expect("allow padding");
+    let remaining = MAX_SCENE_SNAPSHOT_BYTES - usize::try_from(step_bytes).expect("body bytes");
+    let mut last = row;
+    for index in 0..5 {
+        let size = remaining / 5 + usize::from(index < remaining % 5);
+        assert!(size < MAX_BODY_BYTES);
+        let padded = format!("{body}{}", " ".repeat(size - body.len()));
+        let _: super::CutBody = serde_json::from_str(&padded).expect("individually valid body");
+        if index == 0 {
+            store
+                .conn
+                .execute(
+                    "UPDATE events SET body=?1 WHERE id=?2",
+                    params![padded, row],
+                )
+                .expect("pad first cut");
+        } else {
+            store.conn.execute(
+                "INSERT INTO events (thread,kind,body,created_ms) SELECT thread,kind,?1,created_ms FROM events WHERE id=?2",
+                params![padded, row],
+            ).expect("append legal cut");
+            last = store.conn.last_insert_rowid();
+        }
+    }
+    let total: i64 = store
+        .conn
+        .query_row(
+            "SELECT sum(octet_length(body)) FROM events WHERE kind IN ('scene_step','scene_cut') AND json_extract(body,'$.scene')=?1",
+            [scene_row],
+            |row| row.get(0),
+        )
+        .expect("aggregate bytes");
+    assert_eq!(
+        total,
+        i64::try_from(MAX_SCENE_SNAPSHOT_BYTES).expect("byte cap")
+    );
+    let full = store.drawing_scenes().expect("exact boundary");
+    assert_eq!(full.skipped, []);
+    assert_eq!(
+        full.scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        scenes
+    );
+    assert_eq!(full.scenes[1].log.len(), 6);
+    store
+        .conn
+        .execute("UPDATE events SET body=body || ' ' WHERE id=?1", [last])
+        .expect("one byte over");
     assert_eq!(
         recovered_ids(&store),
         (vec![scenes[0], scenes[2], scenes[3]], vec![scenes[1]])

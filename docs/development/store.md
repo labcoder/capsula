@@ -343,6 +343,16 @@ backups and the pagefile.
 
 ## Recovery at start
 
+The shell crash guard also uses durable `scene_cleared` events before relaunch (see
+[runs](runs.md#shell-crash-containment)). These remove recovery membership, not typed history.
+A failed acknowledgement or the guard's 2 s deadline cannot authorize launch. Clear debt is
+only held in the running brain; after brain exit a failed clear may need another crash cycle.
+
+Drawing recovery warnings name only native row ids, never JSON or SQL error content. Recovery
+tests capture those warnings and isolate a corrupt scene from the other three. The aggregate
+32 MiB body limit is tested at exactly the limit and one byte over with individually valid
+bodies below 8 MiB, independently of the per-body limit.
+
 The brain opens the store and runs the recovery scan before it serves any shell:
 
 - threads left `deleting` by a crash between the two transactions finish deleting. One that fails
