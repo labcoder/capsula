@@ -19,6 +19,118 @@ use kumochi_protocol::message::{
 };
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real pipe connection exercises every typed scene frame family"
+)]
+fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
+    use kumochi_protocol::message::{SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk};
+    use kumochi_scene::{Record, SceneEvent, StopCut, parse_record, text::Bounded};
+
+    let link = attended("typed-scenes");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let scene = SceneId(7);
+    let descriptors = Bounded::new(vec![
+        SceneDescriptorV1::new(scene, 1, 1, 1).expect("descriptor"),
+    ])
+    .expect("one scene");
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::ScenesV1 {
+            scenes: descriptors.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("membership written");
+    let LinkEvent::ScenesV1 { generation, scenes } = next(&events) else {
+        panic!("typed membership")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(scenes, descriptors);
+    let Record::Begin(begin) = parse_record(
+        br#"{"begin":{"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"}}"#,
+    )
+    .expect("header") else {
+        panic!("begin")
+    };
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"private-step"}}"#).expect("step")
+    else {
+        panic!("step")
+    };
+    let header = SceneHeader {
+        begin,
+        layout_version: 1,
+    };
+    let frames = [
+        DataToShell::SceneBegin {
+            scene,
+            header: header.clone(),
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(3),
+            scene,
+            index: 0,
+            step: step.clone(),
+        },
+        DataToShell::SceneSnapshotV1 {
+            chunk: SceneSnapshotChunk {
+                scene,
+                revision: 1,
+                ordinal: 0,
+                header: Some(header),
+                events: Bounded::new(vec![SceneEvent::Step {
+                    revision: 1,
+                    step: Arc::new(step),
+                }])
+                .expect("event"),
+                last: true,
+            },
+        },
+        DataToShell::SceneCutApplied {
+            scene,
+            revision: 1,
+            cut: StopCut {
+                activated: 1,
+                revealed: Bounded::default(),
+            },
+        },
+        DataToShell::SceneEnd {
+            run: RunId(3),
+            scene,
+            complete: true,
+        },
+        DataToShell::ScenesRemoved {
+            scenes: vec![scene],
+        },
+    ];
+    for sent in frames {
+        frame::write(&mut &*link.data, &sent, Pipe::Data).expect("typed frame written");
+        let LinkEvent::Data {
+            generation,
+            message,
+            bytes,
+        } = next(&events)
+        else {
+            panic!("typed data")
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(message, sent);
+        assert_eq!(
+            usize::try_from(bytes).expect("frame size"),
+            frame::encode(&sent, Pipe::Data).expect("frame").len()
+        );
+        session.grant(bytes);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("credit"),
+            Some(DataToBrain::Credit { bytes })
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
     use kumochi_protocol::message::{AssistantName, SettingsView};
     let link = attended("settings-view");
