@@ -73,6 +73,8 @@ foreground: the user has already chosen the new window. Hidden and stale deactiv
 do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
 [presence](presence.md). The panel is hidden, not closed, so its draft survives.
 Hover never opens over it or dismisses it.
+Opening the typing panel dismisses Tasks and Settings. Settings uses its normal dismissal
+path, saving an active field edit as on blur.
 Enter submits to the [captured input target](runs.md#the-shells-input-target). When the target
 isn't Kumo, the panel names it and offers **Back to Kumo**. A settings update preserves the
 draft and keyboard focus without changing that target.
@@ -125,9 +127,10 @@ Rejected alternatives:
 ## Esc
 
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
-an active inline rename third, otherwise dismiss the typing panel or focused tasks panel. Stop
-and clear leave an edit intact; cancelling an edit doesn't dismiss its panel. The
-local effect always happens first, and nothing waits on the brain:
+an active inline rename or Settings field edit in the focused panel third, otherwise dismiss
+the typing panel or focused Tasks or Settings panel. Stop and clear leave an edit intact;
+cancelling an edit restores its saved value without sending it and doesn't dismiss its panel.
+The local effect always happens first, and nothing waits on the brain:
 
 - **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames

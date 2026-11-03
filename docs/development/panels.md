@@ -7,12 +7,14 @@ The status surface also has **Settings…**. It opens a separate retained panel 
 the assistant's name and your optional name; **Accounts** is reserved and empty for now.
 Labels, inline validation, saving and offline feedback use the shell's Fluent catalog.
 App identity continues to come from `protocol::constants`; assistant labels use the name
-received from the brain as a Fluent argument, not the product name.
+received from the brain, or `DEFAULT_ASSISTANT_NAME` before any `SettingsView`, as a Fluent
+argument, not the product name.
 
 Settings does not hide on deactivation. Esc operates only when Settings is focused: stop,
 clear, cancel the active field edit, then dismiss on the next Esc. Stop and clear leave the
-edit intact. Its close button and **Settings…** again dismiss it too. On dismissal, an active
-field saves as on blur, and the previous foreground is restored through the existing platform
+edit intact. Its close button and **Settings…** again dismiss it too. Opening the typing panel
+or Tasks, or moving the dock, uses the same dismissal path. On dismissal, an active field
+saves as on blur, and the previous foreground is restored through the existing platform
 presence interface. The native focus handoff requires a real Window and remains an owner
 hand check; pure Esc and save ordering are unit-tested. A new Settings panel inherits the
 current capture exclusion, just like Tasks and typing.
@@ -49,7 +51,9 @@ in [ipc](ipc.md#deleting-a-thread).
 The plain list pins Kumo first using `ThreadRow.kind == Main`; continuations omit it. Search
 ranks it like any other row. The shell's `row_label` uses the assistant name from the latest
 IPC `SettingsView` for Kumo everywhere, including search and the target label, never its empty
-stored title. Kumo has no Delete. Answers are labelled with the same assistant name.
+stored title. Before any settings arrive, it falls back to
+`protocol::constants::DEFAULT_ASSISTANT_NAME`. Kumo has no Delete. Answers are labelled with
+the same assistant name.
 
 Choosing **Rename** on the viewed row opens an inline gpui-kit `Input`. Enter validates
 and sends the edit; Esc cancels it only after stop and clear have had their turns. Validation
@@ -83,7 +87,10 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
 
-The list highlight follows `Threads.open`, including Back to Kumo and hide/reopen. Enter and
+The list highlight follows changes to `Threads.open`, including Back to Kumo and hide/reopen.
+Unrelated model notifications preserve a row highlighted with the arrow keys, so Enter still
+opens that row. Page updates remap the highlight by row id. Confirming a targeted task's delete
+refreshes the cached header target immediately, without waiting for a link reply. Enter and
 Save share the same rename availability check, so an offline or deleting row cannot send an
 edit. Conversation and target presentation notify their views only when their content changes;
 an answer delta alone does not redraw the tasks panel.

@@ -16,6 +16,7 @@ mod settings;
 mod settings_view;
 mod stretch;
 mod text;
+mod thread_selection;
 mod thread_view;
 mod threads;
 
@@ -42,7 +43,7 @@ use crate::platform::{
     PresenceNative, PresenceSurface,
 };
 use crate::runs::Runs;
-use crate::settings::{Field, Settings};
+use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
@@ -98,7 +99,6 @@ struct Presence {
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
     error: Option<SharedString>,
-    error_field: Option<Field>,
     /// A local submission refusal, shown only in the typing panel.
     refusal: Option<Text>,
 }
@@ -136,6 +136,7 @@ impl Presence {
             self.start_ticking(cx);
         }
         self.native.show(index)?;
+        self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         self.dismiss_threads(cx)?;
         self.set_panel(PanelVisibility::Hidden, cx)?;
@@ -819,7 +820,6 @@ pub(crate) fn open(
             pointer_settle: None,
             delete_retry: None,
             error: None,
-            error_field: None,
             refusal: None,
             stretch,
         }

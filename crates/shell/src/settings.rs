@@ -68,6 +68,8 @@ struct Pending {
 #[derive(Default)]
 pub(crate) struct Settings {
     view: Option<SettingsView>,
+    notice: Option<UserError>,
+    notice_field: Option<Field>,
     assistant: FieldState,
     user: FieldState,
     pending: VecDeque<Pending>,
@@ -85,6 +87,20 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
+    pub(crate) fn receive(
+        &mut self,
+        current: Option<u64>,
+        generation: u64,
+        view: SettingsView,
+        update: Update,
+    ) -> bool {
+        if current != Some(generation) {
+            return false;
+        }
+        let _completion = self.set_view(view, update);
+        true
+    }
+
     pub(crate) fn set_view(&mut self, view: SettingsView, update: Update) -> Option<Completion> {
         let sync_assistant = !self.assistant.saving && !self.editing(Field::Assistant);
         let sync_user = !self.user.saving && !self.editing(Field::User);
@@ -117,6 +133,9 @@ impl Settings {
         {
             state.error = None;
         }
+        if !pending.failed && self.notice_field == Some(pending.field) {
+            self.clear_notice();
+        }
         Some(Completion {
             failed: pending.failed,
             field: pending.field,
@@ -125,6 +144,15 @@ impl Settings {
 
     pub(crate) fn view(&self) -> Option<&SettingsView> {
         self.view.as_ref()
+    }
+
+    pub(crate) fn notice(&self) -> Option<&UserError> {
+        self.notice.as_ref()
+    }
+
+    pub(crate) fn clear_notice(&mut self) {
+        self.notice = None;
+        self.notice_field = None;
     }
 
     pub(crate) fn field(&self, field: Field) -> &FieldState {
@@ -180,7 +208,11 @@ impl Settings {
             Field::User => UserName::new(value).map(|name| SettingsOp::SetUserName(Some(name))),
         };
         match op {
-            Ok(_) if value.trim() == self.field(field).authoritative => false,
+            Ok(_) if value.trim() == self.field(field).authoritative => {
+                let state = self.field_mut(field);
+                state.value.clone_from(&state.authoritative);
+                false
+            }
             Ok(op) => self.send(field, op, Draft::Reset, send),
             Err(error) => {
                 self.field_mut(field).error = Some(Error::Validation(error));
@@ -234,6 +266,8 @@ impl Settings {
     }
 
     pub(crate) fn error(&mut self, error: UserError) -> Option<Field> {
+        self.notice = Some(error.clone());
+        self.notice_field = self.pending.front().map(|pending| pending.field);
         let pending = self.pending.front_mut()?;
         pending.failed = true;
         let field = pending.field;
@@ -248,6 +282,9 @@ impl Settings {
         self.user.saving = false;
     }
 }
+
+#[cfg(test)]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {
@@ -298,7 +335,10 @@ mod tests {
                 "no normalized save is pending"
             );
             assert_eq!(settings.field(field).error, None);
-            settings.cancel(field);
+            assert!(
+                !settings.editing(field),
+                "a no-op save settles the draft, so later views and renames reach it"
+            );
         }
         assert!(
             !settings.send_assistant(AssistantName::new(" Kumo ").expect("valid"), |_| panic!(

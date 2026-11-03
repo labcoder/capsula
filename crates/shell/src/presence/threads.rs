@@ -98,6 +98,7 @@ impl Presence {
     }
 
     pub(super) fn open_threads(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         if self.thread_panel.is_none() {
             self.thread_panel = Some(self.create_threads(cx)?);

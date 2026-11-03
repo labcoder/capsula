@@ -58,10 +58,10 @@ impl SettingsView {
                                 cx.notify();
                             });
                         }
-                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur
-                            if view.editing == Some(field) =>
-                        {
-                            view.editing = None;
+                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
+                            if view.editing == Some(field) {
+                                view.editing = None;
+                            }
                             let _gone = view
                                 .owner
                                 .update(cx, |owner, cx| owner.save_setting(field, cx));
@@ -69,7 +69,7 @@ impl SettingsView {
                                 window.focus(&view.focus, cx);
                             }
                         }
-                        InputEvent::PressEnter { .. } | InputEvent::Blur => {}
+                        InputEvent::PressEnter { .. } => {}
                     }
                     cx.notify();
                 })
@@ -165,7 +165,7 @@ impl SettingsView {
                     .saving
                     .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
             )
-            .children(error.map(|error| div().text_xs().text_color(cx.theme().danger).child(error)))
+            .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
 }
 

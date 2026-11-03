@@ -11,7 +11,8 @@ pointer: clicks just beside it, even while it stretches, reach the app underneat
 
 Use the tray menu to choose one of nine positions: top, middle or bottom, aligned left,
 center or right. This choice currently lasts until the shell restarts. A later release moves
-it into Settings → General and saves it.
+it into Settings → General and saves it. Moving the dock closes any open Settings panel,
+saving an active edit as if you had left the field.
 
 If the taskbar or display work area changes, choose the position again to realign the dock.
 Display-scale changes currently require restarting the shell.
@@ -23,6 +24,9 @@ While you hold [the shortcut](shortcut.md), the dock shows Listening. A double t
 typing box under the dock; [Esc](escape.md) or switching to another window hides it and keeps
 your draft. Enter sends what you typed and the answer appears in the box. A message that can't
 be sent stays there, with the reason. Switching away leaves your chosen window in front.
-**[Tasks…](tasks.md)** opens stored conversations without changing where you type next. Chat
-and settings controls appear as those features become available; the panels don't offer
-commands that can't yet work.
+**[Tasks…](tasks.md)** opens stored conversations without changing where you type next.
+**[Settings…](settings.md)** opens the name fields. Opening the typing box or Tasks closes
+Settings, saving an active edit as if you had left the field.
+
+If the dock says **Check settings**, open **Settings…** for the full explanation and retry the
+field that failed. A successful retry clears that notice.

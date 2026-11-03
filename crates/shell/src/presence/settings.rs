@@ -7,22 +7,8 @@ use super::settings_view::SettingsView;
 use super::{
     Foreground, OpenError, Presence, PresenceSurface, configure_surface, options, platform,
 };
-use crate::settings::{Completion, Field};
+use crate::settings::Field;
 use crate::strings::{Strings, Text};
-
-pub(super) fn settle_notice(
-    notice: &mut Option<super::SharedString>,
-    field: &mut Option<Field>,
-    completion: Option<Completion>,
-) -> bool {
-    if !completion.is_some_and(|completion| !completion.failed && *field == Some(completion.field))
-    {
-        return false;
-    }
-    *notice = None;
-    *field = None;
-    true
-}
 
 pub(super) struct SettingsPanel {
     pub(super) window: AnyWindowHandle,
@@ -35,6 +21,16 @@ pub(super) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(super) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
+        let previous = (self.error.clone(), self.refusal);
+        self.error = self
+            .settings
+            .read(cx)
+            .notice()
+            .map(|error| cx.global::<Strings>().error(error).into());
+        self.notices_changed(&previous, cx);
+    }
+
     pub(super) fn settings_open(&self) -> bool {
         self.settings_panel
             .as_ref()
@@ -235,83 +231,5 @@ impl Presence {
             cx.notify();
             sent
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsView, ThreadId, UserName};
-
-    use super::settle_notice;
-    use crate::settings::{Field, Settings, Update};
-
-    fn view() -> SettingsView {
-        SettingsView {
-            assistant_name: AssistantName::new("Kumo").expect("valid"),
-            user_name: None,
-            onboarded: true,
-            main_thread: ThreadId(1),
-        }
-    }
-
-    #[test]
-    fn dock_error_survives_unrelated_success_and_reconnect_until_its_field_succeeds() {
-        let mut settings = Settings::default();
-        assert_eq!(settings.set_view(view(), Update::Unsolicited), None);
-        settings.change(Field::Assistant, "Cloud");
-        assert!(settings.save(Field::Assistant, |_| true));
-        let mut field = settings.error(ErrorKey::SettingsRefused.into());
-        let mut notice = Some(gpui_kit::SharedString::from(
-            "Couldn't save that setting. Try again.",
-        ));
-        assert!(!settle_notice(
-            &mut notice,
-            &mut field,
-            settings.set_view(view(), Update::Answer)
-        ));
-        assert_eq!(field, Some(Field::Assistant));
-        assert_eq!(
-            notice.as_deref(),
-            Some("Couldn't save that setting. Try again.")
-        );
-        settings.change(Field::User, "Alex");
-        assert!(settings.save(Field::User, |_| true));
-        let mut saved = view();
-        saved.user_name = Some(UserName::new("Alex").expect("valid"));
-        assert!(!settle_notice(
-            &mut notice,
-            &mut field,
-            settings.set_view(saved.clone(), Update::Answer)
-        ));
-        assert_eq!(
-            notice.as_deref(),
-            Some("Couldn't save that setting. Try again.")
-        );
-        settings.disconnected();
-        assert!(!settle_notice(
-            &mut notice,
-            &mut field,
-            settings.set_view(saved.clone(), Update::Unsolicited)
-        ));
-        assert_eq!(field, Some(Field::Assistant));
-        assert_eq!(
-            notice.as_deref(),
-            Some("Couldn't save that setting. Try again.")
-        );
-        settings.change(Field::Assistant, "Cloud");
-        assert!(settings.save(Field::Assistant, |_| true));
-        assert_eq!(
-            notice.as_deref(),
-            Some("Couldn't save that setting. Try again.")
-        );
-        saved.assistant_name = AssistantName::new("Cloud").expect("valid");
-        assert!(settle_notice(
-            &mut notice,
-            &mut field,
-            settings.set_view(saved, Update::Answer)
-        ));
-        assert_eq!(settings.value(Field::Assistant), "Cloud");
-        assert_eq!(field, None);
-        assert_eq!(notice, None);
     }
 }

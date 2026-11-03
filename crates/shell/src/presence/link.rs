@@ -4,12 +4,7 @@ use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{LinkEvent, LinkState};
 use crate::settings::Update;
-use crate::strings::Strings;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
-
-fn current_generation(current: Option<u64>, received: u64) -> bool {
-    current == Some(received)
-}
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once.
@@ -92,10 +87,11 @@ impl Presence {
         bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
-        if current_generation(
-            self.session.as_ref().map(crate::link::Session::generation),
-            generation,
-        ) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.generation() == generation)
+        {
             let credit = match message {
                 message @ (DataToShell::ThreadList { .. }
                 | DataToShell::Page { .. }
@@ -144,22 +140,20 @@ impl Presence {
         update: Update,
         cx: &mut Context<'_, Self>,
     ) {
-        if !current_generation(
-            self.session.as_ref().map(crate::link::Session::generation),
-            generation,
-        ) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        let applied = self.settings.update(cx, |state, cx| {
+            let applied = state.receive(current, generation, view.clone(), update);
+            if applied {
+                cx.notify();
+            }
+            applied
+        });
+        if !applied {
             return;
         }
         self.runs.settings(view.main_thread);
         self.clear_refusal(cx);
-        let previous = (self.error.clone(), self.refusal);
-        let completion = self.settings.update(cx, |state, cx| {
-            let completion = state.set_view(view.clone(), update);
-            cx.notify();
-            completion
-        });
-        super::settings::settle_notice(&mut self.error, &mut self.error_field, completion);
-        self.notices_changed(&previous, cx);
+        self.sync_settings_notice(cx);
         self.threads.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
@@ -168,14 +162,11 @@ impl Presence {
 
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
-        let previous = (self.error.clone(), self.refusal);
-        self.error_field = self.settings.update(cx, |state, cx| {
-            let field = state.error(error.clone());
+        self.settings.update(cx, |state, cx| {
+            let _field = state.error(error.clone());
             cx.notify();
-            field
         });
-        self.error = Some(cx.global::<Strings>().error(error).into());
-        self.notices_changed(&previous, cx);
+        self.sync_settings_notice(cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
@@ -238,6 +229,7 @@ impl Presence {
                 state.disconnected();
                 cx.notify();
             });
+            self.sync_settings_notice(cx);
             self.runs.disconnected();
             self.sync_deletes(cx);
             self.threads.update(cx, |state, cx| {
@@ -253,17 +245,5 @@ impl Presence {
             panel.state = state;
             cx.notify();
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::current_generation;
-
-    #[test]
-    fn settings_views_require_the_current_connection_generation() {
-        assert!(!current_generation(Some(8), 7));
-        assert!(!current_generation(None, 7));
-        assert!(current_generation(Some(8), 8));
     }
 }

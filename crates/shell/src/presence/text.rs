@@ -70,6 +70,7 @@ pub(super) struct TextPanel {
 
 impl Presence {
     pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.dismiss_settings(cx)?;
         self.dismiss_threads(cx)?;
         if self.text.is_none() {
             self.text = Some(self.create_text(cx)?);
@@ -266,7 +267,7 @@ impl Presence {
         submission_notice(&mut self.error, &mut self.refusal, result);
         self.notices_changed(&previous, cx);
         if result.is_ok() {
-            self.error_field = None;
+            self.settings.update(cx, |state, _| state.clear_notice());
             let input = text.input.clone();
             text.window
                 .update(cx, |_, window, cx| {

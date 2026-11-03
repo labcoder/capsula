@@ -19,6 +19,7 @@ use kumochi_protocol::message::{
     ThreadKind, ThreadOp, ThreadRow, ThreadTitle,
 };
 
+use super::thread_selection::Selection;
 use super::{Presence, PresenceEvent, send};
 use crate::runs::Target;
 use crate::strings::{Strings, Text};
@@ -32,7 +33,7 @@ gpui_kit::actions!(threads_panel, [EarlierMessages, LaterMessages]);
 pub(super) struct ThreadsDelegate {
     model: Entity<Threads>,
     owner: WeakEntity<Presence>,
-    selected: Option<ThreadId>,
+    selection: Selection,
     _watch: Subscription,
 }
 
@@ -46,8 +47,7 @@ impl ThreadsDelegate {
         let watch = cx.observe_in(&model, window, |list, _, window, cx| {
             let delegate = list.delegate_mut();
             let state = delegate.model.read(cx);
-            delegate.selected = state.open;
-            let ix = state.selected_index().map(IndexPath::new);
+            let ix = delegate.selection.observe(state).map(IndexPath::new);
             list.set_selected_index(ix, window, cx);
             cx.notify();
         });
@@ -55,7 +55,7 @@ impl ThreadsDelegate {
             Self {
                 model,
                 owner,
-                selected: None,
+                selection: Selection::default(),
                 _watch: watch,
             },
             window,
@@ -103,13 +103,12 @@ impl ListDelegate for ThreadsDelegate {
         _: &mut Window,
         cx: &mut Context<'_, ListState<Self>>,
     ) {
-        self.selected = ix
-            .and_then(|ix| self.model.read(cx).rows.get(ix.row))
-            .map(|row| row.id);
+        self.selection
+            .select(ix.map(|ix| ix.row), self.model.read(cx));
     }
 
     fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<'_, ListState<Self>>) {
-        if let Some(thread) = self.selected {
+        if let Some(thread) = self.selection.selected {
             let owner = self.owner.clone();
             cx.defer(move |cx| {
                 let _gone = owner.update(cx, |owner, cx| owner.select_thread(Some(thread), cx));

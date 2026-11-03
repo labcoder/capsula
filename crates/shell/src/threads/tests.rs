@@ -250,7 +250,7 @@ fn kumo_in_search_and_the_cache_uses_only_the_latest_settings_name() {
 }
 
 #[test]
-fn viewing_keeps_focus_and_switch_uses_the_received_title_and_choice() {
+fn switch_uses_the_received_title_and_choice() {
     use crate::runs::{Runs, Target};
     use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug};
     let mut state = loaded();
