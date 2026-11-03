@@ -8,7 +8,7 @@
 )]
 
 use super::frame::{Eye, FrameState};
-use super::look::Look;
+use super::look::{Look, Theme};
 use super::math::{Rgb, Vec2, Vec3, hex, mix, smoothstep, v2, v3};
 use super::shape::{Framing, GBuffer, Silhouette, fbm};
 
@@ -56,6 +56,7 @@ impl Renderer {
                 });
             }
         }
+        bleed_lit(&mut lit, size);
         Self {
             look,
             size,
@@ -131,10 +132,7 @@ impl Renderer {
     /// The lit body at body-space point `q` with the mood's light, blush and eyes on top.
     fn body_color(&self, f: &FrameState, t: &Lit, q: Vec2, upp: f32) -> Rgb {
         let theme = self.look.theme;
-        let g = (glow(q, f.glow_pos, f.glow_r) * f.glow_k * t.inside).min(1.0);
-        let mut c = t.base.lerp(f.glow, g * 0.55).screen(f.glow, g * 0.35);
-        let rim = f.glow.lerp(theme.accent, t.accent_mix).lerp(WHITE, 0.25);
-        c = c.lerp(rim, (t.rim * f.rim_k * 0.6).min(0.85));
+        let mut c = finish(&theme, f, t, q);
         for e in &f.eyes {
             let rel = q - e.center;
             if f.blush > 0.01 && rel.y < 0.0 && rel.y > -0.2 {
@@ -206,11 +204,42 @@ pub(crate) fn bleed_clear(pixels: &mut [u8], size: u16) {
     }
 }
 
+/// Gives each empty texel beside the body the lit surface of its most covered 8-neighbour,
+/// keeping its coverage at 0. A squashed or lifted frame samples between texels, and an empty
+/// texel's black base and missing rim would otherwise darken the soft edge.
+fn bleed_lit(lit: &mut [Lit], size: u16) {
+    for j in 0..size {
+        for i in 0..size {
+            if lit[index(size, i, j)].coverage > 0.0 {
+                continue;
+            }
+            let near = |k: u16| [k.checked_sub(1), Some(k), (k + 1 < size).then_some(k + 1)];
+            let donor = near(j)
+                .into_iter()
+                .flatten()
+                .flat_map(|nj| {
+                    near(i)
+                        .into_iter()
+                        .flatten()
+                        .map(move |ni| index(size, ni, nj))
+                })
+                .filter(|&n| lit[n].coverage > 0.0)
+                .max_by(|&a, &b| lit[a].coverage.total_cmp(&lit[b].coverage));
+            if let Some(n) = donor {
+                lit[index(size, i, j)] = Lit {
+                    coverage: 0.0,
+                    ..lit[n]
+                };
+            }
+        }
+    }
+}
+
 /// The frame-independent part of a surface point: lit colour with the static accent light in,
 /// how much inner light it lets through, its rim weight, and where its rim sits between the
 /// mood's colour and the accent.
 #[derive(Clone, Copy, Debug, Default)]
-struct Lit {
+pub(super) struct Lit {
     coverage: f32,
     base: Rgb,
     inside: f32,
@@ -232,7 +261,14 @@ impl Lit {
 
 /// The material and colour layers at one surface point: `n` is its normal and `q` its
 /// position in body space.
-fn surface(look: &Look, n: Vec3, thickness: f32, occlusion: f32, q: Vec2, floor: f32) -> Lit {
+pub(super) fn surface(
+    look: &Look,
+    n: Vec3,
+    thickness: f32,
+    occlusion: f32,
+    q: Vec2,
+    floor: f32,
+) -> Lit {
     let theme = look.theme;
     let m = look.material;
     let key = m.key_dir.normalized();
@@ -272,6 +308,15 @@ fn surface(look: &Look, n: Vec3, thickness: f32, occlusion: f32, q: Vec2, floor:
     }
 }
 
+/// The frame's layers over a lit surface point at body-space `q`: the mood's inner light and
+/// the luminous rim. The body and the neck share it, so the neck is the same stuff.
+pub(super) fn finish(theme: &Theme, f: &FrameState, t: &Lit, q: Vec2) -> Rgb {
+    let g = (glow(q, f.glow_pos, f.glow_r) * f.glow_k * t.inside).min(1.0);
+    let c = t.base.lerp(f.glow, g * 0.55).screen(f.glow, g * 0.35);
+    let rim = f.glow.lerp(theme.accent, t.accent_mix).lerp(WHITE, 0.25);
+    c.lerp(rim, (t.rim * f.rim_k * 0.6).min(0.85))
+}
+
 fn glow(q: Vec2, at: Vec2, r: f32) -> f32 {
     let d = q - at;
     (-d.dot(d) / (r * r)).exp()
@@ -283,7 +328,7 @@ fn glow(q: Vec2, at: Vec2, r: f32) -> f32 {
     clippy::cast_sign_loss,
     reason = "clamped to 0..=255.5 first"
 )]
-fn to_u8(v: f32) -> u8 {
+pub(super) fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
@@ -335,7 +380,10 @@ fn eye_coverage(e: &Eye, rel: Vec2, upp: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRAMING, FrameState, Look, Renderer, SizeMismatch, bleed_clear, index};
+    use super::{
+        FRAMING, FrameState, Lit, Look, Renderer, SizeMismatch, bleed_clear, bleed_lit, index,
+    };
+    use crate::presence::kumo::math::hex;
     use crate::presence::kumo::shape::Silhouette;
 
     #[expect(
@@ -473,6 +521,106 @@ mod tests {
         bleed_clear(&mut px, 4);
         assert_eq!(px, vec![0; 4 * 4 * 4]);
         bleed_clear(&mut [], 0);
+    }
+
+    /// A squashed frame samples the bake between texels. Its soft edge must keep the colour the
+    /// unsquashed edge has at the same body point, not pull in the black of empty texels. The
+    /// pixels compared are the squashed frame's soft edge whose matching still pixel is covered.
+    #[test]
+    fn a_squashed_edge_keeps_its_colour() {
+        let size = 84;
+        let look = Look {
+            shadow: false,
+            ..Look::default()
+        };
+        let renderer = Renderer::new(&Silhouette::emoji(), size, look);
+        let mut still = vec![0; renderer.image_len()];
+        let mut squashed = still.clone();
+        renderer
+            .render(&FrameState::IDLE, &mut still)
+            .expect("the buffer is the renderer's size");
+        let f = FrameState {
+            body_scale: super::v2(1.04, 0.95),
+            ..FrameState::IDLE
+        };
+        renderer
+            .render(&f, &mut squashed)
+            .expect("the buffer is the renderer's size");
+        let (mut worst, mut compared) = (0, 0);
+        for j in 0..size {
+            for i in 0..size {
+                let px = &squashed[index(size, i, j) * 4..][..4];
+                if px[3] == 0 || px[3] == 255 {
+                    continue;
+                }
+                let p = FRAMING.to_cloud(size, f32::from(i) + 0.5, f32::from(j) + 0.5);
+                let floor = Silhouette::emoji().floor;
+                let q = super::v2(p.x / f.body_scale.x, floor + (p.y - floor) / f.body_scale.y);
+                let at = FRAMING.to_pixel(size, q);
+                let still_px = &still[index(size, pixel(at.x), pixel(at.y)) * 4..][..4];
+                if still_px[3] == 0 {
+                    continue;
+                }
+                compared += 1;
+                for c in 0..3 {
+                    worst = worst.max(px[c].abs_diff(still_px[c]));
+                }
+            }
+        }
+        assert!(compared > 50, "only {compared} soft-edge pixels compared");
+        // Black from empty texels put it 108 off; neighbouring surface colours differ by about 5.
+        assert!(
+            worst <= 8,
+            "a squashed edge pixel is {worst}/255 off the still edge's colour"
+        );
+    }
+
+    /// A 4x4 bake: a solid red texel at (1,1) and a faint blue one at (3,2).
+    #[test]
+    fn an_empty_texel_takes_its_most_covered_neighbours_surface() {
+        let size = 4;
+        let red = Lit {
+            coverage: 1.0,
+            base: hex(0xff_00_00),
+            inside: 0.7,
+            ..Lit::default()
+        };
+        let blue = Lit {
+            coverage: 0.25,
+            base: hex(0x00_00_ff),
+            ..Lit::default()
+        };
+        let mut lit = vec![Lit::default(); 16];
+        lit[index(size, 1, 1)] = red;
+        lit[index(size, 3, 2)] = blue;
+        bleed_lit(&mut lit, size);
+        let at = |i, j| lit[index(size, i, j)];
+        for (i, j, want) in [
+            (0, 0, red),
+            (2, 2, red),
+            (3, 3, blue),
+            (1, 1, red),
+            (3, 2, blue),
+        ] {
+            assert_eq!(at(i, j).base, want.base, "texel {i},{j}");
+            assert!(
+                (at(i, j).inside - want.inside).abs() < 1e-6,
+                "texel {i},{j}"
+            );
+        }
+        for (i, j) in [(0, 0), (2, 2), (3, 3)] {
+            assert!(at(i, j).coverage.abs() < 1e-6, "{i},{j} stays clear");
+        }
+        assert_eq!(
+            at(3, 0).base,
+            hex(0),
+            "no covered neighbour, nothing to take"
+        );
+        // A sample halfway between the solid texel and a bled one keeps the colour, at half
+        // coverage.
+        let mid = at(1, 1).lerp(at(0, 1), 0.5);
+        assert_eq!(mid.base, red.base);
+        assert!((mid.coverage - 0.5).abs() < 1e-6);
     }
 
     #[test]

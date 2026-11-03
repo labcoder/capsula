@@ -30,7 +30,8 @@ impl Placement {
 }
 
 /// Writes each source row's hull of texels at or above [`CUTOFF`] into `rows`, from the
-/// leftmost to the rightmost. `pixels` is straight-alpha BGRA, `size` x `size`.
+/// leftmost to the rightmost. `pixels` is straight-alpha BGRA, `size` texels wide: the body's
+/// square or the neck's rectangle.
 pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
     rows.fill(None);
     let width = usize::from(size);
@@ -49,15 +50,17 @@ pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
 /// Maps source row hulls to device-pixel spans for an image drawn at `at`. A device pixel
 /// samples texel k when its centre lies within one texel of k's centre, so each texel span
 /// reaches half a texel further out on each side, plus one device pixel for the snap. Spans
-/// are clipped to the drawn quad and its snap pixel. `out` gets [`Placement::rows`] entries.
-pub(crate) fn device_spans(rows: &[Span<u16>], src: u16, at: Placement, out: &mut [Span<i32>]) {
+/// are clipped to the drawn quad and its snap pixel. The source is `width` texels wide and one
+/// texel tall per row hull. `out` gets [`Placement::rows`] entries.
+pub(crate) fn device_spans(rows: &[Span<u16>], width: u16, at: Placement, out: &mut [Span<i32>]) {
     out.fill(None);
-    if src == 0 || at.width <= 0 || at.height <= 0 {
+    let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    if width == 0 || height == 0 || at.width <= 0 || at.height <= 0 {
         return;
     }
     let (scale_x, scale_y) = (
-        f64::from(at.width) / f64::from(src),
-        f64::from(at.height) / f64::from(src),
+        f64::from(at.width) / f64::from(width),
+        f64::from(at.height) / f64::from(height),
     );
     let top = at.y - 1;
     let (min_x, max_x) = (at.x - 1, at.x + at.width + 1);
@@ -109,26 +112,34 @@ mod tests {
     use super::{CUTOFF, Placement, Span, device_spans, row_hulls};
     use crate::presence::kumo::frame::FrameState;
     use crate::presence::kumo::look::Look;
+    use crate::presence::kumo::math::v2;
+    use crate::presence::kumo::neck::{GooShader, Neck, Rect};
     use crate::presence::kumo::raster::Renderer;
     use crate::presence::kumo::shape::Silhouette;
 
-    /// One drawn image: straight-alpha BGRA pixels, `src` x `src`, at `at`.
+    /// One drawn image: straight-alpha BGRA pixels, `w` x `h`, at `at`.
     #[derive(Clone, Copy)]
     struct Layer<'a> {
         pixels: &'a [u8],
-        src: u16,
+        w: u16,
+        h: u16,
         at: Placement,
     }
 
     /// GPUI's `snap_bounds`, written out on its own: an image laid out at logical `left, top`
     /// with side `side` has each device edge rounded half toward zero at `scale`.
+    fn snapped(left: f64, top: f64, side: f64, scale: f64) -> Placement {
+        snapped_rect(left, top, side, side, scale)
+    }
+
+    /// [`snapped`] for a `width` x `height` rectangle.
     #[expect(
         clippy::as_conversions,
         clippy::cast_possible_truncation,
         clippy::float_cmp,
         reason = "small device coordinates, and GPUI tests for an exact half"
     )]
-    fn snapped(left: f64, top: f64, side: f64, scale: f64) -> Placement {
+    fn snapped_rect(left: f64, top: f64, width: f64, height: f64, scale: f64) -> Placement {
         let edge = |v: f64| {
             let v = v * scale;
             (if v.fract().abs() == 0.5 {
@@ -141,8 +152,8 @@ mod tests {
         Placement {
             x,
             y,
-            width: edge(left + side) - x,
-            height: edge(top + side) - y,
+            width: edge(left + width) - x,
+            height: edge(top + height) - y,
         }
     }
 
@@ -159,13 +170,13 @@ mod tests {
         if !(at.x..at.x + at.width).contains(&x) || !(at.y..at.y + at.height).contains(&y) {
             return 0.0;
         }
-        let n = i32::from(l.src);
+        let (w, h) = (i32::from(l.w), i32::from(l.h));
         let alpha = |i: i32, j: i32| {
-            let (i, j) = (i.clamp(0, n - 1), j.clamp(0, n - 1));
-            f64::from(l.pixels[usize::try_from(j * n + i).expect("in range") * 4 + 3])
+            let (i, j) = (i.clamp(0, w - 1), j.clamp(0, h - 1));
+            f64::from(l.pixels[usize::try_from(j * w + i).expect("in range") * 4 + 3])
         };
-        let u = (f64::from(x - at.x) + 0.5) * f64::from(n) / f64::from(at.width) - 0.5;
-        let v = (f64::from(y - at.y) + 0.5) * f64::from(n) / f64::from(at.height) - 0.5;
+        let u = (f64::from(x - at.x) + 0.5) * f64::from(w) / f64::from(at.width) - 0.5;
+        let v = (f64::from(y - at.y) + 0.5) * f64::from(h) / f64::from(at.height) - 0.5;
         let (i, j) = (u.floor(), v.floor());
         let (fu, fv) = (u - i, v - j);
         let (i, j) = (i as i32, j as i32);
@@ -184,10 +195,10 @@ mod tests {
     }
 
     fn mask(l: Layer<'_>) -> Vec<Span<i32>> {
-        let mut rows = vec![None; usize::from(l.src)];
-        row_hulls(l.pixels, l.src, &mut rows);
+        let mut rows = vec![None; usize::from(l.h)];
+        row_hulls(l.pixels, l.w, &mut rows);
         let mut out = vec![None; l.at.rows()];
-        device_spans(&rows, l.src, l.at, &mut out);
+        device_spans(&rows, l.w, l.at, &mut out);
         out
     }
 
@@ -314,7 +325,8 @@ mod tests {
         let clear = square(4, |_, _| 0);
         let layer = Layer {
             pixels: &clear,
-            src: 4,
+            w: 4,
+            h: 4,
             at,
         };
         assert!(mask(layer).iter().all(Option::is_none));
@@ -339,10 +351,26 @@ mod tests {
         };
         let out = mask(Layer {
             pixels: &px,
-            src: 1,
+            w: 1,
+            h: 1,
             at,
         });
         assert_eq!(out, vec![Some([3, 7]); 5]);
+    }
+
+    #[test]
+    fn a_wide_source_scales_each_axis_by_its_own_size() {
+        // Two texels wide, one tall, drawn 4 x 2: each texel row reaches one device pixel past
+        // its bilinear footprint on every side, clipped to the quad and its snap border.
+        let mut out = vec![None; 4];
+        let at = Placement {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        device_spans(&[Some([0, 2])], 2, at, &mut out);
+        assert_eq!(out, vec![Some([-1, 5]); 4]);
     }
 
     #[test]
@@ -400,12 +428,14 @@ mod tests {
             let layers = [
                 Layer {
                     pixels: &pa,
-                    src: 4,
+                    w: 4,
+                    h: 4,
                     at,
                 },
                 Layer {
                     pixels: &pb,
-                    src: 4,
+                    w: 4,
+                    h: 4,
                     at: Placement { x: 3, y: 2, ..at },
                 },
             ];
@@ -417,8 +447,10 @@ mod tests {
     /// The over-ownership bound per axis: a hull reaches a whole texel past its outermost texel
     /// at or above the cutoff, plus a floor or ceil and the snap pixel, and the visible edge
     /// starts within the soft edge `d` of that texel, plus a pixel to the next centre.
-    fn band(d: f64, src: u16, at: Placement) -> f64 {
-        (d + 1.0) * f64::from(at.width.max(at.height)) / f64::from(src) + 3.0
+    fn band(d: f64, l: Layer<'_>) -> f64 {
+        let x = f64::from(l.at.width) / f64::from(l.w);
+        let y = f64::from(l.at.height) / f64::from(l.h);
+        (d + 1.0) * x.max(y) + 3.0
     }
 
     #[test]
@@ -438,13 +470,15 @@ mod tests {
             for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
                 for (left, top) in [(-7.0, 11.0), (10.3, 7.6), (0.2, 0.6), (-3.25, 12.5)] {
                     let at = snapped(left, top, side, scale);
-                    let excess = check(&[Layer {
+                    let layer = Layer {
                         pixels: &px,
-                        src,
+                        w: src,
+                        h: src,
                         at,
-                    }]);
+                    };
+                    let excess = check(&[layer]);
                     assert!(
-                        excess <= band(d, src, at),
+                        excess <= band(d, layer),
                         "excess {excess} at {src} px, {at:?}"
                     );
                 }
@@ -459,19 +493,147 @@ mod tests {
         let layers = [
             Layer {
                 pixels: &px,
-                src: 84,
+                w: 84,
+                h: 84,
                 at: first,
             },
             Layer {
                 pixels: &px,
-                src: 84,
+                w: 84,
+                h: 84,
                 at: snapped(13.7, 6.1, 84.0, 1.25),
             },
         ];
         let excess = check(&layers);
         assert!(
-            excess <= band(soft_edge(&px, 84), 84, first),
+            excess <= band(soft_edge(&px, 84), layers[0]),
             "excess {excess}"
         );
+    }
+
+    const BODY: f32 = 84.0;
+
+    /// The goo for `neck` shaded at `scale`: its pixels, size, and region in logical pixels.
+    fn goo(neck: &Neck, scale: f32) -> (Vec<u8>, u16, u16, Rect) {
+        let r = neck.bounds().expect("an attached neck has goo");
+        let (w, h) = GooShader::size(r, scale);
+        let mut px = vec![0; w * h * 4];
+        let f = FrameState {
+            body_scale: neck.body_scale(),
+            ..FrameState::IDLE
+        };
+        GooShader::new(BODY)
+            .render(
+                neck,
+                r,
+                scale,
+                &Silhouette::emoji(),
+                &Look::default(),
+                &f,
+                &mut px,
+            )
+            .expect("the region fits the shader");
+        let size = |n: usize| u16::try_from(n).expect("a small image");
+        (px, size(w), size(h), r)
+    }
+
+    /// The image's widest soft edge in texels: the furthest any texel at or above the cutoff
+    /// lies, as a chessboard distance, from one at 128 or more.
+    fn transition(l: Layer<'_>) -> f64 {
+        let (w, h) = (i32::from(l.w), i32::from(l.h));
+        let alpha = |i: i32, j: i32| {
+            if (0..w).contains(&i) && (0..h).contains(&j) {
+                l.pixels[usize::try_from(j * w + i).expect("in range") * 4 + 3]
+            } else {
+                0
+            }
+        };
+        let mut worst = 0;
+        for j in 0..h {
+            for i in 0..w {
+                if alpha(i, j) < CUTOFF {
+                    continue;
+                }
+                let near = (0..=w.max(h)).find(|&k| {
+                    (-k..=k).any(|d| {
+                        [
+                            (i + d, j - k),
+                            (i + d, j + k),
+                            (i - k, j + d),
+                            (i + k, j + d),
+                        ]
+                        .into_iter()
+                        .any(|(a, b)| alpha(a, b) >= 128)
+                    })
+                });
+                worst = worst.max(near.unwrap_or(i32::MAX));
+            }
+        }
+        f64::from(worst)
+    }
+
+    /// The neck's own images, half and full resolution at several DPIs and with a fractional
+    /// window offset, alone and joined to the body: every visible pixel is owned, and the
+    /// over-ownership stays within the band of the image's measured soft edge.
+    #[test]
+    fn the_neck_and_its_join_are_owned_within_the_soft_edge_band() {
+        let dock = v2(400.3, 10.6);
+        let pull = |to: (f32, f32), frames: u16| {
+            let body = dock + v2(to.0, to.1);
+            let mut neck = Neck::new(dock, BODY);
+            for _ in 0..frames {
+                neck.update(1.0 / 72.0, body);
+            }
+            (neck, body)
+        };
+        let bpx = body(84);
+        let mut widest: f64 = 0.0;
+        for (to, frames) in [
+            ((0.0, 70.08), 72),
+            ((0.0, 150.08), 72),
+            ((70.0, 90.0), 6),
+            ((20.0, 10.08), 72),
+        ] {
+            let (neck, centre) = pull(to, frames);
+            for dpi in [1.0_f32, 1.25, 1.5, 2.0] {
+                for scale in [dpi * 0.5, dpi.min(1.0)] {
+                    let (px, w, h, r) = goo(&neck, scale);
+                    assert!(px.as_chunks::<4>().0.iter().any(|p| p[3] == 255), "{to:?}");
+                    for (ox, oy) in [(0.0, 0.0), (0.37, 0.71)] {
+                        let neck_l = Layer {
+                            pixels: &px,
+                            w,
+                            h,
+                            at: snapped_rect(
+                                f64::from(r.origin.x) + ox,
+                                f64::from(r.origin.y) + oy,
+                                f64::from(w) / f64::from(scale),
+                                f64::from(h) / f64::from(scale),
+                                f64::from(dpi),
+                            ),
+                        };
+                        let body_l = Layer {
+                            pixels: &bpx,
+                            w: 84,
+                            h: 84,
+                            at: snapped(
+                                f64::from(centre.x) - 42.0 + ox,
+                                f64::from(centre.y) - 42.0 + oy,
+                                84.0,
+                                f64::from(dpi),
+                            ),
+                        };
+                        let soft = transition(neck_l);
+                        widest = widest.max(soft);
+                        let alone = check(&[neck_l]);
+                        assert!(alone <= band(soft, neck_l), "{to:?} at {dpi}x: {alone}");
+                        let join = check(&[body_l, neck_l]);
+                        let limit = band(soft, neck_l).max(band(soft_edge(&bpx, 84), body_l));
+                        assert!(join <= limit, "{to:?} joined at {dpi}x: {join}");
+                    }
+                }
+            }
+        }
+        assert!(widest <= 6.0, "the neck's soft edge is {widest} texels");
     }
 }
