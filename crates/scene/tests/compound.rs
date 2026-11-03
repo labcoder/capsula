@@ -323,7 +323,6 @@ fn a_new_cluster_takes_a_free_slot_without_moving_earlier_nodes() {
     );
     let a = bounds(&first.after, "a");
     let b = bounds(&first.after, "b");
-    let snapshot = first.after.items();
     let second = picture(
         &mut scene,
         &mut budget,
@@ -335,8 +334,41 @@ fn a_new_cluster_takes_a_free_slot_without_moving_earlier_nodes() {
     );
     assert_eq!(bounds(&second.after, "a"), a);
     assert_eq!(bounds(&second.after, "b"), b);
-    assert_eq!(first.after.items(), snapshot);
+    assert_eq!(bounds(&second.after, "left"), bounds(&first.after, "left"));
     assert!(bounds(&second.after, "left").max().y < bounds(&second.after, "right").origin.y);
+}
+
+#[test]
+fn changing_a_clusters_colour_keeps_its_measured_size_for_new_siblings() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = picture(
+        &mut scene,
+        &mut budget,
+        &before,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"outer","dir":"right"}},
+            {"diagram":{"id":"cluster","in":"outer"}},
+            {"node":{"id":"a","in":"cluster","label":"A"}},
+            {"node":{"id":"b","in":"cluster","label":"B"}},
+            {"edge":{"id":"ab","in":"cluster","from":"a","to":"b"}}
+        ]}),
+    );
+    let cluster = bounds(&first.after, "cluster");
+    let second = picture(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"second","set":[{"target":"cluster","color":"#abcdef"}],"put":[
+            {"node":{"id":"sibling","in":"outer","label":"Sibling"}}
+        ]}),
+    );
+    assert_eq!(bounds(&second.after, "cluster"), cluster);
+    assert_eq!(
+        bounds(&second.after, "sibling").origin.y,
+        cluster.max().y + 46.0
+    );
 }
 
 #[test]
