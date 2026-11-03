@@ -533,6 +533,7 @@ mod tests {
             ["1.0e-6", "1.0e-4", "0.01", "1", "100", "10k", "1M"]
         );
         assert_eq!(labels[0].0.to_bits(), plot.frame.origin.x.to_bits());
+        // The "1M" label measures two glyphs at 7 px each.
         assert_eq!((labels[6].0 + 14.0).to_bits(), plot.frame.max().x.to_bits());
     }
 

@@ -727,8 +727,8 @@ fn spring_scale_envelopes_and_repeat_counts_remain_positive_and_finite() {
         json!({"id":"positive_shrink","put":[{"anim":{"target":"t0","track":"scale","ease":"spring","keys":[[0,1],[1,0.1]]}}]}),
     );
     assert_eq!(
-        state.handle(&id("t0")),
-        Some(kumochi_scene::Handle::new(1, 0).expect("handle"))
+        (state.revision(), budget.usage().tracks, budget.usage().keys),
+        (3, 1, 2)
     );
     put(
         &mut state,
@@ -834,7 +834,7 @@ fn duplicate_owners_and_zero_periods_fail_at_their_source_fields() {
 #[test]
 fn entrance_envelopes_reserve_translation_and_descendant_pivots() {
     for (enter, positive_inside, positive_outside, negative_inside, negative_outside) in [
-        ("pop", 17500, 18000, -17500, -18000),
+        ("pop", 17615, 17616, -17616, -17617),
         ("slide", 19985, 19986, -19986, -19987),
         ("fly", 19951, 19952, -19952, -19953),
     ] {
