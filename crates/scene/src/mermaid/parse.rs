@@ -219,7 +219,7 @@ impl<'a> Parser<'a> {
             return self.close_group();
         }
         if self.read.keyword("direction")
-            && let Some(flow) = self.direction()
+            && let Some(flow) = self.direction()?
         {
             // Pele ignores a root `direction`; refusing it keeps the source and drawing in step.
             let group = self.scope().ok_or(ErrorCode::Unsupported)?;
@@ -250,20 +250,29 @@ impl<'a> Parser<'a> {
     }
 
     /// A `direction` statement, or `None` when `direction` starts an ordinary node.
-    fn direction(&mut self) -> Option<Flow> {
+    fn direction(&mut self) -> Result<Option<Flow>, ErrorCode> {
         let rest = &self.read.rest()["direction".len()..];
         let word = rest.trim_start_matches([' ', '\t']);
         if word.len() == rest.len() {
-            return None;
+            return Ok(None);
         }
-        let length = word.bytes().take_while(|&b| is_word(b)).count();
-        let flow = flow_of(&word[..length])?;
+        let mut length = word.bytes().take_while(|&b| is_word(b)).count();
+        if length == 0 && word.starts_with(['<', '>', '^']) {
+            length = 1;
+        }
         let after = word[length..].trim_start_matches([' ', '\t', '\r']);
         if !(after.is_empty() || after.starts_with(['\n', ';'])) {
-            return None;
+            return Ok(None);
         }
+        let flow = match flow_of(&word[..length]) {
+            Some(flow) => flow,
+            None if matches!(&word[..length], "BR" | "v" | "<" | ">" | "^") => {
+                return Err(ErrorCode::Unsupported);
+            }
+            None => return Ok(None),
+        };
         self.read.pos = self.read.src.len() - after.len();
-        Some(flow)
+        Ok(Some(flow))
     }
 
     fn open_group(&mut self) -> Result<(), ErrorCode> {
@@ -525,6 +534,14 @@ mod tests {
             ("flowchart LR\nA -->\n", ErrorCode::Malformed),
             ("flowchart LR\nsubgraph g\nA\n", ErrorCode::Malformed),
             ("flowchart BR\nA\n", ErrorCode::Unsupported),
+            (
+                "flowchart TB\nsubgraph g\ndirection BR\nA\nend\n",
+                ErrorCode::Unsupported,
+            ),
+            (
+                "flowchart TB\nsubgraph g\ndirection <\nA\nend\n",
+                ErrorCode::Unsupported,
+            ),
             ("flowchart LR\nA ----> B\n", ErrorCode::Unsupported),
             ("flowchart LR\nA[\"a<br>b\"]\n", ErrorCode::Unsupported),
             (
@@ -601,6 +618,18 @@ mod tests {
         )
         .expect("bare mentions keep first ownership");
         assert_eq!(repeated.nodes[0].owner, Some(0));
+    }
+
+    #[test]
+    fn direction_can_still_name_a_node_in_a_link() {
+        let chart = parse("flowchart TB\nsubgraph g\ndirection --> A\nend\n", 5)
+            .expect("an ordinary node named direction");
+        assert_eq!(
+            chart.nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            ["direction", "A"]
+        );
+        assert_eq!(chart.groups[0].flow, None);
+        assert_eq!((chart.edges[0].from, chart.edges[0].to), (0, 1));
     }
 
     #[test]
