@@ -1241,6 +1241,24 @@ fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() 
     );
     let table = picture(&scene, table, &before, &mut measure).expect("empty table");
     assert_eq!(table.after.items().len(), 1);
+    let empty = table.after.items().pop().expect("table item");
+    assert_eq!(
+        empty.bounds.size,
+        kumochi_scene::geom::Vec2::new(112.0, 31.55),
+        "empty content keeps the header height"
+    );
+    assert!(
+        matches!(
+            &*empty.primitives,
+            [
+                Prim::Rect { .. },
+                Prim::Text { .. },
+                Prim::Text { .. },
+                Prim::Line { .. }
+            ]
+        ),
+        "an empty table has its background, headers and rule"
+    );
     let rows = committed(
         &mut scene,
         &mut budget,
@@ -1284,8 +1302,11 @@ fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() 
             _ => None,
         })
         .collect();
-    assert!(values.iter().any(|value| value == "1,000"));
-    assert!(values.iter().any(|value| value == "true"));
+    assert_eq!(
+        values,
+        ["Name", "Value", "A", "1,000", "B", "true"],
+        "header and row text follow handle order"
+    );
 }
 
 #[test]
@@ -1523,6 +1544,208 @@ fn table_lists_accept_eight_cells_and_alignments_and_reject_nine() {
             matches!(parse_record(&serde_json::to_vec(&record).expect("fixture")),Err(error) if error.code==kumochi_scene::ErrorCode::TooLong)
         );
     }
+}
+
+#[test]
+fn narrow_table_measures_its_wrapped_title_and_header() {
+    use kumochi_scene::{geom::Vec2, record::Align};
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"title","put":[
+            {"table":{"id":"t","box":[10,20,80,300],"title":"Title wraps here","cols":["Long header"],"align":["center"]}}
+        ]}),
+    );
+    let result = picture(&scene, first, &before, &mut Measure::default()).expect("wrapped table");
+    let item = result.after.items().pop().expect("table");
+    assert_eq!(
+        item.bounds.size,
+        Vec2::new(80.0, 78.0),
+        "title and header contribute their wrapped heights"
+    );
+    let [
+        Prim::Rect { .. },
+        Prim::Text {
+            origin: title_at,
+            text: title,
+            style: title_style,
+            ..
+        },
+        Prim::Text {
+            origin: header_at,
+            text: label,
+            style: header_style,
+            max_width,
+            align,
+            ..
+        },
+        Prim::Line { points, .. },
+    ] = &*item.primitives
+    else {
+        panic!("background, title, header and rule");
+    };
+    assert_eq!(
+        (title.as_str(), label.as_str()),
+        ("Title wraps here", "Long header"),
+        "the title and column label are preserved"
+    );
+    assert_eq!(
+        (*title_at, *header_at),
+        (Vec2::new(20.0, 27.0), Vec2::new(20.0, 71.0)),
+        "wrapped blocks are vertically separated"
+    );
+    assert_eq!(
+        (*title_style, *header_style),
+        (
+            TextStyle {
+                size: 15.0,
+                bold: true
+            },
+            TextStyle {
+                size: 13.5,
+                bold: true
+            }
+        ),
+        "title and header use their distinct styles"
+    );
+    assert_eq!(
+        (*max_width, *align),
+        (Some(60.0), Align::Center),
+        "the header uses the fitted cell width and explicit alignment"
+    );
+    assert_eq!(
+        &**points,
+        &[Vec2::new(10.0, 98.0), Vec2::new(90.0, 98.0)],
+        "the rule follows the wrapped header"
+    );
+}
+
+#[test]
+fn a_four_hundred_character_cell_prepares_without_truncation() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let value = "x".repeat(400);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"cap","put":[
+            {"table":{"id":"t","box":[0,0,1600,1000],"cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[value]}}
+        ]}),
+    );
+    let result = picture(&scene, first, &before, &mut Measure::default()).expect("cell at cap");
+    let row = result
+        .after
+        .items()
+        .into_iter()
+        .find(|item| Some(item.handle) == result.after.handle(&id("r")))
+        .expect("row");
+    let Prim::Text {
+        text, max_width, ..
+    } = &row.primitives[0]
+    else {
+        panic!("cell text");
+    };
+    assert_eq!(
+        text.as_str(),
+        value,
+        "all four hundred characters remain in the prepared cell"
+    );
+    assert_eq!(
+        *max_width,
+        Some(1580.0),
+        "padding leaves the expected wrapped width"
+    );
+    assert_eq!(
+        row.bounds.size,
+        kumochi_scene::geom::Vec2::new(1600.0, 44.0),
+        "wrapped text determines the row height"
+    );
+}
+
+#[test]
+fn row_order_cell_sets_and_whole_table_removal_keep_their_boundaries() {
+    use kumochi_scene::{ErrorCode, geom::Vec2};
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut layout = LayoutState::new(&scene);
+    for value in [
+        json!({"id":"first","put":[{"table":{"id":"t","cols":["V"]}},{"row":{"id":"z","in":"t","cells":["old"]}}]}),
+        json!({"id":"second","put":[{"row":{"id":"a","in":"t","cells":["new"]}}]}),
+        json!({"id":"update","set":[{"target":"z","cells":["longer"]}]}),
+    ] {
+        let commit = committed(&mut scene, &mut budget, value);
+        layout = picture(&scene, commit, &layout, &mut Measure::default())
+            .expect("row step")
+            .after;
+    }
+    let origins = ["z", "a"].map(|name| {
+        layout
+            .bounds(&id(name))
+            .expect("bounds")
+            .expect("row")
+            .origin
+    });
+    assert_eq!(
+        origins,
+        [Vec2::new(0.0, 31.55), Vec2::new(0.0, 65.05)],
+        "updating an older row does not reorder it"
+    );
+    assert_eq!(
+        layout
+            .bounds(&id("t"))
+            .expect("bounds")
+            .expect("table")
+            .size,
+        Vec2::new(68.0, 98.55),
+        "an attached cell update refits the column"
+    );
+    let excess = step(json!({"id":"excess","set":[{"target":"z","cells":[1,2]}]}));
+    assert!(
+        matches!(scene.admit(&excess, &budget), Err(error) if error.code == ErrorCode::OutOfRange),
+        "a set cannot exceed the owning column count"
+    );
+    for value in [
+        json!({"id":"remove","remove":["z"]}),
+        json!({"id":"append","put":[{"row":{"id":"m","in":"t","cells":["last"]}}]}),
+    ] {
+        let commit = committed(&mut scene, &mut budget, value);
+        layout = picture(&scene, commit, &layout, &mut Measure::default())
+            .expect("row step")
+            .after;
+    }
+    let origins = ["a", "m"].map(|name| {
+        layout
+            .bounds(&id(name))
+            .expect("bounds")
+            .expect("row")
+            .origin
+    });
+    assert_eq!(
+        origins,
+        [Vec2::new(0.0, 31.55), Vec2::new(0.0, 65.05)],
+        "new handles append after surviving rows"
+    );
+    let handles = ["m", "a", "t"].map(|name| layout.handle(&id(name)).expect("handle"));
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"clear","remove":["m","a","t"]}),
+    );
+    let removed =
+        picture(&scene, commit, &layout, &mut Measure::default()).expect("remove table and rows");
+    assert_eq!(
+        removed.removed, handles,
+        "whole-table removals retain their exact activation handles"
+    );
+    assert!(
+        removed.after.items().is_empty(),
+        "no removed parent is rebuilt"
+    );
 }
 
 #[test]
