@@ -41,6 +41,8 @@ exceptions = [
 ignore = true
 
 [bans]
+# A log bridge would expose webbrowser's authorization URL in tracing logs.
+deny = [{ name = "tracing-log" }]
 # GPUI's graph carries several versions of the windows crates; duplicates are reported, not fatal.
 multiple-versions = "warn"
 wildcards = "deny"

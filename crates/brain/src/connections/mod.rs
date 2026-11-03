@@ -2,5 +2,6 @@
 
 pub mod error;
 pub mod marker;
+pub mod oauth;
 pub mod records;
 pub mod vault;
