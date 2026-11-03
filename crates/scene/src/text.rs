@@ -75,9 +75,14 @@ impl fmt::Debug for Source {
 }
 
 /// A finite canvas number within the coordinate cap.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
 pub struct Finite(f32);
+impl fmt::Debug for Finite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Finite(..)")
+    }
+}
 impl Finite {
     /// Returns the checked value.
     pub fn get(self) -> f32 {
@@ -103,9 +108,14 @@ impl From<Finite> for f32 {
 }
 
 /// A finite data number, not a canvas coordinate.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f64", into = "f64")]
 pub struct Number(f64);
+impl fmt::Debug for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Number(..)")
+    }
+}
 impl Number {
     /// Returns the checked value.
     pub fn get(self) -> f64 {

@@ -6,7 +6,7 @@
 use crate::{
     Budget, ErrorCode,
     geom::{Rect, Vec2},
-    limits::{MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES},
+    limits::{MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES, MAX_LIVE_OBJECTS},
     record::Direction,
 };
 
@@ -27,18 +27,23 @@ pub(super) struct Placement {
     pub ranks: Vec<usize>,
 }
 
-/// Lays out nodes of the given sizes. Edges index into `sizes`; edges out of range or
-/// self-loops are ignored.
+/// Lays out members of the given sizes: `nodes` of them are nodes and the rest are nested
+/// clusters, which count toward the live-object cap instead of the node cap. Edges index into
+/// `sizes`; edges out of range or self-loops are ignored.
 /// # Errors
-/// Rejects excess nodes/edges, invalid dimensions or out-of-cap generated coordinates.
+/// Rejects excess nodes/members/edges, invalid dimensions or out-of-cap generated coordinates.
 pub(super) fn layout(
     sizes: &[Vec2],
+    nodes: usize,
     edges: &[(usize, usize)],
     dir: Direction,
     rank_gap: f32,
 ) -> Result<Placement, ErrorCode> {
-    if sizes.len() > MAX_DIAGRAM_NODES {
+    if nodes > MAX_DIAGRAM_NODES {
         return Err(ErrorCode::OverBudget(Budget::DiagramNodes));
+    }
+    if sizes.len() > MAX_LIVE_OBJECTS {
+        return Err(ErrorCode::OverBudget(Budget::LiveObjects));
     }
     if edges.len() > MAX_DIAGRAM_EDGES {
         return Err(ErrorCode::OverBudget(Budget::DiagramEdges));
@@ -104,7 +109,7 @@ pub(super) fn layout(
 }
 
 fn count_f32(count: usize) -> f32 {
-    f32::from(u16::try_from(count).expect("diagram node and edge caps fit u16"))
+    f32::from(u16::try_from(count).expect("diagram member and edge caps fit u16"))
 }
 
 /// Drops edges that close a cycle, found by DFS in insertion order.
@@ -229,6 +234,7 @@ mod tests {
         let sizes = vec![Vec2::new(100.0, 40.0); 4];
         let p = layout(
             &sizes,
+            4,
             &[(0, 1), (1, 2), (2, 3), (3, 1), (2, 2), (9, 1)],
             Direction::Right,
             RANK_GAP,
@@ -248,8 +254,8 @@ mod tests {
     #[test]
     fn siblings_stack_across_the_flow() {
         let sizes = vec![Vec2::new(80.0, 40.0); 3];
-        let p =
-            layout(&sizes, &[(0, 1), (0, 2)], Direction::Down, RANK_GAP).expect("bounded siblings");
+        let p = layout(&sizes, 3, &[(0, 1), (0, 2)], Direction::Down, RANK_GAP)
+            .expect("bounded siblings");
         assert_eq!(p.ranks, vec![0, 1, 1]);
         assert!(
             (p.rects[1].center().y - p.rects[2].center().y).abs() < 1e-3,
@@ -265,7 +271,7 @@ mod boundary_tests {
     #[test]
     fn empty_singleton_and_exact_caps_are_deterministic() {
         assert_eq!(
-            layout(&[], &[], Direction::Down, RANK_GAP).expect("empty"),
+            layout(&[], 0, &[], Direction::Down, RANK_GAP).expect("empty"),
             Placement {
                 rects: vec![],
                 bounds: Rect::default(),
@@ -273,22 +279,23 @@ mod boundary_tests {
             }
         );
         let singleton =
-            layout(&[Vec2::new(80.0, 40.0)], &[], Direction::Right, 0.0).expect("singleton");
+            layout(&[Vec2::new(80.0, 40.0)], 1, &[], Direction::Right, 0.0).expect("singleton");
         assert_eq!(
             singleton.rects,
             vec![Rect::centered(Vec2::new(40.0, 0.0), Vec2::new(80.0, 40.0))]
         );
         let sizes = vec![Vec2::new(80.0, 40.0); MAX_DIAGRAM_NODES];
         let edges = vec![(0, 1); MAX_DIAGRAM_EDGES];
-        let first = layout(&sizes, &edges, Direction::Down, RANK_GAP).expect("exact caps");
+        let first = layout(&sizes, 48, &edges, Direction::Down, RANK_GAP).expect("exact caps");
         assert_eq!(
             first,
-            layout(&sizes, &edges, Direction::Down, RANK_GAP).expect("repeat")
+            layout(&sizes, 48, &edges, Direction::Down, RANK_GAP).expect("repeat")
         );
         assert_eq!(first.rects.len(), 48);
         assert_eq!(
             layout(
                 &vec![Vec2::new(1.0, 1.0); 49],
+                49,
                 &[],
                 Direction::Down,
                 RANK_GAP
@@ -297,8 +304,37 @@ mod boundary_tests {
             ErrorCode::OverBudget(Budget::DiagramNodes)
         );
         assert_eq!(
-            layout(&sizes, &vec![(0, 1); 97], Direction::Down, RANK_GAP).expect_err("edge cap"),
+            layout(&sizes, 48, &vec![(0, 1); 97], Direction::Down, RANK_GAP).expect_err("edge cap"),
             ErrorCode::OverBudget(Budget::DiagramEdges)
+        );
+    }
+    #[test]
+    fn clusters_beyond_the_node_cap_count_only_as_members() {
+        let sizes = vec![Vec2::new(80.0, 40.0); MAX_DIAGRAM_NODES + 2];
+        let placement = layout(&sizes, MAX_DIAGRAM_NODES, &[], Direction::Down, RANK_GAP)
+            .expect("48 nodes and two clusters");
+        assert_eq!(placement.rects.len(), MAX_DIAGRAM_NODES + 2);
+        assert_eq!(
+            layout(
+                &sizes,
+                MAX_DIAGRAM_NODES + 1,
+                &[],
+                Direction::Down,
+                RANK_GAP
+            )
+            .expect_err("node cap"),
+            ErrorCode::OverBudget(Budget::DiagramNodes)
+        );
+        assert_eq!(
+            layout(
+                &vec![Vec2::new(1.0, 1.0); MAX_LIVE_OBJECTS + 1],
+                0,
+                &[],
+                Direction::Down,
+                RANK_GAP
+            )
+            .expect_err("member cap"),
+            ErrorCode::OverBudget(Budget::LiveObjects)
         );
     }
     #[test]
@@ -310,18 +346,25 @@ mod boundary_tests {
             Vec2::new(20_001.0, 1.0),
         ] {
             assert_eq!(
-                layout(&[size], &[], Direction::Down, RANK_GAP).expect_err("unsafe size"),
+                layout(&[size], 1, &[], Direction::Down, RANK_GAP).expect_err("unsafe size"),
                 ErrorCode::OutOfRange
             );
         }
         assert_eq!(
-            layout(&[Vec2::new(1.0, 1.0)], &[], Direction::Down, f32::INFINITY)
-                .expect_err("unsafe gap"),
+            layout(
+                &[Vec2::new(1.0, 1.0)],
+                1,
+                &[],
+                Direction::Down,
+                f32::INFINITY
+            )
+            .expect_err("unsafe gap"),
             ErrorCode::OutOfRange
         );
         assert_eq!(
             layout(
                 &[Vec2::new(20_000.0, 20_000.0); 2],
+                2,
                 &[(0, 1)],
                 Direction::Right,
                 RANK_GAP

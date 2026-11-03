@@ -1,6 +1,7 @@
 //! Serial scene preparation and pure layout, independent of painting and clocks.
 mod callout;
 mod chart;
+mod compound;
 mod diagram;
 mod nodes;
 mod path;

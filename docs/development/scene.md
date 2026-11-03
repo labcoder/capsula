@@ -271,6 +271,8 @@ whose own entrance and every ancestor's entrance have finished, each clipped to 
 deadline; the host passes those handles into the authoritative `StopCut`.
 Each child's entrance starts no earlier than its parent's start, retaining its own
 duration, so delayed diagrams do not hide their children's entrances.
+Explicit tracks retain their step-relative clocks, so a track may finish while a
+delayed parent still hides its target; only entrances are shifted.
 
 After painting at `t`, request another frame when `animating(t)` is true, otherwise
 wake at `next_wake(t)`. This paints the final frame without continuously polling
@@ -318,8 +320,8 @@ flowchart LR
 
 The ignored `frame_four_views_max` and `activation_at_caps` tests measure CPU sampling
 and activation with deterministic text measurement, not a painter or real fonts.
-Run their release binaries at normal priority on Rez under `runs/measuring.lock`,
-after 30 seconds without cargo/rustc, and record priority and lock release.
+Run their release binaries at normal priority on a quiet machine with no other
+builds running, and record the machine, workload, priority and sample counts.
 The original frame numbers are after-only because main then had no sampler; follow-up
 comparisons retain that original workload and label the wider glide/property variant.
 
@@ -331,6 +333,19 @@ diagram. Later additions use free slots without moving existing node-local recta
 Inline defaults to downwards flow at the host's narrow width (360 logical pixels by
 default); overlay defaults to rightwards flow. Explicit diagram direction and bounds
 win. Inline `begin.size` overrides host dimensions when present.
+
+A boxless diagram directly inside another diagram is a ranked cluster. Preparation
+measures its contents before placing it among its parent's nodes and other clusters;
+boxed nested diagrams keep their explicit placement. Unspecified directions inherit
+from the nearest diagram ancestor. An edge joins nodes in its exact least common
+diagram, which ranks their containing clusters and routes the edge in that diagram's
+coordinate space. Tables and charts are not implicit graph clusters.
+
+The 48-node and 96-edge limits apply per diagram, not per nested drawing. Clusters
+consume the scene's existing object and depth budgets rather than its direct-node
+budget. Incremental additions keep earlier node rectangles and cluster placements
+stable; a cluster can grow into its siblings on a later step instead of moving them.
+Groups have no frame or label in the plain diagram vocabulary.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
