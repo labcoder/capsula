@@ -107,6 +107,8 @@ pub(crate) enum Point {
     Drain,
     /// In the snapshot, its read-only connection open.
     Snapshot,
+    /// Inside the snapshot's statement, from its progress handler, once some of it is on disk.
+    InSnapshot,
     /// After it let go of the live store.
     Clean,
     /// Before it removes what a stopped or failed copy left.
@@ -132,6 +134,14 @@ pub(crate) struct Pauses {
 
 #[cfg(test)]
 impl Pauses {
+    fn armed(&self, at: Point) -> bool {
+        self.at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|pause| pause.at == at)
+    }
+
     fn reach(&self, at: Point) {
         let pause = {
             let mut pauses = self.at.lock().unwrap_or_else(PoisonError::into_inner);
@@ -443,7 +453,30 @@ pub(super) fn snapshot(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreErr
     #[cfg(test)]
     cancel.pauses.reach(Point::Snapshot);
     stoppable(&mut reader, cancel)?;
+    #[cfg(test)]
+    held_inside(&mut reader, cancel, sidecar(db, SNAPSHOT))?;
     finished(reader.execute("VACUUM INTO ?1", [utf8(&sidecar(db, SNAPSHOT))?]))
+}
+
+/// [`stoppable`], and holds the statement at [`Point::InSnapshot`] once `output` has bytes.
+#[cfg(test)]
+fn held_inside(
+    conn: &mut Connection,
+    cancel: &Arc<Cancel>,
+    output: PathBuf,
+) -> rusqlite::Result<()> {
+    let cancel = Arc::clone(cancel);
+    conn.progress_handler(
+        1000,
+        Some(move || {
+            if cancel.pauses.armed(Point::InSnapshot)
+                && fs::metadata(&output).is_ok_and(|meta| meta.len() > 0)
+            {
+                cancel.pauses.reach(Point::InSnapshot);
+            }
+            cancel.stopped()
+        }),
+    )
 }
 
 /// Clears the owed row in the snapshot and rebuilds its FTS index from the live events, which
