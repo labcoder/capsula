@@ -8,7 +8,7 @@
 )]
 
 use super::frame::{Eye, FrameState};
-use super::look::Look;
+use super::look::{Look, Theme};
 use super::math::{Rgb, Vec2, Vec3, hex, mix, smoothstep, v2, v3};
 use super::shape::{Framing, GBuffer, Silhouette, fbm};
 
@@ -132,10 +132,7 @@ impl Renderer {
     /// The lit body at body-space point `q` with the mood's light, blush and eyes on top.
     fn body_color(&self, f: &FrameState, t: &Lit, q: Vec2, upp: f32) -> Rgb {
         let theme = self.look.theme;
-        let g = (glow(q, f.glow_pos, f.glow_r) * f.glow_k * t.inside).min(1.0);
-        let mut c = t.base.lerp(f.glow, g * 0.55).screen(f.glow, g * 0.35);
-        let rim = f.glow.lerp(theme.accent, t.accent_mix).lerp(WHITE, 0.25);
-        c = c.lerp(rim, (t.rim * f.rim_k * 0.6).min(0.85));
+        let mut c = finish(&theme, f, t, q);
         for e in &f.eyes {
             let rel = q - e.center;
             if f.blush > 0.01 && rel.y < 0.0 && rel.y > -0.2 {
@@ -242,7 +239,7 @@ fn bleed_lit(lit: &mut [Lit], size: u16) {
 /// how much inner light it lets through, its rim weight, and where its rim sits between the
 /// mood's colour and the accent.
 #[derive(Clone, Copy, Debug, Default)]
-struct Lit {
+pub(super) struct Lit {
     coverage: f32,
     base: Rgb,
     inside: f32,
@@ -264,7 +261,14 @@ impl Lit {
 
 /// The material and colour layers at one surface point: `n` is its normal and `q` its
 /// position in body space.
-fn surface(look: &Look, n: Vec3, thickness: f32, occlusion: f32, q: Vec2, floor: f32) -> Lit {
+pub(super) fn surface(
+    look: &Look,
+    n: Vec3,
+    thickness: f32,
+    occlusion: f32,
+    q: Vec2,
+    floor: f32,
+) -> Lit {
     let theme = look.theme;
     let m = look.material;
     let key = m.key_dir.normalized();
@@ -304,6 +308,15 @@ fn surface(look: &Look, n: Vec3, thickness: f32, occlusion: f32, q: Vec2, floor:
     }
 }
 
+/// The frame's layers over a lit surface point at body-space `q`: the mood's inner light and
+/// the luminous rim. The body and the neck share it, so the neck is the same stuff.
+pub(super) fn finish(theme: &Theme, f: &FrameState, t: &Lit, q: Vec2) -> Rgb {
+    let g = (glow(q, f.glow_pos, f.glow_r) * f.glow_k * t.inside).min(1.0);
+    let c = t.base.lerp(f.glow, g * 0.55).screen(f.glow, g * 0.35);
+    let rim = f.glow.lerp(theme.accent, t.accent_mix).lerp(WHITE, 0.25);
+    c.lerp(rim, (t.rim * f.rim_k * 0.6).min(0.85))
+}
+
 fn glow(q: Vec2, at: Vec2, r: f32) -> f32 {
     let d = q - at;
     (-d.dot(d) / (r * r)).exp()
@@ -315,7 +328,7 @@ fn glow(q: Vec2, at: Vec2, r: f32) -> f32 {
     clippy::cast_sign_loss,
     reason = "clamped to 0..=255.5 first"
 )]
-fn to_u8(v: f32) -> u8 {
+pub(super) fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
