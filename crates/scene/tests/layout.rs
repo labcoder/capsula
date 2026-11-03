@@ -1408,10 +1408,13 @@ fn row_only_rebuild_preserves_the_detached_tables_absorbed_opacity() {
         json!({"id":"row","set":[{"target":"r","cells":[2]}]}),
     );
     let next = picture(&scene, next, &detached, &mut Measure::default()).expect("row update");
-    let table = next
-        .after
+    let mut view = kumochi_scene::motion::SceneView::new(&detached, scene.activated());
+    view.activate(next, 0, 800).expect("row activation");
+    let mut frame = kumochi_scene::motion::Frame::new();
+    view.frame(0, &mut frame);
+    let table = frame
         .items()
-        .into_iter()
+        .iter()
         .find(|item| item.handle == table)
         .expect("table");
     assert_eq!(

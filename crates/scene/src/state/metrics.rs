@@ -133,22 +133,21 @@ fn graph(
             translation: 0.0,
             rotated: false,
         });
-    let scalar = object
-        .work
-        .motion
-        .get("scale")
-        .map_or(1.0, |m| m.max[0].max(1.0));
+    let scale_motion = object.work.motion.get("scale");
+    let scalar = scale_motion.map_or(1.0, |m| m.max[0].max(1.0));
     let basis = parent.scale * object.work.inherited_scale;
-    let (enter_lo, enter_hi, enter_offset) = object.work.enter.map_or((1.0, 1.0, 0.0), crate::motion::entrance_envelope);
+    let (enter_lo, enter_hi, enter_offset) = object
+        .work
+        .enter
+        .map_or((1.0, 1.0, 0.0), crate::motion::entrance_envelope);
     let before_enter = basis * object.work.scale * scalar;
     let scale = before_enter * enter_hi;
-    let min_scalar = object
-        .work
-        .motion
-        .get("scale")
-        .map_or(1.0, |motion| motion.min[0].min(1.0));
-    let min_scale =
-        parent.min_scale * object.work.inherited_min_scale * object.work.scale * min_scalar * enter_lo;
+    let min_scalar = scale_motion.map_or(1.0, |motion| motion.min[0].min(1.0));
+    let min_scale = parent.min_scale
+        * object.work.inherited_min_scale
+        * object.work.scale
+        * min_scalar
+        * enter_lo;
     let rotated = parent.rotated
         || object.work.inherited_rotation
         || object
@@ -162,7 +161,9 @@ fn graph(
         1.0
     };
     let translation = parent.translation
-        + before_enter * ((enter_hi - 1.0).max(0.0) * object.work.extent + enter_offset) * rotation_bound
+        + before_enter
+            * ((enter_hi - 1.0).max(0.0) * object.work.extent + enter_offset)
+            * rotation_bound
         + object.work.inherited_translation
         + basis * scalar * object.work.offset * rotation_bound
         + basis
@@ -178,14 +179,7 @@ fn graph(
                 })
                 .sum::<f32>()
             * rotation_bound;
-    let extent = object.work.extent
-        * scale
-        * if rotated {
-            std::f32::consts::SQRT_2
-        } else {
-            1.0
-        }
-        + translation;
+    let extent = object.work.extent * scale * rotation_bound + translation;
     if !scale.is_finite()
         || scale > MAX_COMPOSED_SCALE
         || min_scale <= 0.0

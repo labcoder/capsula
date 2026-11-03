@@ -8,7 +8,7 @@ use crate::{
     Begin, ErrorCode, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    record::{Anchor, Change, Track},
+    record::{Anchor, Change, Enter, Track},
     state::{object, work},
     theme::Theme,
 };
@@ -110,15 +110,25 @@ pub fn prepare(
         .iter()
         .map(|(id, object)| (id.clone(), object.rest))
         .collect();
+    for change in ticket
+        .step
+        .set
+        .iter()
+        .filter(|change| change.color.is_some())
+    {
+        rests
+            .entry(change.target.clone())
+            .or_insert_with(Rest::default)
+            .color = None;
+    }
     let mut motions = BTreeMap::new();
     let mut explicit_pos = BTreeSet::new();
     for (slot, op) in ticket.step.put.iter().enumerate() {
         if let Op::Anim(anim) = op {
-            let value = &anim.keys.last().expect("admission checked nonempty keys").1;
             rests
                 .entry(anim.target.clone())
                 .or_insert_with(Rest::default)
-                .set(anim.track, value);
+                .set(anim.track, crate::motion::final_key(anim), &theme);
             if anim.track == Track::Pos {
                 explicit_pos.insert(anim.target.clone());
             }
@@ -205,14 +215,16 @@ pub fn prepare(
         let group = after.objects.get_mut(id).ok_or(PrepareError::Stale)?;
         let old = group.rest.pos;
         group.rest.pos = *to;
-        group.motion.insert(
-            "pos",
-            work::Motion {
-                keys: 2,
-                min: [old.x.min(to.x), old.y.min(to.y)],
-                max: [old.x.max(to.x), old.y.max(to.y)],
-            },
-        );
+        let glide = work::Motion {
+            keys: 2,
+            min: [old.x.min(to.x), old.y.min(to.y)],
+            max: [old.x.max(to.x), old.y.max(to.y)],
+        };
+        group
+            .motion
+            .entry("pos")
+            .and_modify(|cached| *cached = cached.peak(glide))
+            .or_insert(glide);
     }
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
@@ -300,6 +312,7 @@ pub fn prepare(
         resident_bytes,
         ticket,
         base: Arc::clone(&before.version),
+        theme,
     })
 }
 
@@ -540,7 +553,10 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
                 Prim::Text { .. } => {}
             }
         }
-        let extent = if matches!(&*placed.source, Op::Diagram(_)) {
+        let enter = work::entrance(&placed.source);
+        let extent = if matches!(&*placed.source, Op::Diagram(_))
+            && enter.is_none_or(|enter| enter == Enter::None)
+        {
             0.0
         } else {
             bounds
@@ -559,6 +575,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
             inherited_translation: matrix[4].abs().max(matrix[5].abs()),
             inherited_rotation: matrix[1] != 0.0 || matrix[2] != 0.0,
             motion: placed.motion.clone(),
+            enter,
             ..work::Work::default()
         };
         objects.insert(

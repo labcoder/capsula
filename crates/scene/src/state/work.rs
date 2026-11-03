@@ -418,8 +418,15 @@ pub(super) fn changes(
                     .or_insert_with(|| object.clone());
             }
             let value = motion(anim, index, step)?;
-            if owners.insert((anim.target.clone(), property(anim.track)), value).is_some() {
-                return Err(StepError::in_step(&step.id, op_path(index, "anim").field("track"), ErrorCode::OutOfRange));
+            if owners
+                .insert((anim.target.clone(), property(anim.track)), value)
+                .is_some()
+            {
+                return Err(StepError::in_step(
+                    &step.id,
+                    op_path(index, "anim").field("track"),
+                    ErrorCode::OutOfRange,
+                ));
             }
         }
     }
@@ -450,4 +457,22 @@ pub(super) fn changes(
         }
     }
     Ok(original)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spring_scale_shrink_has_a_positive_geometric_envelope() {
+        let step: Step = serde_json::from_str(
+            r#"{"id":"shrink","put":[{"anim":{"target":"t","track":"scale","ease":"spring","keys":[[0,1],[100,0.2]]}}]}"#,
+        ).expect("step");
+        let Op::Anim(anim) = &step.put[0] else {
+            panic!("anim fixture")
+        };
+        let envelope = motion(anim, 0, &step).expect("positive scale envelope");
+        assert!((envelope.min[0] - 0.109_216_23).abs() < 1e-6);
+        assert_eq!(envelope.max[0].to_bits(), 1.0_f32.to_bits());
+    }
 }

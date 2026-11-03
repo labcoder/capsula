@@ -3,18 +3,22 @@ use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
     display::Item,
     geom::{Affine, Vec2},
-    record::{KeyValue, Track},
+    record::{KeyValue, Rgb, Track},
+    theme::Theme,
 };
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+/// Resting values of explicit tracks; `None` means no explicit owner, so the base applies.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Rest {
+pub(crate) struct Rest {
     pub pos: Vec2,
     pub x: f32,
     pub y: f32,
     pub scale: f32,
     pub rotate: f32,
-    pub opacity: f32,
+    pub opacity: Option<f32>,
+    pub draw: Option<f32>,
+    pub color: Option<Rgb>,
 }
 impl Default for Rest {
     fn default() -> Self {
@@ -24,26 +28,30 @@ impl Default for Rest {
             y: 0.0,
             scale: 1.0,
             rotate: 0.0,
-            opacity: 1.0,
+            opacity: None,
+            draw: None,
+            color: None,
         }
     }
 }
 impl Rest {
-    pub(super) fn transform(self) -> Affine {
+    pub(crate) fn transform(self) -> Affine {
         Affine::pose(
             self.scale,
             self.rotate.to_radians(),
             self.pos + Vec2::new(self.x, self.y),
         )
     }
-    pub(super) fn set(&mut self, track: Track, value: &KeyValue) {
+    pub(super) fn set(&mut self, track: Track, value: &KeyValue, theme: &Theme) {
         match (track, value) {
             (Track::Pos, KeyValue::V2(v)) => self.pos = Vec2::new(v[0].get(), v[1].get()),
             (Track::X, KeyValue::Num(v)) => self.x = v.get(),
             (Track::Y, KeyValue::Num(v)) => self.y = v.get(),
             (Track::Scale, KeyValue::Num(v)) => self.scale = v.get(),
             (Track::Rotate, KeyValue::Num(v)) => self.rotate = v.get(),
-            (Track::Opacity, KeyValue::Num(v)) => self.opacity = v.get(),
+            (Track::Opacity, KeyValue::Num(v)) => self.opacity = Some(v.get()),
+            (Track::Draw, KeyValue::Num(v)) => self.draw = Some(v.get()),
+            (Track::Color, KeyValue::Color(c)) => self.color = Some(theme.resolve(c)),
             _ => {}
         }
     }
@@ -59,6 +67,8 @@ pub(super) struct Placed {
     pub initialized: bool,
     pub motion: BTreeMap<&'static str, crate::state::work::Motion>,
     pub chart_basis: Option<Arc<super::chart::Basis>>,
+    /// Resting opacity of ancestors a cut detached; `item.opacity` stays the object's own base.
+    pub inherited_opacity: f32,
 }
 
 impl Placed {
@@ -75,6 +85,7 @@ impl Placed {
             initialized: cached.is_some_and(|old| old.initialized),
             motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
             chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
+            inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
         }
     }
 }
@@ -108,6 +119,12 @@ impl LayoutState {
             objects: BTreeMap::new(),
             handles: BTreeMap::new(),
         }
+    }
+    /// Every placed item with its resting values and inherited opacity, for activation.
+    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32)> {
+        self.objects
+            .values()
+            .map(|object| (&object.item, object.rest, object.inherited_opacity))
     }
     /// Last prepared or fenced commit revision, including gaps after a cut.
     pub fn revision(&self) -> u32 {
@@ -198,7 +215,8 @@ impl LayoutState {
                         .get(&handle)
                         .and_then(|id| self.objects.get(id))
                         .ok_or(PrepareError::Stale)?;
-                    object.item.opacity *= ancestor.item.opacity * ancestor.rest.opacity;
+                    object.inherited_opacity *= ancestor.inherited_opacity
+                        * ancestor.rest.opacity.unwrap_or(ancestor.item.opacity);
                     next = ancestor.item.parent;
                 }
             }

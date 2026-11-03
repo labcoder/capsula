@@ -241,6 +241,11 @@ impl SceneState {
     pub fn revision(&self) -> u32 {
         self.revision
     }
+    /// Returns the activated prefix, excluding steps dropped by a cut.
+    /// Recovery treats every retained step as activated and at rest.
+    pub fn activated(&self) -> u32 {
+        self.activated
+    }
     /// Returns the number of prospectively surviving objects.
     pub fn object_count(&self) -> usize {
         self.objects.len()

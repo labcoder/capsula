@@ -301,10 +301,12 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
                 }
             }
         }
-        Op::Edge(r) => {
-            if r.flow.is_some_and(|period| period.get() == 0) {
-                return Err(StepError::in_step(&step.id, prefix.clone().field("flow"), ErrorCode::OutOfRange));
-            }
+        Op::Edge(r) if r.flow.is_some_and(|period| period.get() == 0) => {
+            return Err(StepError::in_step(
+                &step.id,
+                prefix.clone().field("flow"),
+                ErrorCode::OutOfRange,
+            ));
         }
         _ => {}
     }

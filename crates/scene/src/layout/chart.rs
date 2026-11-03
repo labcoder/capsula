@@ -319,14 +319,9 @@ fn install(
     basis: Option<Arc<Basis>>,
 ) {
     let old = state.objects.get(&id);
-    let opacity = old.map_or_else(
-        || {
-            crate::state::object::visual(&source)
-                .and_then(|v| v.opacity)
-                .map_or(1.0, crate::Finite::get)
-        },
-        |o| o.item.opacity,
-    );
+    let opacity = crate::state::object::visual(&source)
+        .and_then(|v| v.opacity)
+        .map_or(1.0, crate::Finite::get);
     let mut placed = Placed::new(
         Item {
             handle,
@@ -862,6 +857,10 @@ mod tests {
         );
     }
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one lifecycle pins attached, cut and updated residency and inherited opacity"
+    )]
     fn residency_and_opacity_follow_the_chart_lifecycle() {
         let Record::Begin(header) =
             parse_record(br#"{"begin":{"v":1,"scene":"resident","surface":"inline","alt":""}}"#)
@@ -888,7 +887,14 @@ mod tests {
         };
         let opacity = |state: &LayoutState| {
             let object = &state.objects[&s];
-            [object.item.opacity, object.rest.opacity].map(f32::to_bits)
+            (
+                object.item.opacity.to_bits(),
+                object.rest.opacity.map(f32::to_bits),
+                object.inherited_opacity.to_bits(),
+            )
+        };
+        let bits = |own: f32, rest: f32, inherited: f32| {
+            (own.to_bits(), Some(rest.to_bits()), inherited.to_bits())
         };
         let first = picture(
             &mut scene,
@@ -906,7 +912,7 @@ mod tests {
             first.after.objects[&c].item.opacity.to_bits(),
             0.5_f32.to_bits()
         );
-        assert_eq!(opacity(&first.after), [0.5_f32, 0.75].map(f32::to_bits));
+        assert_eq!(opacity(&first.after), bits(0.5, 0.75, 1.0));
         let second = picture(
             &mut scene,
             &mut budget,
@@ -939,7 +945,11 @@ mod tests {
                 && Arc::ptr_eq(&frozen[0].plot, &frozen[1].plot),
             "the cut keeps both bases and their plot"
         );
-        assert_eq!(opacity(&detached), [0.25_f32, 0.75].map(f32::to_bits));
+        assert_eq!(
+            opacity(&detached),
+            bits(0.5, 0.75, 0.5),
+            "the cut moves the chart's 0.5 into the inherited factor, not the own base"
+        );
         let next = picture(
             &mut scene,
             &mut budget,
@@ -952,6 +962,10 @@ mod tests {
             Arc::ptr_eq(&kept[0], &frozen[0]) && Arc::ptr_eq(&kept[1], &frozen[1]),
             "a detached update allocates no new basis"
         );
-        assert_eq!(opacity(&next.after), [0.25_f32, 0.25].map(f32::to_bits));
+        assert_eq!(
+            opacity(&next.after),
+            bits(0.5, 0.25, 0.5),
+            "a detached update keeps its base and inherited factor; the new track owns the rest"
+        );
     }
 }

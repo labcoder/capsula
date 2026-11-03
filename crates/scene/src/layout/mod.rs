@@ -17,6 +17,7 @@ use crate::{
 };
 pub use prepare::{prepare, recover};
 pub use state::LayoutState;
+pub(crate) use state::Rest;
 use std::sync::Arc;
 
 /// Host geometry supplied for this rendering, not persisted drawing coordinates.
@@ -118,6 +119,7 @@ pub struct PreparedStep {
     pub resident_bytes: usize,
     ticket: Preparation,
     base: Arc<()>,
+    theme: Arc<Theme>,
 }
 impl PreparedStep {
     /// Rejects results superseded by a cut or prepared against another tip.
@@ -135,6 +137,14 @@ impl PreparedStep {
     /// Original committed input for entrance and explicit-track compilation in A7.
     pub fn step(&self) -> &crate::Step {
         &self.ticket.step
+    }
+    /// Whether this result was prepared on exactly `before`'s layout version.
+    pub(crate) fn is_based_on(&self, before: &LayoutState) -> bool {
+        Arc::ptr_eq(&self.base, &before.version)
+    }
+    /// The palette color keys compile against at activation.
+    pub(crate) fn theme(&self) -> &Theme {
+        &self.theme
     }
 }
 
