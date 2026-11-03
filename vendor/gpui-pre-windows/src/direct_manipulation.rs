@@ -1,6 +1,7 @@
 // Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::*;
@@ -30,7 +31,7 @@ pub(crate) struct DirectManipulationHandler {
 }
 
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(window: HWND, scale_factor: f32, frame_request: Arc<FrameRequest>) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -72,6 +73,7 @@ impl DirectManipulationHandler {
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    frame_request,
                 )
                 .into();
 
@@ -152,6 +154,7 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl DirectManipulationEventHandler {
@@ -159,6 +162,7 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        frame_request: Arc<FrameRequest>,
     ) -> Self {
         Self {
             window,
@@ -169,6 +173,7 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            frame_request,
         }
     }
 
@@ -223,6 +228,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
+        self.frame_request.gesture_status_changed();
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {

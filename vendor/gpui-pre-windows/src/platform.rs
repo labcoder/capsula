@@ -454,14 +454,20 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
-                    if !FRAME_DEMAND.wait(&stop) {
-                        break;
-                    }
-                    let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                    let frame = match FRAME_DEMAND.wait(&stop, IDLE_DEVICE_CHECK) {
+                        Wake::Stop => break,
+                        // Still check for a lost device now and then, so an idle window recovers.
+                        Wake::Idle => None,
+                        Wake::Frame => Some((
+                            vsync_provider.wait_for_vsync(),
+                            PlatformFrameSignal::capture(scheduler::Instant::now),
+                        )),
+                    };
                     if stop.load(Ordering::Acquire) {
-                        // Hand any request on to the thread that replaces this one.
-                        FRAME_DEMAND.request();
+                        if frame.is_some() {
+                            // Hand the request on to the thread that replaces this one.
+                            FRAME_DEMAND.request();
+                        }
                         break;
                     }
                     if check_device_lost(&directx_device.device)
@@ -480,12 +486,15 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
+                    let Some((signal_source, signal_at)) = frame else {
+                        continue;
+                    };
                     let now_ms = clock_ms();
                     let mut sustaining = false;
                     for hwnd in all_windows.read().iter() {
-                        let sustained = hwnd.frame_request.is_sustained(now_ms);
-                        sustaining |= sustained;
-                        if !hwnd.frame_request.take() && !sustained {
+                        let poll = hwnd.frame_request.poll(now_ms);
+                        sustaining |= poll.sustained;
+                        if !poll.invalidate {
                             continue;
                         }
                         unsafe {

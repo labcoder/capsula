@@ -1,9 +1,6 @@
 // Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
 use std::{
-    sync::{
-        Condvar, LazyLock, Mutex, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -16,6 +13,10 @@ use windows::Win32::{
     System::Performance::QueryPerformanceFrequency,
 };
 
+mod frame_demand;
+
+pub(crate) use frame_demand::*;
+
 static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {
     let mut frequency = 0;
     // On systems that run Windows XP or later, the function will always succeed and
@@ -26,92 +27,6 @@ static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {
 
 const VSYNC_INTERVAL_THRESHOLD: Duration = Duration::from_millis(1);
 const DEFAULT_VSYNC_INTERVAL: Duration = Duration::from_micros(16_666); // ~60Hz
-
-/// Wakes the vsync thread only while some window wants a frame, so a settled app sleeps.
-pub(crate) static FRAME_DEMAND: FrameDemand = FrameDemand {
-    pending: Mutex::new(false),
-    changed: Condvar::new(),
-};
-
-pub(crate) struct FrameDemand {
-    pending: Mutex<bool>,
-    changed: Condvar,
-}
-
-impl FrameDemand {
-    pub(crate) fn request(&self) {
-        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.changed.notify_all();
-    }
-
-    /// Blocks until a request arrives and consumes it, or returns false once `stop` is set.
-    pub(crate) fn wait(&self, stop: &AtomicBool) -> bool {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        loop {
-            if stop.load(Ordering::Acquire) {
-                return false;
-            }
-            if *pending {
-                *pending = false;
-                return true;
-            }
-            pending = self
-                .changed
-                .wait(pending)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-    }
-
-    /// Wakes every waiting thread without adding demand, so a stopped one exits.
-    pub(crate) fn wake_all(&self) {
-        // Taking the lock orders this after a waiter's stop check, so the wakeup can't be lost.
-        drop(self.pending.lock().unwrap_or_else(PoisonError::into_inner));
-        self.changed.notify_all();
-    }
-}
-
-/// How long GPUI keeps presenting after high-rate input (its `InputRateTracker`).
-const INPUT_SUSTAIN: Duration = Duration::from_secs(1);
-
-static CLOCK_START: LazyLock<Instant> = LazyLock::new(Instant::now);
-
-/// Milliseconds on a clock both the UI thread and the vsync thread can compare through an atomic.
-pub(crate) fn clock_ms() -> u64 {
-    u64::try_from(CLOCK_START.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-/// One window's frame demand, shared by its UI thread and the vsync thread.
-#[derive(Default)]
-pub(crate) struct FrameRequest {
-    requested: AtomicBool,
-    /// Until when, on `clock_ms`, input keeps this window's frames coming.
-    input_sustain_until: AtomicU64,
-}
-
-impl FrameRequest {
-    /// Asks the vsync thread to invalidate this window at the next vblank.
-    pub(crate) fn request(&self) {
-        self.requested.store(true, Ordering::Release);
-        FRAME_DEMAND.request();
-    }
-
-    /// GPUI keeps presenting through and after high-rate input without asking for frames, so
-    /// input keeps them coming for as long as GPUI might present.
-    pub(crate) fn sustain_after_input(&self) {
-        let until = clock_ms().saturating_add(INPUT_SUSTAIN.as_secs() * 1000);
-        self.input_sustain_until.store(until, Ordering::Relaxed);
-        self.request();
-    }
-
-    /// Takes a pending request.
-    pub(crate) fn take(&self) -> bool {
-        self.requested.swap(false, Ordering::AcqRel)
-    }
-
-    pub(crate) fn is_sustained(&self, now_ms: u64) -> bool {
-        self.input_sustain_until.load(Ordering::Relaxed) > now_ms
-    }
-}
 
 pub(crate) struct VSyncProvider {
     interval: Duration,

@@ -1331,7 +1331,7 @@ impl WindowsWindowInner {
         // from the forced WM_GPUI_FORCE_UPDATE_WINDOW or a stray WM_PAINT in
         // between) is treated as a forced render so it both clears
         // `skip_draws` and bypasses the view cache.
-        self.state.force_render_pending.set(true);
+        self.state.forced_frame.latch();
         Some(0)
     }
 
@@ -1346,7 +1346,7 @@ impl WindowsWindowInner {
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
             log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {
-                self.state.force_render_pending.set(true);
+                self.state.forced_frame.latch();
             }
             // Validate the region so a nested message pump doesn't keep
             // re-dispatching WM_PAINT for the still-invalid region in a busy
@@ -1363,10 +1363,9 @@ impl WindowsWindowInner {
         unsafe { ValidateRect(Some(handle), None).ok().log_err() };
 
         self.state.direct_manipulation.update();
-        // Manual-update DirectManipulation only advances a gesture and its inertia when drawn.
-        if self.state.direct_manipulation.is_active() {
-            self.state.frame_request.request();
-        }
+        self.state
+            .frame_request
+            .gesture_updated(self.state.direct_manipulation.is_active());
 
         let events = self.state.direct_manipulation.drain_events();
         if !events.is_empty() {
@@ -1378,9 +1377,8 @@ impl WindowsWindowInner {
             }
         }
 
-        let force_render = force_render || self.state.force_render_pending.get();
+        let force_render = self.state.forced_frame.begin(force_render);
         if force_render {
-            self.state.force_render_pending.set(true);
             // Re-enable drawing after a device loss recovery. The forced render
             // will rebuild the scene with fresh atlas textures.
             self.state.renderer.borrow_mut().mark_drawable();
@@ -1389,17 +1387,13 @@ impl WindowsWindowInner {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
-        self.state.serving_forced_frame.set(force_render);
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
             signal_at,
             signal_source,
         });
-        self.state.serving_forced_frame.set(false);
-        if self.state.force_render_pending.get() {
-            // GPUI defers a forced render that arrives during another draw, or too soon for an
-            // inactive window, without dirtying the window; keep asking until it draws one.
+        if self.state.forced_frame.end() {
             self.state.frame_request.request();
         }
 

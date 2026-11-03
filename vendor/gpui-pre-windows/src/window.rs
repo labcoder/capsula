@@ -75,10 +75,7 @@ pub struct WindowsWindowState {
     /// from the previous frame and panic in `DirectXAtlasTextures::texture`),
     /// and when a forced render was requested while another draw was in
     /// progress and had to be deferred.
-    /// It stays set until GPUI draws the forced render.
-    pub force_render_pending: Cell<bool>,
-    /// Set while `draw_window` asks GPUI for a forced render, so a draw inside it serves it.
-    pub serving_forced_frame: Cell<bool>,
+    pub forced_frame: ForcedFrame,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -161,8 +158,10 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+        let frame_request = Arc::<FrameRequest>::default();
+        let direct_manipulation =
+            DirectManipulationHandler::new(hwnd, scale_factor, Arc::clone(&frame_request))
+                .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),
@@ -176,7 +175,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
-            frame_request: Arc::default(),
+            frame_request,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -185,8 +184,7 @@ impl WindowsWindowState {
             hovered: Cell::new(hovered),
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
-            force_render_pending: Cell::new(false),
-            serving_forced_frame: Cell::new(false),
+            forced_frame: ForcedFrame::default(),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -1061,9 +1059,7 @@ impl PlatformWindow for WindowsWindow {
             .draw(scene, self.state.background_appearance.get())
             .log_err();
         // A failed forced draw is served too; device-lost recovery latches a fresh one.
-        if self.state.serving_forced_frame.get() {
-            self.state.force_render_pending.set(false);
-        }
+        self.state.forced_frame.drawn();
         if drawn.is_none() {
             // The device may be lost, and the vsync thread checks only while a frame is wanted.
             self.state.frame_request.request();
@@ -1076,7 +1072,7 @@ impl PlatformWindow for WindowsWindow {
         self.state.frame_request.request();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
             .renderer
