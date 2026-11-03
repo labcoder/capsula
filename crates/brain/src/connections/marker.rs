@@ -135,6 +135,9 @@ impl SignOutMarker {
                 if self.sign_out.is_some() {
                     return Err(VaultError::Fenced);
                 }
+                // A pending flag still set here belongs to a request whose result was never
+                // marked owned, so it stays as uncertainty instead of being reused.
+                self.outcome_unknown |= self.request_pending;
                 self.request_pending = true;
             }
             MarkerUpdate::RequestFinished { outcome_unknown } => {

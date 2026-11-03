@@ -28,7 +28,11 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
             .map(|&objects| {
                 let shapes = |range: std::ops::Range<usize>| {
                     range.map(|i| {
-                        format!(r#"{{"shape":{{"id":"s{i}","kind":"rect","box":[0,0,1,1]}}}}"#)
+                        if counts.len() == 1 {
+                            format!(r#"{{"shape":{{"id":"s{i}","kind":"rect","box":[0,0,1,1]}}}}"#)
+                        } else {
+                            format!(r#"{{"shape":{{"id":"s{i}","kind":"polygon","points":[[0,0],[1,0],[1,1],[0,1]]}}}}"#)
+                        }
                     })
                 };
                 let first = shapes(0..128)
@@ -90,7 +94,17 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 }
                 assert_eq!(mirror.scenes[&id].ready.len(), 63);
                 assert_eq!(mirror.scenes[&id].tip().revision(), 63);
+                assert_eq!(mirror.scenes[&id].state.object_count(), counts[offset]);
             }
+            let usage = mirror.global.usage();
+            assert_eq!(usage.objects, counts.iter().sum::<usize>());
+            assert_eq!(usage.scenes, counts.len());
+            assert_eq!(usage.tracks, 256 * counts.len());
+            assert_eq!(usage.keys, 512 * counts.len());
+            assert_eq!(
+                usage.segments,
+                if counts.len() == 1 { 17_400 } else { 6_000 }
+            );
             let mut elapsed = Vec::with_capacity(workloads.len());
             for (offset, (_, _, _, last)) in workloads.iter().enumerate() {
                 let scene = SceneId(100 + u64::try_from(offset).expect("four scenes"));
@@ -142,14 +156,19 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
         admissions.sort_unstable();
         clears.sort_unstable();
         println!(
-            "motion_ui scenes={} objects={} admission_samples={} clear_samples=32 warmups=5 admission_p50_ns={} admission_max_ns={} clear_p50_ns={} clear_max_ns={}; release reducer, fully prepared tip, clear includes output destruction, setup/preparation excluded, no paint",
+            "motion_ui scenes={} objects={} admission_samples={} clear_samples=32 warmups=5 admission_p50_ns={} admission_max_ns={} clear_p50_ns={} clear_max_ns={}; {} reducer, fully prepared tip, clear includes output destruction, setup/preparation excluded, no paint",
             counts.len(),
             counts.iter().sum::<usize>(),
             admissions.len(),
             admissions[admissions.len() / 2 - 1],
             admissions[admissions.len() - 1],
             clears[15],
-            clears[31]
+            clears[31],
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
         );
     }
 }

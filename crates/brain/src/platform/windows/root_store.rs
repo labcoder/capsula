@@ -587,18 +587,20 @@ mod tests {
     #[test]
     fn no_kept_root_is_distrusted_by_windows() {
         let store = Store::open("ROOT").expect("the current user's ROOT store opens");
-        let disallowed = Store::open("Disallowed").expect("the Disallowed store opens");
+        let disallowed = missing_is_empty(Store::open("Disallowed"))
+            .expect("the Disallowed store opens or doesn't exist");
         let now = filetime(SystemTime::now().duration_since(UNIX_EPOCH).ok());
         let (mut checked, mut kept_roots, mut due, mut otherwise_kept, mut kept_due) =
             (0, 0, 0, 0, 0);
         let mut current = store.next(None).expect("the ROOT store walks");
         while let Some(context) = current {
             checked += 1;
-            let distrusted = disallowed.contains(&context) == Probe::Present(())
+            let distrusted = disallowed.as_ref().map(|store| store.contains(&context))
+                == Some(Probe::Present(()))
                 || matches!(disallowed_after(&context), Probe::Present(after) if after <= now);
             due += usize::from(distrusted);
             otherwise_kept += usize::from(distrusted && admitted(&context).is_ok());
-            if kept(&context, Some(&disallowed), now).is_ok() {
+            if kept(&context, disallowed.as_ref(), now).is_ok() {
                 kept_roots += 1;
                 kept_due += usize::from(distrusted);
             }

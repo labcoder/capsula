@@ -64,6 +64,13 @@ Each is capped at 8 KiB of UTF-8 bytes (`MAX_SOURCE_BYTES`); the path figure com
 from S1, while the Mermaid figure is a starting cap. Admission's shared SVG preflight
 enforces the 512-command path limit. Source Debug exposes byte length only.
 
+The bounded Mermaid lexical reader is exercised in unit tests: a UTF-8-safe cursor
+reads ids, labels, shapes and links, with typed refusals for unsupported syntax.
+The grammar builds ordered nodes, parent-first groups and links, assigning node
+membership to the first closing group. Its tests cover complete-input parsing,
+direction, metadata and refusal boundaries. Admission still rejects Mermaid;
+this grammar layer alone does not enable it.
+
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary
 branches use declaration-order enum tags and the same validated payload types and

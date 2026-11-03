@@ -3,9 +3,7 @@ use kumochi_scene::{
     Admission, Budget, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
     display::Prim,
     geom::{Rect, Vec2},
-    layout::{
-        LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover, recover_all,
-    },
+    layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare, recover, recover_all},
     parse_record,
     text::Bounded,
     theme::Theme,

@@ -10,7 +10,7 @@
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, encode};
-use crate::message::{ControlToBrain, ControlToShell, DataToBrain, DataToShell};
+use crate::message::{AccountOp, ControlToBrain, ControlToShell, DataToBrain, DataToShell};
 
 /// The start of every recording, with the format's version.
 pub const MAGIC: [u8; 5] = *b"KTAP\x02";
@@ -71,7 +71,13 @@ impl Tapped for ControlToBrain {
                     after_turns: _,
                     resend: _
                 }
-                | Self::AccountOp(_)
+                | Self::AccountOp(
+                    AccountOp::SignIn
+                        | AccountOp::CancelSignIn
+                        | AccountOp::SignOut
+                        | AccountOp::EnablePlan
+                        | AccountOp::Retry
+                )
         )
     }
 }

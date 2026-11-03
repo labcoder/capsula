@@ -7,6 +7,7 @@ mod drawings;
 mod escape;
 mod geometry;
 mod gesture;
+mod kumo;
 mod launch;
 mod link;
 pub(crate) mod observer;
@@ -333,21 +334,29 @@ impl Presence {
         }
     }
 
-    fn activity(&self) -> Activity {
+    fn activity(
+        runs: &Runs,
+        panel: EscapePanel,
+        _presenter: &crate::presenter::Presenter,
+    ) -> Activity {
         // shortcut: B5 adds painted v1 scenes to global Esc activity; mirrored scenes aren't visible.
-        let panel = if self.text_open() {
-            EscapePanel::Open
-        } else {
-            EscapePanel::Closed
-        };
-        escape_activity(&self.runs, panel)
+        Activity {
+            working: runs.working(),
+            speaking: false,
+            drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+        }
     }
 
     /// Follows a change in the runs or the typing panel: holds or releases Esc if what Esc sees
     /// changed, and shows the newest run.
     fn runs_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.refresh_conversation(cx);
-        let activity = self.activity();
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        let activity = Self::activity(&self.runs, panel, &self.presenter);
         if activity == self.activity {
             return Ok(());
         }
@@ -890,14 +899,6 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
 /// Link events applied in one update at most [guess]: a fast stream is applied in batches
 /// rather than one UI update per frame.
 const EVENT_BATCH: usize = 256;
-
-fn escape_activity(runs: &Runs, panel: EscapePanel) -> Activity {
-    Activity {
-        working: runs.working(),
-        speaking: false,
-        drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
-    }
-}
 
 fn listen(
     states: Receiver<LinkEvent>,

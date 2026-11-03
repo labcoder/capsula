@@ -94,15 +94,28 @@ impl Captured {
     }
 
     /// Sets a subscriber writing here as this thread's default until the guard drops.
-    pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
+    pub(crate) fn install(&self) -> Capturing {
         let captured = self.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .with_writer(move || captured.clone())
             .finish();
-        tracing::subscriber::set_default(subscriber)
+        // With one dispatcher registered, tracing asks only the current thread's subscriber
+        // about a new callsite, so one first hit on another test's thread would be cached as
+        // never. A second keeps it asking every live dispatcher, this one included.
+        let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        Capturing {
+            _default: tracing::subscriber::set_default(subscriber),
+            _second: second,
+        }
     }
+}
+
+/// Capture lasts until this drops.
+pub(crate) struct Capturing {
+    _default: tracing::subscriber::DefaultGuard,
+    _second: tracing::Dispatch,
 }
 
 impl Write for Captured {
