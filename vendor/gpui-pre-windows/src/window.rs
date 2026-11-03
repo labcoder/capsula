@@ -75,7 +75,10 @@ pub struct WindowsWindowState {
     /// from the previous frame and panic in `DirectXAtlasTextures::texture`),
     /// and when a forced render was requested while another draw was in
     /// progress and had to be deferred.
+    /// It stays set until GPUI draws the forced render.
     pub force_render_pending: Cell<bool>,
+    /// Set while `draw_window` asks GPUI for a forced render, so a draw inside it serves it.
+    pub serving_forced_frame: Cell<bool>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -183,6 +186,7 @@ impl WindowsWindowState {
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
+            serving_forced_frame: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -981,8 +985,14 @@ impl PlatformWindow for WindowsWindow {
         self.state.callbacks.request_frame.set(Some(callback));
     }
 
-    fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
-        self.state.callbacks.input.set(Some(callback));
+    fn on_input(&self, mut callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
+        // GPUI keeps presenting for a while after input on its own, so every input it receives
+        // keeps this window's frames coming for at least as long.
+        let frame_request = self.state.frame_request.clone();
+        self.state.callbacks.input.set(Some(Box::new(move |input| {
+            frame_request.sustain_after_input();
+            callback(input)
+        })));
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
@@ -1052,6 +1062,8 @@ impl PlatformWindow for WindowsWindow {
         if drawn.is_none() {
             // The device may be lost, and the vsync thread checks only while a frame is wanted.
             self.state.frame_request.request();
+        } else if self.state.serving_forced_frame.get() {
+            self.state.force_render_pending.set(false);
         }
     }
 

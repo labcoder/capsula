@@ -114,6 +114,7 @@ impl DirectManipulationHandler {
 
     /// Whether a gesture or its inertia is in progress.
     pub fn is_active(&self) -> bool {
+        // SAFETY: `viewport` is this handler's live viewport, queried on the UI thread that owns it.
         unsafe { self.viewport.GetStatus() }.is_ok_and(|status| {
             status == DIRECTMANIPULATION_RUNNING || status == DIRECTMANIPULATION_INERTIA
         })

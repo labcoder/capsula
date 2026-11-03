@@ -86,9 +86,6 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if matches!(msg, WM_MOUSEFIRST..=WM_MOUSELAST | WM_KEYFIRST..=WM_KEYLAST) {
-            self.state.frame_request.sustain_after_input();
-        }
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -1381,8 +1378,9 @@ impl WindowsWindowInner {
             }
         }
 
-        let force_render = force_render || self.state.force_render_pending.take();
+        let force_render = force_render || self.state.force_render_pending.get();
         if force_render {
+            self.state.force_render_pending.set(true);
             // Re-enable drawing after a device loss recovery. The forced render
             // will rebuild the scene with fresh atlas textures.
             self.state.renderer.borrow_mut().mark_drawable();
@@ -1391,15 +1389,17 @@ impl WindowsWindowInner {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        self.state.serving_forced_frame.set(force_render);
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
             signal_at,
             signal_source,
         });
-        if force_render {
-            // GPUI defers a forced render that arrives during another draw without dirtying the
-            // window, so nothing else would ask for the frame that delivers it.
+        self.state.serving_forced_frame.set(false);
+        if self.state.force_render_pending.get() {
+            // GPUI defers a forced render that arrives during another draw, or too soon for an
+            // inactive window, without dirtying the window; keep asking until it draws one.
             self.state.frame_request.request();
         }
 
