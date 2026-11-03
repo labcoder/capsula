@@ -294,6 +294,10 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         .await
         .expect("bounded fixture");
     assert_eq!(response.body.expose().as_slice(), SENTINEL.as_bytes());
+    assert!(
+        response.body.expose().capacity() < MAX_BODY_BYTES,
+        "a small response doesn't reserve the whole body cap"
+    );
     assert_eq!(response.request_id.as_deref(), Some("req_fixture"));
     assert!(
         !format!("{response:?}").contains(SENTINEL),
@@ -334,10 +338,10 @@ async fn request_ids_are_bounded_graphic_ascii() {
 }
 
 #[test]
+#[ignore = "entry point for the isolated proxy child process"]
 fn proxy_probe_child() {
-    let Some(url) = std::env::var_os("ACCOUNT_HTTP_TEST_CHILD") else {
-        return;
-    };
+    let url =
+        std::env::var_os("ACCOUNT_HTTP_TEST_CHILD").expect("parent supplies the loopback URL");
     let url = url::Url::parse(url.to_str().expect("numeric test URL")).expect("fixture URL");
     assert_eq!(url.host_str(), Some("127.0.0.1"));
     assert_eq!(url.scheme(), "https");
@@ -358,9 +362,10 @@ fn proxy_probe_child() {
             .send()
             .await
     });
+    let error = result.expect_err("the generated fixture CA isn't in the real ROOT store");
     assert!(
-        result.is_err(),
-        "the generated fixture CA isn't in the real ROOT store"
+        unknown_issuer(&error),
+        "the request reached the TLS target directly, not the dead proxy"
     );
     println!("transport-rejected");
 }
@@ -369,15 +374,19 @@ fn proxy_probe_child() {
 fn production_client_ignores_proxy_environment_in_an_isolated_child() {
     let target = Server::start(reply("200 OK", b"{}", ""));
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port 0");
-    proxy.set_nonblocking(true).expect("nonblocking probe");
     let proxy_address = proxy.local_addr().expect("proxy address");
+    drop(proxy);
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
             "connections::http_client::tests::proxy_probe_child",
             "--nocapture",
+            "--ignored",
         ])
         .env("HTTPS_PROXY", format!("http://{proxy_address}"))
+        .env("HTTP_PROXY", format!("http://{proxy_address}"))
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .env("ACCOUNT_HTTP_TEST_CHILD", target.url())
         .output()
         .expect("child test process");
@@ -388,10 +397,6 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("transport-rejected"),
         "child reached the production constructor"
-    );
-    assert!(
-        matches!(proxy.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
-        "the proxy saw no connection"
     );
     assert!(
         target.finish().is_err(),

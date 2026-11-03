@@ -12,18 +12,18 @@ use crate::connections::oauth::Authorization;
 use crate::test_support::{Captured, SENTINEL};
 
 struct Scripted {
-    replies: Mutex<VecDeque<Response>>,
+    replies: Mutex<VecDeque<Result<Response, HttpError>>>,
     requests: Mutex<Vec<Request>>,
 }
 
 impl Scripted {
     fn new(status: u16, body: Vec<u8>) -> Self {
         Self {
-            replies: Mutex::new(VecDeque::from([Response {
+            replies: Mutex::new(VecDeque::from([Ok(Response {
                 status,
                 request_id: None,
                 body: Secret::new(Zeroizing::new(body)),
-            }])),
+            })])),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -35,12 +35,13 @@ impl Http for Scripted {
         request: Request,
     ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
         self.requests.lock().expect("requests").push(request);
-        std::future::ready(Ok(self
-            .replies
-            .lock()
-            .expect("replies")
-            .pop_front()
-            .expect("one scripted response")))
+        std::future::ready(
+            self.replies
+                .lock()
+                .expect("replies")
+                .pop_front()
+                .expect("one scripted response"),
+        )
     }
 }
 
@@ -56,6 +57,37 @@ fn authorization() -> Authorization {
 
 fn tokens() -> Value {
     json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600, "earliest_refresh_at":1234})
+}
+
+fn unusable(refresh_token: &str) -> ExchangeError {
+    ExchangeError::Unusable {
+        refresh_token: Some(Secret::new(Zeroizing::new(refresh_token.to_owned()))),
+    }
+}
+
+#[tokio::test]
+async fn a_missing_id_token_keeps_the_received_refresh_token_for_revocation() {
+    let captured = Captured::default();
+    let _logging = captured.install();
+    tracing::info!("capture-control");
+    let mut body = tokens();
+    body.as_object_mut().expect("object").remove("id_token");
+    body["refresh_token"] = json!(SENTINEL);
+    let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
+    let error = exchange(&fixture, &authorization()).await.unwrap_err();
+    assert_eq!(error, unusable(SENTINEL));
+    assert!(
+        !format!("{error:?} {error}").contains(SENTINEL),
+        "retained token redacts diagnostics"
+    );
+    assert!(
+        captured.text().contains("capture-control"),
+        "capture active"
+    );
+    assert!(
+        !captured.text().contains(SENTINEL),
+        "retained token never logged"
+    );
 }
 
 #[tokio::test]
@@ -155,7 +187,11 @@ async fn exchange_fields_and_records_are_bounded_by_bytes() {
         let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
         assert_eq!(
             exchange(&fixture, &authorization()).await.unwrap_err(),
-            ExchangeError::Bounds,
+            unusable(
+                body["refresh_token"]
+                    .as_str()
+                    .expect("fixture refresh token")
+            ),
             "oversized {field}"
         );
     }
@@ -163,6 +199,14 @@ async fn exchange_fields_and_records_are_bounded_by_bytes() {
     assert_eq!(
         exchange(&fixture, &authorization()).await.unwrap_err(),
         ExchangeError::Bounds
+    );
+    let mut body = tokens();
+    body["padding"] = json!("x".repeat(48 * 1024));
+    let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
+    assert_eq!(
+        exchange(&fixture, &authorization()).await.unwrap_err(),
+        unusable("fixture-refresh"),
+        "a parsed oversized record retains its revocable token"
     );
     let mut body = tokens();
     body["expires_in"] = json!(u64::MAX);
@@ -190,7 +234,7 @@ async fn incomplete_and_non_bearer_responses_fail_without_echoing_provider_text(
         let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
         assert_eq!(
             exchange(&fixture, &authorization()).await.unwrap_err(),
-            ExchangeError::Response { status: 200 },
+            unusable("fixture-refresh"),
             "missing {field}"
         );
     }
@@ -205,7 +249,14 @@ async fn incomplete_and_non_bearer_responses_fail_without_echoing_provider_text(
         body[field] = json!(value);
         let fixture = Scripted::new(200, serde_json::to_vec(&body).expect("fixture"));
         let error = exchange(&fixture, &authorization()).await.unwrap_err();
-        assert_eq!(error, ExchangeError::Response { status: 200 });
+        assert_eq!(
+            error,
+            unusable(
+                body["refresh_token"]
+                    .as_str()
+                    .expect("fixture refresh token")
+            )
+        );
         assert!(
             !format!("{error:?} {error}").contains(SENTINEL),
             "provider text discarded"
@@ -227,6 +278,11 @@ async fn only_typed_oauth_4xx_responses_report_a_conclusive_refusal() {
         (
             401,
             json!({"error":{"code":"invalid_client"}}),
+            ExchangeError::Response { status: 401 },
+        ),
+        (
+            401,
+            json!({"error":"invalid_client"}),
             ExchangeError::OAuth {
                 status: 401,
                 code: OAuthCode::InvalidClient,
@@ -239,6 +295,12 @@ async fn only_typed_oauth_4xx_responses_report_a_conclusive_refusal() {
                 status: 403,
                 code: OAuthCode::Other,
             },
+        ),
+        (400, json!({"error":"x".repeat(257)}), ExchangeError::Bounds),
+        (
+            400,
+            json!({"error":""}),
+            ExchangeError::Response { status: 400 },
         ),
         (
             400,
@@ -266,6 +328,18 @@ async fn only_typed_oauth_4xx_responses_report_a_conclusive_refusal() {
 }
 
 #[tokio::test]
+async fn transport_failure_remains_uncertain() {
+    let fixture = Scripted {
+        replies: Mutex::new(VecDeque::from([Err(HttpError::Timeout)])),
+        requests: Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        exchange(&fixture, &authorization()).await.unwrap_err(),
+        ExchangeError::Http(HttpError::Timeout)
+    );
+}
+
+#[tokio::test]
 async fn invalid_local_inputs_are_refused_before_any_http_request() {
     let mut cases = Vec::new();
     let mut bad = authorization();
@@ -277,11 +351,18 @@ async fn invalid_local_inputs_are_refused_before_any_http_request() {
     let mut bad = authorization();
     bad.verifier = Secret::new(Zeroizing::new("short".into()));
     cases.push(bad);
+    let mut bad = authorization();
+    bad.verifier = Secret::new(Zeroizing::new(format!("{}/", "v".repeat(42))));
+    cases.push(bad);
     for redirect in [
         "https://127.0.0.1:1455/auth/callback",
         "http://localhost:1455/auth/callback",
         "http://127.0.0.1:1455/wrong",
         "http://127.0.0.1:1455/auth/callback?code=extra",
+        "http://127.0.0.1/auth/callback",
+        "http://user@127.0.0.1:1455/auth/callback",
+        "http://:pass@127.0.0.1:1455/auth/callback",
+        "http://127.0.0.1:1455/auth/callback#fragment",
     ] {
         let mut bad = authorization();
         bad.redirect = redirect.into();

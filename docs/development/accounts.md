@@ -129,10 +129,12 @@ computes expiry through `Clock`; failed wall-time conversion doesn't consume the
 fields. Access and ID tokens are at most 16 KiB each, refresh tokens 8 KiB, granted scope 1 KiB,
 and client ids and subjects 256 bytes. The code is capped at 16 KiB, the redirect at 256 bytes,
 and the verifier must fit PKCE's 43–128 unreserved ASCII characters. `expires_in` is clipped to
-86,400 seconds as in the spike. `earliest_refresh_at` is consumed without assigning an
-undocumented type or scheduling rule. Only a typed OAuth error on a 4xx response conclusively
-reports refusal; transport failures, malformed replies, oversized data and other statuses
-leave issuance uncertain for the later token lane. No provider message or body enters an error.
+86,400 seconds as in the spike. `earliest_refresh_at` is ignored. A parsed but unusable HTTP 200
+returns its received refresh token in a redacted, zeroizing error for the caller to revoke,
+including when a field or record exceeds its storage bound. Only an OAuth error object with a
+string `error` on a 4xx response conclusively reports refusal; transport failures, malformed
+replies, oversized data and other statuses leave issuance uncertain for the later token lane.
+No provider message or body enters an error.
 
 ### Signed identity and plan permission
 
@@ -167,8 +169,9 @@ credentials for any account or service.
 
 ## Credential storage
 
-The store is accessed from one thread at a time: Credential Manager can miss a cross-thread
-read while writes to other names overlap.
+Store access must be serialized: Credential Manager can miss a cross-thread read while writes
+to other names overlap. At this head only the tests serialize real-store access; 9b wires
+production reads and writes to one lane.
 
 The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
 credential by exact target name. Windows uses `CredWriteW` with

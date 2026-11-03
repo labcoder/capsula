@@ -32,7 +32,7 @@ pub enum OAuthCode {
 }
 
 /// A bounded exchange failure. Only a typed OAuth 4xx conclusively reports no tokens issued.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ExchangeError {
     /// Local inputs were invalid; no request was dispatched.
     #[error("invalid code-exchange request")]
@@ -54,7 +54,13 @@ pub enum ExchangeError {
         /// The provider's status, never its body.
         status: u16,
     },
-    /// A response field or the whole record exceeded its byte limit.
+    /// Parsed HTTP 200 credentials failed validation; the caller owns any received refresh token.
+    #[error("unusable code-exchange credentials")]
+    Unusable {
+        /// Retained for in-memory revocation, including empty or oversized received values.
+        refresh_token: Option<Secret<Zeroizing<String>>>,
+    },
+    /// An unparsed response record or OAuth error code exceeded its byte limit.
     #[error("code-exchange response exceeds its bounds")]
     Bounds,
 }
@@ -84,26 +90,17 @@ impl TokenSet {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: Zeroizing<String>,
+    access_token: Option<Zeroizing<String>>,
     refresh_token: Option<Zeroizing<String>>,
     id_token: Option<Zeroizing<String>>,
     scope: Option<Zeroizing<String>>,
-    token_type: Zeroizing<String>,
-    expires_in: u64,
-    #[serde(default, rename = "earliest_refresh_at")]
-    _earliest_refresh_at: Option<serde::de::IgnoredAny>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ErrorValue {
-    Code(Zeroizing<String>),
-    Object { code: Zeroizing<String> },
+    token_type: Option<Zeroizing<String>>,
+    expires_in: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct ErrorBody {
-    error: ErrorValue,
+    error: Zeroizing<String>,
 }
 
 /// Exchange exactly this callback's code, verifier, client id and redirect URI.
@@ -179,7 +176,7 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
         if (400..500).contains(&response.status)
             && let Ok(body) = serde_json::from_slice::<ErrorBody>(bytes)
         {
-            let (ErrorValue::Code(code) | ErrorValue::Object { code }) = body.error;
+            let code = body.error;
             if code.len() > MAX_ID_BYTES {
                 return Err(ExchangeError::Bounds);
             }
@@ -196,40 +193,49 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
         }
         return Err(invalid);
     }
-    if bytes.len() > MAX_RECORD_BYTES {
-        return Err(ExchangeError::Bounds);
-    }
-    let data: TokenResponse = serde_json::from_slice(bytes).map_err(|_| invalid)?;
+    let data: TokenResponse = match serde_json::from_slice(bytes) {
+        Ok(data) => data,
+        Err(_) if bytes.len() > MAX_RECORD_BYTES => return Err(ExchangeError::Bounds),
+        Err(_) => return Err(invalid),
+    };
     let refresh_token = data.refresh_token;
-    let id_token = data.id_token.ok_or(invalid)?;
-    let scope = data.scope.ok_or(invalid)?;
-    for (value, limit) in [
-        (&data.access_token, MAX_TOKEN_BYTES),
+    let (Some(access_token), Some(id_token), Some(scope), Some(token_type), Some(expires_in)) = (
+        data.access_token,
+        data.id_token,
+        data.scope,
+        data.token_type,
+        data.expires_in,
+    ) else {
+        return Err(ExchangeError::Unusable {
+            refresh_token: refresh_token.map(Secret::new),
+        });
+    };
+    let invalid_fields = [
+        (&access_token, MAX_TOKEN_BYTES),
         (&id_token, MAX_TOKEN_BYTES),
         (&scope, MAX_SCOPE_BYTES),
-        (&data.token_type, MAX_ID_BYTES),
+        (&token_type, MAX_ID_BYTES),
     ]
     .into_iter()
     .chain(
         refresh_token
             .as_ref()
             .map(|value| (value, MAX_REFRESH_BYTES)),
-    ) {
-        if value.len() > limit {
-            return Err(ExchangeError::Bounds);
-        }
-        if value.is_empty() {
-            return Err(invalid);
-        }
-    }
-    if !data.token_type.eq_ignore_ascii_case("bearer") {
-        return Err(invalid);
+    )
+    .any(|(value, limit)| value.is_empty() || value.len() > limit);
+    if bytes.len() > MAX_RECORD_BYTES
+        || invalid_fields
+        || !token_type.eq_ignore_ascii_case("bearer")
+    {
+        return Err(ExchangeError::Unusable {
+            refresh_token: refresh_token.map(Secret::new),
+        });
     }
     Ok(TokenSet {
-        access_token: Secret::new(data.access_token),
+        access_token: Secret::new(access_token),
         refresh_token: refresh_token.map(Secret::new),
         id_token: Secret::new(id_token),
         scope: Secret::new(scope),
-        expires_in: data.expires_in.min(MAX_EXPIRES_IN),
+        expires_in: expires_in.min(MAX_EXPIRES_IN),
     })
 }

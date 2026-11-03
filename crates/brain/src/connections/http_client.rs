@@ -211,7 +211,7 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .filter(|v| v.len() <= 256 && v.bytes().all(|b| b.is_ascii_graphic()))
             .map(str::to_owned);
-        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BODY_BYTES));
+        let mut bytes = Zeroizing::new(Vec::new());
         while let Some(chunk) = response
             .chunk()
             .await
