@@ -19,6 +19,48 @@ use kumochi_protocol::message::{
 };
 
 #[test]
+fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
+    use kumochi_protocol::message::{AssistantName, SettingsView};
+    let link = attended("settings-view");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let expected = SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(9),
+    };
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            answer: false,
+            view: expected.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("written");
+    let LinkEvent::Settings { generation, view } = next(&events) else {
+        panic!("settings")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(view, expected);
+    let mut runs = Runs::default();
+    runs.connected(generation);
+    runs.settings(view.main_thread);
+    runs.submit("home", |turn| link.handle.send_data(&session, turn))
+        .expect("sent");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::TextSubmit {
+            thread: Some(ThreadId(9)),
+            text: "home".to_owned()
+        })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dropped() {
     let link = attended("pages");
     let events = patient(link.events);
@@ -347,6 +389,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     a.grant(bytes);
     let mut runs = Runs::default();
     runs.connected(a.generation());
+    runs.settings(ThreadId(1));
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&a, turn)),
         Err(Refused::Offline),
@@ -355,6 +398,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     assert!(!handle.send_control(&a, ControlToBrain::Pong));
     runs.disconnected();
     runs.connected(b.generation());
+    runs.settings(ThreadId(1));
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&b, turn)),
         Ok(())
@@ -363,7 +407,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "typed".to_owned(),
         })
     );
@@ -404,6 +448,15 @@ fn frame_size(message: &DataToShell) -> u32 {
     u32::try_from(size).expect("small")
 }
 
+fn ready_runs(session: &Session) -> Runs {
+    let mut runs = Runs::default();
+    runs.met(session.incarnation());
+    runs.connected(session.generation());
+    runs.settings(ThreadId(1));
+    runs.apply_scenes(&[]).expect("valid");
+    runs
+}
+
 fn delete_of(thread: ThreadId, after_turns: u32) -> ControlToBrain {
     ControlToBrain::DeleteThread {
         thread,
@@ -420,10 +473,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     let session = connected(next(&events));
     let handle = &link.handle;
     let send = |turn| handle.send_data(&session, turn);
-    let mut runs = Runs::default();
-    runs.met(session.incarnation());
-    runs.connected(session.generation());
-    runs.apply_scenes(&[]).expect("valid");
+    let mut runs = ready_runs(&session);
     assert!(runs.select_thread(Some(u)));
     runs.submit("u", send).expect("queued");
     assert!(runs.select_thread(Some(t)));
@@ -504,10 +554,10 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     assert_eq!(
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "next".to_owned(),
         }),
-        "confirming T's delete untargeted it"
+        "confirming T's delete returned input to Kumo"
     );
     assert!(runs.confirm_delete(v));
     handle.delete(v);
@@ -555,10 +605,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     });
     let events = patient(events);
     let a = connected(next(&events));
-    let mut runs = Runs::default();
-    runs.met(a.incarnation());
-    runs.connected(a.generation());
-    runs.apply_scenes(&[]).expect("valid");
+    let mut runs = ready_runs(&a);
     assert!(runs.confirm_delete(t));
     handle.delete(t);
     assert!(handle.send_deletes(&a));
@@ -582,6 +629,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     runs.disconnected();
     runs.met(b.incarnation());
     runs.connected(b.generation());
+    runs.settings(ThreadId(1));
     runs.apply_scenes(&[]).expect("valid");
     assert!(handle.send_deletes(&b));
     assert!(handle.send_control(&b, ControlToBrain::Pong));
@@ -597,7 +645,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "next".to_owned(),
         })
     );

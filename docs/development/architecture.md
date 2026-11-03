@@ -2,6 +2,8 @@
 
 How Kumochi works inside. This page is the map. Each module has its own page under `docs/development/` with the detail. The full design record lives outside the repo.
 
+The [glossary](glossary.md) maps user-facing words to code and protocol terms.
+
 Kumochi is built in slices. Slice 0 is the skeleton: the two processes, their pipes and handshake, and the Job Objects. Sections below describe the whole first release, so some of what they show arrives with later slices.
 
 ## The two processes

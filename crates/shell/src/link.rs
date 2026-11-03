@@ -20,7 +20,7 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
-    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId, UserError,
+    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SettingsView, ThreadId, UserError,
 };
 
 use crate::credential::{self, CredentialError};
@@ -64,6 +64,10 @@ pub(crate) enum LinkEvent {
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
     Connected(Session),
+    Settings {
+        generation: u64,
+        view: SettingsView,
+    },
     /// A run's phase changed, from the control pipe.
     RunState {
         run: RunId,
@@ -572,7 +576,7 @@ impl Link {
             })
         });
         match read {
-            Ok(()) if open => watch(&control, &control_out, events),
+            Ok(()) if open => watch(&control, &control_out, events, generation),
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
@@ -713,7 +717,12 @@ fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
 
 /// Reads the control pipe until the connection ends: answers pings and passes run states and
 /// scenes on. A repeated handshake ends the connection, as the brain treats a protocol violation.
-fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<LinkEvent>) {
+fn watch(
+    control: &PipeClient,
+    out: &Sender<ControlToBrain>,
+    events: &Sender<LinkEvent>,
+    generation: u64,
+) {
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
             Ok(None) => return,
@@ -722,8 +731,14 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
                     tracing::warn!("the control queue is full; the brain isn't reading");
                 }
             }
-            // shortcut: the shell shows no settings yet; slice 3's PRs 5 and 6 read the view.
-            Ok(Some(ControlToShell::Settings { .. })) => {}
+            Ok(Some(ControlToShell::Settings { view, .. })) => {
+                if events
+                    .send_blocking(LinkEvent::Settings { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
                 if events
                     .send_blocking(LinkEvent::RunState { run, thread, phase })
