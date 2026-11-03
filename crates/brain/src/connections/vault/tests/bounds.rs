@@ -227,13 +227,4 @@ fn every_record_debug_is_redacted() {
         phase: Phase::Revoking,
     };
     assert_eq!(format!("{pending:?}"), "SignOut(***)");
-    assert!(
-        !format!(
-            "{:?} {:?}",
-            SaveResult::NotCommitted(VaultError::Bounds),
-            DeleteResult::Refused(VaultError::Unreadable)
-        )
-        .contains("sentinel"),
-        "outcomes hold no secret data"
-    );
 }

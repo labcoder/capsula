@@ -94,7 +94,7 @@ impl<S: CredentialStore> Vault<S> {
     /// # Errors
     /// Returns typed Busy for contention, or a path/lock failure otherwise.
     pub fn open(store: S) -> Result<Self, VaultError> {
-        let path = platform::session_lock_path().ok_or(VaultError::NoLocalAppData)?;
+        let path = platform::session_lock_path().ok_or(VaultError::NoDataDir)?;
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 

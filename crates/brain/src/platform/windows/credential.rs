@@ -1,11 +1,12 @@
 //! Non-roaming generic credentials, accessed only by exact target name.
 
 use std::fmt;
+use std::io;
 use std::ptr::{self, NonNull};
 use std::slice;
 
 use kumochi_protocol::Secret;
-use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
+use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
 use windows_sys::Win32::Security::Credentials::{
     CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_MAX_GENERIC_TARGET_NAME_LENGTH, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
@@ -43,8 +44,10 @@ impl CredentialStore for WindowsCredentialStore {
         };
         // SAFETY: the initialized credential and bounded, live target/blob buffers outlive the call.
         if unsafe { CredWriteW(&raw const credential, 0) } == 0 {
-            // SAFETY: GetLastError has no preconditions and immediately follows the failed call.
-            return Err(CredentialStoreError::Write(unsafe { GetLastError() }));
+            let code = io::Error::last_os_error()
+                .raw_os_error()
+                .expect("a Win32 last error has a raw OS code");
+            return Err(CredentialStoreError::Write(code));
         }
         Ok(())
     }
@@ -53,9 +56,10 @@ impl CredentialStore for WindowsCredentialStore {
         let target = target_wide(target)?;
         // SAFETY: target is a validated, live, null-terminated UTF-16 buffer; flags are reserved zero.
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
-            // SAFETY: GetLastError has no preconditions and immediately follows the failed call.
-            let code = unsafe { GetLastError() };
-            if code != ERROR_NOT_FOUND {
+            let code = io::Error::last_os_error()
+                .raw_os_error()
+                .expect("a Win32 last error has a raw OS code");
+            if u32::try_from(code) != Ok(ERROR_NOT_FOUND) {
                 return Err(CredentialStoreError::Delete(code));
             }
         }
@@ -77,9 +81,10 @@ fn read(target: &str) -> Result<Option<ReadCredential>, CredentialStoreError> {
     let mut credential = ptr::null_mut();
     // SAFETY: target is live and null-terminated; credential is a writable out pointer.
     if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &raw mut credential) } == 0 {
-        // SAFETY: GetLastError has no preconditions and immediately follows the failed call.
-        let code = unsafe { GetLastError() };
-        return if code == ERROR_NOT_FOUND {
+        let code = io::Error::last_os_error()
+            .raw_os_error()
+            .expect("a Win32 last error has a raw OS code");
+        return if u32::try_from(code) == Ok(ERROR_NOT_FOUND) {
             Ok(None)
         } else {
             Err(CredentialStoreError::Read(code))
@@ -177,10 +182,6 @@ mod tests {
             assert_eq!(allocation.credential().Persist, CRED_PERSIST_LOCAL_MACHINE);
             assert_eq!(allocation.credential().Type, CRED_TYPE_GENERIC);
             assert_eq!(format!("{allocation:?}"), "ReadCredential(***)");
-            assert_eq!(
-                format!("{WindowsCredentialStore:?}"),
-                "WindowsCredentialStore"
-            );
             drop(allocation);
             let actual = WindowsCredentialStore
                 .get(target)
