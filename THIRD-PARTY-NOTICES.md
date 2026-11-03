@@ -29,12 +29,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Mermaid flowchart compatibility fixtures
+## Mermaid-derived regression input
 
-Flowchart compatibility inputs are adapted from Pele's `tests/compat/flowchart/`,
-which records their source as [Mermaid](https://github.com/mermaid-js/mermaid),
-version 12.1.0, revision `21f72f07ea`. The fixture inventory identifies each source
-case; the fixtures are not a claim of full Mermaid or Pele compatibility.
+The input in `crates/scene/src/mermaid/read.rs`'s
+`a_trailing_hyphen_belongs_to_the_id_before_an_odd_shape` test is reduced from
+Pele's `tests/compat/flowchart/flow-text.spec.js:374` (the odd vertex whose id
+ends in a minus). Pele records that input's source as
+[Mermaid](https://github.com/mermaid-js/mermaid), version 12.1.0,
+revision `21f72f07ea`.
+
+No upstream fixture directory or fixture inventory is vendored. The separate
+offline compatibility audit is not shipped and is not a claim of full compatibility.
 
 The MIT License (MIT)
 
