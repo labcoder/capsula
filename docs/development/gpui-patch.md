@@ -46,21 +46,20 @@ Each modified file says so in its first line, as Apache-2.0 4(b) asks; the licen
 ## Measured
 
 Rez, 144 Hz, release builds of main 5205b0c ("before") and this branch ("after"), product shell
-via `cargo xtask bench`, 20 s runs, one `measuring.lock` hold.
-
-Shell process, calibrated cycles as a share of one core:
+via `cargo xtask bench` (calibrated cycles of the shell process as a share of one core), 20 s
+runs, each set under one `measuring.lock` hold.
 
 | Workload | Before | After |
 |---|---|---|
-| `idle`, run 1 | 2.37% | 0.058% |
-| `idle`, run 2 | 2.73% | 0.057% |
-| `idle --panel` | 2.50% | 0.057% |
-| `stretch` (animating) | 9.59% | 9.63% |
+| `idle` | 2.37%, 2.73% | 0.061% |
+| `idle --panel` | 2.50% | 0.065% |
+| `stretch` (animating) | 10.40%, 10.25% | 10.43%, 10.36% |
 
-During `stretch` the fixture counted 8643 ticks and 7140 shape changes before, 8641 and 7183
-after, so the animation draws as often as it did. A spike app measured presents with PresentMon:
-2876 vs 2875 presents at 144 Hz and 1436 vs 1437 at a 72 fps cap, with the same 6.94 ms and
-13.89 ms median intervals.
+The `stretch` runs alternated before and after in one hold; the idle "before" runs come from an
+earlier hold the same day. During `stretch` the fixture counted 8641 ticks and about 7170 shape
+changes in every run, before and after, so the animation draws as often as it did. A spike app
+measured presents with PresentMon: 2876 vs 2875 presents at 144 Hz and 1436 vs 1437 at a 72 fps
+cap, with the same 6.94 ms and 13.89 ms median intervals.
 
 Real-input checks (hover, drag, typing, touchpad pan and inertia) and a device-lost check are
 done by hand at the desk (OSC-132); none of them is automated.
