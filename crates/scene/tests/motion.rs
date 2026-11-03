@@ -3,15 +3,16 @@
 mod allocation;
 #[path = "support/motion.rs"]
 mod fixtures;
+#[path = "support/scene.rs"]
+mod scene_support;
 
 use fixtures::{Fixture, four_views, gliding_scene, mixed_track};
+use scene_support::{Measure, id, new_scene, prepared};
 
 use kumochi_scene::{
-    Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
-    Text, WireId,
-    display::{MeasureError, TextMeasure, TextStyle},
+    Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut, Text,
     geom::Affine,
-    layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare},
+    layout::{LayoutState, PrepareError, SurfaceGeometry},
     motion::{at_word_offset_ms, synthetic_duration_ms},
     parse_record,
     text::Bounded,
@@ -20,64 +21,10 @@ use kumochi_scene::{
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::AtomicBool};
 
-struct Measure;
-impl TextMeasure for Measure {
-    fn measure(
-        &mut self,
-        text: &str,
-        _style: TextStyle,
-        max_width: Option<f32>,
-    ) -> Result<[f32; 2], MeasureError> {
-        let width =
-            f32::from(u16::try_from(text.chars().count()).expect("bounded fixture text")) * 8.0;
-        Ok([max_width.map_or(width, |limit| width.min(limit)), 10.0])
-    }
-}
-
-fn id(value: &str) -> WireId {
-    value.to_owned().try_into().expect("fixture id")
-}
 fn fresh() -> (SceneState, GlobalBudget, SceneView) {
     let scene = new_scene("motion");
     let view = SceneView::new(&LayoutState::new(&scene), scene.activated());
     (scene, GlobalBudget::default(), view)
-}
-fn new_scene(name: &str) -> SceneState {
-    let Record::Begin(header) = parse_record(
-        &serde_json::to_vec(&json!({"begin":{"v":1,"scene":name,"surface":"inline","alt":""}}))
-            .expect("header JSON"),
-    )
-    .expect("header") else {
-        panic!("begin");
-    };
-    SceneState::begin(header).expect("scene")
-}
-fn prepared(
-    scene: &mut SceneState,
-    budget: &mut GlobalBudget,
-    before: &LayoutState,
-    value: Value,
-) -> PreparedStep {
-    let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
-    let Record::Step(step) =
-        parse_record(&serde_json::to_vec(&envelope).expect("fixture JSON")).expect("typed fixture")
-    else {
-        panic!("step");
-    };
-    let Admission::New(candidate) = scene.admit(&step, budget).expect("admitted fixture") else {
-        panic!("new step");
-    };
-    let committed = scene.commit(candidate, budget).expect("fresh candidate");
-    let input = PrepareInput::new(
-        committed.preparation,
-        before.clone(),
-        SurfaceGeometry::default(),
-        Arc::new(Theme::default()),
-    )
-    .expect("consecutive input");
-    let result = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepared step");
-    result.validate(scene, before).expect("current result");
-    result
 }
 /// Commits, prepares on the view's layout and activates one step at `now`.
 fn activate(

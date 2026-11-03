@@ -96,6 +96,24 @@ pub(super) fn ancestry(
     chain
 }
 
+/// Whether `id` is strictly below `group` without crossing a non-cluster diagram.
+pub(super) fn inside(state: &LayoutState, id: &WireId, group: Handle) -> bool {
+    let mut current = state.objects.get(id);
+    for _ in 0..=MAX_OBJECT_DEPTH {
+        let Some(object) = current else {
+            return false;
+        };
+        if matches!(&*object.source, Op::Diagram(_)) && !is_cluster(state, object) {
+            return false;
+        }
+        if object.item.parent == Some(group) {
+            return true;
+        }
+        current = object.item.parent.and_then(|parent| get(state, parent));
+    }
+    false
+}
+
 /// The rectangle a member occupies in its parent's space: a node's bounds, or a cluster's
 /// transformed contents with padding.
 pub(super) fn member_rect(object: &Placed) -> Rect {
@@ -109,12 +127,11 @@ pub(super) fn member_rect(object: &Placed) -> Rect {
     }
 }
 
-/// Union of a diagram's children in its own space, as the final bounds pass computes it.
-pub(super) fn contents(state: &LayoutState, group: Handle) -> Option<Rect> {
-    state
-        .objects
-        .values()
-        .filter(|object| object.item.parent == Some(group))
+/// Union of a diagram's children in its own space, as the final bounds pass computes it when
+/// they come in id order.
+pub(super) fn contents<'a>(children: impl IntoIterator<Item = &'a Placed>) -> Option<Rect> {
+    children
+        .into_iter()
         .map(|object| {
             object
                 .item

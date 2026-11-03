@@ -351,6 +351,8 @@ diagram, which ranks their containing clusters and routes the edge in that diagr
 coordinate space. Tables and charts are not implicit graph clusters.
 An edge's `in` must be exactly that least common diagram, or admission returns
 `OutOfRange` at `from` or `to`; that endpoint blame is a deterministic heuristic.
+Preparation indexes children once and caches group depths for bottom-up placement;
+content unions retain identifier order and ranked members retain handle order.
 
 The 48-node and 96-edge limits apply per diagram, not per nested drawing. Clusters
 consume the scene's existing object and depth budgets rather than its direct-node
@@ -358,9 +360,15 @@ budget. Incremental additions keep earlier node rectangles and cluster placement
 stable; a cluster can grow into its siblings or off-screen on a later step because
 it neither moves nor glides to bring new contents into view; A9 revisits this limit.
 Groups have no frame or label in the plain diagram vocabulary.
-Text, shapes and callouts inside a cluster are placed after its parent ranks it,
-so they do not yet contribute to its ranked size; the parser/compiler PR measures
-them before ranking together with private Mermaid group labels.
+New text, shapes, lines, paths, highlights and callouts inside a cluster contribute
+to its ranked size in a step that places the cluster or adds a node to it, when all
+their anchors are absolute or refer to placed objects strictly inside its subtree.
+Source-order readiness passes resolve local dependency chains before ranking.
+Anchors to or across a boxed diagram draw late because its glide applies after
+placement. References to the cluster itself, its ancestors, siblings or outside
+objects are also drawn late, so they do not contribute to its ranked size; A9's
+renders judge this shortcut. Changed objects retain the later-growth behavior above.
+Private Mermaid group labels belong to the parser/compiler layer.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
@@ -372,8 +380,19 @@ result for excess node/edge counts, unsafe measured dimensions or generated coor
 outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
 and those failure boundaries have additional tests.
 Outside that pure port, node sizing is smaller, the rank gap is fixed, edges use
-quadratic routing, and wide initial batches are not scaled to fit; A8's visual gate
+quadratic routing, and wide initial batches are not scaled to fit; A9's visual gate
 will decide these differences from S1.
+
+The ignored `cluster_inputs::prepare_many_clusters` test times initial preparation
+with deterministic text measurement: flat 16/32/64/128-cluster growth, a successful
+600-object nested drawing (301 diagrams), and preparation's `OutOfRange` rejection
+of flat 299-cluster drawings in both directions after successful 600-object admission.
+An additional 400-text workload interleaves 40 reversed ten-link anchor chains,
+exercising local readiness dependencies within the admitted graph-depth limit.
+It excludes parsing, admission, commit, input construction, inspection and successful
+output destruction; rejection includes cleanup inside `prepare`. Run the release
+test executable at normal priority on quiet Rez under the shared measurement lock,
+not through Cargo. The fixture is not a worst-case bound or a real-font/GPU measurement.
 
 ### Inputs, publication and cuts
 
