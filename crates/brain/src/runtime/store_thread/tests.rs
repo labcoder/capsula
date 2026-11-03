@@ -136,13 +136,38 @@ fn a_failed_purge_is_retried_in_session() {
              END;",
         )
         .expect("trigger");
-    let (thread, attempts) = spawn(store);
-    assert_eq!(next(&attempts), Attempt::Failed);
+    let (reached, reaching) = std_mpsc::channel();
+    let (releasing, release) = std_mpsc::channel();
+    let (heard, attempts) = std_mpsc::channel();
+    let (acks, _replies) = mpsc::unbounded_channel();
+    let schedule = Schedule {
+        quiet: Duration::from_millis(1),
+        first_retry: Duration::from_millis(20),
+        last_retry: Duration::from_millis(20),
+        free_space: |_| Ok(u64::MAX),
+        attempts: Some(heard),
+        pauses: Some(Pauses {
+            at: std::sync::Mutex::new(vec![Pause {
+                at: Point::Clean,
+                reached,
+                release,
+            }]),
+            waiting: None,
+        }),
+        ..Schedule::default()
+    };
+    let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+    // Fixed while the first copy holds its snapshot, so the retry's copy never meets the fixer.
+    reaching
+        .recv_timeout(PATIENCE)
+        .expect("the first copy took its snapshot");
     Connection::open(scratch.db())
         .expect("fixer")
         .execute_batch("DROP TRIGGER keep_owed")
         .expect("drop");
-    done_after(&attempts, &[Attempt::Failed]);
+    releasing.send(()).expect("released");
+    assert_eq!(next(&attempts), Attempt::Failed);
+    assert_eq!(next(&attempts), Attempt::Done);
     thread.close().blocking_recv().expect("closed");
     assert_eq!(owed(&scratch), 0);
 }
