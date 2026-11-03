@@ -64,7 +64,11 @@ fn count(value: usize) -> f32 {
 fn fit(widths: &mut [f32], textual: &[bool], available: f32, font: f32) {
     let mut excess = (widths.iter().sum::<f32>() - available).max(0.0);
     let minimum = (available / count(widths.len().max(1))).min(PAD_X * 2.0 + font * 2.0);
+    let tolerance = 0.01;
     for text_only in [true, false] {
+        if excess <= tolerance {
+            break;
+        }
         for _ in 0..widths.len() {
             let Some(widest) = widths
                 .iter()
@@ -90,16 +94,21 @@ fn fit(widths: &mut [f32], textual: &[bool], available: f32, font: f32) {
             let reduction = (excess / count(tied)).min(widest - next);
             for (i, width) in widths.iter_mut().enumerate() {
                 if *width == widest && (!text_only || textual[i]) {
-                    *width -= reduction;
+                    *width = if reduction == widest - next {
+                        next
+                    } else {
+                        *width - reduction
+                    };
                 }
             }
             excess = (excess - reduction * count(tied)).max(0.0);
-            if excess <= f32::EPSILON {
+            if excess <= tolerance {
                 break;
             }
         }
     }
-    if excess > 0.0 {
+    if excess > tolerance {
+        // Keep rounding residuals inside the available width after the bounded passes.
         let total = widths.iter().sum::<f32>();
         for width in widths {
             *width *= available / total;
@@ -349,6 +358,7 @@ fn install(
             bounds,
             primitives: primitives.into(),
             transform: Affine::default(),
+            // shortcut: own updates lose inherited opacity; retain its separate factor in A7.
             opacity: crate::state::object::visual(&source)
                 .and_then(|visual| visual.opacity)
                 .map_or(1.0, crate::Finite::get),
@@ -386,6 +396,7 @@ pub(super) fn place(
                     let mut output = old.item.primitives.to_vec();
                     output.retain(|primitive| !matches!(primitive, Prim::Rect { .. }));
                     let mut column = 0;
+                    // shortcut: frozen rows retain their rule while bounds grow; revisit in A8's visual gate.
                     let mut bounds = old.item.bounds;
                     for primitive in &mut output {
                         if let Prim::Text {
@@ -475,6 +486,7 @@ fn place_table(
         .ok_or(PrepareError::Stale)?
         .clone();
     let old = state.objects.get(&id).ok_or(PrepareError::Stale)?;
+    let unchanged_opacity = (!sources.contains_key(&id)).then_some(old.item.opacity);
     let source = Arc::clone(sources.get(&id).map_or(&old.source, |(_, source)| source));
     let Op::Table(table) = &*source else {
         return Err(PrepareError::Stale);
@@ -525,6 +537,14 @@ fn place_table(
         bounds,
         primitives,
     );
+    if let Some(opacity) = unchanged_opacity {
+        state
+            .objects
+            .get_mut(&table.id)
+            .ok_or(PrepareError::Stale)?
+            .item
+            .opacity = opacity;
+    }
     for (index, (row_handle, (id, source))) in rows.into_iter().enumerate() {
         let Op::Row(row) = &*source else {
             unreachable!("row sources were filtered");
@@ -547,9 +567,20 @@ fn place_table(
 mod tests {
     use super::*;
     #[test]
+    fn fractional_width_fitting_preserves_numeric_width_while_text_can_shrink() {
+        let mut widths = [1164.6945, 321.97293, 118.40325, 100.91873];
+        fit(&mut widths, &[true, true, true, false], 388.67493, 14.0);
+        assert_eq!(
+            widths[3].to_bits(),
+            100.91873_f32.to_bits(),
+            "text columns must absorb the excess before the numeric column shrinks"
+        );
+    }
+    #[test]
     fn numbers_are_grouped_rounded_and_trimmed() {
         for (value, expected) in [
             (1234.5, "1,234.5"),
+            (-1234.5, "-1,234.5"),
             (-0.25, "-0.25"),
             (12.0, "12"),
             (1000.0, "1,000"),
@@ -560,5 +591,43 @@ mod tests {
             assert_eq!(number(value), expected);
         }
         assert_eq!(number(1.0e308), "1.00e308");
+        assert_eq!(
+            number(1.0e299).len(),
+            399,
+            "the last grouped magnitude stays within the text cap"
+        );
+        assert_eq!(
+            number(-1.0e299).len(),
+            400,
+            "the sign may reach the exact text cap"
+        );
+        assert_eq!(
+            number(1.0e300),
+            "1.00e300",
+            "grouping beyond the cap uses scientific notation"
+        );
+        assert_eq!(
+            number(-1.0e300),
+            "-1.00e300",
+            "negative scientific output retains the sign"
+        );
+    }
+
+    #[test]
+    fn numeric_columns_shrink_only_after_text_reaches_its_minimum() {
+        let mut widths = [100.0, 100.0];
+        fit(&mut widths, &[true, false], 160.0, 14.0);
+        assert_eq!(
+            widths.map(f32::to_bits),
+            [60.0_f32.to_bits(), 100.0_f32.to_bits()],
+            "text absorbs the first forty pixels"
+        );
+        let mut widths = [100.0, 100.0];
+        fit(&mut widths, &[true, false], 100.0, 14.0);
+        assert_eq!(
+            widths.map(f32::to_bits),
+            [48.0_f32.to_bits(), 52.0_f32.to_bits()],
+            "numeric width shrinks only after text reaches forty-eight pixels"
+        );
     }
 }
