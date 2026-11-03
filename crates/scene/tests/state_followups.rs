@@ -258,8 +258,8 @@ fn missing_targets_endpoint_kinds_and_duplicate_removals_are_rejected() {
         ),
         (
             r#"{"id":"bad","put":[{"mermaid":{"in":"d","src":""}}]}"#,
-            ErrorCode::Unsupported,
-            "put[0].mermaid",
+            ErrorCode::Malformed,
+            "put[0].mermaid.src",
         ),
         (
             r#"{"id":"bad","put":[{"diagram":{"id":"d"}},{"edge":{"id":"e","in":"d","from":"d","to":"d"}}]}"#,

@@ -2,8 +2,8 @@
 
 use super::state::Placed;
 use crate::{
-    Op, Text,
-    record::{Anchor, Axis, Cell},
+    Op, Step, Text,
+    record::{Anchor, Axis, Cell, Start},
     state::object,
 };
 use std::{collections::HashSet, sync::Arc};
@@ -22,6 +22,36 @@ pub(super) fn source_bytes<'a>(
         .filter(|object| seen.insert(Arc::as_ptr(&object.source)))
         .map(|object| size_of::<Op>() + op_bytes(&object.source))
         .sum()
+}
+
+/// The compiled record a prepared ticket owns, unless it shares the original log record.
+pub(super) fn compiled_bytes(original: &Arc<Step>, run: &Arc<Step>) -> usize {
+    if Arc::ptr_eq(original, run) {
+        return 0;
+    }
+    size_of::<Step>()
+        + run.id.as_str().len()
+        + optional(run.say.as_ref())
+        + elements(&run.put)
+        + run.put.iter().map(op_bytes).sum::<usize>()
+        + elements(&run.set)
+        + run
+            .set
+            .iter()
+            .map(|change| {
+                change.target.as_str().len()
+                    + optional(change.text.as_ref())
+                    + optional(change.label.as_ref())
+                    + change.cells.as_ref().map_or(0, |values| cells(values))
+                    + change.data.as_ref().map_or(0, |values| elements(values))
+            })
+            .sum::<usize>()
+        + elements(&run.remove)
+        + run.remove.iter().map(|id| id.as_str().len()).sum::<usize>()
+        + match &run.start {
+            Start::After { step, .. } => step.as_str().len(),
+            Start::Speech | Start::Now => 0,
+        }
 }
 
 /// Heap bytes an operation owns: each string's bytes and each sequence's elements at their
@@ -55,17 +85,7 @@ fn op_bytes(op: &Op) -> usize {
         Op::Table(table) => {
             texts(&table.cols) + elements(&table.align) + optional(table.title.as_ref())
         }
-        Op::Row(row) => {
-            elements(&row.cells)
-                + row
-                    .cells
-                    .iter()
-                    .map(|cell| match cell {
-                        Cell::Text(text) => text.as_str().len(),
-                        Cell::Number(_) | Cell::Bool(_) => 0,
-                    })
-                    .sum::<usize>()
-        }
+        Op::Row(row) => cells(&row.cells),
         Op::Chart(chart) => {
             let axis = |side: &Axis| optional(side.label.as_ref()) + optional(side.unit.as_ref());
             optional(chart.title.as_ref())
@@ -77,6 +97,17 @@ fn op_bytes(op: &Op) -> usize {
         Op::Anim(anim) => anim.target.as_str().len() + elements(&anim.keys),
         Op::Mermaid(mermaid) => mermaid.parent.as_str().len() + mermaid.src.as_str().len(),
     }
+}
+
+fn cells(values: &[Cell]) -> usize {
+    elements(values)
+        + values
+            .iter()
+            .map(|cell| match cell {
+                Cell::Text(text) => text.as_str().len(),
+                Cell::Number(_) | Cell::Bool(_) => 0,
+            })
+            .sum::<usize>()
 }
 
 /// A sequence's elements at their own inline size.
@@ -103,7 +134,10 @@ fn anchor(value: &Anchor) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Finite, Record, parse_record, record::Point};
+    use crate::{
+        Finite, Record, WireId, parse_record,
+        record::{Change, Point},
+    };
 
     fn op(json: &str) -> Op {
         let record = format!(r#"{{"step":{{"id":"s","put":[{json}]}}}}"#);
@@ -138,6 +172,24 @@ mod tests {
             )),
             2 * size_of::<[Finite; 2]>() + 2,
             "the id, the referenced id and two owned via points"
+        );
+    }
+
+    #[test]
+    fn compiled_records_charge_owned_fields_but_not_a_shared_log_record() {
+        let Record::Step(record) = parse_record(br#"{"step":{"id":"s","say":"say","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}],"set":[{"target":"p","text":"tt","label":"lll","cells":["cc",1],"data":[1,2]}],"remove":["zz"],"start":{"after":"before","ms":0}}}"#).expect("typed record") else { panic!("step"); };
+        let original = Arc::new(record);
+        assert_eq!(compiled_bytes(&original, &original), 0);
+        let copied = Arc::new((*original).clone());
+        assert_eq!(
+            compiled_bytes(&original, &copied),
+            size_of::<Step>()
+                + size_of::<Op>()
+                + size_of::<Change>()
+                + size_of::<WireId>()
+                + 2 * size_of::<Cell>()
+                + 2 * size_of::<Point>()
+                + 21
         );
     }
 }
