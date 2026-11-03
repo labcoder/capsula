@@ -169,12 +169,11 @@ fn deadline(ended: Ended) -> tokio::time::Instant {
     deadline
 }
 
-/// Releases `lock` after `after`, from its own thread.
-fn release_after(lock: rusqlite::Connection, after: Duration) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        std::thread::sleep(after);
-        lock.execute_batch("ROLLBACK").expect("unlocked");
-    })
+/// Releases `lock` once the quit has ended its run and waits on the store, so the quit always
+/// finds the first step's acknowledgement still pending and the wait costs none of its deadline.
+async fn unlock_once_quitting(observed: &mut UnboundedReceiver<Seen>, lock: rusqlite::Connection) {
+    seen(observed, |seen| *seen == Seen::QuitDraining).await;
+    lock.execute_batch("ROLLBACK").expect("unlocked");
 }
 
 #[tokio::test]
@@ -444,9 +443,11 @@ async fn a_quit_applies_a_queued_stop_and_clear_and_waits_for_a_late_first_ack()
         brain.coordinator.visible().is_empty(),
         "the Clear was applied"
     );
-    let released = release_after(lock, Duration::from_millis(300));
-    assert_eq!(brain.quit(deadline).await, Quit::Complete);
-    released.join().expect("released");
+    let (quit, ()) = tokio::join!(
+        brain.quit(deadline),
+        unlock_once_quitting(&mut observed, lock)
+    );
+    assert_eq!(quit, Quit::Complete);
     assert_eq!(
         outcomes(&scratch).last(),
         Some(&outcome("interrupted", "stop")),
@@ -474,9 +475,11 @@ async fn a_quit_ends_a_current_run_whose_first_ack_is_pending() {
     };
     let (ended, lock) = tokio::join!(brain.serve(control, data, &mut tap), client);
     let deadline = deadline(ended);
-    let released = release_after(lock, Duration::from_millis(300));
-    assert_eq!(brain.quit(deadline).await, Quit::Complete);
-    released.join().expect("released");
+    let (quit, ()) = tokio::join!(
+        brain.quit(deadline),
+        unlock_once_quitting(&mut observed, lock)
+    );
+    assert_eq!(quit, Quit::Complete);
     assert_eq!(
         outcomes(&scratch).last(),
         Some(&outcome("interrupted", "shell_lost"))

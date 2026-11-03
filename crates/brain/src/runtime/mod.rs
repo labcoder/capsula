@@ -157,6 +157,8 @@ pub(crate) enum Seen {
     ControlDrained,
     /// The store answered a delete, and the brain applied the answer.
     DeleteAnswered,
+    /// A quit ended the current run and now waits for the store.
+    QuitDraining,
 }
 
 impl Brain {
@@ -271,6 +273,8 @@ impl Brain {
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
         self.pump_settings_offline();
+        #[cfg(test)]
+        self.observer.send(Seen::QuitDraining).ok();
         let mut undeleted = self.coordinator.refused_delete();
         let cleared = tokio::time::timeout_at(deadline, async {
             while self.coordinator.ending_runs() > 0

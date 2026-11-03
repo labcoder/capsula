@@ -145,11 +145,25 @@ snapshot: before any write the store thread stops the copy and waits until it
 has let go of the live store, and nothing more of the copy. Letting go means two things: its drain
 has finished its checkpoint on the helper's connection, which stays open for the helper, and its
 snapshot's own read-only connection has closed. The copy takes the helper's connection before it
-holds off writes, so a write never waits for a checkpoint the helper is running. Measured before
-the page reader and the checkpoint helper existed, and not yet remeasured with them: at 984 MiB
-(`measure_delete_during_a_purge`, 5 samples with the copy in each phase), a delete from enqueue
-to acknowledgement took at most 29.1 ms during the drain and 6.3 ms during the snapshot, against
-9.9 ms with nothing running, and the write right behind it 1.1 ms.
+holds off writes, so a write never waits for a checkpoint the helper is running.
+
+`measure_delete_during_a_purge` holds the real copy, sends a delete, waits until that delete has
+stopped the copy and is waiting for it, queues a turn behind it, and then releases the copy. It
+times both from the release, so it counts the copy's own stop and close but not the hold. The copy
+is held just before its drain's checkpoint, which can't be stopped, or inside `VACUUM INTO` once
+some of the snapshot is on disk. Every held attempt ended stale. Release build on Rez, 5 samples
+in each phase; typical, then worst:
+
+| Store | Delete, drain | Delete, inside the snapshot | Turn behind it, worst | Delete with nothing running, worst |
+|---|---|---|---|---|
+| 46 MiB | 3.1–6.1, 8.2 ms | 4.7–5.3 ms | 10.6 ms | 9.8 ms |
+| 232 MiB | 4.5–4.9, 18.7 ms | 6.6–7.1 ms | 19.7 ms | 21.1 ms |
+| 515 MiB | 3.0–3.2, 8.5 ms | 4.6–5.1 ms | 9.4 ms | 18.5 ms |
+| 984 MiB | 3.0–3.2, 20.1 ms | 4.9–5.3 ms | 31.4 ms | 11.5 ms |
+
+Each store's first drain sample was a slow one: 8.2, 18.7, 8.5 and 8.1 ms. The only other slow
+sample was the fifth at 984 MiB, 20.1 ms, with its turn at 31.4 ms. The rest stay within a few
+milliseconds of an ordinary delete.
 
 A write queued behind a page read no longer waits for it (`measure_page_reads`, release build on
 Rez, 30 rounds; medians, worst in brackets):
@@ -234,17 +248,16 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    can keep its name after its deletion succeeds, until that process closes it. Rez's NTFS
    removes the name at once.
 
-**What store work waits for.** These numbers were measured before the page reader and the
-checkpoint helper existed, and aren't yet remeasured with them. Only the swap stops the store
-thread: 7–11 ms from 46 MiB to
-984 MiB on Rez, flat with size (`measure_purge`, logged with the pull request). During a copy or
-a removal ops share the disk with the helper; the worst op measured during either was 22 ms,
-against 6 ms with no purge running. A deletion a reader kept in the WAL is copied into the file
-by the drain on the helper, not by the swap on the store thread: with a tenth of the store
-deleted behind a reader, 19–123 MiB of WAL, the swap took 8–19 ms against 7–11 ms normally,
-because its TRUNCATE still frees a large WAL file. Without the drain it took 217–223 ms at
-984 MiB. Ops during the drain took at most 48 ms (`measure_swap_after_a_held_reader`). Without
-any purge, the checkpoint helper copies that WAL once the reader lets go; commits never do. These are measurements on Rez's NVMe drive, not a bound for
+**What store work waits for.** Only the swap stops the store thread: 7–21 ms from 46 MiB to
+984 MiB on Rez, 5 purges each (`measure_purge`, release build). During a copy ops share the disk
+with it. The worst op during a copy was 6 ms at 46 MiB, 19 ms at 515 MiB and 25 ms at 984 MiB,
+plus one op of 60 ms at 232 MiB whose other four purges stayed under 7 ms. With no purge running
+the worst was 1–6 ms. A deletion a reader kept in the WAL is copied into the file by the helper
+or the drain, not by the swap on the store thread: with a tenth of the store deleted behind a
+reader, 19–124 MiB of WAL, the swap took 8–20 ms, because its TRUNCATE still frees a large WAL
+file. Draining it apart first took 10–182 ms, and ops meanwhile took at most 6 ms
+(`measure_swap_after_a_held_reader`). Commits never copy that WAL. These are measurements on
+Rez's NVMe drive, not a bound for
 slower disks. On a volume without hard links (FAT, some network shares) the move falls back to
 freeing the old file itself, so the swap grows with the store again.
 
