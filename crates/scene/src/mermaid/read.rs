@@ -462,6 +462,20 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_hyphen_belongs_to_the_id_before_an_odd_shape() {
+        let mut reader = at("odd->Vertex Text]");
+        assert_eq!(reader.node_id(), Ok("odd-"));
+        assert_eq!(reader.pos, 4);
+        assert_eq!(reader.shape().err(), Some(ErrorCode::Unsupported));
+        let mut bare = at("A-");
+        assert_eq!(bare.node_id(), Ok("A-"));
+        assert_eq!(bare.pos, 2);
+        let mut before_link = at("A- --> B");
+        assert_eq!(before_link.node_id(), Ok("A-"));
+        assert_eq!(before_link.pos, 2);
+    }
+
+    #[test]
     fn text_keeps_its_length_limit_and_refuses_markup_and_entities() {
         let longest = "x".repeat(400);
         assert_eq!(
