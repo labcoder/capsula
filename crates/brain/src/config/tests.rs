@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
-use kumochi_protocol::message::{AssistantName, ErrorKey, SettingsOp, ThreadId, UserName};
+use kumochi_protocol::message::{
+    AssistantName, ErrorKey, MaxFrameRate, SettingsOp, ThreadId, UserName,
+};
 
 use super::{Config, ConfigError};
 use crate::test_support::Scratch;
@@ -132,6 +134,34 @@ fn invalid_known_values_read_as_defaults_and_stay_until_set() {
     assert_eq!(table["assistant_name"].as_str(), Some(long.as_str()));
     assert_eq!(table["user_name"].as_integer(), Some(5));
     assert_eq!(table["onboarded"].as_bool(), Some(true));
+}
+
+#[test]
+fn the_max_frame_rate_persists_and_automatic_removes_the_key() {
+    let scratch = Scratch::new("config-fps");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(config.view().max_frame_rate, MaxFrameRate::AUTOMATIC);
+    let cap = MaxFrameRate::cap(144).expect("a cap");
+    apply(&mut config, SettingsOp::SetMaxFrameRate(cap));
+    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(reloaded.view().max_frame_rate.fps(), Some(144));
+    apply(
+        &mut config,
+        SettingsOp::SetMaxFrameRate(MaxFrameRate::AUTOMATIC),
+    );
+    let text = std::fs::read_to_string(&path).expect("readable");
+    assert!(!text.contains("max_frame_rate"), "{text}");
+    for bad in ["61", "0", "70000", "-30", "\"60\""] {
+        std::fs::write(&path, format!("max_frame_rate = {bad}\n")).expect("seeded");
+        let config = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(
+            config.view().max_frame_rate,
+            MaxFrameRate::AUTOMATIC,
+            "{bad}"
+        );
+    }
 }
 
 #[test]

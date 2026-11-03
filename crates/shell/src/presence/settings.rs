@@ -1,7 +1,7 @@
 //! Settings window lifetime and nonblocking edits over the current session.
 
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
-use kumochi_protocol::message::{AssistantName, ControlToBrain};
+use kumochi_protocol::message::{AssistantName, ControlToBrain, MaxFrameRate};
 
 use super::settings_view::SettingsView;
 use super::{
@@ -222,6 +222,17 @@ impl Presence {
                 Err(state.rename_refusal())
             }
         })
+    }
+
+    pub(super) fn save_max_frame_rate(&mut self, rate: MaxFrameRate, cx: &mut Context<'_, Self>) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, _| {
+            state.send_max_frame_rate(rate, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            })
+        });
     }
 
     pub(super) fn save_setting(&mut self, field: Field, cx: &mut Context<'_, Self>) -> bool {

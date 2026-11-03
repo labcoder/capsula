@@ -11,7 +11,7 @@ use std::time::Instant;
 use gpui_kit::{Context, WeakEntity, Window};
 
 use super::outline::{self, Outline, Ownership};
-use super::{PanelVisibility, Presence, diagnostics, observer, scaled};
+use super::{PanelVisibility, Presence, diagnostics, frame_rate, observer, scaled};
 use crate::platform::{self, MaskUpdate, PresenceError};
 
 /// The bulb's radius, in logical pixels.
@@ -25,8 +25,11 @@ const PILL_INSET: f32 = 4.0;
 /// The spring's natural frequency, per second: a 90 px pull settles in about a third of a
 /// second, with no overshoot.
 const SPRING: f64 = 28.0;
-/// A longer frame gap steps only this far, so a stall can't fling the bulb.
-const MAX_STEP: f64 = 1.0 / 60.0;
+/// A longer frame gap steps only this far, so a stall can't fling the bulb. It's above every
+/// frame interval a 30 cap gives on a 48 Hz or faster display, so no cap slows the motion.
+const MAX_STEP: f64 = 1.0 / 24.0;
+/// The spring integrates in steps no longer than this, so it moves alike at every frame rate.
+const MAX_SUBSTEP: f64 = 1.0 / 144.0;
 /// The fixture's out-and-back period, in seconds.
 const FIXTURE_PERIOD: f64 = 2.0;
 /// Failed uploads in a row before frames stop; a pointer event or position choice rearms them.
@@ -85,10 +88,18 @@ impl Spring {
     /// Steps `dt` seconds toward `goal`. Once it's there and still, it snaps exactly onto the
     /// goal and returns true.
     fn step(&mut self, goal: [f64; 2], dt: f64) -> bool {
-        for ((offset, velocity), goal) in self.offset.iter_mut().zip(&mut self.velocity).zip(goal) {
-            let pull = SPRING * SPRING * (goal - *offset) - 2.0 * SPRING * *velocity;
-            *velocity += pull * dt;
-            *offset += *velocity * dt;
+        let steps = (dt / MAX_SUBSTEP).ceil();
+        let dt = dt / steps;
+        let mut step = 0.0;
+        while step < steps {
+            step += 1.0;
+            for ((offset, velocity), goal) in
+                self.offset.iter_mut().zip(&mut self.velocity).zip(goal)
+            {
+                let pull = SPRING * SPRING * (goal - *offset) - 2.0 * SPRING * *velocity;
+                *velocity += pull * dt;
+                *offset += *velocity * dt;
+            }
         }
         let near = (goal[0] - self.offset[0]).hypot(goal[1] - self.offset[1]) < 0.25;
         let still = self.velocity[0].hypot(self.velocity[1]) < 4.0;
@@ -323,8 +334,18 @@ impl Presence {
     /// One frame: step the spring, reshape, and ask for another frame unless it settled.
     fn tick(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
         let now = Instant::now();
-        let step = self.stretch.last.replace(now).map_or(1.0 / 144.0, |last| {
-            now.duration_since(last).as_secs_f64().min(MAX_STEP)
+        let cap = (self.settings.read(cx).view())
+            .map(|view| view.max_frame_rate)
+            .unwrap_or_default();
+        let refresh = window.refresh_interval(cx);
+        let since = self.stretch.last.map(|last| now.duration_since(last));
+        if since.is_some_and(|since| since < frame_rate::min_gap(cap, refresh)) {
+            schedule(window, cx.weak_entity());
+            return;
+        }
+        self.stretch.last = Some(now);
+        let step = since.map_or(1.0 / frame_rate::effective(cap, refresh), |since| {
+            since.as_secs_f64().min(MAX_STEP)
         });
         let goal = self.goal(now);
         let settled = self.stretch.spring.step(goal, step);
@@ -501,6 +522,17 @@ mod tests {
         stretch.drive = super::Drive::Fixture(started);
         stretch.reposition();
         assert_eq!(stretch.drive, super::Drive::Fixture(started));
+    }
+
+    #[test]
+    fn the_spring_moves_alike_at_the_slowest_frame_rate() {
+        let mut fast = Spring::default();
+        let mut slow = Spring::default();
+        for _ in 0..4 {
+            fast.step([0.0, 90.0], 1.0 / 144.0);
+        }
+        slow.step([0.0, 90.0], 4.0 / 144.0);
+        assert_eq!(slow, fast);
     }
 
     #[test]

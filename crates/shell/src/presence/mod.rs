@@ -4,6 +4,7 @@
 mod deletes;
 pub(crate) mod diagnostics;
 mod escape;
+mod frame_rate;
 mod geometry;
 mod gesture;
 mod launch;

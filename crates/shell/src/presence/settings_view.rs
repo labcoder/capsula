@@ -2,15 +2,16 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, scroll::ScrollableElement as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div,
 };
-use kumochi_protocol::message::NameError;
+use kumochi_protocol::message::{MaxFrameRate, NameError};
 
-use super::{Presence, PresenceEvent, send};
+use super::{Presence, PresenceEvent, frame_rate, send};
 use crate::settings::{Error, Field, Settings};
 use crate::strings::{Strings, Text};
 
@@ -172,10 +173,60 @@ impl SettingsView {
             )
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
+
+    /// Automatic, then each cap, with the rate the stretch draws at now.
+    fn frame_rate(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let view = self.model.read(cx).view();
+        let cap = view.map(|view| view.max_frame_rate).unwrap_or_default();
+        let selected = cap
+            .fps()
+            .and_then(|fps| MaxFrameRate::CAPS.iter().position(|&each| each == fps))
+            .map_or(0, |ix| ix + 1);
+        let label = strings.get(Text::MaxFrameRate);
+        let owner = self.owner.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().child(label))
+            .child(
+                RadioGroup::horizontal("max-frame-rate")
+                    .child(Radio::new("fps-auto").label(strings.get(Text::FrameRateAutomatic)))
+                    .children(
+                        MaxFrameRate::CAPS.map(|fps| {
+                            Radio::new(("fps", usize::from(fps))).label(fps.to_string())
+                        }),
+                    )
+                    .selected_index(Some(selected))
+                    .disabled(view.is_none())
+                    .on_click(move |ix, _, cx| {
+                        let rate = match ix.checked_sub(1) {
+                            None => Some(MaxFrameRate::AUTOMATIC),
+                            Some(ix) => MaxFrameRate::CAPS
+                                .get(ix)
+                                .and_then(|&fps| MaxFrameRate::cap(fps).ok()),
+                        };
+                        if let Some(rate) = rate {
+                            let _gone =
+                                owner.update(cx, |owner, cx| owner.save_max_frame_rate(rate, cx));
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    // The panel opens beside the dock, so it's on the dock's display.
+                    .child(
+                        strings.frame_rate(frame_rate::effective(cap, window.refresh_interval(cx))),
+                    ),
+            )
+    }
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let events = self.events.clone();
         let close = self.owner.clone();
@@ -249,6 +300,7 @@ impl Render for SettingsView {
                                     }))
                                     .child(self.field(Field::Assistant, cx))
                                     .child(self.field(Field::User, cx))
+                                    .child(self.frame_rate(window, cx))
                                     .child(
                                         div()
                                             .text_xs()
