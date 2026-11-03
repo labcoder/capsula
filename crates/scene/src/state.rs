@@ -241,6 +241,11 @@ impl SceneState {
     pub fn revision(&self) -> u32 {
         self.revision
     }
+    /// Returns the activated prefix, excluding steps dropped by a cut.
+    /// Recovery treats every retained step as activated and at rest.
+    pub fn activated(&self) -> u32 {
+        self.activated
+    }
     /// Returns the number of prospectively surviving objects.
     pub fn object_count(&self) -> usize {
         self.objects.len()
@@ -825,6 +830,16 @@ impl SceneState {
             state.context = Some(Arc::clone(&global.identity));
         }
         Ok((scenes, global))
+    }
+
+    /// Charges an unbound recovered scene to a batch budget, changing neither on rejection.
+    pub(crate) fn bind(&mut self, global: &mut GlobalBudget) -> Result<(), StepError> {
+        self.check_context(global)?;
+        global
+            .check(self.bound_usage(), self.usage)
+            .map_err(StepError::new)?;
+        self.apply_usage(global, self.usage);
+        Ok(())
     }
 }
 

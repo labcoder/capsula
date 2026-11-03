@@ -60,13 +60,13 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
 | Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
 |---|---|---|
 | `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }` or `PageOf::Events { thread, before }` |
-| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`), `next` |
+| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`, `kind`, optional `choice`), `next` |
 | `Page` | Brain to shell, data | `request`, `thread`, events (`id`, optional `run`, `kind`, `text`, `cut`), `before` |
 | `PageFailed` | Brain to shell, data | `request`; the read failed and the brain logged its kind |
 
@@ -81,7 +81,28 @@ flowchart LR
   connection if one goes unanswered for 2 s (checked on the next tick, so 2 to 2.5 s). Outside
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
-  answer, so they're never written to it.
+  answer, so they're never written to it. Even on control it keeps only each frame's op and
+  length unless the op is on its content-free list (see Debugging).
+- **Settings** go to the shell once per connection before `Scenes`, once for every
+  `Settings` change the shell sends, in order, applied or refused (`answer: true`), and when a
+  change an earlier connection sent is saved (`answer: false`). See
+  [settings.md](settings.md).
+- **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
+  shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
+  3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
+  them breaks the connection like any malformed frame. The settings model retains the brain
+  error and its field attribution; Presence caches its localized presentation for the typing
+  panel and tasks panel, with a short **Check settings** dock label for settings keys and
+  **Needs attention** for any other brain error.
+  It clears when a turn is successfully sent or a successful answer settles a retry of the
+  settings field that produced it. An unsolicited view, reconnect, or another field's success
+  cannot clear it. Only `SettingsRefused` and `ConfigUnreadable` are attributed to the settings
+  FIFO's unanswered head operation. Other keys remain general brain errors and never fail a
+  pending settings save.
+  A failed submit leaves that error intact. Local submission refusals are separate, shown only
+  in the typing panel in preference to the retained brain error. Reconnecting or accepting a
+  `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
+  the end of `ErrorKey` and gets its catalog id in `strings.rs`'s `error_id`.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,
@@ -100,6 +121,44 @@ flowchart LR
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
   both come with the first urgent brain-to-shell message.
+
+## Thread ops
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `ThreadOp::Rename` | Control, shell to brain | `thread`, `title`: a `ThreadTitle`, trimmed, one line, 1–80 characters, checked on decode |
+| `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Minimal` to `XHigh`) |
+
+- Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
+  A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
+  The shell confirms a task's displayed title by an authoritative page reread, not by sending
+  the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
+- **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
+  brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
+  with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries
+  `main_thread`, and each `ThreadRow` its `kind`, so the shell knows which row is Kumo's.
+- **The plain list pins the main thread.** The first page of `PageOf::Threads` without search
+  starts with it and counts it toward the 50 rows; continuations leave it out, and the cursor is
+  always a task's, so the main thread never repeats and its own updates never move a cursor. A
+  first page keeps the main thread and at least one task whenever a task exists, shortening that
+  task's title if it alone overflows the frame. A search ranks the main thread like any other.
+- `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
+  Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
+
+## Account
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
+| `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
+
+- No token, code or account identifier crosses the pipe. The only identity is the display
+  email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
+- `AccountOp` is on the tap's content-free list. `Account` isn't, because it carries the email.
+- The view is authoritative: every op is answered by one `Account`, a refused one included, and
+  the shell never moves the account on its own. See [accounts](accounts.md).
+- shortcut: until slice 3 PR 9b wires the account system the brain ignores `AccountOp`, and the
+  shell ignores `Account` until Settings → Accounts (PR 19).
 
 ## Scenes and recovery
 
@@ -193,6 +252,8 @@ sequenceDiagram
   S->>S: fence runs up to last_run, then drop the rows
 ```
 
+- **The main thread** is never deleted: a `DeleteThread` naming it is answered `NotHidden` at
+  once, before any run is interrupted or any fence is added, with no store operation.
 - **Admission.** A delete ends the thread's current run and queues one store operation. One
   for a thread already being deleted only moves its watermark. The brain keeps at most eight
   in flight, twice the shell's four slots [guess], because deletes outlive the connection that
@@ -260,8 +321,89 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
   a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
   id out again, and the answer and scenes still shown belong to none of the new brain's runs.
-  The next turn goes to a new thread unless the shell knows its thread is stored: picked from
-  the threads list, or answered by a run, which starts only after its turn is stored.
+  A non-durable input target returns to Kumo; a stored task target stays. Disconnect clears
+  the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
+  a row only views it: explicit switches and per-turn selection revisions govern targeting,
+  as described in [runs](runs.md#the-shells-input-target).
+
+## Scene v1 wire contract
+
+The v1 messages are staged alongside the labelled placeholder protocol. B2 builds the brain
+path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
+the placeholder at both ends and deletes its development-only store rows. The brain accepts
+`StopScenes`, `StepShown` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
+its presenter. `NoVisual` still ends the connection until B8 supplies its consumer.
+These variants are appended; the handshake
+tags and bytes do not change. Mixed builds still fail their build-id handshake.
+
+| Pipe | Messages | Meaning |
+| --- | --- | --- |
+| Control, shell to brain | `StopScenes { run, cuts }` | Fence the run and apply each scene's activated revision and finished handles. A scene can span runs. |
+| Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut. Control order keeps these observations ahead of later Stop cuts. |
+| Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
+| Control, brain to shell | `NoVisual` | The requested drawing had no visual outcome; preparation errors are reported separately. |
+| Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |
+| Data, brain to shell | `SceneSnapshotV1` | Complete ordered original steps and effective cuts, packed as whole events. Chunk zero alone carries the header. |
+| Data, brain to shell | `SceneCutApplied` | Authoritative cut, after every step committed before it; the last committed revision is included for a cheap consistency check. |
+| Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
+
+`SceneStepCommit` and `StepShown` indices are zero-based lifetime indices; scene revisions and `StopCut.activated`
+are one-based bounds. They are not dense indices into the kept steps. The per-run 64-step
+budget and scene's 64 lifetime committed-step cap are distinct. A recovery log contains every
+original committed step, even one dropped by a cut, and every effective cut, with at most 128
+entries. Descriptors advertise log length separately from retained count. The consumer checks
+unique membership, consecutive chunk ordinals, matching revision, exact log/kept counts and
+semantic replay, and installs only on `last` from the describing connection, provided no clear
+generation changed. A wrong index, bad cut acknowledgement or rejected cut ends the connection;
+ordinary reconnect recovery rebuilds all four scenes together, not one against a new budget.
+If a stored scene cannot replay or the brain builds an invalid descriptor, chunk or encoded
+frame, that whole scene is omitted and cleared durably before membership is sent. Other scenes
+recover against one shared budget; the failure does not force a reconnect loop. A recovered
+scene that B4 cannot prepare is cleared through `ClearDrawing`, retaining its stored history,
+not cut through a stale run's `StepFailed` observation.
+
+The data FIFO orders removal of an evicted scene before the next scene's header and first
+step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-end frames are
+scene-owned, not run-owned: Stop never revokes them. A durable step whose store acknowledgement
+arrives after Stop still travels before the cut acknowledgement. `ScenesRemoved` remains the
+non-revocable FIFO removal marker, so clearing the scene cannot discard the removal itself.
+The shell drains fenced commits into its semantic mirror without preparing or activating them,
+then applies the acknowledged cut. While any cut is outstanding, no run activates more work in
+that scene. A cut for an already removed scene is stale. The shell sends at most one cut per
+scene between commits. A replaced run alone does not cut its committed scenes.
+`StopScenes` names every visible v1 scene the shell knows, even if the stopped run has not
+committed there yet. Incomplete recovery scenes are cleared through the existing clear path
+before Stop is sent. The brain cuts an unseen, never-activated scene to zero after any held
+first-step transaction commits. This scene-wide policy relies on D1 having one current run;
+OSC-56's concurrent runs must replace it with per-run revocation so Stop cannot discard
+another run's in-flight work.
+Every accepted cut receives `SceneCutApplied`, including a cut that changes nothing and adds
+no recovery-log entry, so the shell can release its outstanding-cut hold.
+
+Before B6 supplies a conductor, B4 can cut only at its current activation (zero for a fresh
+scene, or the recovered bound) and sends no `StepShown`; pending removals stay conservatively
+charged. Only v1 scenes send v1 cuts during staging. After B3 and before B5/B6 paints, development
+builds have no visible drawings. Drawings are intended to remain until Esc; a fifth overlay
+scene retires the oldest first and leaves it in history. That is the recommended default while
+the owner's retention question remains open.
+
+The 32 KiB chunk packing target is not a cap on a legal step's binary form: number-dense JSON
+expands in postcard. One whole event may travel alone up to the 256 KiB data-payload cap.
+Bounded sequence decoding limits entries before extending a list. Return data credit per staged
+chunk, not only on final install; a log may exceed the 512 KiB credit window. Chunks received
+before membership withhold credit and are thereby bounded by that window. Encoded staging is
+limited to 32 MiB per scene and 128 MiB across four, including frame headers, independently of
+the 64 MiB prepared-geometry residency budget. B4 enforces accumulated counts/bytes and measures
+a process-memory staging proxy; these wire-policy caps are not a measured heap bound.
+
+Every new scene message is excluded from the tap's content-free allow-list. The tap records
+only its operation and byte count, never headers, steps, speech, model ids or parser diagnostics.
+Even a forged recording's payload flag does not authorize contentful fields in `pipe-dump`.
+
+The 32 KiB JSON cap applies to original model records, not to persisted typed JSON. Numeric
+values such as `0` can reserialize as `0.0`, expanding a legal record. Store typed steps in
+the event body (never the FTS text column), then deserialize the bounded typed log on reload;
+do not feed reserialized storage JSON back through the model-record byte cap in `parse_record`.
 
 ## Starting and reconnecting
 
@@ -272,6 +414,12 @@ restarting.
 
 ## Debugging
 
-A debug brain records the control frames it sends and receives, and the handshake with
-capabilities zeroed, when `KUMOCHI_PIPE_TAP` names a file. `cargo xtask pipe-dump <file>`
-decodes the recording with the same message types.
+A debug brain records the control frames it sends and receives, and both handshakes, when
+`KUMOCHI_PIPE_TAP` names a file that doesn't exist yet; an existing file is left alone and
+nothing is recorded. The tap fails closed. Each record holds the frame's op name and length, and
+its fields only when the op is on the content-free list in `crates/protocol/src/tap.rs`
+(`Quitting`, `Stop`, `Pong`, `ClearDrawing` and `DeleteThread` from the shell; `Welcome`,
+`RunState`, `Ping`, `Scenes`, `ThreadDeleted`, `TurnRefused` and `Error` from the brain). Anything
+else, `Hello`, `Settings` and `ThreadOp` included, is never serialized for the tap, and a new op stays
+redacted until someone lists it. `cargo xtask pipe-dump <file>` prints one line per frame: the
+fields of a listed op, otherwise `Op (n bytes)`.

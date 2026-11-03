@@ -1,7 +1,8 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
-use fluent_bundle::{FluentBundle, FluentResource};
+use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
 use gpui_kit::Global;
+use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -55,11 +56,39 @@ pub(crate) enum Text {
     ThreadDeleting,
     ThreadDeleteFailed,
     ThreadDeletesFull,
+    BackToKumo,
+    SwitchThread,
+    RenameThread,
+    SaveRename,
+    CancelRename,
+    RenameEmpty,
+    RenameTooLong,
+    RenameNameTooLong,
+    RenameOneLine,
+    TaskFallback,
+    Settings,
+    OpenSettings,
+    CloseSettings,
+    General,
+    Accounts,
+    AssistantName,
+    UserName,
+    UserNameHelp,
+    SettingsSaving,
+    SettingsOffline,
+    DockError,
+    RenameBusy,
+    SettingsUnavailable,
+    SettingsNotSaved,
+    SettingsSaveHelp,
+    DockBrainError,
+    MaxFrameRate,
+    FrameRateAutomatic,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 46] = [
+    const ALL: [Self; 74] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -106,6 +135,34 @@ impl Text {
         Self::ThreadDeleting,
         Self::ThreadDeleteFailed,
         Self::ThreadDeletesFull,
+        Self::BackToKumo,
+        Self::SwitchThread,
+        Self::RenameThread,
+        Self::SaveRename,
+        Self::CancelRename,
+        Self::RenameEmpty,
+        Self::RenameTooLong,
+        Self::RenameNameTooLong,
+        Self::RenameOneLine,
+        Self::TaskFallback,
+        Self::Settings,
+        Self::OpenSettings,
+        Self::CloseSettings,
+        Self::General,
+        Self::Accounts,
+        Self::AssistantName,
+        Self::UserName,
+        Self::UserNameHelp,
+        Self::SettingsSaving,
+        Self::SettingsOffline,
+        Self::DockError,
+        Self::RenameBusy,
+        Self::SettingsUnavailable,
+        Self::SettingsNotSaved,
+        Self::SettingsSaveHelp,
+        Self::DockBrainError,
+        Self::MaxFrameRate,
+        Self::FrameRateAutomatic,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -168,6 +225,34 @@ impl Text {
             Self::ThreadDeleting => "thread-deleting",
             Self::ThreadDeleteFailed => "thread-delete-failed",
             Self::ThreadDeletesFull => "thread-deletes-full",
+            Self::BackToKumo => "action-back-to-kumo",
+            Self::SwitchThread => "action-switch-task",
+            Self::RenameThread => "action-rename-task",
+            Self::SaveRename => "action-save-rename",
+            Self::CancelRename => "action-cancel-rename",
+            Self::RenameEmpty => "rename-empty",
+            Self::RenameTooLong => "rename-task-too-long",
+            Self::RenameNameTooLong => "rename-name-too-long",
+            Self::RenameOneLine => "rename-one-line",
+            Self::TaskFallback => "task-fallback",
+            Self::Settings => "settings-title",
+            Self::OpenSettings => "action-settings",
+            Self::CloseSettings => "settings-close",
+            Self::General => "settings-general",
+            Self::Accounts => "settings-accounts",
+            Self::AssistantName => "settings-assistant-name",
+            Self::UserName => "settings-user-name",
+            Self::UserNameHelp => "settings-user-name-help",
+            Self::SettingsSaving => "settings-saving",
+            Self::SettingsOffline => "settings-offline",
+            Self::DockError => "dock-error",
+            Self::RenameBusy => "rename-busy",
+            Self::SettingsUnavailable => "settings-unavailable",
+            Self::SettingsNotSaved => "settings-not-saved",
+            Self::SettingsSaveHelp => "settings-save-help",
+            Self::DockBrainError => "dock-brain-error",
+            Self::MaxFrameRate => "settings-max-frame-rate",
+            Self::FrameRateAutomatic => "settings-frame-rate-automatic",
         }
     }
 }
@@ -192,6 +277,8 @@ impl Strings {
             .expect("the bundled English catalog parses; strings::tests checks it");
         let language: LanguageIdentifier = "en".parse().expect("\"en\" is a valid language id");
         let mut bundle = FluentBundle::new(vec![language]);
+        // shortcut: isolation is off because GPUI doesn't prove FSI/PDI render invisibly; revisit with the first right-to-left locale.
+        bundle.set_use_isolating(false);
         bundle
             .add_resource(resource)
             .expect("the bundled catalog has no duplicate ids; strings::tests checks it");
@@ -200,25 +287,85 @@ impl Strings {
 
     /// The text for `text`. A missing entry shows its id, which the unit test rules out.
     pub(crate) fn get(&self, text: Text) -> String {
-        let Some(pattern) = self.bundle.get_message(text.id()).and_then(|m| m.value()) else {
-            tracing::error!(id = text.id(), "missing string");
-            return text.id().to_owned();
+        self.format(text.id(), None)
+    }
+
+    pub(crate) fn assistant(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        self.format(Text::BackToKumo.id(), Some(&args))
+    }
+
+    pub(crate) fn frame_rate(&self, fps: f64) -> String {
+        let mut args = FluentArgs::new();
+        args.set("fps", (fps * 10.0).round() / 10.0);
+        self.format("settings-frame-rate-now", Some(&args))
+    }
+
+    pub(crate) fn focus(&self, task: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("task", task);
+        self.format("task-focus", Some(&args))
+    }
+
+    /// The text for an error the brain sent, with its typed arguments.
+    pub(crate) fn error(&self, error: &UserError) -> String {
+        let mut args = FluentArgs::new();
+        for arg in error.args() {
+            match *arg {
+                ErrorArg::Seconds(seconds) => args.set("seconds", seconds),
+                ErrorArg::Count(count) => args.set("count", count),
+            }
+        }
+        self.format(error_id(error.key()), Some(&args))
+    }
+
+    fn format(&self, id: &'static str, args: Option<&FluentArgs<'_>>) -> String {
+        let Some(pattern) = self.bundle.get_message(id).and_then(|m| m.value()) else {
+            tracing::error!(id, "missing string");
+            return id.to_owned();
         };
         let mut errors = Vec::new();
         let value = self
             .bundle
-            .format_pattern(pattern, None, &mut errors)
+            .format_pattern(pattern, args, &mut errors)
             .into_owned();
         if !errors.is_empty() {
-            tracing::error!(id = text.id(), ?errors, "string failed to format");
+            tracing::error!(id, ?errors, "string failed to format");
         }
         value
     }
 }
 
+/// Each error's catalog id. Append only, beside `ErrorKey`.
+const fn error_id(key: ErrorKey) -> &'static str {
+    match key {
+        ErrorKey::SettingsRefused => "error-settings-refused",
+        ErrorKey::ConfigUnreadable => "error-config-unreadable",
+        ErrorKey::SignInTimedOut => "error-sign-in-timed-out",
+        ErrorKey::SignInFailed => "error-sign-in-failed",
+        ErrorKey::SignInOtherAccount => "error-sign-in-other-account",
+        ErrorKey::BrowserUnavailable => "error-browser-unavailable",
+        ErrorKey::AccountOffline => "error-account-offline",
+        ErrorKey::CredentialsUnavailable => "error-credentials-unavailable",
+        ErrorKey::RevocationBacklog => "error-revocation-backlog",
+        ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
+        ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
+        ErrorKey::AccountMisconfigured => "error-account-misconfigured",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Strings, Text};
+    use super::{Strings, Text, error_id};
+    use fluent_bundle::{FluentBundle, FluentResource};
+    use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 
     #[test]
     fn every_text_is_in_the_catalog() {
@@ -234,5 +381,67 @@ mod tests {
             );
         }
         assert_eq!(strings.get(Text::Connected), "Ready");
+    }
+
+    #[test]
+    fn every_error_is_in_the_catalog() {
+        let strings = Strings::english();
+        for key in ErrorKey::ALL {
+            assert!(
+                strings
+                    .bundle
+                    .get_message(error_id(key))
+                    .and_then(|m| m.value())
+                    .is_some(),
+                "{key:?} has no value in locales/en/shell.ftl",
+            );
+        }
+        assert_eq!(
+            strings.error(&UserError::from(ErrorKey::SettingsRefused)),
+            "Couldn't save that setting. Try again."
+        );
+    }
+
+    #[test]
+    fn an_error_fills_in_each_argument_by_name() {
+        let id = error_id(ErrorKey::SettingsRefused);
+        let ftl = format!("{id} = Wait {{ $seconds }} s for {{ $count }} more\n");
+        let resource = FluentResource::try_new(ftl).expect("the test message parses");
+        let mut bundle = FluentBundle::new(vec!["en".parse().expect("valid")]);
+        bundle.set_use_isolating(false);
+        bundle.add_resource(resource).expect("one message");
+        let strings = Strings { bundle };
+        let error = UserError::new(
+            ErrorKey::SettingsRefused,
+            vec![ErrorArg::Count(3), ErrorArg::Seconds(30)],
+            Vec::new(),
+        )
+        .expect("within the limits");
+        assert_eq!(strings.error(&error), "Wait 30 s for 3 more");
+    }
+
+    #[test]
+    fn names_and_task_context_have_no_isolation_marks() {
+        let strings = Strings::english();
+        assert_eq!(strings.assistant("Cloud"), "Cloud");
+        assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
+        assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+    }
+
+    #[test]
+    fn the_frame_rate_shows_its_fraction() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.frame_rate(72.0),
+            "Drawing at 72 frames a second on this display."
+        );
+        assert_eq!(
+            strings.frame_rate(28.8),
+            "Drawing at 28.8 frames a second on this display."
+        );
+        assert_eq!(
+            strings.frame_rate(170.0 / 3.0),
+            "Drawing at 56.7 frames a second on this display."
+        );
     }
 }

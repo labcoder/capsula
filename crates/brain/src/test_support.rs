@@ -7,9 +7,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants;
+use kumochi_protocol::message::ThreadId;
 
+use crate::config::Config;
+use crate::connections::account::Worker;
+use crate::connections::clock::FixedClock;
+use crate::connections::http_client::HttpError;
+use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
+use crate::connections::vault::Vault;
+use crate::connections::vault::fake::FakeStore;
+use crate::engines::fixture::Fixture;
 use crate::runtime::Brain;
-use crate::runtime::fixture::Fixture;
+use crate::runtime::account::{Accounts, Net};
 use crate::store::Store;
 
 /// A store file in its own temp folder, removed afterwards.
@@ -33,6 +42,12 @@ impl Scratch {
 
     pub(crate) fn db(&self) -> PathBuf {
         self.0.join("store.db")
+    }
+
+    /// Settings kept in this folder, so a test never touches the user's, naming the main thread
+    /// a fresh store creates.
+    pub(crate) fn config(&self) -> Config {
+        Config::load(Some(self.0.clone()), ThreadId(1))
     }
 }
 
@@ -59,10 +74,48 @@ impl Drop for Scratch {
 pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
+    let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
     let fixture = Fixture::parse(script).expect("script");
-    Brain::new(store, high_water, scenes, fixture).expect("brain")
+    let config = Config::load(Some(scratch.0.clone()), main_thread);
+    Brain::new(
+        store,
+        main_thread,
+        high_water,
+        scenes,
+        Box::new(fixture),
+        config,
+        accounts(scratch),
+    )
+    .expect("brain")
+}
+
+/// An account system on an in-memory credential store, with its session lock in `scratch`.
+pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
+    let store = FakeStore::default();
+    let lock = scratch.0.join(constants::SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "test-accounts", &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    Accounts::spawn(worker, net()).expect("credential thread")
+}
+
+/// What an account system reaches outside the brain through, in tests: it never opens a
+/// browser or reaches the network, since launches and requests are refused.
+pub(crate) fn net() -> Net {
+    struct NoBrowser;
+    impl Launcher for NoBrowser {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            Err(LaunchError::Launch)
+        }
+    }
+    Net {
+        http: Arc::new(|| Err(HttpError::Configuration)),
+        launcher: Arc::new(NoBrowser),
+        clock: Arc::new(FixedClock(1_800_000_000)),
+    }
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.
@@ -76,15 +129,28 @@ impl Captured {
     }
 
     /// Sets a subscriber writing here as this thread's default until the guard drops.
-    pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
+    pub(crate) fn install(&self) -> Capturing {
         let captured = self.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .with_writer(move || captured.clone())
             .finish();
-        tracing::subscriber::set_default(subscriber)
+        // With one dispatcher registered, tracing asks only the current thread's subscriber
+        // about a new callsite, so one first hit on another test's thread would be cached as
+        // never. A second keeps it asking every live dispatcher, this one included.
+        let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        Capturing {
+            _default: tracing::subscriber::set_default(subscriber),
+            _second: second,
+        }
     }
+}
+
+/// Capture lasts until this drops.
+pub(crate) struct Capturing {
+    _default: tracing::subscriber::DefaultGuard,
+    _second: tracing::Dispatch,
 }
 
 impl Write for Captured {

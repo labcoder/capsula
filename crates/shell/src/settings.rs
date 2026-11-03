@@ -1,0 +1,397 @@
+//! Settings drafts and ordered save answers, independent of the UI and transport.
+
+use std::collections::VecDeque;
+use std::fmt;
+
+use kumochi_protocol::message::{
+    AssistantName, ErrorKey, MaxFrameRate, NameError, SettingsOp, SettingsView, UserError, UserName,
+};
+
+use crate::strings::Text;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Field {
+    Assistant,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Update {
+    Answer,
+    Unsolicited,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Draft {
+    Reset,
+    Preserve,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Error {
+    #[error("{0}")]
+    Validation(NameError),
+    #[error("the brain refused the settings change")]
+    Brain(UserError),
+    #[error("the brain is offline")]
+    Offline,
+}
+
+#[derive(Default)]
+pub(crate) struct FieldState {
+    pub(crate) saving: bool,
+    pub(crate) error: Option<Error>,
+    value: String,
+    authoritative: String,
+}
+
+impl fmt::Debug for FieldState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FieldState")
+            .field("saving", &self.saving)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Completion {
+    pub(crate) failed: bool,
+    pub(crate) field: Field,
+}
+
+/// What a queued settings operation changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Name(Field),
+    /// The frame rate has no draft; the rate is kept so a quick second choice compares to it.
+    FrameRate(MaxFrameRate),
+}
+
+impl Slot {
+    fn field(self) -> Option<Field> {
+        match self {
+            Self::Name(field) => Some(field),
+            Self::FrameRate(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Pending {
+    slot: Slot,
+    failed: bool,
+    reset_draft: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Settings {
+    view: Option<SettingsView>,
+    notice: Option<UserError>,
+    notice_slot: Option<Slot>,
+    assistant: FieldState,
+    user: FieldState,
+    pending: VecDeque<Pending>,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings")
+            .field("online", &self.view.is_some())
+            .field("assistant", &self.assistant)
+            .field("user", &self.user)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Settings {
+    pub(crate) fn receive(
+        &mut self,
+        current: Option<u64>,
+        generation: u64,
+        view: SettingsView,
+        update: Update,
+    ) -> bool {
+        if current != Some(generation) {
+            return false;
+        }
+        for field in [Field::Assistant, Field::User] {
+            let state = self.field_mut(field);
+            if state.error == Some(Error::Offline) {
+                state.error = None;
+            }
+        }
+        let _completion = self.set_view(view, update);
+        true
+    }
+
+    pub(crate) fn set_view(&mut self, view: SettingsView, update: Update) -> Option<Completion> {
+        let sync_assistant = !self.assistant.saving && !self.editing(Field::Assistant);
+        let sync_user = !self.user.saving && !self.editing(Field::User);
+        view.assistant_name
+            .as_str()
+            .clone_into(&mut self.assistant.authoritative);
+        view.user_name
+            .as_ref()
+            .map_or("", UserName::as_str)
+            .clone_into(&mut self.user.authoritative);
+        if sync_assistant {
+            self.assistant
+                .value
+                .clone_from(&self.assistant.authoritative);
+        }
+        if sync_user {
+            self.user.value.clone_from(&self.user.authoritative);
+        }
+        self.view = Some(view);
+        if update == Update::Unsolicited {
+            return None;
+        }
+        let pending = self.pending.pop_front()?;
+        if !pending.failed && self.notice_slot.map(Slot::field) == Some(pending.slot.field()) {
+            self.clear_notice();
+        }
+        let field = pending.slot.field()?;
+        let state = self.field_mut(field);
+        state.saving = false;
+        if pending.reset_draft {
+            state.value.clone_from(&state.authoritative);
+        }
+        if !pending.failed && (pending.reset_draft || matches!(state.error, Some(Error::Brain(_))))
+        {
+            state.error = None;
+        }
+        Some(Completion {
+            failed: pending.failed,
+            field,
+        })
+    }
+
+    pub(crate) fn view(&self) -> Option<&SettingsView> {
+        self.view.as_ref()
+    }
+
+    pub(crate) fn notice(&self) -> Option<&UserError> {
+        self.notice.as_ref()
+    }
+
+    pub(crate) fn dock_notice(&self) -> Option<Text> {
+        if [&self.assistant, &self.user]
+            .iter()
+            .any(|state| matches!(state.error, Some(Error::Validation(_) | Error::Offline)))
+        {
+            return Some(Text::SettingsNotSaved);
+        }
+        self.notice.as_ref().map(|error| {
+            if settings_error(error.key()) {
+                Text::DockError
+            } else {
+                Text::DockBrainError
+            }
+        })
+    }
+
+    pub(crate) fn clear_notice(&mut self) {
+        self.notice = None;
+        self.notice_slot = None;
+    }
+
+    pub(crate) fn field(&self, field: Field) -> &FieldState {
+        match field {
+            Field::Assistant => &self.assistant,
+            Field::User => &self.user,
+        }
+    }
+
+    fn field_mut(&mut self, field: Field) -> &mut FieldState {
+        match field {
+            Field::Assistant => &mut self.assistant,
+            Field::User => &mut self.user,
+        }
+    }
+
+    pub(crate) fn value(&self, field: Field) -> &str {
+        &self.field(field).value
+    }
+
+    pub(crate) fn editing(&self, field: Field) -> bool {
+        let state = self.field(field);
+        state.value != state.authoritative
+    }
+
+    pub(crate) fn change(&mut self, field: Field, value: &str) {
+        let state = self.field_mut(field);
+        if state.value == value {
+            return;
+        }
+        value.clone_into(&mut state.value);
+        state.error = None;
+        for pending in &mut self.pending {
+            if pending.slot == Slot::Name(field) {
+                pending.reset_draft = false;
+            }
+        }
+    }
+
+    pub(crate) fn cancel(&mut self, field: Field) {
+        if self.field(field).saving {
+            return;
+        }
+        let value = self.field(field).authoritative.clone();
+        self.change(field, &value);
+    }
+
+    pub(crate) fn save(&mut self, field: Field, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+        if self.field(field).saving {
+            return false;
+        }
+        let value = self.value(field);
+        let op = match field {
+            Field::Assistant => AssistantName::new(value).map(SettingsOp::SetAssistantName),
+            Field::User if value.trim().is_empty() => Ok(SettingsOp::SetUserName(None)),
+            Field::User => UserName::new(value).map(|name| SettingsOp::SetUserName(Some(name))),
+        };
+        match op {
+            Ok(_) if value.trim() == self.field(field).authoritative => {
+                let state = self.field_mut(field);
+                state.value.clone_from(&state.authoritative);
+                false
+            }
+            Ok(op) => {
+                let queued = self.send(field, op, Draft::Reset, send);
+                if !queued {
+                    self.field_mut(field).error = Some(Error::Offline);
+                }
+                queued
+            }
+            Err(error) => {
+                self.field_mut(field).error = Some(Error::Validation(error));
+                false
+            }
+        }
+    }
+
+    /// Inline Kumo renames share the settings FIFO without replacing an unrelated draft.
+    pub(crate) fn send_assistant(
+        &mut self,
+        name: AssistantName,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if name.as_str() == self.assistant.authoritative {
+            return false;
+        }
+        self.send(
+            Field::Assistant,
+            SettingsOp::SetAssistantName(name),
+            if self.editing(Field::Assistant) {
+                Draft::Preserve
+            } else {
+                Draft::Reset
+            },
+            send,
+        )
+    }
+
+    /// The newest frame rate cap the user chose: the last one queued, else the saved one.
+    pub(crate) fn max_frame_rate_choice(&self) -> Option<MaxFrameRate> {
+        let queued = self
+            .pending
+            .iter()
+            .rev()
+            .find_map(|pending| match pending.slot {
+                Slot::FrameRate(rate) => Some(rate),
+                Slot::Name(_) => None,
+            });
+        queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
+    }
+
+    /// Sends a new frame rate cap unless it's the newest one, queued or saved. It shows once the
+    /// brain answers.
+    pub(crate) fn send_max_frame_rate(
+        &mut self,
+        rate: MaxFrameRate,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self
+            .max_frame_rate_choice()
+            .is_none_or(|newest| newest == rate)
+            || !send(SettingsOp::SetMaxFrameRate(rate))
+        {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::FrameRate(rate),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
+    pub(crate) fn rename_refusal(&self) -> Text {
+        if self.assistant.saving {
+            Text::RenameBusy
+        } else if self.view.is_none() {
+            Text::TurnOffline
+        } else {
+            Text::SettingsUnavailable
+        }
+    }
+
+    fn send(
+        &mut self,
+        field: Field,
+        op: SettingsOp,
+        draft: Draft,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self.field(field).saving {
+            return false;
+        }
+        if self.view.is_none() || !send(op) {
+            return false;
+        }
+        self.field_mut(field).saving = true;
+        self.pending.push_back(Pending {
+            slot: Slot::Name(field),
+            failed: false,
+            reset_draft: matches!(draft, Draft::Reset),
+        });
+        true
+    }
+
+    pub(crate) fn error(&mut self, error: UserError) -> Option<Field> {
+        self.notice = Some(error.clone());
+        self.notice_slot = self
+            .pending
+            .front()
+            .filter(|_| settings_error(error.key()))
+            .map(|pending| pending.slot);
+        self.notice_slot?;
+        let pending = self.pending.front_mut()?;
+        pending.failed = true;
+        let field = pending.slot.field()?;
+        self.field_mut(field).error = Some(Error::Brain(error));
+        Some(field)
+    }
+
+    pub(crate) fn disconnected(&mut self) {
+        self.view = None;
+        self.pending.clear();
+        self.assistant.saving = false;
+        self.user.saving = false;
+    }
+}
+
+fn settings_error(key: ErrorKey) -> bool {
+    matches!(key, ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable)
+}
+
+#[cfg(test)]
+mod session_tests;
+
+#[cfg(test)]
+mod followup_tests;
+
+#[cfg(test)]
+mod tests;

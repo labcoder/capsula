@@ -2,7 +2,8 @@
 
 `kumochi-scene` is the shared, synchronous drawing format. It depends on neither
 GPUI nor tokio. The brain parses model JSON; the shell decodes the same validated
-types from postcard. There is no renderer or scene-state caller yet; preparation is synchronous and host-independent.
+types from postcard. The brain's drawing reducer owns canonical scene state; preparation is
+synchronous and host-independent, and rendering is not wired yet.
 
 ## Records
 
@@ -40,6 +41,9 @@ within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors and all 3D operations are absent, not ignored.
 
+JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
+the original f64 chart values, rather than changing a final bit during recovery.
+
 All relative timing fields, including delays, entrances, edge flow, after-step
 offsets and animation key times, are milliseconds in 0–60,000. `Ms` validates on
 both routes and `checked_add` returns none if a sum exceeds that cap. `at_word` denotes an estimated offset within a synthetic speech
@@ -59,6 +63,16 @@ Path data (`d`) and Mermaid source (`src`) use `Source`, not display `Text`.
 Each is capped at 8 KiB of UTF-8 bytes (`MAX_SOURCE_BYTES`); the path figure comes
 from S1, while the Mermaid figure is a starting cap. Admission's shared SVG preflight
 enforces the 512-command path limit. Source Debug exposes byte length only.
+
+The bounded Mermaid lexical reader is exercised in unit tests: a UTF-8-safe cursor
+reads ids, labels, shapes and links, with typed refusals for unsupported syntax.
+The grammar builds ordered nodes, parent-first groups and links, assigning node
+membership to the first closing group. Its tests cover complete-input parsing,
+direction, metadata and refusal boundaries. Admission still rejects Mermaid;
+these grammar and compiler layers alone do not enable it. The test-linked compiler
+expands sources in place into a private root, groups, nodes and edges. It checks
+expanded slots and per-diagram counts, reserves collision-free names, and keeps
+original-slot diagnostics and private drawing facts alongside the executable step.
 
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary
@@ -80,7 +94,9 @@ field name to its path. `UnknownOp` denotes only an unknown record/op tag;
 unknown vocabulary values and invalid numeric values are `OutOfRange`.
 `StepError`'s `Display` and `Debug` contain only the path and code. `tool_text` may include a
 known step id when replying to its model, but never the rejected field value.
-`Text` and `WireId` debug formatting exposes lengths only. Do not trace records,
+`Text`, `Source` and `WireId` expose lengths only; `Finite`, `Number`, `Rgb`, `Ms`, `Cell` and
+`Point` redact values, while `Step`, `Frame` and `FrameItem` summarize counts, hiding
+timings, repeat counts and word offsets along with drawing values. Do not trace records,
 serialize drawing content into logs, or trace a model-facing tool reply.
 
 ## Admission and identity
@@ -154,8 +170,10 @@ kept prefix is considered activated; its removals are retired. The selected glob
 budget strategy is **validate the combined final replayed result once**, rather
 than replay independent scenes against unrelated historical peaks. The budget
 layer implements this through `SceneState::replay_all`, returning the restored
-scenes and their shared budget atomically. Standalone `replay` returns an unbound
-scene; its next mutation must install its entire remaining charge. During replay,
+scenes and their shared budget atomically. The shell's layout-aware counterpart,
+`layout::recover_all`, returns an outcome per scene instead (see Preparation).
+Standalone `replay` returns an unbound scene; its next mutation must install its
+entire remaining charge. During replay,
 each commit releases removal/replacement charges without advancing the activated
 bound, so a later `Stop(1)` still works after replaying steps 1 and 2. Undo metadata
 stays available until actual activation or a cut.
@@ -183,12 +201,13 @@ Pending replacements reserve each object's maximum expanded cost and the union o
 its property owners, rather than charging the same identity twice. Retirement,
 Stop and terminal `clear` return charges exactly once.
 
-Table rows charge padded cells. Charts charge every data point, reject invalid log
-domains and non-finite stacked sums, and reserve generated data motion. Diagram
-groups reserve their generated position glide; entrances and edge flow also count
-as motion owners. Repeated finite animations, including delay, must fit 60 seconds;
-infinite repeat remains bounded by the later scene deadline. A7 supplies that clock
-and the remaining property-ownership rules.
+Table rows charge padded cells. Charts charge every data point and reject invalid log
+domains and non-finite stacked sums. Only explicit tracks consume track/key budgets;
+entrances, edge flow and generated glides are bounded structurally by the live objects,
+at most two generated effects per object. Chart data changes instantly at activation.
+Repeated finite animations, including delay, must fit 60 seconds; infinite repeat must
+fit its first play and remains bounded by the scene deadline. Zero-period repetition,
+zero-period flow and duplicate same-step (target, property) tracks fail with `OutOfRange`.
 
 The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
 repetitions. It validates coordinates and counts commands before vertices exist.
@@ -242,11 +261,89 @@ palette. Host foreground/accent overrides do not change fixed named colors.
 `display` defines immutable prepared primitives and handle-tagged items. Polygon and
 polyline vertices use shared slices; painters can share prepared primitives instead
 of cloning text or path storage. Debug output summarizes counts, not drawing content
-or vertex arrays. A7 supplies sampled frames. `TextMeasure` supplies the same shaping sizes
+or vertex arrays. `motion` supplies sampled frames. `TextMeasure` supplies the same shaping sizes
 used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No
-painter or motion sampler is implemented yet.
+painter is implemented here.
+
+### Motion and the host clock
+
+`motion::SceneView` owns the activated layout and live property owners. Construct an
+at-rest view with the layout and `SceneState::activated()`, not the layout's committed
+revision: a cut can leave a higher dropped revision in that layout. Live Stop and
+recovery use this same at-rest construction. `activate` accepts only the matching
+prepared predecessor, clears its caller-owned frame outside paint, applies removals,
+and rebuilds parent-first sampling order. Pass that frame into `activate`.
+Activation may allocate or free; `frame` does neither and takes no locks. A `Frame` reserves
+space for the per-scene object cap and reuses it. Its items share immutable primitive
+Arcs, so the host must clear the frame outside paint when clearing its scene or
+constructing a replacement view after a cut. A frame binds to one activated view
+generation; sampling with a stale binding returns `Stale` without releasing its data.
+
+The host supplies monotonic `u64` milliseconds. Absolute additions saturate; `Ms`
+remains a bounded duration, never an absolute timestamp. Every activation establishes
+a 60-second motion deadline, independent of narration length. Delays, entrances,
+glides and repeats are clipped to that deadline. A stopped view returns only handles
+whose own entrance and every ancestor's entrance have finished, each clipped to the
+deadline; the host passes those handles into the authoritative `StopCut`.
+Each child's entrance starts no earlier than its parent's start, retaining its own
+duration, so delayed diagrams do not hide their children's entrances.
+Explicit tracks retain their step-relative clocks, so a track may finish while a
+delayed parent still hides its target; only entrances are shifted.
+
+After painting at `t`, request another frame when `animating(t)` is true, otherwise
+wake at `next_wake(t)`. This paints the final frame without continuously polling
+holds. A delayed track is not animating until its moving interval starts; the next
+wake reports its future start. With no pending motion it returns `None`.
+
+Newest activated owners replace older owners of the same property. Delayed tracks
+hold their first key; finite yoyo tracks rest on the first key after an even number
+of plays and the last key otherwise. Explicit opacity, draw and color override their
+own base rather than multiplying it. Optional resting values preserve that ownership
+across cuts and recovery. Own opacity multiplies a separate inherited factor, ancestor
+opacity and entrance alpha; no division by a previous zero opacity occurs. A later
+`set color` clears the previous color owner. Draw progress also multiplies a draw entrance.
+
+The spring is the standard underdamped response with damping ratio 0.3 and natural
+frequency 20, normalized by its response at 1. Its endpoint is exactly 1 without a
+snap; the conservative overshoot bound is 0.3759. Positive scales interpolate in
+logarithmic space using f64, so shrinking springs stay positive. Opacity, draw and
+color samples clamp to their valid ranges. Pop and grow scale about the object's
+centre; slide and fly translate vertically. Admission and measured preparation use
+the same entrance envelope, including pivot translation inherited by descendants.
+Generated position glides capture the sampled live start when activated and run for
+450 ms with InOut easing; a newer explicit position owner wins over a glide.
+
+Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with no
+60-second narration cap: 11 words take 4,000 ms and 200 take 72,728 ms. Word offsets
+use integer proportional placement within that segment, with u128 multiplication.
+Speech-driven timing and painting belong to their later slices.
+
+Esc during an explicit opacity fade-in without `enter` reveals its final opacity.
+Exact interrupted recovery needs timestamps in the log; use entrances for reveals.
+
+```mermaid
+flowchart LR
+    P[Prepared step] --> A[Activate and clear Frame]
+    A --> F[Sample and paint Frame]
+    F --> M{Animating?}
+    M -->|yes| F
+    M -->|no| W[Wake at next_wake]
+    W --> F
+    F --> S[Stop and semantic cut]
+    S --> C[Clear Frame and construct at-rest view]
+    C --> P
+```
+
+The ignored `frame_four_views_max` and `activation_at_caps` tests measure CPU sampling
+and activation with deterministic text measurement, not a painter or real fonts.
+`prepare_four_views_at_caps` measures four-scene initial preparation at the global
+object cap, with a common local-edge control and a separate cross-group-edge workload.
+Run their release binaries at normal priority on a quiet machine with no other
+builds running, and record the machine, workload, priority and sample counts.
+The original frame numbers are after-only because main then had no sampler; follow-up
+comparisons retain that original workload and label the wider glide/property variant.
 
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
@@ -256,6 +353,34 @@ diagram. Later additions use free slots without moving existing node-local recta
 Inline defaults to downwards flow at the host's narrow width (360 logical pixels by
 default); overlay defaults to rightwards flow. Explicit diagram direction and bounds
 win. Inline `begin.size` overrides host dimensions when present.
+
+A boxless diagram directly inside another diagram is a ranked cluster. Preparation
+measures its nodes, edges, child clusters and preplaced containers before placing it
+among its parent's nodes and other clusters;
+boxed nested diagrams keep their explicit placement. Unspecified directions inherit
+from the nearest diagram ancestor. An edge joins nodes in its exact least common
+diagram, which ranks their containing clusters and routes the edge in that diagram's
+coordinate space. Tables and charts are not implicit graph clusters.
+An edge's `in` must be exactly that least common diagram, or admission returns
+`OutOfRange` at `from` or `to`; that endpoint blame is a deterministic heuristic.
+Preparation indexes children once and caches group depths for bottom-up placement;
+content unions retain identifier order and ranked members retain handle order.
+
+The 48-node and 96-edge limits apply per diagram, not per nested drawing. Clusters
+consume the scene's existing object and depth budgets rather than its direct-node
+budget. Incremental additions keep earlier node rectangles and cluster placements
+stable; a cluster can grow into its siblings or off-screen on a later step because
+it neither moves nor glides to bring new contents into view; A9 revisits this limit.
+Groups have no frame or label in the plain diagram vocabulary.
+New text, shapes, lines, paths, highlights and callouts inside a cluster contribute
+to its ranked size in a step that places the cluster or adds a node to it, when all
+their anchors are absolute or refer to placed objects strictly inside its subtree.
+Source-order readiness passes resolve local dependency chains before ranking.
+Anchors to or across a boxed diagram draw late because its glide applies after
+placement. References to the cluster itself, its ancestors, siblings or outside
+objects are also drawn late, so they do not contribute to its ranked size; A9's
+renders judge this shortcut. Changed objects retain the later-growth behavior above.
+Private Mermaid group labels belong to the parser/compiler layer.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram
@@ -267,8 +392,19 @@ result for excess node/edge counts, unsafe measured dimensions or generated coor
 outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
 and those failure boundaries have additional tests.
 Outside that pure port, node sizing is smaller, the rank gap is fixed, edges use
-quadratic routing, and wide initial batches are not scaled to fit; A8's visual gate
+quadratic routing, and wide initial batches are not scaled to fit; A9's visual gate
 will decide these differences from S1.
+
+The ignored `cluster_inputs::prepare_many_clusters` test times initial preparation
+with deterministic text measurement: flat 16/32/64/128-cluster growth, a successful
+600-object nested drawing (301 diagrams), and preparation's `OutOfRange` rejection
+of flat 299-cluster drawings in both directions after successful 600-object admission.
+An additional 400-text workload interleaves 40 reversed ten-link anchor chains,
+exercising local readiness dependencies within the admitted graph-depth limit.
+It excludes parsing, admission, commit, input construction, inspection and successful
+output destruction; rejection includes cleanup inside `prepare`. Run the release
+test executable at normal priority on quiet Rez under the shared measurement lock,
+not through Cargo. The fixture is not a worst-case bound or a real-font/GPU measurement.
 
 ### Inputs, publication and cuts
 
@@ -293,16 +429,25 @@ flowchart LR
 ```
 
 `PrepareInput::new` joins the ticket with the immediately preceding `LayoutState`,
-host surface and theme. `prepare` resolves primitives, text, callouts, highlights,
-nodes and edges, then validates measured/generated bounds and conservative motion
+host surface and theme. A rejected join returns `(PrepareError, Preparation)`, handing
+the ticket back: `Stale` for a foreign, nonconsecutive or pre-cut predecessor, or a
+layout error for invalid host dimensions, so the same ticket can join the right
+predecessor. `prepare` resolves primitives, text, callouts, highlights,
+nodes, edges, tables, rows, charts and series, then validates measured/generated bounds and conservative motion
 envelopes against ±20,000 before publishing. It checks cancellation before publication.
-Charts remain unsupported until the chart layer of A6. `PreparedStep` contains owned display changes,
+`PreparedStep` contains owned display changes,
 activation-time removals, generated glides and an immutable `after` layout. Nothing
 mutates an earlier picture. The host calls `PreparedStep::validate` against the current
 scene and predecessor immediately before accepting the result.
 
+`Stale` only ever means the inputs moved on: a join or result superseded by a commit
+or cut, a layout from another scene, or a frame from another view generation. Inside
+`prepare`, a placement that admission guarantees but the prefix lacks, or holds as
+another kind, is an internal invariant failure. It fails the step as
+`Layout(UnknownRef)`, so the host cuts instead of retrying it as stale.
+
 A diagram gets at most one generated position glide per step, targeting its last
-resting position plus the shift. A7 supplies the sampled start at activation and
+resting position plus the shift. Motion captures the sampled start at activation and
 compiles at most two keys. An explicit same-step position track wins; nodes without
 a diagram parent never receive a group glide. All shifted output remains coordinate-
 checked, including motion extrema rather than only the final resting rectangle.
@@ -313,24 +458,41 @@ authoritative survivor handles and parents after semantic reference pruning. A d
 its ancestor's static and final activated transforms, including generated glides and
 opacity. No per-revision layout undo deltas or persisted geometry are needed.
 A cut fences both old results and old predecessor states, even when a result's
-objects survive the cut.
-Resting transforms currently scale, rotate, then translate by `pos + (x, y)`;
-A7 must confirm this composition against its sampler.
+objects survive the cut. `cut` rejects a layout prepared past the kept prefix (a
+revision above both its own last cut and `SceneState::activated()`) with
+`Layout(OutOfRange)`, because it would keep a dropped step's edits.
+Resting and sampled transforms scale, rotate, then translate by `pos + (x, y)`.
 
 `layout::recover` shares semantic replay's ordered traversal. Every original step
 and effective cut is semantically validated, but layout skips any step dropped by
 its first following cut. Thus a deterministically failing dropped preparation cannot
 block recovery. A failing kept preparation returns its revision in `RecoveryError`;
-the host applies the ordinary failure cut before that revision. B4 owns the total
-recovery time budget.
+revision zero rejects the whole scene (an invalid header or log, or the batch caps
+below). Recovered steps carry no run, so the shell clears a failed scene through its
+ordinary clear path, keeping its history, instead of cutting it.
 
-`resident_bytes` estimates new primitive/vertex payload plus the full layout index
-for every result, including entries for unchanged objects. Older shared geometry is
-excluded from that result's new-payload charge. The index estimate does not include
-all referenced heap storage, and summing result estimates is not an exact retained
-or recovered-scene total. Preparation rejects a single estimate over 64 MiB; B4
-must complete retained/queued accounting and enforce the global residency cap,
-independently of logical admission.
+`layout::recover_all` recovers a visible batch for the shell: one result per source,
+in input order, and one new `GlobalBudget`. Each scene recovers alone. Scenes that
+recover are charged in input order and bound to that budget privately, so `stop`,
+`clear` and `admit` accept only it; there is no public adopt or bind call. A failed
+scene charges nothing, and neither does a recovered scene that would take the batch
+past a global cap with the scenes before it: it fails whole, with revision zero and
+`OverBudget`. Once `cancel` is set, the scenes still preparing fail with `Cancelled`.
+The shell's recovery deadline is sized from the measurement below.
+
+`PreparedStep::resident_bytes` charges what a result adds to its predecessor: new
+primitive and vertex arrays, chart bases and plots, and the layout's own `Op` source
+copies, plus the result's full index, because every result holds its own copy of the
+maps. `LayoutState::resident_bytes()` charges everything a retained layout holds,
+counting each shared allocation once by pointer. So the retained layout plus the
+queued results make up the scene's residency, and a recovered layout charges exactly
+what the live one did. Source copies are counted field by field for each record
+type: each string's bytes and each sequence's elements at their own size, which
+matches what they allocate because cloned records have exact capacities. The index
+charge is a fixed allowance per object for its two map entries, plus both heap copies
+of its id; map node overhead, motion maps and allocator headers aren't counted beyond
+it. Preparation rejects a single estimate over 64 MiB, and the shell enforces the
+64 MiB cap across visible scenes.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
 to 600 existing text objects, using fixed deterministic measurement rather than GPUI.
@@ -340,6 +502,15 @@ test below normal priority, then run its executable at normal priority under the
 exclusive Rez lock after 30 seconds without cargo/rustc. Main had no preparation
 pipeline, so there is no before speedup baseline. Results are not painter, frame,
 real-font or end-to-end timings.
+
+The ignored `recover_at_the_caps` test in `tests/compound.rs` sizes recovery. It
+recovers the 14-diagram chain fixture grown one batch per step through a 64-step
+history, in its control and cross-group forms; a 600-object scene of 306 clusters
+(17 clusters of 17 single-node clusters); the chain plus that scene as one
+`recover_all` batch; and four scenes with the chain, clusters and two 150-object
+local/cross views at the shared 1,500-object cap. Three warm-ups precede 16 timed recoveries per workload; building
+the histories, resident-byte totals and result destruction are outside the timer, and
+text measurement is the fixed fake. Run it like the preparation measurement above.
 
 ### Tables
 
@@ -354,21 +525,113 @@ number uses scientific notation if grouped output would exceed the display-text 
 
 A table's explicit box supplies its origin and available width; content determines
 its height, as in S1. Without a box it uses the host viewport's origin and width.
+Its content-sized height must still fit the ±20,000 canvas: an over-tall table fails
+the step with `OutOfRange` in preparation's final bounds check, so the model can
+send a smaller table.
 Empty tables still prepare their header and background. Adding, updating or removing
 a row rebuilds that table's current geometry at the new step's activation, without
 changing an earlier prepared picture. A detached row keeps its placed columns and
 absorbed ancestor transform, including when later cell/color/emphasis updates arrive.
 Emphasis changes rebuild both the text weight and the colored background band.
-The existing shared detachment path does not yet preserve inherited opacity across
-later updates; A7 must retain that factor independently of the object's own opacity.
+Inherited opacity is stored independently from own opacity and survives table and
+row rebuilds, including explicit own-opacity overrides from zero.
+Width fitting tolerates at most 0.01 px of residual excess, so summed columns can
+be that much wider than the supplied box.
+
+Chart series use the same frozen-detachment rule: an immutable shared basis retains
+the plot rectangle, linear/log domains, categories, palette slot, bar group position,
+signed stack baselines and the series' allocated pie span. A cut carries the existing
+Arc; attached preparation replaces it and charges each new plot once and each new
+series basis once. Detached updates reuse it without charging its payload again.
+One drawing path serves attached and detached series. Values outside a retained
+domain map to its boundary, so a detached update cannot refit the discarded chart.
+Pie updates redistribute their retained span; a formerly zero-total series that
+becomes positive gets a full-circle fallback because it had no allocated span.
+These are placement facts only, never wire/persisted fields; ordered recovery
+rebuilds them from the original kept chart preparations and cuts.
+Series updates preserve their inherited opacity. Explicit opacity changes
+use an `anim` opacity track, not `set.opacity`, which the strict schema rejects.
+
+Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
+labels. Numeric point pairs retain their x coordinates; scalar points use indices.
+Log ticks use whole decades. Automatic log domains round out to decades; an explicit
+window containing no whole decade has no tick labels.
+Stacks accumulate positive and negative bar values separately. Pie normalization
+includes every attached series, not only the first. Empty/zero-range/zero-total
+data is valid; admission rejects nonpositive log values and negative pie values.
+Series and pie slices take theme colors in order and repeat after eight; an explicit
+pie series color affects its first slice. Grouped bars with numeric x coordinates
+assume evenly spaced values, so uneven gaps can produce overlapping bars.
+Area fill and its open top stroke are both reserved; native dots need no flattened
+segments. The explicit chart box wins, otherwise the viewport supplies the origin
+and width with height capped at 300. Chart data changes apply instantly at activation;
+animating them is later work.
+Explicit titled charts reserve their 12 px label-origin inset at admission, including
+at the positive canvas edge; measured text still receives preparation's bounds check.
+The ignored `measure_prepare_charts_at_mark_and_pie_segment_caps` fixture updates
+five eight-series scatter charts at 20,000 marks and an eight-series pie at 19,886
+segments (163 slices); another pie slice would exceed the shared 20,000 segment cap.
+Those equal-sized slices are below the label threshold, so that pie fixture times
+no slice-label measurement and is not a worst-case label-shaping claim.
+It uses the same deterministic, exclusive-lock timing method as the table fixture.
 
 The S1 tests `numbers_are_grouped_rounded_and_trimmed` and
 `alignment_defaults_and_explicit_override` retain their names. Preparation replaces
-S1's draw-time measurement and entrance progress; A7 owns sampling. No source data is
+S1's draw-time measurement; `motion` owns entrance and property sampling. No source data is
 silently clipped to a table cap. The ignored
 `measure_prepare_table_at_column_and_row_caps` fixture rebuilds one table with eight
 columns, forty rows and 400 characters per cell using deterministic measurement.
 It follows the exclusive-lock release timing method above, not a real-font/frame test.
+
+## Shell mirror and preparation
+
+The shell's `presenter` owns one canonical budget and revalidates each durable typed step
+at its exact lifetime index. Live suffixes wait behind the complete recovery batch; fenced
+steps still enter the semantic mirror but never prepare. The snapshot assembler checks
+membership, ordinals, full log and retained counts, and every received frame byte including
+its header. It returns credit per consumed chunk so recovery can exceed the data window;
+only pre-membership chunks and the waiting live suffix withhold bounded credit.
+
+```mermaid
+flowchart LR
+    Pipe[Typed pipe frames] --> Assembly[Bounded log assembly]
+    Assembly --> Recovery[Scene-local batch recovery]
+    Recovery --> Mirror[Canonical mirror and shared budget]
+    Mirror --> Worker[Serial immutable preparation jobs]
+    Worker --> Publish[Validate job, cut, index and residency]
+    Watchdog[Independent deadline timer] --> Mirror
+```
+
+GPUI's shared text system crosses to the background executor; each worker constructs its
+own `WindowTextSystem` and uses the shell theme's font family. No window crosses threads.
+A host with no resolvable UI or fallback font aborts the shell under the release panic
+policy; drawings cannot select fonts, and ordinary shaping errors fail only their scene.
+
+Live preparation targets 50 ms and fails at 250 ms, including a queued step waiting for a
+worker slot; time behind its serial predecessor is excluded. A watchdog independent of
+completion sets cooperative cancellation and rejects
+late results. At most eight jobs or undelivered answers retain worker slots; dropping an
+unspawned job releases its slot too. Recovered layouts and queued results share a 64 MiB
+residency charge, with shared geometry and layout-owned source copies counted by identity.
+Clearing, removal and disconnect release ownership; cancelled workers keep their slots until
+their answer is applied or dropped. Cancellation never claims to kill a thread.
+
+Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
+a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
+fixed text measurement). Full cap recovery
+with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
+A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+allowing successful scenes to install. If the whole batch misses its deadline, its pending
+scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
+then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
+acknowledgement reaches the exact final committed revision. One new commit permits one new
+effective cut; stale acknowledgements for removed scenes do nothing.
+Clear intent made while scenes are mirrored survives brain restarts because scene ids are
+durable event ids; membership
+that still names a locally cleared scene causes its idempotent clear to be sent again.
+
+No fresh scene activates and no `StepShown` is sent yet. Production still uses placeholders
+until B3 switches both ends; B6 supplies painting and activation.
 
 ## Incremental drawing input
 

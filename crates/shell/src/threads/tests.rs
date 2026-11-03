@@ -1,5 +1,296 @@
 use super::*;
-use kumochi_protocol::message::{PageEventKind, RunId};
+use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
+
+fn settings(name: &str) -> SettingsView {
+    SettingsView {
+        assistant_name: kumochi_protocol::message::AssistantName::new(name).expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(1),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+    }
+}
+
+#[test]
+fn main_before_settings_uses_the_default_assistant_name() {
+    let mut main = row(1);
+    main.kind = ThreadKind::Main;
+    main.title.clear();
+    assert_eq!(row_label(&main, None), constants::DEFAULT_ASSISTANT_NAME);
+}
+
+#[test]
+fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
+    let mut state = loaded();
+    state.more_threads();
+    let first = state.requests().remove(0);
+    let DataToBrain::PageRequest {
+        page: PageOf::Threads { after: cursor, .. },
+        ..
+    } = first
+    else {
+        panic!("list")
+    };
+    state.apply(reply(request_id(&first), &[1], None));
+    state.renamed(ThreadId(1));
+    assert_eq!(
+        state.row(ThreadId(1)).expect("cached").title,
+        "private title 1"
+    );
+    assert_eq!(state.rows[2].title, "private title 1");
+    let reread = state.requests().remove(0);
+    assert_eq!(
+        reread,
+        DataToBrain::PageRequest {
+            request: 3,
+            page: PageOf::Threads {
+                search: None,
+                after: cursor
+            }
+        }
+    );
+    let mut renamed = row(1);
+    renamed.title = "confirmed new title".to_owned();
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&reread),
+        threads: vec![renamed.clone()],
+        next: None,
+    });
+    assert_eq!(state.row(ThreadId(1)), Some(&renamed));
+    assert_eq!(state.rows[2], renamed);
+    state.renamed(ThreadId(1));
+    let failed_write = state.requests().remove(0);
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&failed_write),
+        threads: vec![row(0)],
+        next: None,
+    });
+    assert_eq!(
+        state.rows[2], renamed,
+        "a refused write never invents a title"
+    );
+    assert_eq!(state.row(ThreadId(1)), Some(&renamed));
+}
+
+#[test]
+fn a_rename_during_a_page_read_waits_then_rereads_after_the_op() {
+    let mut state = loaded();
+    state.refresh();
+    let old = state.requests().remove(0);
+    state.renamed(ThreadId(3));
+    assert_eq!(state.requests(), []);
+    state.apply(reply(request_id(&old), &[3, 2], Some(2)));
+    assert_eq!(
+        state.row(ThreadId(3)).expect("row").title,
+        "private title 3"
+    );
+    assert_eq!(
+        state.requests().len(),
+        1,
+        "the pre-op reply didn't confirm the rename"
+    );
+}
+
+#[test]
+fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_deleted_row() {
+    let mut state = with_second_page();
+    state.renamed(ThreadId(1));
+    let old = state.requests().remove(0);
+    state.deleted(ThreadId(0));
+    let mut renamed = row(1);
+    renamed.title = "confirmed new title".to_owned();
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&old),
+        threads: vec![renamed.clone(), row(0)],
+        next: None,
+    });
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert_eq!(state.row(ThreadId(1)), Some(&row(1)));
+    assert_eq!(state.rows, [row(3), row(2), row(1)]);
+
+    assert_eq!(
+        state.requests(),
+        [DataToBrain::PageRequest {
+            request: 4,
+            page: PageOf::Threads {
+                search: None,
+                after: Some(ThreadCursor {
+                    updated_ms: 2,
+                    id: ThreadId(2),
+                    rank_bits: 0,
+                }),
+            },
+        }]
+    );
+    state.apply(DataToShell::ThreadList {
+        request: 4,
+        threads: vec![renamed.clone()],
+        next: None,
+    });
+    assert_eq!(state.row(ThreadId(1)), Some(&renamed));
+    assert_eq!(state.rows, [row(3), row(2), renamed.clone()]);
+    assert_eq!(state.requests(), [list_request(5)]);
+    state.apply(reply(5, &[3, 2], None));
+    assert_eq!(state.rows, [row(3), row(2), renamed]);
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn a_search_before_delete_does_not_requeue_an_old_rename_cursor() {
+    let mut state = with_second_page();
+    state.renamed(ThreadId(1));
+    let old = state.requests().remove(0);
+    state.search("new query");
+    state.deleted(ThreadId(0));
+    state.apply(reply(request_id(&old), &[1, 0], None));
+    assert_eq!(state.rows, []);
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert_eq!(
+        state.requests(),
+        [DataToBrain::PageRequest {
+            request: 4,
+            page: PageOf::Threads {
+                search: Some("new query".to_owned()),
+                after: None,
+            },
+        }]
+    );
+    state.apply(reply(4, &[8], None));
+    assert_eq!(state.rows, [row(8)]);
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn a_refresh_after_delete_discards_the_old_rename_cursor() {
+    let mut state = with_second_page();
+    state.renamed(ThreadId(1));
+    let old = state.requests().remove(0);
+    state.deleted(ThreadId(0));
+    state.refresh();
+    state.apply(reply(request_id(&old), &[1, 0], None));
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.rows, [row(3), row(2)]);
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn hiding_after_delete_discards_the_old_rename_cursor() {
+    let mut state = with_second_page();
+    state.renamed(ThreadId(1));
+    let old = state.requests().remove(0);
+    state.deleted(ThreadId(0));
+    state.hide();
+    state.apply(reply(request_id(&old), &[1, 0], None));
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert!(state.reread.is_empty());
+    assert_eq!(state.requests(), []);
+    state.show();
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.rows, [row(3), row(2)]);
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn a_delete_while_hidden_does_not_requeue_an_old_rename_cursor() {
+    let mut state = with_second_page();
+    state.renamed(ThreadId(1));
+    let old = state.requests().remove(0);
+    state.hide();
+    state.deleted(ThreadId(0));
+    state.apply(reply(request_id(&old), &[1, 0], None));
+    assert_eq!(state.row(ThreadId(0)), None);
+    assert!(state.reread.is_empty());
+    assert_eq!(state.requests(), []);
+    state.show();
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.rows, [row(3), row(2)]);
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn kumo_in_search_and_the_cache_uses_only_the_latest_settings_name() {
+    let mut state = loaded();
+    state.set_settings(settings("Kumo"));
+    state.search("a remembered phrase");
+    let request = state.requests().remove(0);
+    let mut main = row(1);
+    main.kind = ThreadKind::Main;
+    main.title.clear();
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&request),
+        threads: vec![row(9), main],
+        next: None,
+    });
+    assert_eq!(row_label(&state.rows[1], state.settings.as_ref()), "Kumo");
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(1)).expect("cached"),
+            state.settings.as_ref()
+        ),
+        "Kumo"
+    );
+    assert_eq!(
+        row_label(&state.rows[0], state.settings.as_ref()),
+        "private title 9"
+    );
+    state.set_settings(settings("Cloud"));
+    assert_eq!(row_label(&state.rows[1], state.settings.as_ref()), "Cloud");
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(1)).expect("cached"),
+            state.settings.as_ref()
+        ),
+        "Cloud"
+    );
+    assert_eq!(state.requests(), [], "a name update needs no list read");
+}
+
+#[test]
+fn switch_uses_the_received_title_and_choice() {
+    use crate::runs::{Runs, Target};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug};
+    let mut state = loaded();
+    let mut chosen = row(9);
+    chosen.choice = Some(ModelChoice {
+        model: ModelSlug::new("stored-model").expect("valid"),
+        effort: Effort::High,
+    });
+    state.refresh();
+    let request = state.requests().remove(0);
+    state.apply(DataToShell::ThreadList {
+        request: request_id(&request),
+        threads: vec![chosen.clone()],
+        next: None,
+    });
+    let mut runs = Runs::default();
+    runs.settings(ThreadId(1));
+    state.select(Some(ThreadId(9)));
+    assert_eq!(state.open, Some(ThreadId(9)));
+    assert!(runs.select_row(state.row(ThreadId(9)).expect("received row")));
+    state.search("another query");
+    assert_eq!(state.row(ThreadId(9)), Some(&chosen));
+    assert_eq!(
+        row_label(
+            state.row(ThreadId(9)).expect("cache"),
+            state.settings.as_ref()
+        ),
+        "private title 9"
+    );
+    assert_eq!(
+        state.row(ThreadId(9)).expect("cache").choice,
+        Some(ModelChoice {
+            model: ModelSlug::new("stored-model").expect("valid"),
+            effort: Effort::High,
+        })
+    );
+    assert_eq!(runs.target(), Target::Task(ThreadId(9)));
+    assert_eq!(runs.revision(), 1);
+}
 
 #[test]
 fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early() {
@@ -26,6 +317,8 @@ fn row(id: u64) -> ThreadRow {
         id: ThreadId(id),
         title: format!("private title {id}"),
         updated_ms: i64::try_from(id).expect("small"),
+        kind: ThreadKind::Thread,
+        choice: None,
     }
 }
 
@@ -65,6 +358,39 @@ fn loaded() -> Threads {
     let requests = state.requests();
     state.apply(reply(request_id(&requests[0]), &[3, 2], Some(2)));
     state
+}
+
+fn with_second_page() -> Threads {
+    let mut state = loaded();
+    state.more_threads();
+    let request = state.requests().remove(0);
+    state.apply(reply(request_id(&request), &[1, 0], None));
+    state
+}
+
+#[test]
+fn programmatic_view_changes_and_reopening_keep_the_highlight_in_sync() {
+    let mut state = loaded();
+    state.select(Some(ThreadId(2)));
+    assert_eq!(state.selected_index(), Some(1));
+    state.select(Some(ThreadId(3)));
+    assert_eq!(state.selected_index(), Some(0));
+    state.hide();
+    assert_eq!(state.open, None);
+    assert_eq!(state.selected_index(), None);
+    state.show();
+    assert_eq!(state.selected_index(), None);
+}
+
+#[test]
+fn rename_requires_a_connected_row_that_is_not_deleting() {
+    let mut state = loaded();
+    assert!(state.can_rename(ThreadId(3)));
+    state.deleting.push(ThreadId(3));
+    assert!(!state.can_rename(ThreadId(3)));
+    assert!(state.can_rename(ThreadId(2)));
+    state.disconnected();
+    assert!(!state.can_rename(ThreadId(2)));
 }
 
 #[test]

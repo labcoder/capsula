@@ -6,10 +6,11 @@ use std::time::Duration;
 use kumochi_protocol::message::{Phase, RunId, SceneId, Step, ThreadId};
 
 use super::{
-    R, S, T, ack, commit_in_scene, committed, end_run, end_run_clearing, engine, run_end, started,
-    state, step,
+    R, S, T, ack, commit_in_scene, committed, delta, draw_call, draw_step, end_run,
+    end_run_clearing, engine, run_end, started, state, step,
 };
-use crate::coordinator::{Coordinator, Effect, EngineEvent, Input, StoreOp};
+use crate::coordinator::{Coordinator, Effect, Input, StoreOp};
+use crate::engines::{Finish, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState, SceneTarget};
 
 fn visible(ids: &[u64]) -> Vec<SceneState> {
@@ -31,7 +32,7 @@ fn ids(core: &Coordinator) -> Vec<u64> {
 
 /// Run 10 started in a new thread 4, over `scenes`.
 fn started_over(scenes: &[u64]) -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(scenes));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(scenes));
     core.handle(Input::Turn {
         thread: None,
         text: "hi".to_owned(),
@@ -70,8 +71,7 @@ fn clear_scenes(ids: &[u64]) -> Effect {
 fn a_fifth_scene_evicts_the_oldest_in_its_first_steps_write() {
     let mut core = started_over(&[1, 2, 3, 4]);
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Step(step("a"))))
-            .expect("current"),
+        draw_step(&mut core, R, "a").expect("current"),
         vec![state(R, T, Phase::Answering), first_write(Some(1), "a")]
     );
     assert_eq!(ids(&core), [1, 2, 3, 4], "nothing moves before the commit");
@@ -83,15 +83,13 @@ fn a_fifth_scene_evicts_the_oldest_in_its_first_steps_write() {
     );
 
     let mut core = started_over(&[1, 2, 3]);
-    let effects = core
-        .handle(engine(R, EngineEvent::Step(step("a"))))
-        .expect("current");
+    let effects = draw_step(&mut core, R, "a").expect("current");
     assert_eq!(effects[1], first_write(None, "a"), "three leave room");
 }
 
 #[test]
 fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     assert!(core.settled());
     let clear = |scenes: &[u64]| Input::Clear {
         scenes: scenes.iter().copied().map(SceneId).collect(),
@@ -141,7 +139,7 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
 
 #[test]
 fn a_failed_clear_is_retried_at_the_barrier_and_quit_clears_it_with_the_visible_set() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2, 3]));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
     core.handle(Input::Clear {
         scenes: vec![SceneId(3)],
     })
@@ -170,8 +168,7 @@ fn a_failed_clear_is_retried_at_the_barrier_and_quit_clears_it_with_the_visible_
 fn late_acks_after_a_stop_count_in_the_revision_but_never_come_back() {
     let mut core = started();
     for label in ["a", "b", "c", "d"] {
-        core.handle(engine(R, EngineEvent::Step(step(label))))
-            .expect("current");
+        draw_step(&mut core, R, label).expect("current");
     }
     assert_eq!(
         core.handle(ack(0, "a")).expect("current"),
@@ -206,8 +203,7 @@ fn late_acks_after_a_stop_count_in_the_revision_but_never_come_back() {
 fn a_stop_that_kept_a_gap_keeps_only_the_revealed_steps() {
     let mut core = started();
     for label in ["a", "b", "c"] {
-        core.handle(engine(R, EngineEvent::Step(step(label))))
-            .expect("current");
+        draw_step(&mut core, R, label).expect("current");
     }
     for (index, label) in ["a", "b", "c"].into_iter().enumerate() {
         core.handle(ack(u32::try_from(index).expect("small"), label))
@@ -237,10 +233,7 @@ fn waiting() -> (Coordinator, Vec<Effect>) {
     let mut core = started();
     let mut effects = Vec::new();
     for label in ["a", "b", "c"] {
-        effects.extend(
-            core.handle(engine(R, EngineEvent::Step(step(label))))
-                .expect("current"),
-        );
+        effects.extend(draw_step(&mut core, R, label).expect("current"));
     }
     assert_eq!(written(&effects), ["a"], "b and c wait for a's ack");
     (core, effects)
@@ -255,7 +248,8 @@ fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
             text: "next".to_owned(),
         },
         Input::TurnStored { run: next },
-        engine(next, EngineEvent::Step(step("z"))),
+        engine(next, draw_call()),
+        engine(next, delta("z")),
     ] {
         effects.extend(core.handle(input).expect("the new run is current"));
     }
@@ -314,10 +308,7 @@ fn a_replacement_drops_steps_waiting_for_the_scene_and_the_run_settles() {
         core.handle(Input::TurnStored { run: RunId(11) })
             .expect("current"),
     );
-    effects.extend(
-        core.handle(engine(RunId(11), EngineEvent::Step(step("z"))))
-            .expect("current"),
-    );
+    effects.extend(draw_step(&mut core, RunId(11), "z").expect("current"));
     assert_eq!(written(&effects), ["a", "z"], "b and c never leak");
 }
 
@@ -383,7 +374,7 @@ fn a_scene_state_s_debug_leaves_its_labels_out() {
 
 #[test]
 fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     let failed = |id: u64| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok: false,
@@ -424,7 +415,7 @@ fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
 
 #[test]
 fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2, 3]));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
     let failed = |id: u64| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok: false,
@@ -470,7 +461,7 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
 
 #[test]
 fn a_partial_commit_resets_the_wait_and_replaces_a_longer_deadline() {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     let cleared = |id: u64, ok: bool| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok,
@@ -506,11 +497,11 @@ fn a_partial_commit_resets_the_wait_and_replaces_a_longer_deadline() {
 fn a_scene_both_kept_and_cleared_counts_once_and_both_writes_retire() {
     let mut core = started_over(&[]);
     for (index, label) in [(0, "a"), (1, "b")] {
-        core.handle(engine(R, EngineEvent::Step(step(label))))
-            .expect("current");
+        draw_step(&mut core, R, label).expect("current");
         core.handle(ack(index, label)).expect("current");
     }
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("current");
     core.handle(Input::RunStored { run: R }).expect("ending");
     let stop = Input::Stop {
         run: R,

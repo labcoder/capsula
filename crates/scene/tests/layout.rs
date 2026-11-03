@@ -1,9 +1,11 @@
 //! Incremental placement, preparation isolation and ordered-cut recovery.
 use kumochi_scene::{
-    Admission, Begin, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
+    Admission, Begin, Budget, ErrorCode, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
     display::{MeasureError, Prim, TextMeasure, TextStyle},
+    geom::Vec2,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
+        recover_all,
     },
     parse_record,
     text::Bounded,
@@ -76,7 +78,8 @@ fn picture(
         before.clone(),
         SurfaceGeometry::default(),
         Arc::new(Theme::default()),
-    )?;
+    )
+    .map_err(|(error, _)| error)?;
     let result = prepare(input, measure, &AtomicBool::new(false))?;
     result.validate(scene, before)?;
     Ok(result)
@@ -101,6 +104,27 @@ fn cut(
             budget,
         )
         .expect("valid cut");
+}
+fn assert_vec2_near(actual: Vec2, expected: [f32; 2]) {
+    assert!(
+        (actual.x - expected[0]).abs() <= 0.001 && (actual.y - expected[1]).abs() <= 0.001,
+        "expected {expected:?}, got {actual:?}"
+    );
+}
+fn chart_picture(put: &Value) -> PreparedStep {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(&mut scene, &mut budget, json!({"id":"chart","put":put}));
+    picture(&scene, commit, &before, &mut Measure::default()).expect("chart picture")
+}
+fn titled_bar_fixture() -> Value {
+    json!([
+        {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"title":"T","categories":["Q","R"],
+            "x":{"min":-0.5,"max":1.5,"label":"X"},"y":{"min":-10,"max":10,"label":"Y"}}},
+        {"series":{"id":"a","in":"c","name":"A","data":[2,-2]}},
+        {"series":{"id":"b","in":"c","name":"B","data":[3,-3]}}
+    ])
 }
 
 #[test]
@@ -726,7 +750,7 @@ fn a_cut_invalidates_kept_results_and_their_old_layout_base() {
             SurfaceGeometry::default(),
             Arc::new(Theme::default())
         ),
-        Err(PrepareError::Stale)
+        Err((PrepareError::Stale, _))
     ));
 }
 
@@ -1071,7 +1095,7 @@ fn invalid_host_measurements_fail_before_publication() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_six_hundred_text_updates() {
     let mut samples = Vec::new();
     for iteration in 0..69 {
@@ -1241,6 +1265,24 @@ fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() 
     );
     let table = picture(&scene, table, &before, &mut measure).expect("empty table");
     assert_eq!(table.after.items().len(), 1);
+    let empty = table.after.items().pop().expect("table item");
+    assert_eq!(
+        empty.bounds.size,
+        kumochi_scene::geom::Vec2::new(112.0, 31.55),
+        "empty content keeps the header height"
+    );
+    assert!(
+        matches!(
+            &*empty.primitives,
+            [
+                Prim::Rect { .. },
+                Prim::Text { .. },
+                Prim::Text { .. },
+                Prim::Line { .. }
+            ]
+        ),
+        "an empty table has its background, headers and rule"
+    );
     let rows = committed(
         &mut scene,
         &mut budget,
@@ -1284,8 +1326,11 @@ fn tables_prepare_empty_then_keep_future_removals_out_of_the_previous_picture() 
             _ => None,
         })
         .collect();
-    assert!(values.iter().any(|value| value == "1,000"));
-    assert!(values.iter().any(|value| value == "true"));
+    assert_eq!(
+        values,
+        ["Name", "Value", "A", "1,000", "B", "true"],
+        "header and row text follow handle order"
+    );
 }
 
 #[test]
@@ -1314,6 +1359,11 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
         json!({"id":"cells","set":[{"target":"r","cells":[2],"color":"red"}]}),
     );
     let next = picture(&scene, next, &tip, &mut measure).expect("detached cells");
+    assert_eq!(
+        next.after.bounds(&id("r")).expect("updated bounds"),
+        Some(expected),
+        "a detached update keeps the absorbed ancestor transform"
+    );
     let texts: Vec<_> = next.after.items()[0]
         .primitives
         .iter()
@@ -1334,6 +1384,97 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
     )
     .expect("detached replay");
     assert_eq!(replayed.items(), next.after.items());
+}
+
+#[test]
+fn row_only_rebuild_preserves_the_detached_tables_absorbed_opacity() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d","opacity":0.5}},
+            {"table":{"id":"t","in":"d","cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[1]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("table");
+    let table = first.after.handle(&id("t")).expect("table handle");
+    cut(&mut scene, &mut budget, 1, &["t", "r"], &first.after);
+    let detached = first.after.cut(&scene).expect("detached table");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"row","set":[{"target":"r","cells":[2]}]}),
+    );
+    let next = picture(&scene, next, &detached, &mut Measure::default()).expect("row update");
+    let mut view = kumochi_scene::motion::SceneView::new(&detached, scene.activated());
+    let mut frame = kumochi_scene::motion::Frame::new();
+    view.activate(next, 0, 800, &mut frame)
+        .expect("row activation");
+    view.frame(0, &mut frame).expect("row frame");
+    let table = frame
+        .items()
+        .iter()
+        .find(|item| item.handle == table)
+        .expect("table");
+    assert_eq!(
+        table.opacity.to_bits(),
+        0.5_f32.to_bits(),
+        "editing a child must not reset an untouched detached table's inherited opacity"
+    );
+}
+
+#[test]
+fn measured_entrance_pivots_bound_child_motion_outside_the_resting_union() {
+    let prepare_case = |offset| {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let step = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"pivot","put":[
+                {"diagram":{"id":"parent","enter":"pop"}},
+                {"shape":{"id":"child","in":"parent","kind":"rect","box":[0,0,10000,10000]}},
+            {"anim":{"target":"child","track":"x","keys":[[0,offset],[100,0]]}}
+            ]}),
+        );
+        picture(&scene, step, &before, &mut Measure::default())
+    };
+    // The parent pivot adds 676.6: offset 8000 bounds 19894.5, but 8100 bounds 20001.3.
+    assert!(
+        prepare_case(8000).is_ok(),
+        "the measured parent pivot and child envelope fit"
+    );
+    assert!(
+        matches!(
+            prepare_case(8100),
+            Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange
+        ),
+        "only the measured parent pivot pushes the child envelope beyond the canvas"
+    );
+}
+
+#[test]
+fn chart_title_admission_reserves_the_origin_but_preparation_checks_its_height() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let step = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"title","put":[
+            {"chart":{"id":"chart","box":[0,19985,300,15],"title":"Title"}}
+        ]}),
+    );
+    assert!(
+        matches!(picture(&scene, step, &before, &mut Measure::default()),
+        Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange),
+        "the title starts at 19997 but its measured height extends beyond 20000"
+    );
 }
 
 #[test]
@@ -1484,7 +1625,749 @@ fn table_lists_accept_eight_cells_and_alignments_and_reject_nine() {
 }
 
 #[test]
-#[ignore = "Rez timing session; hold measuring.lock and wait for a quiet machine"]
+fn chart_series_removal_uses_the_prepared_prefix_and_keeps_older_pictures() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"a","in":"c","data":[0,1]}}
+        ]}),
+    );
+    let second = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"second","put":[
+            {"series":{"id":"b","in":"c","data":[10,20]}}
+        ]}),
+    );
+    let removed_handle = second.handles[0].1;
+    let third = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"third","remove":["b"]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("first chart");
+    let unchanged = first.after.items();
+    assert!(
+        first.after.handle(&id("b")).is_none(),
+        "future series never enters the earlier picture"
+    );
+    let second =
+        picture(&scene, second, &first.after, &mut Measure::default()).expect("second chart");
+    assert!(
+        second.after.handle(&id("b")).is_some(),
+        "a future removal does not affect this picture"
+    );
+    let a = first.after.handle(&id("a")).expect("original series");
+    let second_items = second.after.items();
+    assert_ne!(
+        second_items
+            .iter()
+            .find(|item| item.handle == a)
+            .expect("rescaled series")
+            .primitives,
+        unchanged
+            .iter()
+            .find(|item| item.handle == a)
+            .expect("original picture")
+            .primitives,
+        "the added series changes the existing series scale before its removal"
+    );
+    let third =
+        picture(&scene, third, &second.after, &mut Measure::default()).expect("removed series");
+    assert_eq!(
+        third.removed,
+        [removed_handle],
+        "removal is published at its own activation"
+    );
+    assert_eq!(
+        first.after.items(),
+        unchanged,
+        "later reflows never mutate an earlier picture"
+    );
+    assert_eq!(
+        third.after.items(),
+        unchanged,
+        "after removal the original series again determines the ranges"
+    );
+}
+
+#[test]
+fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[100,100,300,200],"x":{"min":0,"max":2},"y":{"min":0,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[[0,0],[1,5],[2,10]]}},
+            {"anim":{"target":"c","track":"pos","keys":[[0,[20,30]]]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("chart");
+    cut(&mut scene, &mut budget, 1, &["s"], &first.after);
+    let detached = first.after.cut(&scene).expect("detached series");
+    let expected = detached.items().pop().expect("survivor");
+    let expected_bounds = detached.bounds(&id("s")).expect("bounds");
+    let original_points = expected
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points.as_ref()),
+            _ => None,
+        })
+        .expect("original line");
+    assert_eq!(original_points.len(), 3);
+    assert_vec2_near(original_points[1], [260.0, 192.2]);
+    assert_eq!(
+        expected.transform,
+        kumochi_scene::geom::Affine([1.0, 0.0, 0.0, 1.0, 20.0, 30.0]),
+        "the cut absorbs the chart translation"
+    );
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"data","set":[
+            {"target":"s","data":[[0,0],[1,2.5],[2,1000]]}
+        ]}),
+    );
+    let next =
+        picture(&scene, next, &detached, &mut Measure::default()).expect("frozen data update");
+    assert_eq!(
+        next.after.bounds(&id("s")).expect("updated bounds"),
+        expected_bounds,
+        "the update keeps the pre-update world placement and scale"
+    );
+    let updated = next.after.items().pop().expect("updated survivor");
+    assert_eq!(
+        updated.transform, expected.transform,
+        "the update retains the absorbed translation"
+    );
+    let points = updated
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points.as_ref()),
+            _ => None,
+        })
+        .expect("updated line");
+    assert_eq!(points.len(), 3);
+    assert_vec2_near(points[0], [138.0, 268.4]);
+    assert_vec2_near(points[1], [260.0, 230.3]);
+    assert_vec2_near(points[2], [382.0, 116.0]);
+    let (_, replayed) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("recovery");
+    assert_eq!(
+        replayed.items(),
+        next.after.items(),
+        "recovery reconstructs the frozen basis before replaying the data update"
+    );
+}
+
+#[test]
+fn narrow_chart_labels_do_not_invert_their_rounded_clamp_bounds() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"narrow","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,64,300]}},
+            {"series":{"id":"s","in":"c","data":[0,1,2]}}
+        ]}),
+    );
+    let result = picture(&scene, commit, &before, &mut Measure::default()).expect("narrow chart");
+    assert_eq!(result.display.items.len(), 2);
+    let x_labels: Vec<_> = result.display.items[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text {
+                origin,
+                text,
+                max_width,
+                ..
+            } if origin.y > 270.0 => Some((*origin, text.as_str(), *max_width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        x_labels,
+        [(kumochi_scene::geom::Vec2::new(25.6, 275.4), "0", Some(8.0))]
+    );
+}
+
+#[test]
+fn chart_color_sets_repaint_the_zero_baseline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"s","in":"c","data":[0,1]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("chart");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"color","set":[{"target":"c","color":"red"}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut Measure::default()).expect("colored chart");
+    let items = next.after.items();
+    let Prim::Line { color, .. } = items[0].primitives.last().expect("baseline") else {
+        panic!("baseline line");
+    };
+    let red = serde_json::from_value(json!("red")).expect("color");
+    let expected = kumochi_scene::display::Paint::from(Theme::default().resolve(&red)).faded(0.4);
+    assert_eq!(
+        *color, expected,
+        "the accepted chart color reaches its visible baseline"
+    );
+    assert_ne!(
+        items[0].primitives,
+        first.after.items()[0].primitives,
+        "a chart color update changes the output"
+    );
+}
+
+#[test]
+fn chart_axes_area_and_all_pie_series_stay_within_their_reservations() {
+    for (kind, data, expected_series_segments, expected_charge) in [
+        ("area", json!([0, 1, 2]), 7, 71),
+        ("pie", json!([1, 1]), 244, 488),
+    ] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut put = vec![
+            json!({"chart":{"id":"c","kind":kind,"box":[0,0,400,300]}}),
+            json!({"series":{"id":"a","in":"c","data":data}}),
+        ];
+        if kind == "pie" {
+            put.push(json!({"series":{"id":"b","in":"c","data":[1,1]}}));
+        }
+        let commit = committed(&mut scene, &mut budget, json!({"id":"first","put":put}));
+        let result =
+            picture(&scene, commit, &before, &mut Measure::default()).expect("chart primitives");
+        for item in result.after.items() {
+            let segments: usize = item
+                .primitives
+                .iter()
+                .map(|primitive| match primitive {
+                    Prim::Line { points, closed, .. } => {
+                        points.len().saturating_sub(1) + usize::from(*closed)
+                    }
+                    Prim::Fill { points, .. } => points.len(),
+                    _ => 0,
+                })
+                .sum();
+            let expected = if Some(item.handle) == result.after.handle(&id("c")) {
+                if kind == "pie" { 0 } else { 6 }
+            } else {
+                expected_series_segments
+            };
+            assert_eq!(segments, expected, "exact generated topology for {kind}");
+        }
+        assert_eq!(
+            scene.usage().segments,
+            expected_charge,
+            "admission reserves both area primitives and every pie series"
+        );
+    }
+}
+
+#[test]
+fn pie_series_continue_the_slice_palette() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"pie","box":[0,0,400,300]}},
+        {"series":{"id":"a","in":"c","data":[1,1]}},
+        {"series":{"id":"b","in":"c","data":[1,1]}}
+    ]));
+    let pie_colors: Vec<_> = result
+        .after
+        .items()
+        .iter()
+        .flat_map(|item| {
+            item.primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Prim::Fill { color, .. } => Some(*color),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert_eq!(
+        pie_colors,
+        (0..4)
+            .map(|slot| Theme::default().series(slot).into())
+            .collect::<Vec<kumochi_scene::display::Paint>>(),
+        "adjacent series continue the slice palette rather than repeating their shared boundary color"
+    );
+}
+
+#[test]
+fn titled_bar_header_places_the_legend_axes_and_category_labels() {
+    let result = chart_picture(&titled_bar_fixture());
+    let items = result.after.items();
+    let handle = result.after.handle(&id("c")).expect("chart handle");
+    let chart = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("chart");
+    let labels: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text { origin, text, .. } => Some((text.as_str(), *origin)),
+            _ => None,
+        })
+        .collect();
+    let expected_labels = [
+        ("T", [12.0, 12.0]),
+        ("A", [26.0, 30.0]),
+        ("B", [62.0, 30.0]),
+        ("Y", [12.0, 53.6]),
+        ("-10", [6.0, 244.6]),
+        ("-5", [6.0, 199.9]),
+        ("0", [6.0, 155.2]),
+        ("5", [6.0, 110.5]),
+        ("10", [6.0, 65.8]),
+        ("Q", [126.0, 259.4]),
+        ("R", [294.0, 259.4]),
+        ("X", [46.0, 282.0]),
+    ];
+    assert_eq!(labels.len(), expected_labels.len());
+    for ((label, origin), (expected_label, expected_origin)) in
+        labels.into_iter().zip(expected_labels)
+    {
+        assert_eq!(label, expected_label);
+        assert_vec2_near(origin, expected_origin);
+    }
+    let rectangles: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rectangles.len(), 3);
+    assert_vec2_near(rectangles[0].origin, [0.0, 0.0]);
+    assert_vec2_near(rectangles[0].size, [400.0, 300.0]);
+    for (rect, origin) in rectangles[1..].iter().zip([[12.0, 33.0], [48.0, 33.0]]) {
+        assert_vec2_near(rect.origin, origin);
+        assert_vec2_near(rect.size, [9.0, 9.0]);
+    }
+    let lines: Vec<_> = chart
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Line { points, .. } => Some(points),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 6);
+    for (points, y) in lines
+        .into_iter()
+        .zip([252.4, 207.7, 163.0, 118.3, 73.6, 163.0])
+    {
+        assert_eq!(points.len(), 2);
+        assert_vec2_near(points[0], [46.0, y]);
+        assert_vec2_near(points[1], [382.0, y]);
+    }
+}
+
+#[test]
+fn grouped_and_stacked_bars_use_series_slots_and_signed_baselines() {
+    for (stacked, expected) in [
+        (
+            false,
+            [
+                [66.16, 145.12, 62.84, 17.88],
+                [234.16, 163.0, 62.84, 17.88],
+                [130.0, 136.18, 62.84, 26.82],
+                [298.0, 163.0, 62.84, 26.82],
+            ],
+        ),
+        (
+            true,
+            [
+                [66.16, 145.12, 126.68, 17.88],
+                [234.16, 163.0, 126.68, 17.88],
+                [66.16, 118.3, 126.68, 26.82],
+                [234.16, 180.88, 126.68, 26.82],
+            ],
+        ),
+    ] {
+        let mut put = titled_bar_fixture();
+        put[0]["chart"]["stacked"] = json!(stacked);
+        let result = chart_picture(&put);
+        let chart = result.after.handle(&id("c")).expect("chart handle");
+        let rectangles: Vec<_> = result
+            .after
+            .items()
+            .iter()
+            .filter(|item| item.parent == Some(chart))
+            .flat_map(|item| {
+                item.primitives
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        Prim::Rect { rect, .. } => Some(*rect),
+                        _ => None,
+                    })
+            })
+            .collect();
+        assert_eq!(rectangles.len(), 4);
+        for (rect, [x, y, width, height]) in rectangles.into_iter().zip(expected) {
+            assert_vec2_near(rect.origin, [x, y]);
+            assert_vec2_near(rect.size, [width, height]);
+        }
+    }
+}
+
+#[test]
+fn pair_x_scatter_uses_uneven_numeric_spacing_and_log_y_midpoints() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"scatter","box":[0,0,400,300],"y":{"min":1,"max":100,"scale":"log"}}},
+        {"series":{"id":"s","in":"c","data":[[10,1],[15,10],[30,100]]}}
+    ]));
+    let items = result.after.items();
+    let handle = result.after.handle(&id("s")).expect("series handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("series");
+    let rectangles: Vec<_> = series
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rectangles.len(), 3);
+    for (rect, center) in rectangles
+        .into_iter()
+        .zip([[46.0, 268.4], [130.0, 142.2], [382.0, 16.0]])
+    {
+        assert_vec2_near(rect.center(), center);
+        assert_vec2_near(rect.size, [8.0, 8.0]);
+    }
+}
+
+#[test]
+fn removing_a_chart_and_all_its_series_publishes_no_rebuilt_items() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,400,300]}},
+            {"series":{"id":"a","in":"c","data":[0,1]}},
+            {"series":{"id":"b","in":"c","data":[1,2]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("first chart");
+    let unchanged = first.after.items();
+    let expected = ["a", "c", "b"].map(|key| first.after.handle(&id(key)).expect("removed handle"));
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"remove","remove":["a","c","b"]}),
+    );
+    let next =
+        picture(&scene, next, &first.after, &mut Measure::default()).expect("whole chart removal");
+    assert_eq!(next.removed, expected);
+    assert!(
+        next.display.items.is_empty(),
+        "no removed parent is rebuilt"
+    );
+    assert!(
+        next.after.items().is_empty(),
+        "the chart and both series are gone"
+    );
+    assert_eq!(
+        first.after.items(),
+        unchanged,
+        "removal leaves the earlier picture intact"
+    );
+}
+
+#[test]
+fn attached_zero_total_pie_keeps_its_series_without_generating_slices() {
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"pie","box":[0,0,400,300]}},
+        {"series":{"id":"s","in":"c","data":[0,0]}}
+    ]));
+    let items = result.after.items();
+    assert_eq!(items.len(), 2);
+    let chart = result.after.handle(&id("c")).expect("chart handle");
+    let handle = result
+        .after
+        .handle(&id("s"))
+        .expect("zero-total series handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("attached series");
+    assert_eq!(series.parent, Some(chart));
+    assert!(
+        series.primitives.is_empty(),
+        "zero values produce neither slices nor labels"
+    );
+    let chart = items
+        .iter()
+        .find(|item| item.handle == chart)
+        .expect("chart background");
+    assert_eq!(chart.primitives.len(), 1);
+    assert!(
+        matches!(chart.primitives[0], Prim::Rect { .. }),
+        "the empty pie still has its frame"
+    );
+}
+
+#[test]
+fn an_admitted_over_tall_table_fails_preparation_with_out_of_range() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut put = vec![json!({"table":{"id":"t","box":[0,0,48,1000],"cols":["V"]}})];
+    put.extend(
+        (0..40)
+            .map(|row| json!({"row":{"id":format!("r{row}"),"in":"t","cells":["x".repeat(400)]}})),
+    );
+    let commit = committed(&mut scene, &mut budget, json!({"id":"tall","put":put}));
+    let result = picture(&scene, commit, &before, &mut Measure::default());
+    assert!(
+        matches!(result, Err(PrepareError::Layout(error)) if error.code == kumochi_scene::ErrorCode::OutOfRange),
+        "the admitted table's wrapped height exceeds the preparation coordinate bound"
+    );
+}
+
+#[test]
+fn narrow_table_measures_its_wrapped_title_and_header() {
+    use kumochi_scene::{geom::Vec2, record::Align};
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"title","put":[
+            {"table":{"id":"t","box":[10,20,80,300],"title":"Title wraps here","cols":["Long header"],"align":["center"]}}
+        ]}),
+    );
+    let result = picture(&scene, first, &before, &mut Measure::default()).expect("wrapped table");
+    let item = result.after.items().pop().expect("table");
+    assert_eq!(
+        item.bounds.size,
+        Vec2::new(80.0, 78.0),
+        "title and header contribute their wrapped heights"
+    );
+    let [
+        Prim::Rect { .. },
+        Prim::Text {
+            origin: title_at,
+            text: title,
+            style: title_style,
+            ..
+        },
+        Prim::Text {
+            origin: header_at,
+            text: label,
+            style: header_style,
+            max_width,
+            align,
+            ..
+        },
+        Prim::Line { points, .. },
+    ] = &*item.primitives
+    else {
+        panic!("background, title, header and rule");
+    };
+    assert_eq!(
+        (title.as_str(), label.as_str()),
+        ("Title wraps here", "Long header"),
+        "the title and column label are preserved"
+    );
+    assert_eq!(
+        (*title_at, *header_at),
+        (Vec2::new(20.0, 27.0), Vec2::new(20.0, 71.0)),
+        "wrapped blocks are vertically separated"
+    );
+    assert_eq!(
+        (*title_style, *header_style),
+        (
+            TextStyle {
+                size: 15.0,
+                bold: true
+            },
+            TextStyle {
+                size: 13.5,
+                bold: true
+            }
+        ),
+        "title and header use their distinct styles"
+    );
+    assert_eq!(
+        (*max_width, *align),
+        (Some(60.0), Align::Center),
+        "the header uses the fitted cell width and explicit alignment"
+    );
+    assert_eq!(
+        &**points,
+        &[Vec2::new(10.0, 98.0), Vec2::new(90.0, 98.0)],
+        "the rule follows the wrapped header"
+    );
+}
+
+#[test]
+fn a_four_hundred_character_cell_prepares_without_truncation() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let value = "x".repeat(400);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"cap","put":[
+            {"table":{"id":"t","box":[0,0,1600,1000],"cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[value]}}
+        ]}),
+    );
+    let result = picture(&scene, first, &before, &mut Measure::default()).expect("cell at cap");
+    let row = result
+        .after
+        .items()
+        .into_iter()
+        .find(|item| Some(item.handle) == result.after.handle(&id("r")))
+        .expect("row");
+    let Prim::Text {
+        text, max_width, ..
+    } = &row.primitives[0]
+    else {
+        panic!("cell text");
+    };
+    assert_eq!(
+        text.as_str(),
+        value,
+        "all four hundred characters remain in the prepared cell"
+    );
+    assert_eq!(
+        *max_width,
+        Some(1580.0),
+        "padding leaves the expected wrapped width"
+    );
+    assert_eq!(
+        row.bounds.size,
+        kumochi_scene::geom::Vec2::new(1600.0, 44.0),
+        "wrapped text determines the row height"
+    );
+}
+
+#[test]
+fn row_order_cell_sets_and_whole_table_removal_keep_their_boundaries() {
+    use kumochi_scene::{ErrorCode, geom::Vec2};
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut layout = LayoutState::new(&scene);
+    for value in [
+        json!({"id":"first","put":[{"table":{"id":"t","cols":["V"]}},{"row":{"id":"z","in":"t","cells":["old"]}}]}),
+        json!({"id":"second","put":[{"row":{"id":"a","in":"t","cells":["new"]}}]}),
+        json!({"id":"update","set":[{"target":"z","cells":["longer"]}]}),
+    ] {
+        let commit = committed(&mut scene, &mut budget, value);
+        layout = picture(&scene, commit, &layout, &mut Measure::default())
+            .expect("row step")
+            .after;
+    }
+    let origins = ["z", "a"].map(|name| {
+        layout
+            .bounds(&id(name))
+            .expect("bounds")
+            .expect("row")
+            .origin
+    });
+    assert_eq!(
+        origins,
+        [Vec2::new(0.0, 31.55), Vec2::new(0.0, 65.05)],
+        "updating an older row does not reorder it"
+    );
+    assert_eq!(
+        layout
+            .bounds(&id("t"))
+            .expect("bounds")
+            .expect("table")
+            .size,
+        Vec2::new(68.0, 98.55),
+        "an attached cell update refits the column"
+    );
+    let excess = step(json!({"id":"excess","set":[{"target":"z","cells":[1,2]}]}));
+    assert!(
+        matches!(scene.admit(&excess, &budget), Err(error) if error.code == ErrorCode::OutOfRange),
+        "a set cannot exceed the owning column count"
+    );
+    for value in [
+        json!({"id":"remove","remove":["z"]}),
+        json!({"id":"append","put":[{"row":{"id":"m","in":"t","cells":["last"]}}]}),
+    ] {
+        let commit = committed(&mut scene, &mut budget, value);
+        layout = picture(&scene, commit, &layout, &mut Measure::default())
+            .expect("row step")
+            .after;
+    }
+    let origins = ["a", "m"].map(|name| {
+        layout
+            .bounds(&id(name))
+            .expect("bounds")
+            .expect("row")
+            .origin
+    });
+    assert_eq!(
+        origins,
+        [Vec2::new(0.0, 31.55), Vec2::new(0.0, 65.05)],
+        "new handles append after surviving rows"
+    );
+    let handles = ["m", "a", "t"].map(|name| layout.handle(&id(name)).expect("handle"));
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"clear","remove":["m","a","t"]}),
+    );
+    let removed =
+        picture(&scene, commit, &layout, &mut Measure::default()).expect("remove table and rows");
+    assert_eq!(
+        removed.removed, handles,
+        "whole-table removals retain their exact activation handles"
+    );
+    assert!(
+        removed.after.items().is_empty(),
+        "no removed parent is rebuilt"
+    );
+}
+
+#[test]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_table_at_column_and_row_caps() {
     let mut samples = Vec::new();
     for iteration in 0..69 {
@@ -1539,9 +2422,368 @@ fn measure_prepare_table_at_column_and_row_caps() {
             samples.push(elapsed);
         }
     }
+    println!("prepare_table_cap_raw_us={samples:?}");
     let mean = samples.iter().sum::<f64>() / 64.0;
     let maximum = samples.into_iter().fold(0.0_f64, f64::max);
     println!(
         "prepare_table_8x40_400chars samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
     );
+}
+
+#[test]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
+fn measure_prepare_twelve_tables_at_row_and_column_caps() {
+    let mut samples = Vec::new();
+    for iteration in 0..69 {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let mut layout = LayoutState::new(&scene);
+        let mut measure = Measure::default();
+        for table in 0..12 {
+            let mut put = vec![
+                json!({"table":{"id":format!("t{table}"),"box":[0,table*1500,1000,1000],"cols":vec!["C";8]}}),
+            ];
+            put.extend((0..40).map(|row| json!({"row":{"id":format!("r{table}_{row}"),"in":format!("t{table}"),"cells":vec!["v";8]}})));
+            let commit = committed(
+                &mut scene,
+                &mut budget,
+                json!({"id":format!("table{table}"),"put":put}),
+            );
+            layout = picture(&scene, commit, &layout, &mut measure)
+                .expect("table fixture")
+                .after;
+        }
+        assert_eq!(
+            scene.usage().cells,
+            3840,
+            "the fixture occupies twelve bounded tables"
+        );
+        let set: Vec<_> = (0..12)
+            .map(|table| json!({"target":format!("r{table}_0"),"color":"red"}))
+            .collect();
+        let commit = committed(&mut scene, &mut budget, json!({"id":"update","set":set}));
+        let input = PrepareInput::new(
+            commit.preparation,
+            layout.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        measure.calls.clear();
+        let start = std::time::Instant::now();
+        let result = std::hint::black_box(prepare(
+            std::hint::black_box(input),
+            &mut measure,
+            &AtomicBool::new(false),
+        ))
+        .expect("many-table update");
+        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+        result.validate(&scene, &layout).expect("current result");
+        assert_eq!(
+            result.display.items.len(),
+            492,
+            "all twelve table headers and 480 rows are replaced"
+        );
+        if iteration >= 5 {
+            samples.push(elapsed);
+        }
+    }
+    println!("prepare_twelve_tables_raw_us={samples:?}");
+    let mean = samples.iter().sum::<f64>() / 64.0;
+    let maximum = samples.into_iter().fold(0.0_f64, f64::max);
+    println!(
+        "prepare_12_tables_40x8_short samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
+    );
+}
+
+#[test]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
+fn measure_prepare_charts_at_mark_and_pie_segment_caps() {
+    for (kind, charts, marks, segments) in [("scatter", 5, 20_000, 320), ("pie", 1, 163, 19_886)] {
+        let mut samples = Vec::new();
+        for iteration in 0..69 {
+            let mut scene = SceneState::begin(header()).expect("scene");
+            let mut budget = GlobalBudget::default();
+            let mut layout = LayoutState::new(&scene);
+            let mut measure = Measure::default();
+            for chart in 0..charts {
+                let mut put = vec![
+                    json!({"chart":{"id":format!("c{chart}"),"kind":kind,"box":[0,chart*350,800,300]}}),
+                ];
+                put.extend((0..8).map(|series| {
+                    let points = if kind == "scatter" { 500 } else if series == 7 { 23 } else { 20 };
+                    json!({"series":{"id":format!("s{chart}_{series}"),"in":format!("c{chart}"),"data":vec![1;points]}})
+                }));
+                let commit = committed(
+                    &mut scene,
+                    &mut budget,
+                    json!({"id":format!("chart{chart}"),"put":put}),
+                );
+                layout = picture(&scene, commit, &layout, &mut measure)
+                    .expect("capped charts")
+                    .after;
+            }
+            assert_eq!(
+                scene.usage().marks,
+                marks,
+                "scatter fills the scene mark cap; pie is segment-limited"
+            );
+            assert_eq!(
+                scene.usage().segments,
+                segments,
+                "one additional pie slice would exceed 20,000 segments"
+            );
+            let set: Vec<_> = (0..charts)
+                .flat_map(|chart| {
+                    (0..8).map(
+                        move |series| json!({"target":format!("s{chart}_{series}"),"color":"red"}),
+                    )
+                })
+                .collect();
+            let commit = committed(&mut scene, &mut budget, json!({"id":"update","set":set}));
+            let input = PrepareInput::new(
+                commit.preparation,
+                layout.clone(),
+                SurfaceGeometry::default(),
+                Arc::new(Theme::default()),
+            )
+            .expect("input");
+            measure.calls.clear();
+            let start = std::time::Instant::now();
+            let result = std::hint::black_box(prepare(
+                std::hint::black_box(input),
+                &mut measure,
+                &AtomicBool::new(false),
+            ))
+            .expect("chart update");
+            let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+            result.validate(&scene, &layout).expect("current result");
+            assert_eq!(
+                result.display.items.len(),
+                charts * 9,
+                "every chart and its eight series are replaced"
+            );
+            if iteration >= 5 {
+                samples.push(elapsed);
+            }
+        }
+        println!("prepare_{kind}_cap_raw_us={samples:?}");
+        let mean = samples.iter().sum::<f64>() / 64.0;
+        let maximum = samples.into_iter().fold(0.0_f64, f64::max);
+        println!(
+            "prepare_{kind}_cap samples=64 warmups=5 marks={marks} segments={segments} mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
+        );
+    }
+}
+
+fn recorded(put: &[Value]) -> SceneState {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    committed(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        json!({"id":"only","put":put}),
+    );
+    scene
+}
+
+#[test]
+fn batch_recovery_keeps_input_order_and_charges_only_what_it_returns() {
+    let label = |id: &str, text: &str| json!({"text":{"id":id,"at":[100,100],"text":text}});
+    let scenes = [
+        recorded(&[label("a", "A")]),
+        recorded(&[label("b", "fail-measure")]),
+        recorded(&[label("c", "C"), label("d", "D")]),
+        recorded(&[label("e", "E")]),
+        recorded(&[label("f", "F")]),
+        recorded(&[label("g", "G")]),
+    ];
+    let header = header();
+    let sources: Vec<_> = scenes
+        .iter()
+        .map(|scene| (&header, scene.recovery_log()))
+        .collect();
+    let (results, mut global) = recover_all(
+        &sources,
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    );
+    let counts: Vec<_> = results
+        .iter()
+        .map(|result| {
+            result
+                .as_ref()
+                .ok()
+                .map(|(scene, layout)| (scene.object_count(), layout.items().len()))
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            Some((1, 1)),
+            None,
+            Some((2, 2)),
+            Some((1, 1)),
+            Some((1, 1)),
+            None
+        ]
+    );
+    let Err(failed) = &results[1] else {
+        panic!("a failed measurement fails its scene");
+    };
+    assert_eq!(failed.revision, 1);
+    assert!(matches!(failed.error, PrepareError::TextMeasure));
+    let Err(over) = &results[5] else {
+        panic!("a fifth recovered scene exceeds the visible cap");
+    };
+    assert_eq!(over.revision, 0);
+    assert!(matches!(
+        &over.error,
+        PrepareError::Layout(error) if error.code == ErrorCode::OverBudget(Budget::VisibleScenes)
+    ));
+    assert_eq!(
+        (global.usage().objects, global.usage().scenes),
+        (5, 4),
+        "neither the failed nor the rejected scene is charged"
+    );
+    let (mut first, _) = results
+        .into_iter()
+        .next()
+        .expect("first result")
+        .expect("first scene");
+    assert_eq!(
+        first
+            .clear(&mut GlobalBudget::default())
+            .expect_err("a foreign budget")
+            .code,
+        ErrorCode::BudgetContext
+    );
+    first.clear(&mut global).expect("the batch budget");
+    assert_eq!((global.usage().objects, global.usage().scenes), (4, 3));
+}
+
+#[test]
+fn retained_bytes_match_step_charges_and_recovery() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let empty = LayoutState::new(&scene);
+    assert_eq!(empty.resident_bytes(), 0);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"shared","put":[
+            {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"categories":["Q","R"],
+                "x":{"min":-0.5,"max":1.5},"y":{"min":-10,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[2,-2]}},
+            {"series":{"id":"t","in":"c","data":[3,-3]}},
+            {"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}
+        ]}),
+    );
+    let first = picture(&scene, commit, &empty, &mut measure).expect("shared geometry");
+    assert_eq!(
+        first.after.resident_bytes(),
+        first.resident_bytes,
+        "a first step charges everything it retains, with the plot and vertices once"
+    );
+    let commit = committed(&mut scene, &mut budget, json!({"id":"nothing","put":[]}));
+    let unchanged = picture(&scene, commit, &first.after, &mut measure).expect("same geometry");
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"more","put":[{"text":{"id":"x","at":[10,10],"text":"X"}}]}),
+    );
+    let second = picture(&scene, commit, &unchanged.after, &mut measure).expect("added text");
+    assert_eq!(
+        second.after.resident_bytes() + unchanged.resident_bytes,
+        unchanged.after.resident_bytes() + second.resident_bytes,
+        "a step adds its new geometry, source and index to the shared prefix"
+    );
+    let (_, recovered) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+    )
+    .expect("recovery");
+    assert_eq!(
+        recovered.resident_bytes(),
+        second.after.resident_bytes(),
+        "recovery charges what the live layout retains"
+    );
+}
+
+#[test]
+fn a_cut_rejects_a_layout_prepared_past_its_kept_prefix() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[{"text":{"id":"x","at":[100,100],"text":"X"}}]}),
+    );
+    let first = picture(&scene, commit, &before, &mut measure).expect("first picture");
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"edit","set":[{"target":"x","text":"Longer"}]}),
+    );
+    let edited = picture(&scene, commit, &first.after, &mut measure).expect("edited picture");
+    cut(&mut scene, &mut budget, 1, &["x"], &first.after);
+    assert!(
+        matches!(
+            edited.after.cut(&scene),
+            Err(PrepareError::Layout(error)) if error.code == ErrorCode::OutOfRange
+        ),
+        "the dropped edit must not survive the cut"
+    );
+    let kept = first.after.cut(&scene).expect("activated prefix");
+    assert_eq!(
+        kept.bounds(&id("x")).expect("kept bounds"),
+        first.after.bounds(&id("x")).expect("first bounds")
+    );
+}
+
+#[test]
+fn a_stale_join_hands_the_ticket_back_for_its_predecessor() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[{"text":{"id":"x","at":[100,100],"text":"X"}}]}),
+    );
+    let first = picture(&scene, commit, &before, &mut measure).expect("first picture");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"next","put":[{"text":{"id":"y","at":[200,100],"text":"Y"}}]}),
+    );
+    let Err((PrepareError::Stale, ticket)) = PrepareInput::new(
+        next.preparation,
+        before,
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    ) else {
+        panic!("a skipped predecessor is stale");
+    };
+    let input = PrepareInput::new(
+        ticket,
+        first.after.clone(),
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    )
+    .expect("the returned ticket joins its predecessor");
+    let prepared = prepare(input, &mut measure, &AtomicBool::new(false)).expect("picture");
+    prepared
+        .validate(&scene, &first.after)
+        .expect("current picture");
+    assert_eq!(prepared.after.items().len(), 2);
 }

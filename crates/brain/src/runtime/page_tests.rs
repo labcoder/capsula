@@ -1,14 +1,42 @@
-use kumochi_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf};
+use kumochi_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf, ThreadKind};
 
 use super::*;
 use crate::coordinator::{Coordinator, Effect, StoreOp};
+use crate::engines::RunRequest;
 use crate::runtime::DATA_CAP;
+
+/// The frames a connection opens with, before any run state.
+fn preamble(frame: &[u8]) -> bool {
+    matches!(
+        frame::decode::<ControlToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
+        ControlToShell::Scenes { .. }
+            | ControlToShell::Settings { .. }
+            | ControlToShell::Account(_)
+    )
+}
 
 fn threads() -> PageOf {
     PageOf::Threads {
         search: None,
         after: None,
     }
+}
+
+/// The main thread a reply to request 7 lists as a fresh store's only row.
+fn only_kumo(reply: DataToShell) -> ThreadId {
+    let DataToShell::ThreadList {
+        request: 7,
+        threads,
+        next: None,
+    } = reply
+    else {
+        panic!("request 7's list, got {reply:?}")
+    };
+    let [row] = threads.as_slice() else {
+        panic!("one row, got {threads:?}")
+    };
+    assert_eq!((row.kind, row.title.as_str()), (ThreadKind::Main, ""));
+    row.id
 }
 
 async fn request(shell: &mut Shell<DuplexStream>, request: u32, page: PageOf) {
@@ -33,7 +61,7 @@ fn exhausted_queue() -> RefCell<DataQueue> {
 
 #[test]
 fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
-    let mut coordinator = Coordinator::new(ThreadId(0), RunId(0), Vec::new());
+    let mut coordinator = Coordinator::new(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
     coordinator
         .handle(Input::Turn {
             thread: None,
@@ -71,8 +99,11 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     assert_eq!(
         coordinator.handle(Input::TurnStored { run: RunId(1) }),
         Ok(vec![Effect::StartEngine {
-            run: RunId(1),
-            text: "go".to_owned()
+            request: RunRequest {
+                run: RunId(1),
+                thread: ThreadId(2),
+                turn: "go".to_owned()
+            }
         }])
     );
 }
@@ -172,13 +203,12 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         );
         turns_tx.send((None, "go".to_owned())).await.expect("turn");
         let mut bytes = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..4 {
             bytes = timeout(PATIENCE, control.recv())
                 .await
                 .expect("state")
                 .expect("open");
-            let decoded = frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]);
-            if decoded.expect("decode") != (ControlToShell::Scenes { scenes: Vec::new() }) {
+            if !preamble(&bytes) {
                 break;
             }
         }
@@ -186,15 +216,18 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
             frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decode"),
             ControlToShell::RunState {
                 run: RunId(1),
-                thread: ThreadId(1),
+                thread: ThreadId(2),
                 phase: Phase::Thinking
             }
         ));
         controls_tx
-            .send(ControlToBrain::Stop {
-                run: RunId(1),
-                revealed: Vec::new(),
-            })
+            .send((
+                ControlToBrain::Stop {
+                    run: RunId(1),
+                    revealed: Vec::new(),
+                },
+                0,
+            ))
             .await
             .expect("stop");
         loop {
@@ -371,9 +404,16 @@ async fn read_pages_and_text(
                 threads,
                 next,
             } => {
-                assert_eq!(threads.len(), 1);
-                assert_eq!(threads[0].id, ThreadId(1));
-                assert_eq!(threads[0].title, title);
+                // The main thread, created after this task, then the task.
+                let kinds: Vec<_> = threads.iter().map(|row| (row.id, row.kind)).collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        (ThreadId(2), ThreadKind::Main),
+                        (ThreadId(1), ThreadKind::Thread)
+                    ]
+                );
+                assert_eq!(threads[1].title, title);
                 assert_eq!(next, None);
                 replies.push(request);
             }
@@ -402,7 +442,12 @@ async fn read_pages_and_text(
             other @ (DataToShell::StepCommit { .. }
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
-            | DataToShell::ScenesRemoved { .. }) => {
+            | DataToShell::ScenesRemoved { .. }
+            | DataToShell::SceneBegin { .. }
+            | DataToShell::SceneStepCommit { .. }
+            | DataToShell::SceneSnapshotV1 { .. }
+            | DataToShell::SceneCutApplied { .. }
+            | DataToShell::SceneEnd { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }
@@ -440,14 +485,7 @@ async fn old_connection_page_success_and_failure_cannot_reach_a_new_connection()
     let ((control, data), mut shell) = duplex();
     let client = async {
         request(&mut shell, 7, threads()).await;
-        assert_eq!(
-            shell.data().await,
-            DataToShell::ThreadList {
-                request: 7,
-                threads: Vec::new(),
-                next: None
-            }
-        );
+        assert_eq!(only_kumo(shell.data().await), ThreadId(1));
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
@@ -465,9 +503,12 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         .expect("broken schema");
     let mut brain = Brain::new(
         store,
-        (ThreadId(0), RunId(0)),
+        ThreadId(1),
+        (ThreadId(1), RunId(0)),
         Vec::new(),
-        Fixture::parse("").expect("fixture"),
+        Box::new(Fixture::parse("").expect("fixture")),
+        scratch.config(),
+        crate::test_support::accounts(&scratch),
     )
     .expect("brain");
     let ((control, data), mut shell) = duplex();
@@ -541,14 +582,8 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
             .borrow_mut()
             .pop(std::time::Instant::now())
             .expect("credit for the reply");
-        assert_eq!(
-            frame::decode::<DataToShell>(&frame[frame::HEADER_LEN..]).expect("decode"),
-            DataToShell::ThreadList {
-                request: 7,
-                threads: Vec::new(),
-                next: None,
-            }
-        );
+        let reply = frame::decode::<DataToShell>(&frame[frame::HEADER_LEN..]).expect("decode");
+        assert_eq!(only_kumo(reply), ThreadId(1));
     };
     tokio::select! { ended = core => panic!("core ended {ended:?}"), () = client => {} }
     brain.close().await;

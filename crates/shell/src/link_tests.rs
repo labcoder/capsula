@@ -10,13 +10,193 @@ use kumochi_protocol::message::{
     ThreadId,
 };
 
-use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
 use crate::platform::{PipeClient, test_pair};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
-    EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow,
+    EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadKind, ThreadRow,
 };
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real pipe connection exercises every typed scene frame family"
+)]
+fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
+    use kumochi_protocol::message::{SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk};
+    use kumochi_scene::{Record, SceneEvent, StopCut, parse_record, text::Bounded};
+
+    let link = attended("typed-scenes");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let scene = SceneId(7);
+    let descriptors = Bounded::new(vec![
+        SceneDescriptorV1::new(scene, 1, 1, 1).expect("descriptor"),
+    ])
+    .expect("one scene");
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::ScenesV1 {
+            scenes: descriptors.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("membership written");
+    let LinkEvent::ScenesV1 { generation, scenes } = next(&events) else {
+        panic!("typed membership")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(scenes, descriptors);
+    let Record::Begin(begin) = parse_record(
+        br#"{"begin":{"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"}}"#,
+    )
+    .expect("header") else {
+        panic!("begin")
+    };
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"private-step"}}"#).expect("step")
+    else {
+        panic!("step")
+    };
+    let header = SceneHeader {
+        begin,
+        layout_version: 1,
+    };
+    let frames = [
+        DataToShell::SceneBegin {
+            scene,
+            header: header.clone(),
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(3),
+            scene,
+            index: 0,
+            step: step.clone(),
+        },
+        DataToShell::SceneSnapshotV1 {
+            chunk: SceneSnapshotChunk {
+                scene,
+                revision: 1,
+                ordinal: 0,
+                header: Some(header),
+                events: Bounded::new(vec![SceneEvent::Step {
+                    revision: 1,
+                    step: Arc::new(step),
+                }])
+                .expect("event"),
+                last: true,
+            },
+        },
+        DataToShell::SceneCutApplied {
+            scene,
+            revision: 1,
+            cut: StopCut {
+                activated: 1,
+                revealed: Bounded::default(),
+            },
+        },
+        DataToShell::SceneEnd {
+            run: RunId(3),
+            scene,
+            complete: true,
+        },
+        DataToShell::ScenesRemoved {
+            scenes: vec![scene],
+        },
+    ];
+    for sent in frames {
+        frame::write(&mut &*link.data, &sent, Pipe::Data).expect("typed frame written");
+        let LinkEvent::Data {
+            generation,
+            message,
+            bytes,
+        } = next(&events)
+        else {
+            panic!("typed data")
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(message, sent);
+        assert_eq!(
+            usize::try_from(bytes).expect("frame size"),
+            frame::encode(&sent, Pipe::Data).expect("frame").len()
+        );
+        session.grant(bytes);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("credit"),
+            Some(DataToBrain::Credit { bytes })
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
+    use kumochi_protocol::message::{AssistantName, SettingsView};
+    let link = attended("settings-view");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let expected = SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(9),
+        max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+    };
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            answer: false,
+            view: expected.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("written");
+    let LinkEvent::Settings {
+        generation,
+        view,
+        answer,
+    } = next(&events)
+    else {
+        panic!("settings")
+    };
+    assert_eq!(generation, session.generation());
+    assert!(!answer);
+    assert_eq!(view, expected);
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            answer: true,
+            view: expected.clone(),
+        },
+        Pipe::Control,
+    )
+    .expect("written");
+    let LinkEvent::Settings {
+        generation: answered_generation,
+        view: answered_view,
+        answer: true,
+    } = next(&events)
+    else {
+        panic!("a settings answer keeps its answer flag")
+    };
+    assert_eq!(answered_generation, session.generation());
+    assert_eq!(answered_view, expected);
+    let mut runs = Runs::default();
+    runs.connected(generation);
+    runs.settings(view.main_thread);
+    runs.submit("home", |turn| link.handle.send_data(&session, turn))
+        .expect("sent");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::TextSubmit {
+            thread: Some(ThreadId(9)),
+            text: "home".to_owned()
+        })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
 
 #[test]
 fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dropped() {
@@ -38,6 +218,8 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
             id: ThreadId(3),
             title: "a private title".to_owned(),
             updated_ms: 9,
+            kind: ThreadKind::Thread,
+            choice: None,
         }],
         next: Some(ThreadCursor {
             id: ThreadId(3),
@@ -296,6 +478,74 @@ fn a_repeated_handshake_ends_the_connection() {
     assert!(link.link.join().expect("joined"));
 }
 
+/// A connection's first frames in the order the brain sends them, which its tap test pins:
+/// the handshake takes Welcome, and the link passes Settings and Scenes on around the account
+/// view without ending the connection.
+#[test]
+fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
+    use kumochi_protocol::message::{AccountView, AssistantName, MaxFrameRate, SettingsView};
+    let (control, shell_control) = pair("first-frames-control");
+    let (_data, shell_data) = pair("first-frames-data");
+    control.set_timeout(Some(PATIENCE));
+    let view = SettingsView {
+        assistant_name: AssistantName::new("Cloud").expect("valid"),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(9),
+        max_frame_rate: MaxFrameRate::AUTOMATIC,
+    };
+    for message in [
+        ControlToShell::Welcome {
+            incarnation: Incarnation(4),
+        },
+        ControlToShell::Settings {
+            answer: false,
+            view: view.clone(),
+        },
+        ControlToShell::Account(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        }),
+        ControlToShell::Scenes { scenes: Vec::new() },
+    ] {
+        frame::write(&mut &control, &message, Pipe::Control).expect("written");
+    }
+    let incarnation = welcome(&shell_control).expect("the handshake takes Welcome");
+    assert_eq!(incarnation, Incarnation(4));
+    let (sender, events) = async_channel::unbounded();
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        shared: Arc::new(Shared::default()),
+    };
+    let (_handle, start) = start(link, sender);
+    let connection = Connection {
+        control: Arc::new(shell_control),
+        data: Arc::new(shell_data),
+        incarnation,
+    };
+    let link = thread::spawn(move || start.link.attend(connection, &start.events));
+    let events = patient(events);
+    let _session = connected(next(&events));
+    let LinkEvent::Settings {
+        view: shown,
+        answer: false,
+        ..
+    } = next(&events)
+    else {
+        panic!("settings first");
+    };
+    assert_eq!(shown, view);
+    let LinkEvent::Scenes(scenes) = next(&events) else {
+        panic!("scenes after the account view");
+    };
+    assert!(scenes.is_empty());
+    frame::write(&mut &control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    let pong = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
+    assert_eq!(pong.expect("still connected"), Some(ControlToBrain::Pong));
+    drop(control);
+    assert!(link.join().expect("joined"));
+}
+
 #[test]
 fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     let (a_control, a_shell_control) = pair("generation-a-control");
@@ -345,6 +595,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     a.grant(bytes);
     let mut runs = Runs::default();
     runs.connected(a.generation());
+    runs.settings(ThreadId(1));
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&a, turn)),
         Err(Refused::Offline),
@@ -353,6 +604,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     assert!(!handle.send_control(&a, ControlToBrain::Pong));
     runs.disconnected();
     runs.connected(b.generation());
+    runs.settings(ThreadId(1));
     assert_eq!(
         runs.submit("typed", |turn| handle.send_data(&b, turn)),
         Ok(())
@@ -361,7 +613,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "typed".to_owned(),
         })
     );
@@ -402,6 +654,15 @@ fn frame_size(message: &DataToShell) -> u32 {
     u32::try_from(size).expect("small")
 }
 
+fn ready_runs(session: &Session) -> Runs {
+    let mut runs = Runs::default();
+    runs.met(session.incarnation());
+    runs.connected(session.generation());
+    runs.settings(ThreadId(1));
+    runs.apply_scenes(&[]).expect("valid");
+    runs
+}
+
 fn delete_of(thread: ThreadId, after_turns: u32) -> ControlToBrain {
     ControlToBrain::DeleteThread {
         thread,
@@ -418,10 +679,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     let session = connected(next(&events));
     let handle = &link.handle;
     let send = |turn| handle.send_data(&session, turn);
-    let mut runs = Runs::default();
-    runs.met(session.incarnation());
-    runs.connected(session.generation());
-    runs.apply_scenes(&[]).expect("valid");
+    let mut runs = ready_runs(&session);
     assert!(runs.select_thread(Some(u)));
     runs.submit("u", send).expect("queued");
     assert!(runs.select_thread(Some(t)));
@@ -502,10 +760,10 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     assert_eq!(
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "next".to_owned(),
         }),
-        "confirming T's delete untargeted it"
+        "confirming T's delete returned input to Kumo"
     );
     assert!(runs.confirm_delete(v));
     handle.delete(v);
@@ -553,10 +811,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     });
     let events = patient(events);
     let a = connected(next(&events));
-    let mut runs = Runs::default();
-    runs.met(a.incarnation());
-    runs.connected(a.generation());
-    runs.apply_scenes(&[]).expect("valid");
+    let mut runs = ready_runs(&a);
     assert!(runs.confirm_delete(t));
     handle.delete(t);
     assert!(handle.send_deletes(&a));
@@ -580,6 +835,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     runs.disconnected();
     runs.met(b.incarnation());
     runs.connected(b.generation());
+    runs.settings(ThreadId(1));
     runs.apply_scenes(&[]).expect("valid");
     assert!(handle.send_deletes(&b));
     assert!(handle.send_control(&b, ControlToBrain::Pong));
@@ -595,7 +851,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
-            thread: None,
+            thread: Some(ThreadId(1)),
             text: "next".to_owned(),
         })
     );

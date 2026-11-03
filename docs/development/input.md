@@ -64,7 +64,7 @@ sequenceDiagram
 ## The typing panel
 
 A double tap opens a small panel where the status panel would be, with one gpui-kit `Input`.
-Like the [threads panel](panels.md), it activates only on a user command, as described in
+Like the [tasks panel](panels.md), it activates only on a user command, as described in
 [Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Kumochi still has the front and that window still exists.
@@ -73,7 +73,11 @@ foreground: the user has already chosen the new window. Hidden and stale deactiv
 do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
 [presence](presence.md). The panel is hidden, not closed, so its draft survives.
 Hover never opens over it or dismisses it.
-It has no Send, history or other controls yet.
+Opening the typing panel dismisses Tasks and Settings. Settings uses its normal dismissal
+path, saving an active field edit as on blur.
+Enter submits to the [captured input target](runs.md#the-shells-input-target). When the target
+isn't Kumo, the panel names it and offers **Back to Kumo**. A settings update preserves the
+draft and keyboard focus without changing that target.
 
 ### Taking the front
 
@@ -122,9 +126,11 @@ Rejected alternatives:
 
 ## Esc
 
-`escape.rs` decides each press: stop moving work first, clear an idle drawing second,
-otherwise dismiss the topmost local panel: the typing panel or the focused threads panel. The
-local effect always happens first, and nothing waits on the brain:
+`escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
+an active inline rename or Settings field edit in the focused panel third, otherwise dismiss
+the typing panel or focused Tasks or Settings panel. Stop and clear leave an edit intact;
+cancelling an edit restores its saved value without sending it and doesn't dismiss its panel.
+The local effect always happens first, and nothing waits on the brain:
 
 - **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames
@@ -142,10 +148,12 @@ local effect always happens first, and nothing waits on the brain:
   happens and the unsent message is logged, without content.
 
 Esc is held system-wide with `RegisterHotKey` only while Kumochi speaks or shows a drawing.
-Listening and an open status panel never hold it. Until slice 4 draws on the overlay, the
-placeholder steps count as a drawing only while the typing panel shows them, and there's no
-speech yet, so Esc is held only then. If registration is refused, the status panel shows Stop
-instead, and the refusal is logged without key or text content. An ignored fixture,
+Listening and an open status panel never hold it. Until B5 paints v1 scenes on the overlay,
+only placeholder steps shown in the typing panel count as a drawing; mirrored, preparing and
+recovering v1 scenes do not hold global Esc. Panel Esc still reaches the presenter. There's no
+speech yet, so Esc is held only for those shown placeholder steps. If registration is refused,
+the status panel shows Stop instead, and the refusal is logged without key or text content.
+An ignored fixture,
 `cargo test -p kumochi-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.
@@ -171,7 +179,7 @@ creates no file.
     holds exactly it. Only diagnostic runs keep that draft, in memory until the compare; no text,
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
-  - `escape action=Stop|Clear|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
+  - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process

@@ -6,8 +6,9 @@ use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, Phase, RunId, SceneId, ThreadId,
 };
 
-use super::{R, S, T, ack, end_run, engine, fresh, run_end, started, state, step};
-use crate::coordinator::{Coordinator, Effect, EngineEvent, Input, Stale, StoreOp};
+use super::{R, S, T, ack, draw_step, end_run, engine, fresh, run_end, started, state, step};
+use crate::coordinator::{Coordinator, Effect, Input, Stale, StoreOp};
+use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Interruption, RunEnd, SceneState};
 
 const U: ThreadId = ThreadId(8);
@@ -215,13 +216,13 @@ fn a_confirmed_delete_after_a_crossed_answer_runs_again() {
 #[test]
 fn past_eight_in_flight_a_delete_is_refused_and_the_accepted_ones_stay() {
     let mut core = fresh();
-    for thread in 1..=8 {
+    for thread in 2..=9 {
         assert_eq!(
             core.handle(delete(ThreadId(thread), 0)),
             Ok(vec![store_delete(ThreadId(thread))])
         );
     }
-    let ninth = ThreadId(9);
+    let ninth = ThreadId(10);
     assert_eq!(
         core.handle(delete(ninth, 0)),
         Ok(vec![told(ninth, Deleted::NotHidden, None)])
@@ -241,18 +242,18 @@ fn past_eight_in_flight_a_delete_is_refused_and_the_accepted_ones_stay() {
 #[test]
 fn more_fences_than_the_shell_holds_or_an_overflowing_count_break_the_connection() {
     let mut core = fresh();
-    for thread in 1..=5 {
+    for thread in 2..=6 {
         core.handle(delete(ThreadId(thread), 1)).expect("accepted");
     }
-    for thread in 1..=4 {
+    for thread in 2..=5 {
         core.handle(answer(ThreadId(thread), Deleted::Removed, None))
             .expect("answered");
     }
     assert_eq!(
-        core.handle(answer(ThreadId(5), Deleted::Removed, None)),
+        core.handle(answer(ThreadId(6), Deleted::Removed, None)),
         Ok(vec![
             Effect::Broken("more deletes fenced than the shell holds"),
-            told(ThreadId(5), Deleted::Removed, None),
+            told(ThreadId(6), Deleted::Removed, None),
         ])
     );
     let mut core = fresh();
@@ -274,6 +275,7 @@ fn the_answer_retires_the_threads_scenes_and_tells_the_data_pipe() {
         stopped: false,
     };
     let mut core = Coordinator::new(
+        ThreadId(1),
         ThreadId(9),
         RunId(9),
         vec![scene(1, T), scene(2, U), scene(3, T)],
@@ -343,11 +345,10 @@ fn visible_ids(core: &Coordinator) -> Vec<u64> {
 
 /// Run 10 in a new thread T over `ids`, with its first step's write queued.
 fn first_step_queued(ids: &[u64]) -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(3), RunId(9), visible_before(ids));
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
     core.handle(turn(None)).expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
-        .expect("current");
+    draw_step(&mut core, R, "a").expect("current");
     core
 }
 
@@ -420,7 +421,8 @@ fn a_first_step_queued_before_the_delete_settles_with_its_eviction() {
 fn drawn_in_t() -> Coordinator {
     let mut core = first_step_queued(&[]);
     core.handle(ack(0, "a")).expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("current");
     core.handle(Input::RunStored { run: R }).expect("ending");
     assert_eq!(visible_ids(&core), [S.0]);
     core
@@ -433,8 +435,11 @@ fn a_stop_held_on_the_threads_ending_run_settles_across_the_delete() {
             let mut core = first_step_queued(&[]);
             // The engine fails with the first step's write out, and the shell's Stop crosses it:
             // the selection waits on the ending run for that write.
-            core.handle(engine(R, EngineEvent::Failed))
-                .expect("current");
+            core.handle(engine(
+                R,
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            ))
+            .expect("current");
             let held = core
                 .handle(Input::Stop {
                     run: R,

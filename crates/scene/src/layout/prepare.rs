@@ -1,14 +1,14 @@
 use super::{
-    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SurfaceGeometry,
-    nodes,
-    primitives::{Build, layout_error, rect},
+    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
+    SurfaceGeometry, heap, nodes,
+    primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
 use crate::{
-    Begin, ErrorCode, Handle, Op, SceneEvent, SceneState, WireId,
+    Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    record::{Anchor, Change, Track},
+    record::{Anchor, Change, Enter, Track},
     state::{object, work},
     theme::Theme,
 };
@@ -51,10 +51,12 @@ pub fn prepare(
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
     let mut tables = false;
+    let mut charts = false;
     for (slot, op) in ticket.step.put.iter().enumerate() {
         if let Some(visual) = object::visual(op) {
             let handle = Handle::new(ticket.revision, slot)?;
             tables |= matches!(op, Op::Table(_) | Op::Row(_));
+            charts |= matches!(op, Op::Chart(_) | Op::Series(_));
             sources.insert(visual.id.clone(), (handle, Arc::new(op.clone())));
             order.push(visual.id.clone());
         }
@@ -63,13 +65,11 @@ pub fn prepare(
         let (handle, source) = if let Some((handle, source)) = sources.get(&change.target) {
             (*handle, Arc::clone(source))
         } else {
-            let previous = after
-                .objects
-                .get(&change.target)
-                .ok_or(PrepareError::Stale)?;
+            let previous = after.objects.get(&change.target).ok_or_else(invariant)?;
             (previous.item.handle, Arc::clone(&previous.source))
         };
         tables |= matches!(&*source, Op::Table(_) | Op::Row(_));
+        charts |= matches!(&*source, Op::Chart(_) | Op::Series(_));
         if !sources.contains_key(&change.target) {
             order.push(change.target.clone());
         }
@@ -87,22 +87,17 @@ pub fn prepare(
             order.push(id.clone());
         }
     }
-    if sources
-        .values()
-        .any(|(_, op)| matches!(&**op, Op::Chart(_) | Op::Series(_)))
-    {
-        return Err(layout_error(ErrorCode::Unsupported));
-    }
     let mut removed = Vec::new();
     for id in &*ticket.step.remove {
         if let Some(old) = after.objects.remove(id) {
             tables |= matches!(&*old.source, Op::Row(_));
+            charts |= matches!(&*old.source, Op::Series(_));
             after.handles.remove(&old.item.handle);
             removed.push(old.item.handle);
         } else if let Some((handle, _)) = sources.get(id) {
             removed.push(*handle);
         } else {
-            return Err(PrepareError::Stale);
+            return Err(invariant());
         }
         sources.remove(id);
     }
@@ -112,23 +107,30 @@ pub fn prepare(
         .iter()
         .map(|(id, object)| (id.clone(), object.rest))
         .collect();
+    for change in ticket
+        .step
+        .set
+        .iter()
+        .filter(|change| change.color.is_some())
+    {
+        rests
+            .entry(change.target.clone())
+            .or_insert_with(Rest::default)
+            .color = None;
+    }
     let mut motions = BTreeMap::new();
     let mut explicit_pos = BTreeSet::new();
     for (slot, op) in ticket.step.put.iter().enumerate() {
         if let Op::Anim(anim) = op {
-            let value = &anim.keys.last().expect("admission checked nonempty keys").1;
             rests
                 .entry(anim.target.clone())
                 .or_insert_with(Rest::default)
-                .set(anim.track, value);
+                .set(anim.track, crate::motion::final_key(anim), &theme);
             if anim.track == Track::Pos {
                 explicit_pos.insert(anim.target.clone());
             }
             let motion = work::motion(anim, slot, &ticket.step)?;
-            motions
-                .entry((anim.target.clone(), work::property(anim.track)))
-                .and_modify(|previous: &mut work::Motion| *previous = previous.peak(motion))
-                .or_insert(motion);
+            motions.insert((anim.target.clone(), work::property(anim.track)), motion);
         }
     }
     for (id, object) in &mut after.objects {
@@ -138,7 +140,12 @@ pub fn prepare(
     }
     let mut containers: Vec<_> = order
         .iter()
-        .filter(|id| matches!(&*sources[*id].1, Op::Diagram(_) | Op::Table(_)))
+        .filter(|id| {
+            matches!(
+                &*sources[*id].1,
+                Op::Diagram(_) | Op::Table(_) | Op::Chart(_)
+            )
+        })
         .cloned()
         .collect();
     while !containers.is_empty() {
@@ -153,16 +160,22 @@ pub fn prepare(
         let (bounds, opacity) = match &**source {
             Op::Diagram(value) => (value.bounds, value.opacity),
             Op::Table(value) => (value.bounds, value.opacity),
-            _ => unreachable!("container list contains diagrams and tables"),
+            Op::Chart(value) => (value.bounds, value.opacity),
+            _ => unreachable!("container list contains diagrams, tables and charts"),
         };
         let previous = after.objects.get(&id).cloned();
         let parent = parent(source, &after, previous.as_ref())?;
+        // A boxless diagram keeps its measured contents, which a parent's ranking reads.
+        let measured = previous
+            .as_ref()
+            .filter(|_| matches!(&**source, Op::Diagram(_)))
+            .map(|old| old.item.bounds);
         let mut object = Placed::new(
             Item {
                 handle: *handle,
                 parent,
                 primitives: Arc::from([]),
-                bounds: bounds.map_or_else(Rect::default, rect),
+                bounds: bounds.map(rect).or(measured).unwrap_or_default(),
                 transform: Affine::default(),
                 opacity: opacity.map_or(1.0, crate::Finite::get),
             },
@@ -171,7 +184,6 @@ pub fn prepare(
         );
         object.anchors = [Vec2::default(); 2];
         object.rest = rests.get(&id).copied().unwrap_or_default();
-        object.rank = None;
 
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
@@ -179,7 +191,13 @@ pub fn prepare(
     if tables {
         super::table::place(&sources, &before, &mut after, &removed, &mut build)?;
     }
-    let mut glides = nodes::place(&sources, &order, &mut after, &mut build, surface)?;
+    let chart_bytes = if charts {
+        super::chart::place(&sources, &before, &mut after, &removed, &mut build)?
+    } else {
+        0
+    };
+    let (mut glides, prebuilt) =
+        nodes::place(&sources, &order, &rests, &mut after, &mut build, surface)?;
     glides.retain(|glide| {
         after
             .handles
@@ -192,26 +210,34 @@ pub fn prepare(
         }
     }
     for Glide { target, to } in &glides {
-        let id = after.handles.get(target).ok_or(PrepareError::Stale)?;
-        let group = after.objects.get_mut(id).ok_or(PrepareError::Stale)?;
+        let id = after.handles.get(target).ok_or_else(invariant)?;
+        let group = after.objects.get_mut(id).ok_or_else(invariant)?;
         let old = group.rest.pos;
         group.rest.pos = *to;
-        group.motion.insert(
-            "pos",
-            work::Motion {
-                keys: 2,
-                min: [old.x.min(to.x), old.y.min(to.y)],
-                max: [old.x.max(to.x), old.y.max(to.y)],
-            },
-        );
+        let glide = work::Motion {
+            keys: 2,
+            min: [old.x.min(to.x), old.y.min(to.y)],
+            max: [old.x.max(to.x), old.y.max(to.y)],
+        };
+        group
+            .motion
+            .entry("pos")
+            .and_modify(|cached| *cached = cached.peak(glide))
+            .or_insert(glide);
     }
     update_group_bounds(&mut after);
     let mut pending: Vec<_> = order
         .iter()
+        .filter(|id| !prebuilt.contains(*id))
         .filter(|id| {
             !matches!(
                 &*sources[*id].1,
-                Op::Diagram(_) | Op::Node(_) | Op::Table(_) | Op::Row(_)
+                Op::Diagram(_)
+                    | Op::Node(_)
+                    | Op::Table(_)
+                    | Op::Row(_)
+                    | Op::Chart(_)
+                    | Op::Series(_)
             )
         })
         .cloned()
@@ -249,7 +275,7 @@ pub fn prepare(
         after
             .objects
             .get_mut(&id)
-            .ok_or(PrepareError::Stale)?
+            .ok_or_else(invariant)?
             .motion
             .insert(property, motion);
     }
@@ -267,9 +293,10 @@ pub fn prepare(
         .map(|(_, object)| object.item.clone())
         .collect();
     items.sort_by_key(|item| item.handle);
-    let resident_bytes = residency(&items, &before)
-        + after.objects.len()
-            * (size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3);
+    let resident_bytes = residency(before.objects.values().map(|object| &object.item), &items)
+        + heap::source_bytes(before.objects.values(), after.objects.values())
+        + chart_bytes
+        + after.index_bytes();
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
     }
@@ -285,6 +312,7 @@ pub fn prepare(
         resident_bytes,
         ticket,
         base: Arc::clone(&before.version),
+        theme,
     })
 }
 
@@ -324,13 +352,14 @@ pub fn recover(
             match event {
                 SceneEvent::Step { revision, .. } if !skipped.contains(revision) => {
                     let result = (|| {
-                        let committed = committed.ok_or(PrepareError::Stale)?;
+                        let committed = committed.ok_or_else(invariant)?;
                         let input = PrepareInput::new(
                             committed.preparation,
                             before.clone(),
                             surface,
                             Arc::clone(theme),
-                        )?;
+                        )
+                        .map_err(|(error, _)| error)?;
                         let prepared = prepare(input, measure, cancel)?;
                         prepared.validate(scene, before)?;
                         Ok::<_, PrepareError>(prepared.after)
@@ -353,6 +382,31 @@ pub fn recover(
     )?;
     let layout = layout.unwrap_or_else(|| LayoutState::new(&scene));
     Ok((scene, layout))
+}
+
+/// Recovers a visible batch scene by scene and binds the survivors to one new budget.
+///
+/// Results follow input order. A failed scene charges nothing, and so does a recovered one
+/// that would take the batch past a global cap with the scenes before it: that one fails
+/// whole, with revision zero.
+pub fn recover_all(
+    sources: &[(&Begin, &[SceneEvent])],
+    surface: SurfaceGeometry,
+    theme: &Arc<Theme>,
+    measure: &mut dyn TextMeasure,
+    cancel: &AtomicBool,
+) -> (Vec<SceneRecovery>, GlobalBudget) {
+    let mut global = GlobalBudget::default();
+    let results = sources
+        .iter()
+        .map(|(header, log)| -> Result<_, RecoveryError> {
+            let (mut scene, layout) =
+                recover((*header).clone(), log, surface, theme, measure, cancel)?;
+            scene.bind(&mut global)?;
+            Ok((scene, layout))
+        })
+        .collect();
+    (results, global)
 }
 
 fn parent(
@@ -431,6 +485,11 @@ fn patch(source: &Op, change: &Change) -> Op {
                 row.emphasis = value;
             }
         }
+        Op::Series(series) => {
+            if let Some(value) = &change.data {
+                series.data = value.clone();
+            }
+        }
         _ => {}
     }
     if let Some(color) = &change.color {
@@ -451,6 +510,8 @@ fn patch(source: &Op, change: &Change) -> Op {
             Op::Edge(value) => color!(value),
             Op::Table(value) => color!(value),
             Op::Row(value) => color!(value),
+            Op::Chart(value) => color!(value),
+            Op::Series(value) => color!(value),
             _ => {}
         }
     }
@@ -518,7 +579,10 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
                 Prim::Text { .. } => {}
             }
         }
-        let extent = if matches!(&*placed.source, Op::Diagram(_)) {
+        let enter = work::entrance(&placed.source);
+        let extent = if matches!(&*placed.source, Op::Diagram(_))
+            && enter.is_none_or(|enter| enter == Enter::None)
+        {
             0.0
         } else {
             bounds
@@ -537,6 +601,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
             inherited_translation: matrix[4].abs().max(matrix[5].abs()),
             inherited_rotation: matrix[1] != 0.0 || matrix[2] != 0.0,
             motion: placed.motion.clone(),
+            enter,
             ..work::Work::default()
         };
         objects.insert(
@@ -563,12 +628,16 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
     Ok(())
 }
 
-fn residency(items: &[Item], before: &LayoutState) -> usize {
+/// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once.
+pub(super) fn residency<'a>(
+    shared: impl IntoIterator<Item = &'a Item>,
+    items: impl IntoIterator<Item = &'a Item>,
+) -> usize {
     let mut shared_arrays = HashSet::new();
     let mut vertices = HashSet::new();
-    for object in before.objects.values() {
-        shared_arrays.insert(object.item.primitives.as_ptr());
-        for primitive in &*object.item.primitives {
+    for item in shared {
+        shared_arrays.insert(item.primitives.as_ptr());
+        for primitive in &*item.primitives {
             if let Prim::Fill { points, .. } | Prim::Line { points, .. } = primitive {
                 vertices.insert(points.as_ptr());
             }
@@ -629,7 +698,10 @@ mod tests {
             ]),
         };
         assert_eq!(
-            residency(std::slice::from_ref(&item), &before),
+            residency(
+                before.objects.values().map(|o| &o.item),
+                std::slice::from_ref(&item)
+            ),
             2 * size_of::<Prim>() + 3 * size_of::<Vec2>()
         );
         let crate::Record::Step(step) = crate::parse_record(
@@ -642,11 +714,20 @@ mod tests {
             "p".to_owned().try_into().expect("id"),
             Placed::new(item.clone(), Arc::new(step.put[0].clone()), None),
         );
-        assert_eq!(residency(std::slice::from_ref(&item), &before), 0);
+        assert_eq!(
+            residency(
+                before.objects.values().map(|o| &o.item),
+                std::slice::from_ref(&item)
+            ),
+            0
+        );
         let recolored = Item {
             primitives: item.primitives.to_vec().into(),
             ..item
         };
-        assert_eq!(residency(&[recolored], &before), 2 * size_of::<Prim>());
+        assert_eq!(
+            residency(before.objects.values().map(|o| &o.item), &[recolored]),
+            2 * size_of::<Prim>()
+        );
     }
 }

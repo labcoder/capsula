@@ -2,6 +2,8 @@
 
 How Kumochi works inside. This page is the map. Each module has its own page under `docs/development/` with the detail. The full design record lives outside the repo.
 
+The [glossary](glossary.md) maps user-facing words to code and protocol terms.
+
 Kumochi is built in slices. Slice 0 is the skeleton: the two processes, their pipes and handshake, and the Job Objects. Sections below describe the whole first release, so some of what they show arrives with later slices.
 
 ## The two processes
@@ -60,6 +62,7 @@ flowchart TD
   shell --> scene
   xtask --> protocol
   xtask --> scene
+  protocol --> scene
 ```
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.
@@ -215,4 +218,4 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 ## Where to read next
 
-`processes.md`, `ipc.md`, `scene.md`, `engines.md`, `store.md`, `voice.md`, `screen.md`, each added with its module.
+`processes.md`, `ipc.md`, `settings.md`, [frame-rate.md](frame-rate.md), `scene.md`, `engines.md`, `store.md`, [accounts.md](accounts.md), `voice.md`, `screen.md`, each added with its module.

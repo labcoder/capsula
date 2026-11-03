@@ -6,13 +6,81 @@ takes inputs and returns effects, and the systems around it (the store, the engi
 timers) do the work and report back. So the order of Esc, late completions and interruption is
 tested as plain unit tests.
 
+## The shell's input target
+
+`crates/shell/src/runs.rs` owns `Target::{Kumo, Task(ThreadId), New}` separately from
+`Threads.open`, the history being viewed. Viewing doesn't change the target or selection
+revision. **Switch to this task**, **Back to Kumo** and **New task** advance the revision;
+switching to the id in `SettingsView.main_thread` normalizes to `Target::Kumo`.
+
+The default is Kumo at shell start, when `met()` meets a new brain incarnation and drops a
+non-durable target, and when the user confirms deletion of the targeted task. These fallbacks
+advance the revision too. A task known from a stored row or an answered run is durable and
+survives reconnect; an unconfirmed new task falls back to Kumo when the brain incarnation
+changes. This replaces slice 2's new-conversation default (OSC-157).
+
+Each submit captures the target in `TextSubmit` and queues the current revision in a FIFO.
+`Target::Kumo` resolves to the connection's `SettingsView.main_thread`; `Target::New` sends
+`None`. Submits are refused as offline until that connection has supplied its `SettingsView`,
+even for New task. Disconnect clears the main id and pending submissions, so a previous
+connection's id cannot be reused before the new view arrives.
+
+While `Target::New` has a submission pending at the current revision, another submit is
+refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
+stays, so after the first `RunState` adopts the task, retrying continues that task. Pending
+turns from older selections don't block New task: explicitly choosing **New task** again
+advances the revision and permits a separate task.
+
+A new `RunState` answers the oldest pending turn. Only a matching queued revision while the
+target is still `New` can adopt that run's thread, without advancing the revision. An empty
+FIFO never adopts, and a task holding a delete slot cannot become the target. A delayed state
+after an explicit switch still answers its own turn but doesn't move input. Esc cancels work,
+not the target or revision. Settings updates replace names and the main id without changing
+the input draft, keyboard focus, viewed history, target or revision.
+
+## Typed drawing admission
+
+`drawing/` is a deterministic reducer beside the coordinator. Direct complete calls and
+closed records share validation, repair and per-run step budgets, including calls opened
+before another call exhausted the run. It owns one global scene
+budget and serializes store lookups, step transactions and effective cuts. A step is admitted
+without mutation, written, then committed to the canonical state only after its store reply;
+only then do `SceneBegin` and `SceneStepCommit` leave on the scene-owned data FIFO. A failed
+step write leaves no handles, revision or reserved scene name behind. Call outcomes contain
+model-visible ids and fixed error codes, never diagnostic drawing content.
+
+Provider completion drains the accepted drawing prefix before ending its run. Stop closes
+queued records but still drains an accepted step transaction before acknowledging its cut.
+An empty Stop received before the first scene id arrives cuts that run's unseen, unactivated
+scene to zero after the step commits. Effective cuts are durable before acknowledgement;
+failed cuts remain owed and block subsequent step writes. A no-op cut is acknowledged without
+adding a log entry. A fifth scene clears the oldest before attempting the new admission, and
+the new first step waits for that clear and any earlier typed clears to commit. A failed
+clear holds the queued first step, not an extra uncleared scene in the store. Replacement
+alone does not cut old scenes. Failed cut retries share the clear backoff, from 500 ms up to
+30 seconds [guess], without resetting while a cut is in flight.
+
+`StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
+Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
+thread deletion holds late drawing frames until the outcome: a refusal releases them in
+order, while a hide or removal discards them and retires the canonical scenes. Reconnect
+waits for pending writes and clear debt before freezing checked descriptors and whole-event
+chunks. A scene whose producer-built descriptor or chunks fail validation or frame encoding
+is omitted whole and cleared durably before the remaining scenes are described. Any transition
+that drains or discards drawing work rechecks run completion, including clear and deletion.
+Quit drains in-flight typed writes, supersedes failed cut debt with its clear and waits for
+the clear acknowledgement within the existing deadline; an unconfirmed clear is incomplete.
+During staging, a v1 recovery is sent only when typed scenes exist; the production
+fixture and an empty placeholder-only recovery remain legacy until B3 switches both ends.
+
 ## Ids and staleness
 
 The coordinator hands out thread and run ids, starting above the store's high-water marks, so an
 id is never reused, even across restarts and deletions. One run is current at a time. An engine
 event, a control input or a timer that names any other run is **stale**: it returns `Stale` and
-changes nothing. That's how a step an engine finishes after `Stop` is refused, and the store
-refuses it again, since it only takes events for active runs. Store replies are the exception:
+changes nothing. A step an engine finishes after `Stop` never gets that far, since cancelling a
+round closes its pump (see [engines and rounds](#engines-and-rounds)); the coordinator would
+refuse it as stale, and the store again, since it only takes events for active runs. Store replies are the exception:
 those for a run that is still ending are accepted, so its outcome is still written and a failure
 still reported (see [the store contract](#the-store-contract)).
 
@@ -28,14 +96,14 @@ sequenceDiagram
   C->>DB: BeginTurn (thread, run, user text)
   C->>S: RunState Thinking
   DB-->>C: TurnStored
-  C->>E: StartEngine
-  E-->>C: Text
+  C->>E: StartEngine (RunRequest)
+  E-->>C: TextDelta
   C->>S: RunState Answering, AssistantText
-  E-->>C: Step
+  E-->>C: ToolCallStarted (draw), ToolArgsDelta (one closed line)
   C->>DB: CommitStep (text so far and the step)
   DB-->>C: StepStored
   C->>S: StepCommit
-  E-->>C: Done
+  E-->>C: ToolCallReady, Finished (Completed)
   C->>DB: EndRun (remaining text, done)
   DB-->>C: RunStored
   C->>S: RunState Done
@@ -48,7 +116,7 @@ sequenceDiagram
   starts only after its predecessor is stored. The shell still hears the old run's `Interrupted`
   and the new run's `Thinking` at once. A held turn that is stopped or replaced in turn is
   still stored, then its outcome, in order.
-- **A step is sent only after it's committed.** When the engine says it's done while a step is
+- **A step is sent only after it's committed.** When the engine's round completes while a step is
   still in the store, the run ends right after that step is stored and sent.
 - **Data keeps the engine's order.** Text the engine produces after a pending step waits behind
   it and goes out right after its `StepCommit`. Control inputs such as `Stop` are handled at
@@ -96,7 +164,7 @@ never lost:
 | The shell took no data for 2 s | `interrupted(view_stalled)` | at once |
 | Its thread is being deleted | `interrupted(deleted)` | at once |
 | A budget ran out | `failed(budget)` | at once |
-| The engine failed or sent an oversized step | `failed(engine)` | at once |
+| The engine failed, its round ended truncated or interrupted, or it sent an oversized step or a call nothing answers | `failed(engine)` | at once |
 | A store write failed | `failed(store)` | at once |
 
 `revealed` keeps only indices of steps already sent to the shell, each once, in order.
@@ -130,21 +198,74 @@ Budgets are absolute for the run and never reset (OSC-105 boundary 5): 120 s of 
 of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, and the text or
 step that went over is never sent. The wall clock starts when the turn is accepted, so time a held
 turn spends waiting counts against it, and it stops applying once the engine says it's done, even
-while the run's last writes are still pending. Model rounds, tool calls and speech budgets arrive
-with the engines that use them.
+while the run's last writes are still pending. The deadline and the text counter belong to the run,
+so they carry across rounds. Model rounds, tool calls and speech budgets arrive with the engines
+that use them.
+
+## Engines and rounds
+
+An engine (`crates/brain/src/engines/`) implements one trait: `Engine::start` takes a `RunRequest`
+(the run, its thread and the turn) and plays **one model round**, sending `TurnEvent`s: `TextDelta`,
+`ToolCallStarted { call, name }` (always before the call's first argument delta),
+`ToolArgsDelta`, `ToolCallReady` with the whole arguments, `OutputItem` for native items kept for
+replay, and `Finished` with `Completed`, `Truncated`, `Failed` or `Interrupted`. Call ids are the
+provider's, ASCII and at most 64 bytes, refused rather than cut. `Debug` prints only the sizes of
+text, arguments, turns and items.
+
+One round per `start` is the direct-provider rule: an engine that calls a model API ends its
+round when the model's response does, and the coordinator starts the next round itself. An engine
+that runs its own tool loop (Claude Code, slice 8) may play several model rounds inside one start;
+the coordinator never dispatches those calls again.
+
+```mermaid
+flowchart LR
+  E[engine round] -->|TurnEvent| P[the round's pump]
+  P -->|Input::Engine run| Q[engine queue, 16] --> C[coordinator]
+  C -->|CancelEngine| X[drop Cancel] -.aborts.-> P
+```
+
+- **Each start gets its own pump and channel.** The pump forwards the round's events tagged with
+  its run, and closes after the first `Finished`, so nothing of a finished round reaches the
+  coordinator, even under a later round of the same run.
+- **A round that ends without `Finished` is `Truncated`**, even after text: the pump reports it,
+  in one place for every engine, and the run fails as `failed(engine)`, never `done`.
+- **The brain owns cancellation.** Dropping the round's `Cancel` aborts the pump and the engine's
+  future with it, even while the pump waits on a full engine queue, so `Stop` under backpressure
+  ends the run at once, and a local `Stop` is never reported as truncation.
+- **A round's end isn't the run's.** The coordinator decides. `Completed` ends the run as `done`;
+  `Truncated`, `Failed` and an engine's `Interrupted` fail an active run, since only the coordinator
+  interrupts runs. Only events for a run that already ended are stale.
+  shortcut: a completed round ends the run whatever calls it made, which only the fixture's
+  draw-only rounds rely on; the tool loop (slice 3's PR 13b) answers every call, a draw
+  included, and starts the next round. Until then a call to any tool but `draw`, or a second
+  call, fails the run.
+- **The draw call's arguments are split into steps** in `coordinator/run.rs`, one per closed
+  line. The open line is charged against the 256-byte label cap before it grows, so arguments with
+  no newline fail the run at the cap. `ToolCallReady` must match what streamed; a last line
+  with no newline is one more step.
+
+**One run at a time.** The coordinator keeps one current run, and a new turn replaces it,
+whatever its thread. That's a limit of slice 3, not of the seam: engines, and everything new that
+works for a run, take the run id from the request and never ask for "the current run", so runs
+keyed by id (OSC-56) need no rework.
 
 ## The fixture engine
 
 Until slice 3 brings real engines, every run plays a fixture script
-(`crates/brain/fixtures/default.txt`, or in a dev build the file `KUMOCHI_FIXTURE` names). One
-line per event: `<ms> text <words>`, `<ms> fill <bytes>`, `<ms> step <label>`, `<ms> fail`, and
-`late <label>`, a step the engine still finishes after it's cancelled. The coordinator refuses
-that late step as stale, and the store would refuse it too.
+(`crates/brain/fixtures/default.txt`, or in a dev build the file `KUMOCHI_FIXTURE` names) through
+`engines/fixture.rs`. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
+`<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
+cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
+and the store would refuse it too.
+
+shortcut: steps stream as one `draw` call: the first step starts it, each step is one
+newline-terminated argument delta, and the script's end sends `ToolCallReady` with the joined lines,
+then `Finished(Completed)`. Slice 4's B3 replaces this adapter with recorded draw arguments.
 
 ## Around the coordinator
 
 The store runs on its own thread, which owns the connection and keeps the store contract above:
-operations in order, one transaction each, every one answered. The fixture engine, the store
+operations in order, one transaction each, every one answered. The engine's pump, the store
 thread and the deadline timer report back as inputs, and the pipes' readers and writers are
 described in `ipc.md`. A shell that disconnects ends the current run as
 `interrupted(shell_lost)`. Every Stop and Clear the control reader read before the pipe ended is

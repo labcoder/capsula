@@ -8,8 +8,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::Secret;
 
+mod account;
+mod error;
 mod pages;
+mod scenes;
+#[macro_use]
+mod settings;
+mod threads;
+pub use account::{
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
+    MAX_EMAIL_BYTES, PlanState,
+};
+pub use error::{
+    Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
+};
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
+pub use scenes::{
+    MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_SCENE_STAGING_BYTES, SceneCut, SceneCuts,
+    SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
+};
+pub use settings::{
+    AssistantName, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp, SettingsView,
+    UserName,
+};
+pub use threads::{
+    Effort, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelSlug, SlugError, ThreadKind,
+    ThreadOp, ThreadTitle,
+};
 
 /// The most rows one page carries [guess].
 pub const MAX_PAGE_ROWS: usize = 50;
@@ -51,19 +76,11 @@ pub struct Hello {
     pub capability: Capability,
 }
 
-impl Hello {
-    /// A copy with the capability zeroed, for the pipe tap.
-    #[must_use]
-    pub fn redacted(&self) -> Self {
-        Self {
-            build_id: self.build_id.clone(),
-            capability: Secret::new([0; CAPABILITY_LEN]),
-        }
-    }
-}
-
 /// The most steps one run may draw (architecture v1 §5.2).
 pub const MAX_STEPS: usize = 64;
+
+/// New scene v1 steps committed by one run, independently of a scene's lifetime step cap.
+pub const MAX_DRAW_STEPS_PER_RUN: usize = 64;
 
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
@@ -161,6 +178,41 @@ pub enum ControlToBrain {
         /// A resend, at a connection's start, of a delete the shell sent on an earlier one.
         resend: bool,
     },
+    /// Change a setting; answered by exactly one [`ControlToShell::Settings`].
+    Settings(SettingsOp),
+    /// Rename a task or set a thread's model; nothing answers it.
+    ThreadOp(ThreadOp),
+    /// A scene-wide Stop, applied even when a later run appended to one of its scenes.
+    StopScenes {
+        /// The run fenced locally; scene cuts are not restricted to this run's commits.
+        run: RunId,
+        /// Every known visible v1 scene's activated revision and finished objects.
+        cuts: SceneCuts,
+    },
+    /// The first paint containing a step; ordered before later cuts on this control pipe.
+    StepShown {
+        /// The run that committed the step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Zero-based lifetime commit index, not an index into the kept steps.
+        index: u32,
+    },
+    /// Preparation failed; the entire scene stops at this cut, through the ordinary cut FIFO.
+    StepFailed {
+        /// The run that committed the failed step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// The failed step's zero-based lifetime index.
+        index: u32,
+        /// A content-free reason; never a parser diagnostic or model text.
+        reason: SceneFailure,
+        /// The activated revision and finished objects; zero activation clears the scene.
+        cut: kumochi_scene::StopCut,
+    },
+    /// Something the user asked of the account; answered by one [`ControlToShell::Account`].
+    AccountOp(AccountOp),
 }
 
 /// What a thread's delete came to.
@@ -224,6 +276,33 @@ pub enum ControlToShell {
         /// The thread the submit named.
         thread: Option<ThreadId>,
     },
+    /// The settings: once per connection before `Scenes`, once per
+    /// [`ControlToBrain::Settings`] from this connection, in order, and after a change an earlier
+    /// connection sent is saved.
+    Settings {
+        /// The settings as saved.
+        view: SettingsView,
+        /// It answers this connection's oldest unanswered change. Otherwise it's the settled
+        /// settings, sent on its own.
+        answer: bool,
+    },
+    /// Something the user should know went wrong. A refused settings change from this
+    /// connection sends it just before that change's answer.
+    Error(UserError),
+    /// Authoritative v1 scene membership before snapshots, replacing `Scenes` at the B3 switch.
+    ScenesV1 {
+        /// At most four descriptors; each full recovery log has its own advertised length.
+        scenes: kumochi_scene::text::Bounded<SceneDescriptorV1, MAX_VISIBLE_SCENES>,
+    },
+    /// A requested drawing never produced a visual outcome; separate from preparation errors.
+    NoVisual {
+        /// The run that requested a drawing.
+        run: RunId,
+    },
+    /// The account: once per connection after `Settings` and before `Scenes`, after every
+    /// change, and once per [`ControlToBrain::AccountOp`]. It carries the display email, so
+    /// the tap never records it.
+    Account(AccountView),
 }
 
 /// Shell to brain, on the data pipe.
@@ -254,7 +333,7 @@ pub enum DataToBrain {
 }
 
 /// Brain to shell, on the data pipe.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DataToShell {
     /// More of the assistant's answer.
     AssistantText {
@@ -321,14 +400,61 @@ pub enum DataToShell {
         /// At most [`MAX_VISIBLE_SCENES`].
         scenes: Vec<SceneId>,
     },
+    /// A live scene's immutable header, on the same FIFO before its first typed step.
+    SceneBegin {
+        /// The scene, allocated by the brain.
+        scene: SceneId,
+        /// Typed header and layout version used for live and recovery preparation.
+        header: SceneHeader,
+    },
+    /// One durable v1 step. Scene ownership preserves it across Stop's run revocation.
+    SceneStepCommit {
+        /// The run that committed the step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Zero-based lifetime commit index.
+        index: u32,
+        /// Original input, never a normalized or pre-expanded replacement.
+        step: kumochi_scene::Step,
+    },
+    /// A bounded chunk of the complete ordered step/cut log; install only on the last chunk.
+    SceneSnapshotV1 {
+        /// Chunk zero includes the header; later chunks omit it.
+        chunk: SceneSnapshotChunk,
+    },
+    /// The brain accepted this scene-wide cut, after delivering every prior durable step.
+    SceneCutApplied {
+        /// The scene whose outstanding-cut hold may now be released.
+        scene: SceneId,
+        /// The last committed revision before the cut, not the cut's activated bound.
+        revision: u32,
+        /// The authoritative cut applied to the mirror at exactly that revision.
+        cut: kumochi_scene::StopCut,
+    },
+    /// A draw call ended; committed steps remain even when its suffix was incomplete.
+    SceneEnd {
+        /// The originating run.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// False after malformed, truncated, invalid or differing final arguments.
+        complete: bool,
+    },
 }
+
+#[cfg(test)]
+#[path = "message/scene_frame_tests.rs"]
+mod scene_frame_tests;
 
 #[cfg(test)]
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Deleted, Hello, Incarnation, MAX_STEP_LABEL, MAX_STEPS, MAX_VISIBLE_SCENES, RunId,
-        SceneDescriptor, SceneId, Secret, Step, ThreadId,
+        Deleted, Effort, Hello, Incarnation, MAX_PAGE_BYTES, MAX_PAGE_ROWS, MAX_SLUG_BYTES,
+        MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, MAX_VISIBLE_SCENES, ModelChoice, ModelSlug,
+        RunId, SceneDescriptor, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
+        ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -417,6 +543,37 @@ mod tests {
             scenes: vec![SCENE; MAX_VISIBLE_SCENES],
         };
         assert_eq!(payload(&removed, Pipe::Data), 2 + 4 * 10);
+    }
+
+    /// Titles are at most 80 characters when written, so only an older or planted one ever needs
+    /// the page budget's shortening.
+    #[test]
+    fn a_full_page_of_the_longest_titles_and_choices_fits_the_page_cap() {
+        let row = ThreadRow {
+            id: ThreadId(u64::MAX),
+            title: "🌥".repeat(MAX_TITLE_CHARS),
+            updated_ms: i64::MIN,
+            kind: ThreadKind::Thread,
+            choice: Some(ModelChoice {
+                model: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
+                effort: Effort::XHigh,
+            }),
+        };
+        let list = DataToShell::ThreadList {
+            request: u32::MAX,
+            threads: vec![row; MAX_PAGE_ROWS],
+            next: Some(ThreadCursor {
+                updated_ms: i64::MIN,
+                id: ThreadId(u64::MAX),
+                rank_bits: u64::MAX,
+            }),
+        };
+        // Per row: id, a 2-byte length and 320 bytes of title, time, kind, Some, a 1-byte length
+        // and 64 bytes of slug, effort.
+        let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1;
+        let payload = payload(&list, Pipe::Data);
+        assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
+        assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
     }
 
     #[test]

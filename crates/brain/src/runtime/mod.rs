@@ -1,20 +1,21 @@
-//! The brain's systems around the coordinator: the store thread, the fixture engine, timers,
+//! The brain's systems around the coordinator: the store thread, the engine, timers,
 //! and one shell connection's readers and writers.
 //!
 //! Each pipe has its own reader and writer, polled together in one task, so a reader never
 //! waits behind a write (CAPS-8 finding 1). Esc reaches the coordinator even while the data
 //! writer is blocked on a shell that stopped reading.
 
+pub(crate) mod account;
+mod controls;
 mod data;
-pub(crate) mod fixture;
 mod recovery;
+mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
@@ -25,15 +26,19 @@ use kumochi_protocol::message::{
 use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
+use crate::config::Config;
+use crate::connections::account::Input as AccountInput;
 use crate::coordinator::{Coordinator, Effect, Input};
+use crate::engines::{self, Cancel, Engine};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
+use account::Accounts;
+use controls::read_control;
 use data::{DataQueue, Owner};
-use fixture::Fixture;
 use recovery::Recovery;
 use store_thread::StoreThread;
 
@@ -96,14 +101,15 @@ pub(crate) enum Quit {
 pub(crate) struct Brain {
     coordinator: Coordinator,
     store: Option<StoreThread>,
-    fixture: Arc<Fixture>,
+    engine: Box<dyn Engine>,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
     /// Engine events, taken only while the data queue has room.
     engine_tx: mpsc::Sender<Input>,
     engine_events: mpsc::Receiver<Input>,
-    engine: Option<(RunId, oneshot::Sender<()>)>,
+    /// The current run's round, aborted when its `Cancel` drops.
+    round: Option<(RunId, Cancel)>,
     deadline: Option<(RunId, Instant)>,
     /// When owed writes are tried again.
     retry_at: Option<Instant>,
@@ -111,6 +117,17 @@ pub(crate) struct Brain {
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
     chunk_target: usize,
+    /// The settings, owned here: they never touch runs or the store.
+    config: Config,
+    /// Settings changes waiting for the one write in flight, answered in order.
+    settings_ops: VecDeque<settings::Queued>,
+    /// The settings write in flight, off the core loop: a durable replace can take any time.
+    config_write: Option<settings::Write>,
+    /// The account system; its credential work runs on its own thread.
+    account: Accounts,
+    /// Holds the next settings write until it sends or drops.
+    #[cfg(test)]
+    config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
     /// Hears what tests wait on instead of sleeping.
     #[cfg(test)]
     observer: mpsc::UnboundedSender<Seen>,
@@ -122,7 +139,7 @@ pub(crate) struct Brain {
 
 /// What a test can wait for instead of sleeping.
 #[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Seen {
     /// The core queued this op for the store thread.
     StoreOpQueued(crate::coordinator::StoreOp),
@@ -148,19 +165,24 @@ pub(crate) enum Seen {
     DeleteAnswered,
     /// A quit ended the current run and now waits for the store.
     QuitDraining,
+    /// A settings write is on disk and became the settings.
+    SettingsCommitted,
 }
 
 impl Brain {
-    /// Starts the store thread. The store must already be recovered, and `high_water` is its
-    /// highest thread and run ids.
+    /// Starts the store thread. The store must already be recovered, `main_thread` is its main
+    /// thread, and `high_water` is its highest thread and run ids.
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
     pub(crate) fn new(
         store: Store,
+        main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
-        fixture: Fixture,
+        engine: Box<dyn Engine>,
+        config: Config,
+        account: Accounts,
     ) -> std::io::Result<Self> {
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
@@ -175,28 +197,41 @@ impl Brain {
             gates: Some(gates_heard),
             ..store_thread::Schedule::default()
         };
+        let drawing_scenes = store.drawing_scenes();
+        let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
+        let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
-        Ok(Self {
-            coordinator: Coordinator::new(last_thread, last_run, scenes),
+        let mut brain = Self {
+            coordinator,
             store: Some(store),
-            fixture: Arc::new(fixture),
+            engine,
             inputs_tx,
             inputs,
             engine_tx,
             engine_events,
-            engine: None,
+            round: None,
             deadline: None,
             retry_at: None,
             epoch: 0,
-            chunk_target: recovery::CHUNK_TARGET,
+            chunk_target: crate::drawing::CHUNK_TARGET,
+            config,
+            settings_ops: VecDeque::new(),
+            config_write: None,
+            account,
+            #[cfg(test)]
+            config_gate: None,
             #[cfg(test)]
             observer,
             #[cfg(test)]
             seen: Some(seen),
             #[cfg(test)]
             gates,
-        })
+        };
+        brain
+            .apply(recovery_clears, None)
+            .expect("offline effects cannot fill a shell queue");
+        Ok(brain)
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -227,7 +262,7 @@ impl Brain {
     fn control_taken(&self, input: &Input) {
         if matches!(
             input,
-            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. }
+            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. } | Input::ThreadOp(_)
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
@@ -245,6 +280,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.pump_settings_offline();
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
         let mut undeleted = self.coordinator.refused_delete();
@@ -252,6 +288,7 @@ impl Brain {
             while self.coordinator.ending_runs() > 0
                 || self.coordinator.clears_in_flight()
                 || self.coordinator.deletes_pending()
+                || self.coordinator.drawing_in_flight()
             {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
@@ -268,7 +305,7 @@ impl Brain {
                 self.offline(input);
             }
             self.offline(Input::ClearVisible);
-            while self.coordinator.clears_in_flight() {
+            while self.coordinator.clears_in_flight() || self.coordinator.drawing_in_flight() {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
                 };
@@ -278,7 +315,9 @@ impl Brain {
                     return false;
                 }
             }
-            true
+            self.coordinator.settled()
+                && !self.coordinator.deletes_pending()
+                && self.coordinator.drawing_available()
         })
         .await
         .unwrap_or(false);
@@ -289,6 +328,8 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
+        self.account.close(deadline).await;
         if cleared && !undeleted {
             Quit::Complete
         } else {
@@ -304,6 +345,8 @@ impl Brain {
     /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
+        let deadline = Instant::now() + CLOSE_WAIT;
+        self.pump_settings_offline();
         let settled = tokio::time::timeout(CLOSE_WAIT, async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {
@@ -324,16 +367,29 @@ impl Brain {
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
             }
         }
+        self.drain_settings_by(deadline).await;
+        self.account.close(deadline).await;
     }
 
-    /// Keeps runs that ended moving through the store while no shell is connected. Never
-    /// returns; drop it when a shell connects.
+    /// Keeps runs that ended moving through the store, and settings changes being written,
+    /// while no shell is connected. Never returns; drop it when a shell connects.
     pub(crate) async fn idle(&mut self) {
+        self.pump_settings_offline();
         loop {
             let input = tokio::select! {
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
+                done = settings::written(&mut self.config_write) => {
+                    let settled = self.settings_done(done, None);
+                    debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+                    continue;
+                }
+                input = self.account.next() => {
+                    let applied = self.account_input(input, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    continue;
+                }
             };
             self.offline(input);
         }
@@ -411,17 +467,19 @@ impl Brain {
             loop {
                 tokio::select! {
                     biased;
-                    Some(message) = controls.recv() => self.control_offline(message, tap),
+                    Some((message, len)) = controls.recv() => {
+                        self.control_offline(message, len, tap);
+                    }
                     _ = &mut control_reader => break,
                     () = &mut grace => break,
                 }
             }
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
-        while let Ok(message) = controls.try_recv() {
+        while let Ok((message, len)) = controls.try_recv() {
             #[cfg(test)]
             self.observer.send(Seen::ControlDrained).ok();
-            self.control_offline(message, tap);
+            self.control_offline(message, len, tap);
         }
         let ended = match quit.get() {
             Some(deadline) => Ended::Quit { deadline },
@@ -432,19 +490,26 @@ impl Brain {
         ended
     }
 
-    /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
-    fn control_offline(&mut self, message: ControlToBrain, tap: &mut Tap) {
-        tap.record(Pipe::Control, Direction::ToBrain, &message);
-        if let Ok(Some(input)) = control_input(message) {
-            #[cfg(test)]
-            self.control_taken(&input);
-            self.offline(input);
-        }
-    }
-
     /// The core loop: frames from the shell, completions from the systems, the deadline and
     /// the watchdog, each turned into coordinator inputs and their effects applied. Nothing in
     /// it awaits a pipe, the store or an engine. Control and store replies are always taken.
+    /// A page read from an older connection is dropped, and one that arrives while the data
+    /// queue is full is held until it has room; any other input passes.
+    fn admit_page(&mut self, input: Input, link: &mut Link<'_, '_>) -> Option<Input> {
+        if let Input::PageRead { epoch, .. } = &input {
+            if *epoch != self.epoch {
+                return None;
+            }
+            if link.queue.borrow().bytes() >= DATA_CAP {
+                link.held_pages.push_back(input);
+                #[cfg(test)]
+                self.observer.send(Seen::PageHeld).ok();
+                return None;
+            }
+        }
+        Some(input)
+    }
+
     /// New turns wait while too many runs are ending or the data queue is full, and engine
     /// events while the data queue is full, so memory stays bounded however slow the store or
     /// the shell is. A turn is the only way to add a run, and so a `RunEnd`, so the frames
@@ -457,7 +522,7 @@ impl Brain {
     /// a time whenever the data queue has room, ahead of engine events.
     async fn core(
         &mut self,
-        controls: &mut mpsc::Receiver<ControlToBrain>,
+        controls: &mut mpsc::Receiver<(ControlToBrain, usize)>,
         turns: &mut mpsc::Receiver<Turn>,
         pages: &mut mpsc::Receiver<Input>,
         room: &Notify,
@@ -467,18 +532,15 @@ impl Brain {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
         let barrier = Instant::now() + SCENES_WAIT;
-        // A clear whose write failed while no shell was connected is retried now at the latest.
-        self.retry_at = None;
-        let retried = self.coordinator.retry_clears();
-        if self.apply(retried, Some(&mut link)).is_err() {
-            return Ended::Lost;
+        if let Err(ended) = self.open(&mut link) {
+            return ended;
         }
         loop {
             if link.recovery.is_none() && self.coordinator.settled() {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
                 };
-                link.recovery = Some(described);
+                link.recovery = described;
             }
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
@@ -488,12 +550,8 @@ impl Brain {
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
-                Some(message) = controls.recv() => {
-                    link.tap.record(Pipe::Control, Direction::ToBrain, &message);
-                    if message == ControlToBrain::Pong {
-                        ping_sent = None;
-                    }
-                    match control_input(message) {
+                Some((message, len)) = controls.recv() => {
+                    match self.control_frame(message, len, &mut link, &mut ping_sent) {
                         Ok(Some(input)) => input,
                         Ok(None) => continue,
                         Err(ended) => return ended,
@@ -505,6 +563,18 @@ impl Brain {
                 () = std::future::ready(()), if feed => {
                     let chunk = link.recovery.as_mut().and_then(Recovery::next_chunk);
                     if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
+                written = settings::written(&mut self.config_write) => {
+                    if self.settings_done(written, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
+                input = self.account.next() => {
+                    if self.account_input(input, Some(&mut link)).is_err() {
                         return Ended::Lost;
                     }
                     continue;
@@ -537,17 +607,9 @@ impl Brain {
                     }
                 }
             };
-            if let Input::PageRead { epoch, .. } = &input {
-                if *epoch != self.epoch {
-                    continue;
-                }
-                if !take_engine {
-                    link.held_pages.push_back(input);
-                    #[cfg(test)]
-                    self.observer.send(Seen::PageHeld).ok();
-                    continue;
-                }
-            }
+            let Some(input) = self.admit_page(input, &mut link) else {
+                continue;
+            };
             #[cfg(test)]
             self.control_taken(&input);
             let Ok(effects) = self.coordinator.handle(input) else {
@@ -564,17 +626,46 @@ impl Brain {
         }
     }
 
+    /// A connection's first frames: the settings and the account, then anything owed from while
+    /// no shell was connected.
+    fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        self.settings_now(link).map_err(|Full| Ended::Lost)?;
+        self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+        self.account_input(AccountInput::Connected, Some(link))
+            .map_err(|Full| Ended::Lost)?;
+        // A clear whose write failed while no shell was connected is retried now at the latest.
+        self.retry_at = None;
+        let retried = self.coordinator.retry_clears();
+        self.apply(retried, Some(link)).map_err(|_| Ended::Lost)
+    }
+
     /// New turns wait while too many runs are ending or too many writes are owed.
     fn room_for_turns(&self) -> bool {
         self.coordinator.ending_runs() < MAX_ENDING && self.coordinator.debt() < DEBT_WATERMARK
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
-    fn describe(&self, link: &mut Link<'_, '_>) -> Result<Recovery, Full> {
+    fn describe(&mut self, link: &mut Link<'_, '_>) -> Result<Option<Recovery>, Full> {
+        let drawings = self.coordinator.drawing_snapshot().map_err(|_| Full)?;
+        if !drawings.skipped.is_empty() {
+            let effects = self.coordinator.failed_drawings(drawings.skipped);
+            self.apply(effects, None)
+                .expect("offline effects cannot fill a shell queue");
+            return Ok(None);
+        }
+        if !drawings.scenes.is_empty() {
+            link.control(&ControlToShell::ScenesV1 {
+                scenes: drawings.scenes,
+            })?;
+            self.coordinator.drawing_described();
+            return Ok(Some(Recovery::drawings(drawings.chunks)));
+        }
         let visible = self.coordinator.visible();
         let scenes = visible.iter().map(descriptor).collect();
         link.control(&ControlToShell::Scenes { scenes })?;
-        Ok(Recovery::new(visible, self.chunk_target))
+        let recovery = Recovery::new(visible, self.chunk_target);
+        self.coordinator.drawing_described();
+        Ok(Some(recovery))
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
@@ -597,8 +688,10 @@ impl Brain {
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
-                        let failed = self.inputs_tx.send(failure);
-                        debug_assert!(failed.is_ok(), "the brain holds its own receiver");
+                        if let Some(failure) = failure {
+                            let failed = self.inputs_tx.send(failure);
+                            debug_assert!(failed.is_ok(), "the brain holds its own receiver");
+                        }
                     }
                 }
                 Effect::Control(message) => {
@@ -610,6 +703,17 @@ impl Brain {
                     }
                 }
                 Effect::Data(message) => {
+                    if link.as_ref().is_some_and(|shell| shell.recovery.is_none())
+                        && matches!(
+                            message,
+                            DataToShell::SceneBegin { .. }
+                                | DataToShell::SceneStepCommit { .. }
+                                | DataToShell::SceneCutApplied { .. }
+                                | DataToShell::SceneEnd { .. }
+                        )
+                    {
+                        continue;
+                    }
                     if let Some(shell) = link.as_deref_mut()
                         && shell.data(&message).is_err()
                     {
@@ -617,10 +721,10 @@ impl Brain {
                         link = None;
                     }
                 }
-                Effect::StartEngine { run, text: _ } => {
-                    let cancel =
-                        fixture::start(Arc::clone(&self.fixture), run, self.engine_tx.clone());
-                    self.engine = Some((run, cancel));
+                Effect::StartEngine { request } => {
+                    let run = request.run;
+                    let cancel = engines::start(&*self.engine, request, self.engine_tx.clone());
+                    self.round = Some((run, cancel));
                 }
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
@@ -636,13 +740,8 @@ impl Brain {
                     }
                 }
                 Effect::CancelEngine { run } => {
-                    if let Some((engine_run, cancel)) = self.engine.take() {
-                        if engine_run == run {
-                            // An engine that already finished has dropped its receiver.
-                            let _finished = cancel.send(());
-                        } else {
-                            self.engine = Some((engine_run, cancel));
-                        }
+                    if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
+                        self.round = None;
                     }
                 }
                 Effect::ArmRetry { after } => {
@@ -683,58 +782,6 @@ fn watchdog(
     Ok(running
         .filter(|_| link.queue.borrow().stalled(now.into_std()))
         .map(|run| Input::Stalled { run }))
-}
-
-/// Reads the control pipe. A `Quitting` latches `quit` before the reader returns, so the
-/// connection ends as a quit whatever ends first.
-async fn read_control(
-    pipe: &mut (impl AsyncRead + Unpin),
-    frames: &mpsc::Sender<ControlToBrain>,
-    quit: &Cell<Option<Instant>>,
-) -> Ended {
-    loop {
-        match ipc::read::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some(ControlToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some(ControlToBrain::Quitting)) => {
-                let deadline = Instant::now() + CLOSE_WAIT;
-                quit.set(Some(deadline));
-                return Ended::Quit { deadline };
-            }
-            Ok(Some(message)) => {
-                if frames.send(message).await.is_err() {
-                    return Ended::Lost;
-                }
-            }
-            Ok(None) => return Ended::Lost,
-            Err(error) => {
-                tracing::warn!(%error, "control pipe failed");
-                return Ended::Lost;
-            }
-        }
-    }
-}
-
-/// The input a control frame asks of the coordinator, if any; a clear of more scenes than can
-/// be visible breaks the connection. The readers end the connection on Hello and Quitting, and
-/// the core answers Pong itself.
-fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
-    Ok(match message {
-        ControlToBrain::Stop { run, revealed } => Some(Input::Stop { run, revealed }),
-        ControlToBrain::ClearDrawing { scene_ids } if scene_ids.len() > MAX_VISIBLE_SCENES => {
-            return Err(Ended::Broken("more scenes cleared than can be visible"));
-        }
-        ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
-        ControlToBrain::DeleteThread {
-            thread,
-            after_turns,
-            resend,
-        } => Some(Input::Delete {
-            thread,
-            after_turns,
-            resend,
-        }),
-        ControlToBrain::Pong | ControlToBrain::Hello(_) | ControlToBrain::Quitting => None,
-    })
 }
 
 /// A visible scene as `Scenes` names it.
@@ -868,9 +915,13 @@ impl<'a, 't> Link<'a, 't> {
     }
 
     fn control(&mut self, message: &ControlToShell) -> Result<(), Full> {
-        self.tap.record(Pipe::Control, Direction::ToShell, message);
         match frame::encode(message, Pipe::Control) {
-            Ok(frame) => self.out.try_send(frame).map_err(|_| Full),
+            Ok(frame) => {
+                let len = frame.len() - frame::HEADER_LEN;
+                self.tap
+                    .record(Pipe::Control, Direction::ToShell, message, len);
+                self.out.try_send(frame).map_err(|_| Full)
+            }
             Err(error) => {
                 tracing::error!(%error, "a control message didn't encode");
                 Ok(())
@@ -888,7 +939,12 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
             DataToShell::ScenesRemoved { .. } => Owner::Marker,
-            DataToShell::SceneSnapshot { scene, .. } => Owner::Scene(*scene),
+            DataToShell::SceneSnapshot { scene, .. }
+            | DataToShell::SceneBegin { scene, .. }
+            | DataToShell::SceneStepCommit { scene, .. }
+            | DataToShell::SceneCutApplied { scene, .. }
+            | DataToShell::SceneEnd { scene, .. } => Owner::Scene(*scene),
+            DataToShell::SceneSnapshotV1 { chunk } => Owner::Scene(chunk.scene),
         };
         let Ok(frame) = frame::encode(message, Pipe::Data) else {
             tracing::error!("a data message didn't encode");

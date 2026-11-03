@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-const MIGRATIONS: &[&str] = &[V1, V2];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -69,19 +69,55 @@ const V2: &str = "
 CREATE TABLE purge_pending (id INTEGER PRIMARY KEY CHECK (id = 1)) STRICT;
 ";
 
+/// Each thread's kind, where its title came from, and the model it runs on. `kind` keeps these two
+/// values for good: changing a `CHECK` rebuilds the table, so later facts get their own columns.
+/// `model` and `effort` are free text, checked against the catalog per run, so a catalog change
+/// never needs a migration; a column `CHECK` may name an earlier column, so the pair rule needs no
+/// rebuild either.
+const V3: &str = "
+ALTER TABLE threads ADD COLUMN kind TEXT NOT NULL DEFAULT 'thread'
+    CHECK (kind IN ('main', 'thread'));
+ALTER TABLE threads ADD COLUMN title_source TEXT NOT NULL DEFAULT 'words'
+    CHECK (title_source IN ('words', 'model', 'user'));
+ALTER TABLE threads ADD COLUMN model TEXT;
+ALTER TABLE threads ADD COLUMN effort TEXT CHECK ((model IS NULL) = (effort IS NULL));
+CREATE UNIQUE INDEX threads_main ON threads (kind) WHERE kind = 'main';
+";
+
 /// Applies every migration past the file's version, each in its own transaction.
 pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+    migrate_to(conn, MIGRATIONS.len())
+}
+
+/// Applies the migrations up to `target`, capped at the known version; tests build older files.
+pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let known = MIGRATIONS.len();
+    let target = target.min(known);
     let applied = usize::try_from(found)
         .ok()
         .filter(|&applied| applied <= known)
         .ok_or(StoreError::NewerSchema { found, known })?;
-    for (version, sql) in (1_i64..).zip(MIGRATIONS).skip(applied) {
+    for (version, sql) in (1_i64..).zip(&MIGRATIONS[..target]).skip(applied) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_target_past_the_known_migrations_applies_only_known_versions() {
+        let mut conn = Connection::open_in_memory().expect("opens");
+        migrate_to(&mut conn, usize::MAX).expect("clamps target");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, i64::try_from(MIGRATIONS.len()).expect("fits"));
+    }
 }

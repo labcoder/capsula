@@ -1,16 +1,84 @@
-# The threads panel
+# Panels
 
-The dock's **Threads…** command opens an interactive surface anchored against the dock,
-clamped to the work area like the typing panel. Opening a thread selects the thread that the
-next typed turn continues; **New thread** clears that selection and opens the typing panel.
-Neither action sends a thread mutation or creates a row until a turn is submitted.
+## Settings panel
 
-The open thread's **Delete** asks first, in a gpui-kit alert dialog. The dialog names what
+The status surface also has **Settings…**. It opens a separate retained panel with the same
+48-by-34-rem initial size and `Layout::anchored_panel` placement as Tasks. **General** contains
+the assistant's name and your optional name; **Accounts** is reserved and empty for now.
+Labels, inline validation, saving and offline feedback use the shell's Fluent catalog.
+App identity continues to come from `protocol::constants`; assistant labels use the name
+received from the brain, or `DEFAULT_ASSISTANT_NAME` before any `SettingsView`, as a Fluent
+argument, not the product name.
+
+Settings does not hide on deactivation. Esc operates only when Settings is focused: stop,
+clear, cancel the active field edit, then dismiss on the next Esc. Stop and clear leave the
+edit intact. Its close button dismisses it too. The status panel stays hidden until Settings
+closes, so Retry and Quit there require closing Settings first; native-menu Retry still works.
+Opening the typing panel
+or Tasks, or moving the dock, uses the same dismissal path. On dismissal, an active field
+saves as on blur. If local validation or sending fails, **Settings not saved** remains on the
+dock and the retained draft and error are available on reopening. The previous foreground is restored through the existing platform
+presence interface. The native focus handoff requires a real Window and remains an owner
+hand check; pure Esc and save ordering are unit-tested. A new Settings panel inherits the
+current capture exclusion, just like Tasks and typing.
+
+`presence/settings.rs` owns this lifetime, `presence/settings_view.rs` composes Kit's TabBar
+and Inputs, and `shell/settings.rs` owns drafts and ordered answers. See
+[settings](settings.md#shell-editor) for the FIFO and error lifetime, and
+[using Settings](../user/settings.md) for the workflow.
+
+## Tasks workflow
+
+The dock's **Tasks…** command opens an interactive surface anchored against the dock,
+clamped to the work area like the typing panel. Opening a task changes only the viewed history,
+not the input target. **Switch to this task** explicitly targets the viewed task and is hidden
+when it is already the target. **Back to Kumo** targets and views the assistant's conversation.
+It is available in the panel header and in the typing panel
+whenever the target isn't Kumo; the typing panel also names the target.
+
+**New task** changes the target to `Target::New` and opens the typing panel. It creates no row
+until a turn is submitted. Closing the tasks panel doesn't change the target. Target capture,
+selection revisions and the defaults to Kumo are described in [runs](runs.md#the-shells-input-target).
+
+The open task's **Delete** asks first, in a gpui-kit alert dialog. The dialog names what
 Kumochi can't remove: issues already filed on GitHub, and what the model provider keeps. A
-confirmed thread stays listed until the brain answers, its row marked Deleting… and disabled,
-and the next turn no longer continues it. Then its row and messages go. While four deletes
-[guess] are unanswered, or waiting on turns sent before them, Delete says to wait. A delete that
-hid nothing leaves the thread and says so. The protocol is in [ipc](ipc.md#deleting-a-thread).
+confirmed task stays listed until the brain answers, its row marked Deleting… and disabled.
+Confirming deletion of the targeted task immediately returns input to Kumo; deleting a task
+that is only being viewed leaves the target alone. Then its row and messages go. While four
+deletes [guess] are unanswered, or waiting on turns sent before them, Delete says to wait. A delete that
+hid nothing leaves the task and says so, without restoring its old input target. The protocol is
+in [ipc](ipc.md#deleting-a-thread).
+
+## Labels and inline rename
+
+The plain list pins Kumo first using `ThreadRow.kind == Main`; continuations omit it. Search
+ranks it like any other row. The shell's `row_label` uses the assistant name from the latest
+IPC `SettingsView` for Kumo everywhere, including search and the target label, never its empty
+stored title. Before any settings arrive, it falls back to
+`protocol::constants::DEFAULT_ASSISTANT_NAME`. Kumo has no Delete. Answers are labelled with
+the same assistant name.
+
+Choosing **Rename** on the viewed row opens an inline gpui-kit `Input`. Enter validates
+and sends the edit; Esc cancels it only after stop and clear have had their turns. Validation
+errors stay inline:
+
+- A task uses `ThreadTitle`: trimmed, one line, 1–80 Unicode scalar values, no control
+  characters or U+2028/U+2029. It sends `ThreadOp::Rename`.
+- Kumo uses `AssistantName`: the same text restrictions with a 1–24-character limit. It sends
+  `SettingsOp::SetAssistantName`, never a generic thread rename.
+
+A sent task rename is not a confirmed title. The shell rereads the authoritative list page and
+updates the displayed title only from that page; a send or an older in-flight read isn't a
+save acknowledgement. Kumo's displayed name changes only on the next `SettingsView`.
+The reread can race the rename across the two pipes and show the old title until the next
+refresh; PR 16's `ThreadsChanged` after every committed `SetTitle` will close that gap.
+If a delete invalidates an in-flight rename reread, its original page cursor is queued again
+before the first-page repair, so an offpage renamed task still gets confirmed without reviving
+the deleted row. A search change, refresh or hide discards these old-query rereads.
+Settings updates preserve the input draft, keyboard focus, viewed history, target and selection
+revision; changing a name never retargets input. See [settings](settings.md).
+
+## Page state
 
 `shell/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
 and nonblocking requests; `presence/thread_view.rs` composes the two virtualized lists:
@@ -21,6 +89,14 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
   the focused message region; its scrollbar and Older messages command are also available.
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
+
+The list highlight follows changes to `Threads.open`, including Back to Kumo and hide/reopen.
+Unrelated model notifications preserve a row highlighted with the arrow keys, so Enter still
+opens that row. Page updates remap the highlight by row id. Confirming a targeted task's delete
+refreshes the cached header target immediately, without waiting for a link reply. Enter and
+Save share the same rename availability check, so an offline or deleting row cannot send an
+edit. Conversation and target presentation notify their views only when their content changes;
+an answer delta alone does not redraw the tasks panel.
 
 Search uses the store's literal FTS phrase matching, not query syntax, and settles for 150 ms
 [guess]. Results are ranked by the best matching event, with descending thread id breaking
@@ -116,9 +192,10 @@ snapshot after it returns.
 Search words, titles, and page text never enter tracing, diagnostics, error Display, or
 loggable Debug. The pipe tap records control only; pages always travel on data.
 
-Esc stops work first, clears a drawing second, and only then dismisses the threads panel while
-it is focused. The panel counts as focused only once its window reports activation, as the
-typing panel does, so a deactivation that arrives before then can't hide a panel that just
+Esc stops work first, clears a drawing second, cancels an active inline rename third, and only
+then dismisses the tasks panel while it is focused. Stop or clear leaves the edit intact; after
+cancel, another Esc dismisses. The panel counts as focused only once its window reports
+activation, as the typing panel does, so a deactivation that arrives before then can't hide a panel that just
 opened. Blur hides it without restoring the old foreground; ordinary dismissal restores
 the previous foreground when Kumochi still owns it. Newly created panels inherit an active
 hold's capture exclusion. The initial panel size, 48 by 34 interface rems, is a [guess].

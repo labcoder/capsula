@@ -33,6 +33,10 @@ fn strict_records() {
     );
     assert_eq!(error(r#"{"view3d":{}}"#).code, ErrorCode::UnknownOp);
     assert_eq!(
+        error(r#"{"step":{"id":"s","set":[{"target":"series","opacity":0.25}]}}"#).code,
+        ErrorCode::UnknownField
+    );
+    assert_eq!(
         error(r#"{"end":{"extra":0}}"#).code,
         ErrorCode::UnknownField
     );

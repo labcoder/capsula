@@ -25,6 +25,12 @@ pub const DATA_DIR: &str = if cfg!(debug_assertions) {
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
 
+/// The empty account-session lock file, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
+pub const SESSION_LOCK: &str = "session.lock";
+
+/// The user's settings, in the [`DATA_DIR`] folder under `%APPDATA%`.
+pub const CONFIG_FILE: &str = "config.toml";
+
 /// Log file name prefixes; the appender adds the date. Neither may start with the other, because
 /// the appender prunes old files by prefix and would count the other process's logs.
 pub const BRAIN_LOG: &str = "kumochi-brain";

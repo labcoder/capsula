@@ -67,10 +67,10 @@ pub(super) fn validate(
             object.work.usage.segments = match chart.kind {
                 ChartKind::Line => count.saturating_sub(1),
                 ChartKind::Area => {
-                    if count == 0 {
+                    if count < 2 {
                         0
                     } else {
-                        count + 2
+                        count * 2 + 1
                     }
                 }
                 ChartKind::Pie => count * (crate::path::PIE_ARC_SEGMENTS + 2),
@@ -133,20 +133,21 @@ fn graph(
             translation: 0.0,
             rotated: false,
         });
-    let scalar = object
-        .work
-        .motion
-        .get("scale")
-        .map_or(1.0, |m| m.max[0].max(1.0));
+    let scale_motion = object.work.motion.get("scale");
+    let scalar = scale_motion.map_or(1.0, |m| m.max[0].max(1.0));
     let basis = parent.scale * object.work.inherited_scale;
-    let scale = basis * object.work.scale * scalar;
-    let min_scalar = object
+    let (enter_lo, enter_hi, enter_offset) = object
         .work
-        .motion
-        .get("scale")
-        .map_or(1.0, |motion| motion.min[0].min(1.0));
-    let min_scale =
-        parent.min_scale * object.work.inherited_min_scale * object.work.scale * min_scalar;
+        .enter
+        .map_or((1.0, 1.0, 0.0), crate::motion::entrance_envelope);
+    let before_enter = basis * object.work.scale * scalar;
+    let scale = before_enter * enter_hi;
+    let min_scalar = scale_motion.map_or(1.0, |motion| motion.min[0].min(1.0));
+    let min_scale = parent.min_scale
+        * object.work.inherited_min_scale
+        * object.work.scale
+        * min_scalar
+        * enter_lo;
     let rotated = parent.rotated
         || object.work.inherited_rotation
         || object
@@ -160,6 +161,9 @@ fn graph(
         1.0
     };
     let translation = parent.translation
+        + before_enter
+            * ((enter_hi - 1.0).max(0.0) * object.work.extent + enter_offset)
+            * rotation_bound
         + object.work.inherited_translation
         + basis * scalar * object.work.offset * rotation_bound
         + basis
@@ -175,14 +179,7 @@ fn graph(
                 })
                 .sum::<f32>()
             * rotation_bound;
-    let extent = object.work.extent
-        * scale
-        * if rotated {
-            std::f32::consts::SQRT_2
-        } else {
-            1.0
-        }
-        + translation;
+    let extent = object.work.extent * scale * rotation_bound + translation;
     if !scale.is_finite()
         || scale > MAX_COMPOSED_SCALE
         || min_scale <= 0.0
@@ -273,18 +270,8 @@ pub(super) fn charge<'a>(
         }
     }
     for (parent, counts) in &groups {
-        let Some(parent) = parent else {
+        if parent.is_none() {
             continue;
-        };
-        if counts[0] > 0
-            && let Some((_, _, motions)) = objects.get(parent)
-        {
-            if let Some(motion) = motions.get("pos") {
-                usage.keys += 2_usize.saturating_sub(motion.keys);
-            } else {
-                usage.tracks += 1;
-                usage.keys += 2;
-            }
         }
         for (count, cap, budget) in [
             (counts[0], MAX_DIAGRAM_NODES, Budget::DiagramNodes),

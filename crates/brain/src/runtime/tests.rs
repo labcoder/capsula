@@ -4,7 +4,7 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, MAX_PENDING_TURNS, Phase, RunId,
-    SceneDescriptor, SceneId, Step, ThreadId,
+    SceneDescriptor, SceneId, SettingsView, Step, ThreadId,
 };
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadHalf, WriteHalf,
@@ -13,9 +13,9 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
 use super::data::DataQueue;
-use super::fixture::Fixture;
 use super::{Brain, Ended, Link, MAX_ENDING, window};
 use crate::coordinator::Input;
+use crate::engines::fixture::Fixture;
 use crate::ipc;
 #[cfg(windows)]
 use crate::platform::{self, PipeClient, PipeServer};
@@ -23,12 +23,67 @@ use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
+#[path = "account_tests.rs"]
+mod accounts;
 #[path = "delete_tests.rs"]
 mod deletes;
+#[path = "drawing_tests.rs"]
+mod drawings;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "settings_tests.rs"]
+mod settings;
+#[path = "thread_op_tests.rs"]
+mod thread_ops;
+
+#[test]
+fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
+    use kumochi_protocol::message::{SceneCuts, SceneFailure};
+    let cut = kumochi_protocol::message::SceneCut {
+        scene: SceneId(1),
+        cut: serde_json::from_str(r#"{"activated":0,"revealed":[]}"#).expect("empty cut"),
+    };
+    let messages = [
+        ControlToBrain::StopScenes {
+            run: RunId(1),
+            cuts: SceneCuts::new(vec![cut.clone()]).expect("one cut"),
+        },
+        ControlToBrain::StepShown {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+        },
+        ControlToBrain::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            reason: SceneFailure::Timeout,
+            cut: cut.cut.clone(),
+        },
+    ];
+    let expected = [
+        Input::StopScenes {
+            run: RunId(1),
+            cuts: SceneCuts::new(vec![cut.clone()]).expect("one cut"),
+        },
+        Input::Drawing(crate::drawing::Input::StepShown {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+        }),
+        Input::Drawing(crate::drawing::Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            cut: cut.cut,
+        }),
+    ];
+    for (message, expected) in messages.into_iter().zip(expected) {
+        assert_eq!(super::controls::control_input(message), Ok(Some(expected)));
+    }
+}
 
 /// How long a test waits for something that should happen at once before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -45,6 +100,8 @@ struct Shell<S> {
     thread: Option<ThreadId>,
     /// The last `Scenes` read.
     scenes: Option<Vec<SceneDescriptor>>,
+    /// Every `Settings` read, in order.
+    views: Vec<SettingsView>,
 }
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
@@ -58,6 +115,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             data_out,
             thread: None,
             scenes: None,
+            views: Vec::new(),
         }
     }
 
@@ -86,6 +144,16 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         .await;
     }
 
+    /// The next control frame other than an account view, which every connection sends.
+    async fn unaccounted(&mut self) -> std::io::Result<Option<ControlToShell>> {
+        loop {
+            match ipc::read::<ControlToShell>(&mut self.control_in, Pipe::Control).await {
+                Ok(Some(ControlToShell::Account(_))) => {}
+                other => return other.map_err(std::io::Error::other),
+            }
+        }
+    }
+
     async fn send(&mut self, message: &ControlToBrain) {
         let frame = frame::encode(message, Pipe::Control).expect("encodes");
         self.control_out.write_all(&frame).await.expect("sent");
@@ -105,6 +173,8 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                         frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
+                Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
+                Some(ControlToShell::Account(_)) => {}
                 other => return other,
             }
         }
@@ -136,6 +206,8 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
+                ControlToShell::Settings { view, .. } => self.views.push(view),
+                ControlToShell::Account(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -205,6 +277,7 @@ fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection
 fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
+    let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     store
         .conn_for_tests()
@@ -212,7 +285,16 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         .expect("busy timeout");
     let fixture = Fixture::parse(script).expect("script");
     let scenes = store.scenes().expect("scenes");
-    Brain::new(store, high_water, scenes, fixture).expect("brain")
+    Brain::new(
+        store,
+        main_thread,
+        high_water,
+        scenes,
+        Box::new(fixture),
+        scratch.config(),
+        crate::test_support::accounts(scratch),
+    )
+    .expect("brain")
 }
 
 /// A connection holding the store's write lock, so the brain's writes wait until it ends.

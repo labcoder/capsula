@@ -6,12 +6,15 @@ use super::{Presence, geometry::PanelVisibility};
 pub(super) enum Owner {
     Pointer,
     Typing,
+    Settings,
     Stop,
 }
 
 impl Presence {
     pub(super) fn panel_owner(&self) -> Owner {
-        if self.text_open() || self.threads_open() {
+        if self.settings_open() {
+            Owner::Settings
+        } else if self.text_open() || self.threads_open() {
             Owner::Typing
         } else if self.escape_hold.shows_stop() {
             Owner::Stop
@@ -23,7 +26,7 @@ impl Presence {
 
 pub(super) fn pointer(current: PanelVisibility, owner: Owner) -> PanelVisibility {
     match owner {
-        Owner::Typing => PanelVisibility::Hidden,
+        Owner::Typing | Owner::Settings => PanelVisibility::Hidden,
         Owner::Stop => PanelVisibility::Visible,
         Owner::Pointer => current,
     }
@@ -31,7 +34,9 @@ pub(super) fn pointer(current: PanelVisibility, owner: Owner) -> PanelVisibility
 
 pub(super) fn pressed(current: PanelVisibility, owner: Owner) -> PanelVisibility {
     match (owner, current) {
-        (Owner::Typing, _) | (Owner::Pointer, PanelVisibility::Visible) => PanelVisibility::Hidden,
+        (Owner::Typing | Owner::Settings, _) | (Owner::Pointer, PanelVisibility::Visible) => {
+            PanelVisibility::Hidden
+        }
         _ => PanelVisibility::Visible,
     }
 }
@@ -42,9 +47,17 @@ pub(super) fn left(owner: Owner) -> PanelVisibility {
 
 #[cfg(test)]
 mod tests {
-    use super::Owner::{Pointer, Stop, Typing};
+    use super::Owner::{Pointer, Settings, Stop, Typing};
     use super::PanelVisibility::{Hidden, Visible};
     use super::{left, pointer, pressed};
+
+    #[test]
+    fn settings_owns_status_visibility_until_it_is_dismissed() {
+        assert_eq!(pointer(Visible, Settings), Hidden);
+        assert_eq!(pressed(Hidden, Settings), Hidden);
+        assert_eq!(left(Settings), Hidden);
+        assert_eq!(pressed(Hidden, Pointer), Visible);
+    }
 
     #[test]
     fn hover_never_opens_status_except_for_the_stop_fallback() {

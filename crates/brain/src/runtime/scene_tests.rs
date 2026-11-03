@@ -1430,8 +1430,8 @@ async fn a_run_after_the_newest_run_was_deleted_and_purged_can_still_be_stopped(
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     let mut store = Store::open(&scratch.db()).expect("store");
-    store.begin_delete(ThreadId(1)).expect("hidden");
-    store.finish_delete(ThreadId(1)).expect("removed");
+    store.begin_delete(ThreadId(2)).expect("hidden");
+    store.finish_delete(ThreadId(2)).expect("removed");
     let copied = store
         .owed()
         .expect("owed")

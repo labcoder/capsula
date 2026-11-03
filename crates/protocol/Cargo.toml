@@ -8,9 +8,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+kumochi-scene.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true

@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{RunId, ThreadId};
+use super::{ModelChoice, RunId, ThreadId, ThreadKind};
 
 /// One stored event, ordered within a thread by its id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -66,6 +66,11 @@ pub struct ThreadRow {
     pub title: String,
     /// Unix milliseconds when it last changed.
     pub updated_ms: i64,
+    /// The main thread or a task; the shell labels the main thread from its settings, since its
+    /// stored title is empty.
+    pub kind: ThreadKind,
+    /// The stored model and effort, even one the catalog no longer offers.
+    pub choice: Option<ModelChoice>,
 }
 
 impl fmt::Debug for ThreadRow {
@@ -73,6 +78,8 @@ impl fmt::Debug for ThreadRow {
         f.debug_struct("ThreadRow")
             .field("id", &self.id)
             .field("updated_ms", &self.updated_ms)
+            .field("kind", &self.kind)
+            .field("choice", &self.choice)
             .finish_non_exhaustive()
     }
 }
@@ -117,13 +124,22 @@ impl fmt::Debug for PageEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{DataToBrain, DataToShell};
+    use crate::message::{DataToBrain, DataToShell, Effort, ModelSlug, ThreadOp};
 
     #[test]
     fn page_debug_never_contains_search_titles_or_text() {
         let words = "private search words";
         let title = "private thread title";
         let text = "private event text";
+        let slug = "zqxprivatemodel";
+        let choice = ModelChoice {
+            model: ModelSlug::new(slug).expect("valid"),
+            effort: Effort::Medium,
+        };
+        let set_model = ThreadOp::SetModel {
+            thread: ThreadId(1),
+            choice: choice.clone(),
+        };
         let page = PageOf::Threads {
             search: Some(words.to_owned()),
             after: None,
@@ -132,6 +148,8 @@ mod tests {
             id: ThreadId(1),
             title: title.to_owned(),
             updated_ms: 2,
+            kind: ThreadKind::Thread,
+            choice: Some(choice),
         };
         let event = PageEvent {
             id: EventId(3),
@@ -140,8 +158,16 @@ mod tests {
             text: text.to_owned(),
             cut: false,
         };
+        assert_eq!(
+            format!("{row:?}"),
+            "ThreadRow { id: ThreadId(1), updated_ms: 2, kind: Thread, choice: Some(ModelChoice { model: ModelSlug(len=15), effort: Medium }), .. }"
+        );
+        assert_eq!(
+            format!("{set_model:?}"),
+            "SetModel { thread: ThreadId(1), choice: ModelChoice { model: ModelSlug(len=15), effort: Medium } }"
+        );
         let output = format!(
-            "{page:?} {row:?} {event:?} {:?} {:?} {:?}",
+            "{page:?} {row:?} {event:?} {set_model:?} {:?} {:?} {:?}",
             DataToBrain::PageRequest {
                 request: 1,
                 page: page.clone()
@@ -158,7 +184,7 @@ mod tests {
                 before: None
             }
         );
-        for content in [words, title, text] {
+        for content in [words, title, text, slug] {
             assert!(!output.contains(content));
         }
     }

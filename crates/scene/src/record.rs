@@ -10,6 +10,7 @@ use crate::{
 };
 pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// One externally tagged scene record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,7 +76,7 @@ pub struct Begin {
 #[serde(deny_unknown_fields)]
 pub struct End {}
 /// Step record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     /// id.
@@ -94,6 +95,15 @@ pub struct Step {
     /// start.
     #[serde(default)]
     pub start: Start,
+}
+impl fmt::Debug for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Step")
+            .field("put", &self.put.len())
+            .field("set", &self.set.len())
+            .field("remove", &self.remove.len())
+            .finish_non_exhaustive()
+    }
 }
 /// An externally tagged 2D operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

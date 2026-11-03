@@ -20,7 +20,8 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
-    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor, SceneDescriptorV1,
+    SettingsView, ThreadId, UserError,
 };
 
 use crate::credential::{self, CredentialError};
@@ -64,6 +65,11 @@ pub(crate) enum LinkEvent {
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
     Connected(Session),
+    Settings {
+        generation: u64,
+        view: SettingsView,
+        answer: bool,
+    },
     /// A run's phase changed, from the control pipe.
     RunState {
         run: RunId,
@@ -79,6 +85,10 @@ pub(crate) enum LinkEvent {
     },
     /// The connection's visible scenes, from the control pipe.
     Scenes(Vec<SceneDescriptor>),
+    ScenesV1 {
+        generation: u64,
+        scenes: kumochi_scene::text::Bounded<SceneDescriptorV1, MAX_VISIBLE_SCENES>,
+    },
     /// A delete's answer, from the control pipe.
     ThreadDeleted {
         thread: ThreadId,
@@ -87,6 +97,8 @@ pub(crate) enum LinkEvent {
     },
     /// The brain refused the oldest unanswered turn, from the control pipe.
     TurnRefused,
+    /// Something the user should be told, from the control pipe.
+    Error(UserError),
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -570,7 +582,7 @@ impl Link {
             })
         });
         match read {
-            Ok(()) if open => watch(&control, &control_out, events),
+            Ok(()) if open => watch(&control, &control_out, events, generation),
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
@@ -644,27 +656,7 @@ impl Link {
             &ControlToBrain::Hello(hello.clone()),
             Pipe::Control,
         )?;
-        let incarnation = match frame::read::<ControlToShell>(&mut &control, Pipe::Control)? {
-            None
-            | Some(
-                ControlToShell::RunState { .. }
-                | ControlToShell::Ping
-                | ControlToShell::Scenes { .. }
-                | ControlToShell::ThreadDeleted { .. }
-                | ControlToShell::TurnRefused { .. },
-            ) => {
-                return Err(LinkError::Rejected);
-            }
-            Some(ControlToShell::BuildMismatch { brain_build }) => {
-                tracing::warn!(
-                    brain_build,
-                    shell_build = BUILD_ID,
-                    "brain from another build"
-                );
-                return Err(LinkError::BuildMismatch);
-            }
-            Some(ControlToShell::Welcome { incarnation }) => incarnation,
-        };
+        let incarnation = welcome(&control)?;
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
         control.set_timeout(None);
@@ -673,6 +665,34 @@ impl Link {
             data: Arc::new(data),
             incarnation,
         })
+    }
+}
+
+/// The brain's answer to Hello: its incarnation, or why this brain can't be used.
+fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
+    match frame::read::<ControlToShell>(&mut &*control, Pipe::Control)? {
+        None
+        | Some(
+            ControlToShell::RunState { .. }
+            | ControlToShell::Ping
+            | ControlToShell::Scenes { .. }
+            | ControlToShell::ThreadDeleted { .. }
+            | ControlToShell::TurnRefused { .. }
+            | ControlToShell::Settings { .. }
+            | ControlToShell::Error(_)
+            | ControlToShell::ScenesV1 { .. }
+            | ControlToShell::NoVisual { .. }
+            | ControlToShell::Account(_),
+        ) => Err(LinkError::Rejected),
+        Some(ControlToShell::BuildMismatch { brain_build }) => {
+            tracing::warn!(
+                brain_build,
+                shell_build = BUILD_ID,
+                "brain from another build"
+            );
+            Err(LinkError::BuildMismatch)
+        }
+        Some(ControlToShell::Welcome { incarnation }) => Ok(incarnation),
     }
 }
 
@@ -709,13 +729,30 @@ fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
 
 /// Reads the control pipe until the connection ends: answers pings and passes run states and
 /// scenes on. A repeated handshake ends the connection, as the brain treats a protocol violation.
-fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<LinkEvent>) {
+fn watch(
+    control: &PipeClient,
+    out: &Sender<ControlToBrain>,
+    events: &Sender<LinkEvent>,
+    generation: u64,
+) {
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
             Ok(None) => return,
             Ok(Some(ControlToShell::Ping)) => {
                 if out.try_send(ControlToBrain::Pong).is_err() {
                     tracing::warn!("the control queue is full; the brain isn't reading");
+                }
+            }
+            Ok(Some(ControlToShell::Settings { view, answer })) => {
+                if events
+                    .send_blocking(LinkEvent::Settings {
+                        generation,
+                        view,
+                        answer,
+                    })
+                    .is_err()
+                {
+                    return;
                 }
             }
             Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
@@ -728,6 +765,14 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
             }
             Ok(Some(ControlToShell::Scenes { scenes })) => {
                 if events.send_blocking(LinkEvent::Scenes(scenes)).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::ScenesV1 { scenes })) => {
+                if events
+                    .send_blocking(LinkEvent::ScenesV1 { generation, scenes })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -749,6 +794,18 @@ fn watch(control: &PipeClient, out: &Sender<ControlToBrain>, events: &Sender<Lin
                 if events.send_blocking(LinkEvent::TurnRefused).is_err() {
                     return;
                 }
+            }
+            Ok(Some(ControlToShell::Error(error))) => {
+                if events.send_blocking(LinkEvent::Error(error)).is_err() {
+                    return;
+                }
+            }
+            // shortcut: the account view has no consumer until Settings → Accounts (slice 3 PR 19).
+            Ok(Some(ControlToShell::Account(_))) => {}
+            // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
+            Ok(Some(ControlToShell::NoVisual { .. })) => {
+                tracing::warn!("scene v1 control before its consumer; ending the connection");
+                return;
             }
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");

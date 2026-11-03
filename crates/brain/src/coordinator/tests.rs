@@ -2,15 +2,20 @@ use kumochi_protocol::message::{
     ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step, ThreadId,
 };
 
-use super::{
-    Coordinator, Effect, EngineEvent, Input, MAX_DELTA, MAX_TEXT, Stale, StoreOp, WALL_CLOCK,
-};
+use super::{Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, Stale, StoreOp, WALL_CLOCK};
+use crate::engines::{CallId, Finish, RunRequest, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
 #[path = "delete_tests.rs"]
 mod deletes;
+#[path = "drawing_tests.rs"]
+mod drawing;
+#[path = "engine_tests.rs"]
+mod engines;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "thread_op_tests.rs"]
+mod thread_ops;
 
 const T: ThreadId = ThreadId(4);
 const R: RunId = RunId(10);
@@ -27,8 +32,52 @@ fn state(run: RunId, thread: ThreadId, phase: Phase) -> Effect {
     Effect::Control(ControlToShell::RunState { run, thread, phase })
 }
 
-fn engine(run: RunId, event: EngineEvent) -> Input {
+fn engine(run: RunId, event: TurnEvent) -> Input {
     Input::Engine { run, event }
+}
+
+/// The draw call every test run's steps stream in.
+fn call() -> CallId {
+    CallId::new("call-1").expect("short ASCII")
+}
+
+fn draw_call() -> TurnEvent {
+    TurnEvent::ToolCallStarted {
+        call: call(),
+        name: ToolName::Draw,
+    }
+}
+
+/// One step as a closed line of the draw call's arguments.
+fn delta(label: &str) -> TurnEvent {
+    TurnEvent::ToolArgsDelta {
+        call: call(),
+        delta: format!("{label}\n"),
+    }
+}
+
+/// Streams one step to `run`, starting its draw call first if it isn't open yet.
+fn draw_step(core: &mut Coordinator, run: RunId, label: &str) -> Result<Vec<Effect>, Stale> {
+    let open = core
+        .current
+        .as_ref()
+        .is_some_and(|current| current.id == run && current.draw.is_some());
+    let mut effects = Vec::new();
+    if !open {
+        effects = core.handle(engine(run, draw_call()))?;
+    }
+    effects.extend(core.handle(engine(run, delta(label)))?);
+    Ok(effects)
+}
+
+fn start_engine(run: RunId, thread: ThreadId, turn: &str) -> Effect {
+    Effect::StartEngine {
+        request: RunRequest {
+            run,
+            thread,
+            turn: turn.to_owned(),
+        },
+    }
 }
 
 fn ack(index: u32, label: &str) -> Input {
@@ -63,7 +112,7 @@ fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
 
 /// A coordinator whose last ids were thread 3 and run 9, with nothing visible.
 fn fresh() -> Coordinator {
-    Coordinator::new(ThreadId(3), RunId(9), Vec::new())
+    Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new())
 }
 
 fn run_end(run: RunId) -> Effect {
@@ -146,10 +195,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
     );
     assert_eq!(
         core.handle(Input::TurnStored { run: R }).expect("current"),
-        vec![Effect::StartEngine {
-            run: R,
-            text: "  \n  Draw a cat\nplease".to_owned(),
-        }]
+        vec![start_engine(R, T, "  \n  Draw a cat\nplease")]
     );
 }
 
@@ -157,13 +203,12 @@ fn a_turn_is_stored_before_the_engine_starts() {
 fn a_step_is_sent_only_once_it_is_committed() {
     let mut core = started();
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("a cat".to_owned())))
+        core.handle(engine(R, TurnEvent::TextDelta("a cat".to_owned())))
             .expect("current"),
         vec![state(R, T, Phase::Answering), text("a cat")]
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Step(step("head"))))
-            .expect("current"),
+        draw_step(&mut core, R, "head").expect("current"),
         vec![Effect::Store(StoreOp::CommitStep {
             thread: T,
             run: R,
@@ -183,11 +228,10 @@ fn a_step_is_sent_only_once_it_is_committed() {
 #[test]
 fn text_waits_behind_a_pending_step() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Text("before".to_owned())))
+    core.handle(engine(R, TurnEvent::TextDelta("before".to_owned())))
         .expect("current");
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Step(step("a"))))
-            .expect("current"),
+        draw_step(&mut core, R, "a").expect("current"),
         vec![Effect::Store(StoreOp::CommitStep {
             thread: T,
             run: R,
@@ -198,19 +242,19 @@ fn text_waits_behind_a_pending_step() {
         })]
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("after ".to_owned()))),
+        core.handle(engine(R, TurnEvent::TextDelta("after ".to_owned()))),
         Ok(Vec::new()),
         "held behind a"
     );
-    core.handle(engine(R, EngineEvent::Text("a".to_owned())))
+    core.handle(engine(R, TurnEvent::TextDelta("a".to_owned())))
         .expect("current");
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Step(step("b")))),
+        draw_step(&mut core, R, "b"),
         Ok(Vec::new()),
         "b waits for a's scene id"
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("after b".to_owned()))),
+        core.handle(engine(R, TurnEvent::TextDelta("after b".to_owned()))),
         Ok(Vec::new())
     );
     assert_eq!(
@@ -250,10 +294,11 @@ fn text_waits_behind_a_pending_step() {
 fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
     let mut core = started();
     for event in [
-        EngineEvent::Step(step("a")),
-        EngineEvent::Step(step("b")),
-        EngineEvent::Step(step("c")),
-        EngineEvent::Text("tail".to_owned()),
+        draw_call(),
+        delta("a"),
+        delta("b"),
+        delta("c"),
+        TurnEvent::TextDelta("tail".to_owned()),
     ] {
         core.handle(engine(R, event)).expect("current");
     }
@@ -274,9 +319,9 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
         "the outcome waits for the step still in the store"
     );
     let late = [
-        engine(R, EngineEvent::Step(step("d"))),
-        engine(R, EngineEvent::Text("more".to_owned())),
-        engine(R, EngineEvent::Done),
+        engine(R, delta("d")),
+        engine(R, TurnEvent::TextDelta("more".to_owned())),
+        engine(R, TurnEvent::Finished(Finish::Completed)),
         Input::Stop {
             run: R,
             revealed: Vec::new(),
@@ -361,13 +406,13 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         ]
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("old".to_owned()))),
+        core.handle(engine(R, TurnEvent::TextDelta("old".to_owned()))),
         Err(Stale)
     );
     core.handle(Input::TurnStored { run: RunId(11) })
         .expect("the new run is current");
     assert_eq!(
-        core.handle(engine(RunId(11), EngineEvent::Done))
+        core.handle(engine(RunId(11), TurnEvent::Finished(Finish::Completed)))
             .expect("current"),
         vec![Effect::Store(StoreOp::EndRun {
             thread: T,
@@ -388,10 +433,11 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
 #[test]
 fn done_is_told_only_once_it_is_stored_and_needs_no_cancel() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Text("x".to_owned())))
+    core.handle(engine(R, TurnEvent::TextDelta("x".to_owned())))
         .expect("current");
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Done)).expect("current"),
+        core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+            .expect("current"),
         vec![end_run(Some("x"), None, RunEnd::Done)]
     );
     assert_eq!(
@@ -412,15 +458,15 @@ fn done_is_told_only_once_it_is_stored_and_needs_no_cancel() {
 #[test]
 fn done_waits_for_the_last_step_to_be_committed_and_sent() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("last"))))
-        .expect("current");
+    draw_step(&mut core, R, "last").expect("current");
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Done)).expect("current"),
+        core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+            .expect("current"),
         Vec::new(),
         "nothing ends while a step is in the store"
     );
     assert_eq!(
-        core.handle(engine(R, EngineEvent::Text("after done".to_owned()))),
+        core.handle(engine(R, TurnEvent::TextDelta("after done".to_owned()))),
         Err(Stale)
     );
     assert_eq!(
@@ -436,11 +482,10 @@ fn done_waits_for_the_last_step_to_be_committed_and_sent() {
 #[test]
 fn a_repeated_step_ack_changes_nothing() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
+    draw_step(&mut core, R, "a").expect("current");
+    draw_step(&mut core, R, "b").expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Step(step("b"))))
-        .expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
     assert_eq!(
         core.handle(ack(0, "a")).expect("first ack"),
         vec![committed(0, "a"), commit_in_scene(None, 1, "b")]
@@ -469,9 +514,10 @@ fn a_repeated_step_ack_changes_nothing() {
 #[test]
 fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Text("x".to_owned())))
+    core.handle(engine(R, TurnEvent::TextDelta("x".to_owned())))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("current");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("ending"),
         vec![state(R, T, Phase::Failed), run_end(R), failed_store()],
@@ -480,8 +526,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
 
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
-        .expect("current");
+    draw_step(&mut core, R, "a").expect("current");
     core.handle(Input::Stop {
         run: R,
         revealed: vec![0],
@@ -520,8 +565,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
 
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
-        .expect("current");
+    draw_step(&mut core, R, "a").expect("current");
     core.handle(Input::Turn {
         thread: Some(T),
         text: "again".to_owned(),
@@ -544,10 +588,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     assert_eq!(
         core.handle(Input::TurnStored { run: RunId(11) })
             .expect("the replacement is untouched"),
-        vec![Effect::StartEngine {
-            run: RunId(11),
-            text: "again".to_owned(),
-        }]
+        vec![start_engine(RunId(11), T, "again")]
     );
 }
 
@@ -559,8 +600,7 @@ fn a_store_failure_mid_run_records_failed_store() {
         Err(Stale),
         "nothing was pending"
     );
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
-        .expect("current");
+    draw_step(&mut core, R, "a").expect("current");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }).expect("current"),
         vec![
@@ -576,12 +616,12 @@ fn a_store_failure_mid_run_records_failed_store() {
 fn budgets_are_absolute_for_the_run() {
     let mut core = started();
     let half = "x".repeat(MAX_TEXT / 2);
-    core.handle(engine(R, EngineEvent::Text(half.clone())))
+    core.handle(engine(R, TurnEvent::TextDelta(half.clone())))
         .expect("first half");
-    core.handle(engine(R, EngineEvent::Text(half)))
+    core.handle(engine(R, TurnEvent::TextDelta(half)))
         .expect("exactly the cap");
     let over = core
-        .handle(engine(R, EngineEvent::Text("y".to_owned())))
+        .handle(engine(R, TurnEvent::TextDelta("y".to_owned())))
         .expect("current");
     assert_eq!(
         over[..3],
@@ -670,21 +710,16 @@ fn ends_failed(failure: Failure) -> Vec<Effect> {
 fn over_budget_steps_and_oversized_labels_commit_and_send_nothing() {
     let mut core = started();
     for index in 0..MAX_STEPS {
-        core.handle(engine(R, EngineEvent::Step(step(&index.to_string()))))
-            .expect("within the step budget");
+        draw_step(&mut core, R, &index.to_string()).expect("within the step budget");
         let index = u32::try_from(index).expect("small");
         core.handle(ack(index, &index.to_string())).expect("stored");
     }
-    let over = core
-        .handle(engine(R, EngineEvent::Step(step("one too many"))))
-        .expect("current");
+    let over = draw_step(&mut core, R, "one too many").expect("current");
     assert_eq!(over, ends_failed(Failure::Budget));
 
     let mut core = started();
     let label = "x".repeat(MAX_STEP_LABEL + 1);
-    let over = core
-        .handle(engine(R, EngineEvent::Step(step(&label))))
-        .expect("current");
+    let over = draw_step(&mut core, R, &label).expect("current");
     assert_eq!(over, ends_failed(Failure::Engine));
 }
 
@@ -700,7 +735,7 @@ fn a_long_delta_goes_out_in_frames_that_fit_the_data_pipe() {
     // Three-byte characters, so a plain byte split would land inside one.
     let delta = "€".repeat(MAX_DELTA / 3 * 2 + 5);
     let sent = core
-        .handle(engine(R, EngineEvent::Text(delta.clone())))
+        .handle(engine(R, TurnEvent::TextDelta(delta.clone())))
         .expect("current");
     let pieces: Vec<&str> = sent
         .iter()
@@ -717,9 +752,9 @@ fn a_long_delta_goes_out_in_frames_that_fit_the_data_pipe() {
 #[test]
 fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("a"))))
+    draw_step(&mut core, R, "a").expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
     assert_eq!(
         core.handle(Input::Stop {
             run: R,
@@ -746,9 +781,10 @@ fn a_stop_while_the_last_step_is_stored_interrupts_the_run() {
 #[test]
 fn a_lost_shell_isnt_told_about_runs_still_ending() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Text("x".to_owned())))
+    core.handle(engine(R, TurnEvent::TextDelta("x".to_owned())))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("current");
     assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()));
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
 }
@@ -761,17 +797,20 @@ fn the_engine_is_heard_only_once_its_turn_is_stored() {
         text: "hi".to_owned(),
     })
     .expect("turn");
-    assert_eq!(core.handle(engine(R, EngineEvent::Done)), Err(Stale));
+    assert_eq!(
+        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        Err(Stale)
+    );
 }
 
 #[test]
 fn a_deadline_after_done_leaves_the_finished_run_alone() {
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("last"))))
+    draw_step(&mut core, R, "last").expect("current");
+    core.handle(engine(R, TurnEvent::TextDelta("tail".to_owned())))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Text("tail".to_owned())))
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
         .expect("current");
-    core.handle(engine(R, EngineEvent::Done)).expect("current");
     assert_eq!(
         core.handle(Input::Deadline { run: R }),
         Err(Stale),
@@ -803,9 +842,8 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         })
     };
     let mut core = started();
-    core.handle(engine(R, EngineEvent::Step(step("one"))))
-        .expect("current");
-    core.handle(engine(R, EngineEvent::Text("tail".to_owned())))
+    draw_step(&mut core, R, "one").expect("current");
+    core.handle(engine(R, TurnEvent::TextDelta("tail".to_owned())))
         .expect("current");
     assert_eq!(
         core.handle(Input::Turn {
@@ -880,9 +918,6 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
     );
     assert_eq!(
         core.handle(Input::TurnStored { run: c }).expect("current"),
-        vec![Effect::StartEngine {
-            run: c,
-            text: "c".to_owned(),
-        }]
+        vec![start_engine(c, T, "c")]
     );
 }

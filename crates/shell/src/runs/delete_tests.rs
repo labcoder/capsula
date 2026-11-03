@@ -14,6 +14,7 @@ fn connected() -> Runs {
     let mut runs = Runs::default();
     runs.met(Incarnation(1));
     runs.connected(1);
+    runs.settings(ThreadId(1));
     runs.apply_scenes(&[]).expect("valid");
     runs
 }
@@ -58,6 +59,7 @@ fn target_after_new_brain(runs: &mut Runs) -> Option<ThreadId> {
     runs.disconnected();
     runs.met(Incarnation(2));
     runs.connected(2);
+    runs.settings(ThreadId(1));
     submit(runs)
 }
 
@@ -65,6 +67,7 @@ fn target_after_new_brain(runs: &mut Runs) -> Option<ThreadId> {
 fn a_new_thread_s_text_or_step_before_answering_proves_it_stored() {
     for proof in [text(1), step(1)] {
         let mut runs = connected();
+        runs.select_thread(None);
         assert_eq!(submit(&mut runs), None);
         state(&mut runs, 1, 7, Phase::Thinking);
         runs.apply_data(proof.clone(), BYTES);
@@ -80,6 +83,7 @@ fn a_new_thread_s_text_or_step_before_answering_proves_it_stored() {
 fn held_data_released_by_its_run_state_proves_the_thread_stored() {
     for proof in [text(1), step(1)] {
         let mut runs = connected();
+        runs.select_thread(None);
         submit(&mut runs);
         assert_eq!(runs.apply_data(proof.clone(), BYTES), 0, "held");
         assert_eq!(
@@ -98,22 +102,28 @@ fn held_data_released_by_its_run_state_proves_the_thread_stored() {
 #[test]
 fn an_unproved_new_thread_is_dropped_by_a_new_brain() {
     let mut runs = connected();
+    runs.select_thread(None);
     submit(&mut runs);
     state(&mut runs, 1, 7, Phase::Thinking);
-    assert_eq!(target_after_new_brain(&mut runs), None);
+    assert_eq!(target_after_new_brain(&mut runs), Some(ThreadId(1)));
 }
 
 #[test]
 fn an_older_run_s_data_never_proves_a_newer_target() {
     for late in [text(1), step(1)] {
         let mut runs = connected();
+        runs.select_thread(None);
         submit(&mut runs);
         state(&mut runs, 1, 7, Phase::Thinking);
         runs.select_thread(None);
         submit(&mut runs);
         state(&mut runs, 2, 8, Phase::Thinking);
         runs.apply_data(late.clone(), BYTES);
-        assert_eq!(target_after_new_brain(&mut runs), None, "{late:?}");
+        assert_eq!(
+            target_after_new_brain(&mut runs),
+            Some(ThreadId(1)),
+            "{late:?}"
+        );
     }
 }
 
@@ -163,11 +173,12 @@ fn a_refusal_leaves_the_target_and_its_durability_alone() {
     assert_eq!(target_after_new_brain(&mut runs), Some(ThreadId(9)));
 
     let mut runs = connected();
+    runs.select_thread(None);
     submit(&mut runs);
     state(&mut runs, 1, 7, Phase::Thinking);
     submit(&mut runs);
     runs.refused();
-    assert_eq!(target_after_new_brain(&mut runs), None);
+    assert_eq!(target_after_new_brain(&mut runs), Some(ThreadId(1)));
 }
 
 #[test]
@@ -204,7 +215,7 @@ fn a_confirmed_delete_untargets_the_thread_and_a_hide_fences_its_held_frames_onc
         BYTES,
         "run 2's held step is released once"
     );
-    assert_eq!(submit(&mut runs), Some(ThreadId(3)));
+    assert_eq!(submit(&mut runs), Some(ThreadId(1)));
 }
 
 #[test]
@@ -270,7 +281,7 @@ fn a_turn_sent_before_its_thread_was_deleted_never_targets_it() {
     assert_eq!(runs.shown(), None);
     assert!(!runs.working(), "its run is fenced");
     assert!(!runs.holds(ThreadId(9)));
-    assert_eq!(submit(&mut runs), None);
+    assert_eq!(submit(&mut runs), Some(ThreadId(1)));
 }
 
 #[test]
@@ -391,6 +402,7 @@ fn a_chunk_held_across_the_answer_installs_and_leaves_at_the_marker() {
     let mut runs = Runs::default();
     runs.met(Incarnation(1));
     runs.connected(1);
+    runs.settings(ThreadId(1));
     runs.apply_scenes(&[restored(5)]).expect("valid");
     assert!(runs.confirm_delete(ThreadId(9)));
     assert_eq!(runs.deleted(ThreadId(9), Deleted::Removed, None), 0);
@@ -409,6 +421,7 @@ fn a_chunk_held_for_scenes_is_dropped_by_the_marker_with_its_credit_once() {
     let mut runs = Runs::default();
     runs.met(Incarnation(1));
     runs.connected(1);
+    runs.settings(ThreadId(1));
     assert_eq!(runs.apply_snapshot(1, chunk(5)), Ok(0), "held for Scenes");
     assert_eq!(runs.remove_scenes(&[SceneId(5)]), BYTES);
     assert_eq!(runs.remove_scenes(&[SceneId(5)]), 0);
@@ -421,6 +434,7 @@ fn a_removed_scene_s_late_chunk_never_installs() {
     let mut runs = Runs::default();
     runs.met(Incarnation(1));
     runs.connected(1);
+    runs.settings(ThreadId(1));
     runs.apply_scenes(&[restored(5)]).expect("valid");
     assert_eq!(runs.remove_scenes(&[SceneId(5)]), 0);
     assert_eq!(runs.apply_snapshot(1, chunk(5)), Ok(BYTES));

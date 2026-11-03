@@ -1,7 +1,7 @@
 //! Lifetime, focus, and page requests for the anchored threads surface.
 
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription, Window};
-use kumochi_protocol::message::ThreadId;
+use kumochi_protocol::message::{ThreadId, ThreadRow};
 
 use super::text::{Hide, Typing};
 use super::thread_view::ThreadsView;
@@ -12,7 +12,7 @@ use super::{
 use crate::strings::{Strings, Text};
 
 /// The initial native window size, in interface rems [guess].
-const PANEL_REMS: [f32; 2] = [48.0, 34.0];
+pub(super) const PANEL_REMS: [f32; 2] = [48.0, 34.0];
 
 pub(super) struct ThreadsPanel {
     pub(super) window: AnyWindowHandle,
@@ -62,9 +62,6 @@ impl Presence {
     }
 
     pub(super) fn select_thread(&mut self, thread: Option<ThreadId>, cx: &mut Context<'_, Self>) {
-        if !self.runs.select_thread(thread) {
-            return;
-        }
         self.threads.update(cx, |state, cx| {
             state.select(thread);
             cx.notify();
@@ -72,13 +69,36 @@ impl Presence {
         self.request_pages(cx);
     }
 
+    pub(super) fn switch_thread(&mut self, row: &ThreadRow, cx: &mut Context<'_, Self>) {
+        if self.runs.select_row(row) {
+            self.select_thread(Some(row.id), cx);
+            self.refresh_conversation(cx);
+        }
+    }
+
+    pub(super) fn back_to_kumo(&mut self, cx: &mut Context<'_, Self>) {
+        self.runs.back_to_kumo();
+        let main = self
+            .threads
+            .read(cx)
+            .settings
+            .as_ref()
+            .map(|settings| settings.main_thread);
+        self.select_thread(main, cx);
+        self.refresh_conversation(cx);
+    }
+
     pub(super) fn new_thread(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        if !self.runs.select_thread(None) {
+            return Ok(());
+        }
         self.select_thread(None, cx);
         self.dismiss_threads(cx)?;
         self.open_text(cx)
     }
 
     pub(super) fn open_threads(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         if self.thread_panel.is_none() {
             self.thread_panel = Some(self.create_threads(cx)?);

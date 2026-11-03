@@ -8,6 +8,9 @@ pub mod geom;
 pub mod id;
 pub mod layout;
 pub mod limits;
+#[cfg(test)]
+mod mermaid;
+pub mod motion;
 pub mod parse;
 mod path;
 pub mod record;
@@ -19,6 +22,7 @@ pub mod tokenize;
 pub use budget::GlobalBudget;
 pub use error::{Budget, ErrorCode, FieldPath, StepError};
 pub use id::{Handle, Ms, WireId};
+pub use motion::{Frame, FrameItem, SceneView};
 pub use parse::parse_record;
 pub use record::{Begin, End, Op, Record, Step};
 pub use state::{

@@ -29,6 +29,7 @@ pub(crate) enum Escape {
     Stop,
     Clear,
     Dismiss,
+    CancelEdit,
     Ignore,
 }
 
@@ -37,6 +38,9 @@ pub(crate) enum Escape {
 pub(crate) enum Panel {
     Open,
     Threads,
+    Rename,
+    Settings,
+    SettingsEdit,
     Closed,
 }
 
@@ -46,6 +50,8 @@ pub(crate) fn decide(activity: Activity, panel: Panel) -> Escape {
         Escape::Stop
     } else if activity.drawing {
         Escape::Clear
+    } else if matches!(panel, Panel::Rename | Panel::SettingsEdit) {
+        Escape::CancelEdit
     } else if panel != Panel::Closed {
         Escape::Dismiss
     } else {
@@ -106,6 +112,79 @@ impl<H> EscapeHold<H> {
 #[cfg(test)]
 mod tests {
     use super::{Activity, Escape, EscapeHold, Panel, decide};
+
+    #[test]
+    fn settings_while_idle_dismisses() {
+        assert_eq!(
+            decide(Activity::default(), Panel::Settings),
+            Escape::Dismiss
+        );
+    }
+
+    #[test]
+    fn settings_edit_keeps_stop_and_clear_before_cancel() {
+        assert_eq!(
+            decide(
+                Activity {
+                    working: true,
+                    ..Activity::default()
+                },
+                Panel::SettingsEdit
+            ),
+            Escape::Stop
+        );
+        assert_eq!(
+            decide(
+                Activity {
+                    drawing: true,
+                    ..Activity::default()
+                },
+                Panel::SettingsEdit
+            ),
+            Escape::Clear
+        );
+        assert_eq!(
+            decide(Activity::default(), Panel::SettingsEdit),
+            Escape::CancelEdit
+        );
+    }
+
+    #[test]
+    fn work_stops_before_an_edit_cancels() {
+        assert_eq!(
+            decide(
+                Activity {
+                    working: true,
+                    ..Activity::default()
+                },
+                Panel::Rename,
+            ),
+            Escape::Stop,
+        );
+    }
+
+    #[test]
+    fn a_drawing_clears_before_an_edit_cancels() {
+        assert_eq!(
+            decide(
+                Activity {
+                    drawing: true,
+                    ..Activity::default()
+                },
+                Panel::Rename,
+            ),
+            Escape::Clear,
+        );
+    }
+
+    #[test]
+    fn an_idle_edit_cancels_before_the_panel_dismisses() {
+        assert_eq!(
+            decide(Activity::default(), Panel::Rename),
+            Escape::CancelEdit,
+        );
+        assert_eq!(decide(Activity::default(), Panel::Threads), Escape::Dismiss);
+    }
 
     #[test]
     fn a_focused_threads_panel_dismisses_only_after_stop_and_clear() {

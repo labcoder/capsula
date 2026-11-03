@@ -514,8 +514,21 @@ impl StoreThread {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one short arm per store op")]
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
     match op {
+        StoreOp::Drawing { serial, write } => {
+            purger.op_arriving();
+            let reply = store
+                .reconnect()
+                .and_then(|()| store.drawing_write(&write))
+                .map_err(|_| ());
+            if reply.is_err() {
+                tracing::warn!("a drawing store operation failed");
+            }
+            answer(acks, Input::DrawingWritten { serial, reply });
+            purger.op_arrived(store);
+        }
         StoreOp::ReadPage { .. } => unreachable!("StoreThread::send hands reads to the reader"),
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();
@@ -541,6 +554,18 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             purger.op_arriving();
             answer(acks, delete(store, thread));
             purger.op_arrived(store);
+        }
+        StoreOp::SetTitle {
+            thread,
+            title,
+            source,
+        } => unanswered(store, purger, thread, "title", |store| {
+            store.set_title(thread, &title, source)
+        }),
+        StoreOp::SetModel { thread, choice } => {
+            unanswered(store, purger, thread, "model choice", |store| {
+                store.set_model(thread, &choice)
+            });
         }
         StoreOp::BeginTurn {
             thread,
@@ -664,6 +689,22 @@ fn write(
         Ok(Ok(stored)) => stored,
     };
     answer(acks, reply);
+    purger.op_arrived(store);
+}
+
+/// Runs a write nothing waits on, holding off the purge meanwhile. A failure is logged by kind
+/// and thread id only.
+fn unanswered(
+    store: &mut Store,
+    purger: &mut Purger,
+    thread: ThreadId,
+    what: &'static str,
+    op: impl FnOnce(&mut Store) -> Result<(), StoreError>,
+) {
+    purger.op_arriving();
+    if let Err(error) = store.reconnect().and_then(|()| op(store)) {
+        tracing::warn!(%error, thread = thread.0, what, "a thread change wasn't stored");
+    }
     purger.op_arrived(store);
 }
 

@@ -5,7 +5,7 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 
 ## Commands
 - Build: `cargo build --workspace` (the toolchain is pinned in `rust-toolchain.toml`)
-- Test: `cargo test --workspace`. Tests never touch the network.
+- Test: `cargo test --workspace`. Tests never touch the network. The one exception: a test may bind `127.0.0.1:0` and talk to that socket. No other address, port, host name or DNS.
 - Lint: `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`
 - Licenses, advisories, duplicates: `cargo deny check`
 - Dev tasks: `cargo xtask help`
@@ -21,6 +21,7 @@ xtask/             dev tasks in Rust; no scripts in other languages
 docs/development/  how Kumochi works inside
 docs/user/         how people use Kumochi
 locales/en/        every user-facing string (Fluent)
+THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
 ```
 
 ## Code rules
@@ -47,7 +48,7 @@ locales/en/        every user-facing string (Fluent)
   environment. Hold them in `Secret`, which prints `***`.
 - Never log prompts, transcripts, screen text, images or tool arguments.
 - Screenshots go only to the model the user chose.
-- Never read or store Claude Code's credentials.
+- Use only the connections the user sets up inside Kumochi. Never read, copy or depend on credentials, tokens, sessions or config that other apps or the developer's machine hold (Claude Code, Codex, gh, browsers and the like).
 - Clean room: nothing from HeyClicky's code, protocol, schemas, prompts, assets or identifiers.
 - Kumochi is `AGPL-3.0-only`, but no one else's GPL, LGPL or AGPL code ships in it: new
   dependencies must pass `deny.toml`'s license list.

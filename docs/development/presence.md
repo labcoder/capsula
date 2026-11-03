@@ -129,6 +129,7 @@ flowchart LR
   `on_next_frame` and are requested only while the bulb moves. A settled bulb requests none:
   under a still pointer, the proxy reports the pointer's next move over the body once, and at
   rest the next entry starts the stretch again. There's no hook, mouse capture, timer or polling.
+  Frames draw no faster than the user's max frame rate: see [frame rate](frame-rate.md).
 - **Status panel.** Left-button-down on the outline toggles the panel; hover only stretches
   the dock. An open panel stays while the pointer is over the outline or the shown panel.
   The pill's rounded corners and the slot's 4 px padding pass the pointer through, and

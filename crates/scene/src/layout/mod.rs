@@ -1,6 +1,9 @@
 //! Serial scene preparation and pure layout, independent of painting and clocks.
 mod callout;
+mod chart;
+mod compound;
 mod diagram;
+mod heap;
 mod nodes;
 mod path;
 mod prepare;
@@ -14,8 +17,9 @@ use crate::{
     geom::{Rect, Vec2},
     theme::Theme,
 };
-pub use prepare::{prepare, recover};
+pub use prepare::{prepare, recover, recover_all};
 pub use state::LayoutState;
+pub(crate) use state::Rest;
 use std::sync::Arc;
 
 /// Host geometry supplied for this rendering, not persisted drawing coordinates.
@@ -68,20 +72,23 @@ pub struct PrepareInput {
 impl PrepareInput {
     /// Joins commit-time sizing facts with the immediately preceding prepared state.
     /// # Errors
-    /// Rejects a foreign, nonconsecutive or pre-cut layout and invalid host dimensions.
+    /// Rejects a foreign, nonconsecutive or pre-cut layout and invalid host dimensions, and
+    /// hands the ticket back so the step can still join its right predecessor.
     pub fn new(
         ticket: Preparation,
         before: LayoutState,
         surface: SurfaceGeometry,
         theme: Arc<Theme>,
-    ) -> Result<Self, PrepareError> {
+    ) -> Result<Self, (PrepareError, Preparation)> {
         if !Arc::ptr_eq(&ticket.owner, &before.owner)
             || ticket.cut_revision != before.cut_revision
             || before.revision.checked_add(1) != Some(ticket.revision)
         {
-            return Err(PrepareError::Stale);
+            return Err((PrepareError::Stale, ticket));
         }
-        surface.viewport(ticket.canvas_size)?;
+        if let Err(error) = surface.viewport(ticket.canvas_size) {
+            return Err((error, ticket));
+        }
         Ok(Self {
             ticket,
             before,
@@ -117,6 +124,7 @@ pub struct PreparedStep {
     pub resident_bytes: usize,
     ticket: Preparation,
     base: Arc<()>,
+    theme: Arc<Theme>,
 }
 impl PreparedStep {
     /// Rejects results superseded by a cut or prepared against another tip.
@@ -135,15 +143,25 @@ impl PreparedStep {
     pub fn step(&self) -> &crate::Step {
         &self.ticket.step
     }
+    /// Whether this result was prepared on exactly `before`'s layout version.
+    pub(crate) fn is_based_on(&self, before: &LayoutState) -> bool {
+        Arc::ptr_eq(&self.base, &before.version)
+    }
+    /// The palette color keys compile against at activation.
+    pub(crate) fn theme(&self) -> &Theme {
+        &self.theme
+    }
 }
 
 /// Content-free preparation failures; the host routes these through its ordinary cut.
+/// A `Stale` from [`crate::SceneView::frame`] instead requires clearing the frame
+/// outside paint, not cutting the scene.
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
     /// Cancellation was observed before publication.
     #[error("scene.PrepareCancelled")]
     Cancelled,
-    /// The scene or layout changed across preparation.
+    /// The scene or layout changed, or a frame belongs to another view generation.
     #[error("scene.StalePreparation")]
     Stale,
     /// Host text shaping failed.
@@ -162,11 +180,15 @@ impl From<crate::ErrorCode> for PrepareError {
     }
 }
 
+/// One source scene's canonical state and resting layout, or its isolated recovery failure.
+pub type SceneRecovery = Result<(SceneState, LayoutState), RecoveryError>;
+
 /// A kept preparation failure identifies the revision B4 must stop before.
 #[derive(Debug, thiserror::Error)]
 #[error("scene.RecoveryPreparation revision={revision}: {error}")]
 pub struct RecoveryError {
-    /// Failing kept revision; zero denotes invalid header/log rather than a kept step.
+    /// Failing kept revision; zero rejects the whole scene: an invalid header or log, or a
+    /// recovered scene that [`recover_all`]'s batch can't also fit under its global caps.
     pub revision: u32,
     /// Content-free cause.
     pub error: PrepareError,

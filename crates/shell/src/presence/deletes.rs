@@ -18,6 +18,7 @@ impl Presence {
         if !self.runs.confirm_delete(thread) {
             return;
         }
+        self.refresh_conversation(cx);
         self.link.delete(thread);
         self.threads.update(cx, |state, cx| {
             state.delete_failed = false;
@@ -30,7 +31,11 @@ impl Presence {
     /// control queue has no room, a timer tries again.
     pub(super) fn send_deletes(&mut self, cx: &mut Context<'_, Self>) {
         self.sync_deletes(cx);
-        let Some(session) = self.session.as_ref().filter(|_| self.runs.described()) else {
+        let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|_| self.runs.described() || self.presenter.membership_ready())
+        else {
             return;
         };
         if self.link.send_deletes(session) || self.delete_retry.is_some() {

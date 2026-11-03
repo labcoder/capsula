@@ -9,7 +9,7 @@ use std::io::BufReader;
 
 use anyhow::{Context as _, Result, bail};
 use kumochi_protocol::constants::PIPE_TAP_ENV;
-use kumochi_protocol::tap::{self, Direction};
+use kumochi_protocol::tap;
 
 #[cfg(windows)]
 mod bench;
@@ -133,22 +133,10 @@ mod tests {
     }
 }
 
-/// Prints one line per recorded frame: its number, pipe, direction and decoded message.
+/// Prints one line per recorded frame: its number, pipe, direction, op and length, and the
+/// fields of content-free ops.
 fn pipe_dump(path: &str) -> Result<()> {
     let mut reader = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
-    let mut seq = 0u64;
-    while let Some(record) = tap::read(&mut reader).with_context(|| format!("record {seq}"))? {
-        let arrow = match record.direction {
-            Direction::ToBrain => "shell -> brain",
-            Direction::ToShell => "brain -> shell",
-        };
-        println!(
-            "{seq:>5} {:<7?} {arrow}  {}",
-            record.pipe,
-            record.describe()
-        );
-        seq += 1;
-    }
-    println!("{seq} frames");
+    tap::dump(&mut reader, &mut std::io::stdout().lock())?;
     Ok(())
 }

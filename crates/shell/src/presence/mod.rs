@@ -3,26 +3,35 @@
 
 mod deletes;
 pub(crate) mod diagnostics;
+mod drawings;
+mod escape;
+mod frame_rate;
 mod geometry;
 mod gesture;
+mod kumo;
 mod launch;
 mod link;
 pub(crate) mod observer;
 mod outline;
 mod paint;
 mod panels;
+mod settings;
+mod settings_view;
 mod stretch;
+#[cfg(test)]
+mod tests;
 mod text;
+mod thread_selection;
 mod thread_view;
 mod threads;
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::{ActiveTheme as _, button::Button};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
@@ -31,14 +40,15 @@ use gpui_kit::{
 };
 use kumochi_protocol::constants;
 
-use crate::escape::{self, Activity, Escape, EscapeHold, Panel as EscapePanel};
+use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::{
     self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
     PresenceNative, PresenceSurface,
 };
-use crate::runs::{Refused, Runs};
+use crate::runs::Runs;
+use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
@@ -49,6 +59,7 @@ pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
 use outline::Outline;
 use paint::{OutlinePaint, PanelStamp, Target};
+use settings::SettingsPanel;
 use stretch::Stretch;
 use text::TextPanel;
 use threads::ThreadsPanel;
@@ -68,6 +79,8 @@ struct Presence {
     /// Created on the first double tap, then hidden and reused so its draft survives.
     text: Option<TextPanel>,
     thread_panel: Option<ThreadsPanel>,
+    settings_panel: Option<SettingsPanel>,
+    settings: Entity<Settings>,
     threads: Entity<Threads>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
@@ -79,6 +92,9 @@ struct Presence {
     /// What `runs` and the typing panel last made Esc see.
     activity: Activity,
     runs: Runs,
+    presenter: crate::presenter::Presenter,
+    scene_timer: Option<Task<()>>,
+    scene_deadline: Option<Instant>,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
@@ -89,6 +105,10 @@ struct Presence {
     stretch: Stretch,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
+    /// The brain's last error, until a turn is sent or its field's retry succeeds.
+    error: Option<SharedString>,
+    /// A local submission refusal, shown only in the typing panel.
+    refusal: Option<Text>,
 }
 
 impl Presence {
@@ -124,6 +144,7 @@ impl Presence {
             self.start_ticking(cx);
         }
         self.native.show(index)?;
+        self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         self.dismiss_threads(cx)?;
         self.set_panel(PanelVisibility::Hidden, cx)?;
@@ -168,7 +189,11 @@ impl Presence {
         if visibility != self.panel_visibility {
             self.set_panel(visibility, cx)?;
         }
-        if self.text_open() || self.threads_open() || self.escape_hold.shows_stop() {
+        if self.text_open()
+            || self.threads_open()
+            || self.settings_open()
+            || self.escape_hold.shows_stop()
+        {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -214,6 +239,10 @@ impl Presence {
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let label: SharedString = if self.gesture.get().listening() {
             cx.global::<Strings>().get(Text::Listening).into()
+        } else if let Some(notice) = self.settings.read(cx).dock_notice().filter(|notice| {
+            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
+        }) {
+            cx.global::<Strings>().get(notice).into()
         } else {
             dock_label(self.state, cx)
         };
@@ -280,7 +309,8 @@ impl Presence {
         }
         let text = self.text.as_ref().map(|text| text.window);
         let threads = self.thread_panel.as_ref().map(|panel| panel.window);
-        for window in [Some(self.panel_window), text, threads]
+        let settings = self.settings_panel.as_ref().map(|panel| panel.window);
+        for window in [Some(self.panel_window), text, threads, settings]
             .into_iter()
             .flatten()
         {
@@ -305,53 +335,16 @@ impl Presence {
         }
     }
 
-    /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
-    /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
-    fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let panel = if self.threads_focused() {
-            EscapePanel::Threads
-        } else if self.text_open() {
-            EscapePanel::Open
-        } else {
-            EscapePanel::Closed
-        };
-        let action = escape::decide(self.activity, panel);
-        let tell = match action {
-            Escape::Stop => self.runs.stop(),
-            Escape::Clear => {
-                let effect = self.runs.clear();
-                self.grant(effect.credit);
-                effect.clear
-            }
-            Escape::Dismiss => {
-                if panel == EscapePanel::Threads {
-                    self.dismiss_threads(cx)?;
-                } else {
-                    self.dismiss_text(cx)?;
-                }
-                None
-            }
-            Escape::Ignore => None,
-        };
-        self.activity = self.activity();
-        self.refresh_conversation(cx);
-        // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
-        diagnostics::record(cx, format_args!("escape action={action:?}"));
-        if let Some(message) = tell {
-            self.tell(message);
-        }
-        self.escape_fixture = false;
-        self.sync_escape(cx)
-    }
-
-    /// What's moving or on screen, as Esc sees it. shortcut: the placeholder steps show only in
-    /// the typing panel, so they count as a drawing only while it's open; slice 4 draws on the
-    /// overlay.
-    fn activity(&self) -> Activity {
+    fn activity(
+        runs: &Runs,
+        panel: EscapePanel,
+        _presenter: &crate::presenter::Presenter,
+    ) -> Activity {
+        // shortcut: B5 adds painted v1 scenes to global Esc activity; mirrored scenes aren't visible.
         Activity {
-            working: self.runs.working(),
+            working: runs.working(),
             speaking: false,
-            drawing: self.runs.drawing() && self.text_open(),
+            drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
         }
     }
 
@@ -359,50 +352,17 @@ impl Presence {
     /// changed, and shows the newest run.
     fn runs_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.refresh_conversation(cx);
-        let activity = self.activity();
+        let panel = if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        };
+        let activity = Self::activity(&self.runs, panel, &self.presenter);
         if activity == self.activity {
             return Ok(());
         }
         self.activity = activity;
         self.sync_escape(cx)
-    }
-
-    /// Enter in the typing panel: sends the draft as a turn and empties the box, or keeps the
-    /// draft and says why it wasn't sent.
-    pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let Some(text) = &self.text else {
-            return Ok(());
-        };
-        let draft = text.input.read(cx).value();
-        let (link, session) = (&self.link, &self.session);
-        let result = self.runs.submit(&draft, |turn| {
-            session
-                .as_ref()
-                .is_some_and(|session| link.send_data(session, turn))
-        });
-        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
-        let notice = match result {
-            Ok(()) => {
-                let input = text.input.clone();
-                text.window
-                    .update(cx, |_, window, cx| {
-                        input.update(cx, |state, cx| state.set_value("", window, cx));
-                    })
-                    .map_err(|error| OpenError::Gpui(error.into()))?;
-                None
-            }
-            Err(Refused::Blank) => None,
-            Err(Refused::Busy) => Some(Text::TurnBusy),
-            Err(Refused::Offline) => Some(Text::TurnOffline),
-            Err(Refused::TooLong) => Some(Text::TurnTooLong),
-        };
-        let notice: Option<SharedString> =
-            notice.map(|notice| cx.global::<Strings>().get(notice).into());
-        text.view.update(cx, |view, cx| {
-            view.notice = notice;
-            cx.notify();
-        });
-        self.runs_changed(cx)
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
@@ -427,11 +387,21 @@ impl Presence {
         });
         if let Some(text) = &self.text {
             text.view.update(cx, |view, cx| {
-                view.stop = stop;
-                cx.notify();
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
             });
         }
         if let Some(panel) = &self.thread_panel {
+            panel.view.update(cx, |view, cx| {
+                if view.stop != stop {
+                    view.stop = stop;
+                    cx.notify();
+                }
+            });
+        }
+        if let Some(panel) = &self.settings_panel {
             panel.view.update(cx, |view, cx| {
                 view.stop = stop;
                 cx.notify();
@@ -480,10 +450,13 @@ impl Presence {
         Ok(())
     }
 
-    fn quit(&self, cx: &mut Context<'_, Self>) {
+    fn quit(&mut self, cx: &mut Context<'_, Self>) {
         if !self.link.begin_quit() {
             return;
         }
+        self.presenter.disconnected();
+        self.scene_timer = None;
+        self.scene_deadline = None;
         let link = self.link.clone();
         diagnostics::record(cx, format_args!("stretch totals {}", self.stretch.totals()));
         let diagnostics = diagnostics::release(cx);
@@ -596,9 +569,11 @@ impl Render for Panel {
         let strings = cx.global::<Strings>();
         let quit_events = self.events.clone();
         let threads_owner = self.threads.clone();
+        let settings_owner = self.threads.clone();
         let retry = (self.state == LinkState::Failed).then(|| {
             let events = self.events.clone();
             Button::new("retry")
+                .small()
                 .label(strings.get(Text::Retry))
                 .on_click(move |_, _, _| {
                     send(&events, PresenceEvent::Retry);
@@ -608,6 +583,7 @@ impl Render for Panel {
             let events = self.events.clone();
             Target(
                 Button::new("stop")
+                    .small()
                     .label(strings.get(Text::Stop))
                     .on_click(move |_, _, _| {
                         send(&events, PresenceEvent::Escape);
@@ -632,11 +608,13 @@ impl Render for Panel {
             .child(
                 div()
                     .flex()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_1()
                     .children(stop)
                     .children(retry)
                     .child(
                         Button::new("threads")
+                            .small()
                             .label(strings.get(Text::OpenThreads))
                             .on_click(move |_, _, cx| {
                                 if let Some(owner) = threads_owner.clone() {
@@ -650,7 +628,16 @@ impl Render for Panel {
                                 }
                             }),
                     )
-                    .child(Button::new("quit").label(strings.get(Text::Quit)).on_click(
+                    .child(Button::new("settings").small().label(strings.get(Text::OpenSettings)).on_click(move |_, _, cx| {
+                        if let Some(owner) = settings_owner.clone() {
+                            cx.defer(move |cx| {
+                                if let Ok(Err(error)) = owner.update(cx, Presence::toggle_settings) {
+                                    tracing::error!(%error, "can't open the settings panel");
+                                }
+                            });
+                        }
+                    }))
+                    .child(Button::new("quit").small().label(strings.get(Text::Quit)).on_click(
                         move |_, _, _| {
                             send(&quit_events, PresenceEvent::Quit);
                         },
@@ -747,6 +734,35 @@ fn presence_labels(cx: &App) -> PresenceLabels {
     }
 }
 
+fn status_window(
+    events: &Sender<PresenceEvent>,
+    cx: &mut App,
+) -> Result<(AnyWindowHandle, Entity<Panel>), OpenError> {
+    let panel_events = events.clone();
+    let close_events = events.clone();
+    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
+        window.set_window_title(constants::DISPLAY_NAME);
+        window.on_window_should_close(cx, move |_, _| {
+            send(&close_events, PresenceEvent::DismissPanel);
+            false
+        });
+        cx.new(|_| Panel {
+            state: LinkState::Connecting,
+            stop: false,
+            events: panel_events,
+            threads: None,
+        })
+    })
+    .map_err(|error| OpenError::Gpui(error.into()))?;
+    let status_events = events.clone();
+    panel_window
+        .update(cx, |_, window, cx| {
+            configure_surface(window, PresenceSurface::Panel, status_events, cx)
+        })
+        .map_err(|error| OpenError::Gpui(error.into()))??;
+    Ok((panel_window, panel))
+}
+
 /// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
 /// from the first frame. The caller starts the brain link afterwards.
 pub(crate) fn open(
@@ -788,31 +804,19 @@ pub(crate) fn open(
     let stretch = Stretch::new(scale);
     let slot = [scaled(112.0, scale), scaled(48.0, scale)];
     let native = PresenceNative::new(labels, events.clone(), stretch.mask_size(slot))?;
-    let panel_events = events.clone();
-    let close_events = events.clone();
-    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
-        window.set_window_title(constants::DISPLAY_NAME);
-        window.on_window_should_close(cx, move |_, _| {
-            send(&close_events, PresenceEvent::DismissPanel);
-            false
-        });
-        cx.new(|_| Panel {
-            state: LinkState::Connecting,
-            stop: false,
-            events: panel_events,
-            threads: None,
-        })
-    })
-    .map_err(|error| OpenError::Gpui(error.into()))?;
-    let status_events = events.clone();
-    panel_window
-        .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, status_events, cx)
-        })
-        .map_err(|error| OpenError::Gpui(error.into()))??;
+    let (panel_window, panel) = status_window(&events, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let owner_gesture = Rc::clone(&gesture);
     let threads = cx.new(|_| Threads::default());
+    let settings = cx.new(|_| Settings::default());
+    // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
+    let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
+        let display_size = display.bounds().size;
+        [display_size.width.into(), display_size.height.into()]
+    });
+    let presenter = crate::presenter::Presenter::new(
+        kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
+        std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
+    );
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -823,14 +827,19 @@ pub(crate) fn open(
             panel,
             text: None,
             thread_panel: None,
+            settings_panel: None,
+            settings,
             threads,
             events,
             link,
             session: None,
             state: LinkState::Connecting,
-            gesture: owner_gesture,
+            gesture: Rc::clone(&gesture),
             activity: Activity::default(),
             runs: Runs::default(),
+            presenter,
+            scene_timer: None,
+            scene_deadline: None,
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout {
@@ -842,6 +851,8 @@ pub(crate) fn open(
             scale,
             pointer_settle: None,
             delete_retry: None,
+            error: None,
+            refusal: None,
             stretch,
         }
     });
@@ -880,7 +891,7 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
         let weak = owner.downgrade();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(delay).await;
-            let _closed = weak.update(cx, |this, cx| this.quit(cx));
+            let _closed = weak.update(cx, Presence::quit);
         })
         .detach();
     }

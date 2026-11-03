@@ -1,5 +1,6 @@
 use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
+    limits::MAX_OBJECT_DEPTH,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
 use std::collections::{BTreeMap, HashSet};
@@ -217,12 +218,49 @@ pub(super) fn validate_op(
         let valid = if reference.field == "in" {
             required_parent.map_or_else(|| target.kind.container(), |kind| target.kind == kind)
         } else if v.kind == Kind::Edge {
-            target.kind == Kind::Node && target.parent.as_ref() == v.parent
+            target.kind == Kind::Node
         } else {
             true
         };
         if !valid {
             return Err(StepError::in_step(&step.id, field, ErrorCode::OutOfRange));
+        }
+    }
+    if let Op::Edge(edge) = op {
+        let mut ancestors = [None; MAX_OBJECT_DEPTH];
+        let mut cursor = objects
+            .get(&edge.from)
+            .and_then(|node| node.parent.as_ref());
+        for slot in &mut ancestors {
+            let Some(id) = cursor else { break };
+            let Some(object) = objects.get(id) else { break };
+            if object.kind != Kind::Diagram {
+                break;
+            }
+            *slot = Some(id);
+            cursor = object.parent.as_ref();
+        }
+        let mut common = None;
+        cursor = objects.get(&edge.to).and_then(|node| node.parent.as_ref());
+        for _ in 0..MAX_OBJECT_DEPTH {
+            let Some(id) = cursor else { break };
+            let Some(object) = objects.get(id) else { break };
+            if object.kind != Kind::Diagram {
+                break;
+            }
+            if ancestors.contains(&Some(id)) {
+                common = Some(id);
+                break;
+            }
+            cursor = object.parent.as_ref();
+        }
+        if common != edge.parent.as_ref() {
+            let field = if objects[&edge.from].parent == edge.parent {
+                "to"
+            } else {
+                "from"
+            };
+            return Err(fail(field, ErrorCode::OutOfRange));
         }
     }
     validate_dimensions(op, &prefix, step)
@@ -285,7 +323,29 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
         Op::Highlight(r) => positive(r.pad, "pad")?,
         Op::Diagram(r) => bounds(r.bounds)?,
         Op::Table(r) => bounds(r.bounds)?,
-        Op::Chart(r) => bounds(r.bounds)?,
+        Op::Chart(r) => {
+            bounds(r.bounds)?;
+            if r.title.is_some()
+                && let Some(bounds) = r.bounds
+            {
+                for (axis, origin) in bounds[..2].iter().enumerate() {
+                    if origin.get() + crate::limits::CHART_LABEL_INSET > crate::limits::MAX_COORD {
+                        return Err(StepError::in_step(
+                            &step.id,
+                            prefix.clone().field("box").index(axis),
+                            ErrorCode::OutOfRange,
+                        ));
+                    }
+                }
+            }
+        }
+        Op::Edge(r) if r.flow.is_some_and(|period| period.get() == 0) => {
+            return Err(StepError::in_step(
+                &step.id,
+                prefix.clone().field("flow"),
+                ErrorCode::OutOfRange,
+            ));
+        }
         _ => {}
     }
     Ok(())
