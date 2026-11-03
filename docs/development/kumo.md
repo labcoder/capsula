@@ -7,6 +7,10 @@ with no GPUI, no platform code and no dependencies, so it runs the same on Windo
 ```mermaid
 flowchart LR
     S["Silhouette<br/>implicit surface"] -->|"bake, once per size"| G["GBuffer<br/>coverage, normal,<br/>thickness, occlusion"]
+    G -->|"light with a Look"| R["Renderer"]
+    F["FrameState<br/>squash, eyes, glow"] --> R
+    R -->|"render, per expression change"| I["straight-alpha BGRA"]
+    I -->|"row hulls, device spans"| M["conservative hit mask"]
 ```
 
 ## The shape and the bake
@@ -25,3 +29,55 @@ and never inside GPUI's paint.
 Tests cover the field's sign inside and outside, the framing's centre and corner, the bake's
 empty corners and covered middle, the soft band against a crisp one, determinism, and the empty
 and single-pixel sizes.
+
+## Shading
+
+`raster.rs`'s `Renderer::new` bakes the body at one square size and lights each covered texel
+once with a `Look` (`look.rs`: the approved `Material::SOFT` and `Theme::LAVENDER`, and a
+contact shadow). Lighting is a wrapped key light with sky fill, crease occlusion toward a
+saturated shade colour, a silver lining where thin vapour scatters the key light, and a static
+accent glow from one side.
+
+`Renderer::render` shades one frame from a `FrameState` (`frame.rs`): the body's squash and
+lift about its bottom centre, the two eyes, blush, and the mood's inner light and rim.
+`FrameState::IDLE` is the still pose a resting Kumo shows. It writes straight-alpha BGRA into
+a buffer the caller owns, allocates nothing, and returns a typed error for a buffer of the wrong
+size. The soft edge drifts with the frame's time, so it reads as vapour; at time 0 a frame is
+the same bytes every time.
+
+GPUI filters straight-alpha colour when it scales an image, so a black clear pixel beside the
+body would darken the edge. `bleed_clear` gives every clear pixel the colour of a covered
+4-neighbour, keeping its alpha at 0. Every image Kumo hands GPUI goes through it.
+
+Measured on Rez (release, best of 5 bakes and 20 frames, 2026-11-03):
+
+| Square, px | Bake, ms | One frame, µs |
+|---|---|---|
+| 48 | 2.1 | 81 |
+| 72 | 4.7 | 175 |
+| 84 | 6.3 | 239 |
+| 96 | 8.2 | 304 |
+| 126 | 14.1 | 512 |
+| 168 | 25.0 | 897 |
+
+So a bake is too slow for GPUI's paint at high display scales: it runs before the image is
+first shown, or on a background executor. A frame is shaded only when the expression changes.
+
+## Hit mask
+
+`coverage.rs` decides which device pixels of a drawn image take the pointer. It's conservative:
+it never lets a click through a visible pixel. GPUI samples a scaled image bilinearly, so a
+device pixel reads the texels within one texel of its centre. `row_hulls` takes each source
+row's hull of texels at or above 75/255 alpha, and `device_spans` maps those through the
+image's snapped `Placement`, reaching half a texel further on each side plus one device pixel
+for the snap, clipped to the drawn quad. The cutoff is 75 because two layers each under 75
+composite to under 128, so a pixel visible after compositing body and neck is owned by one of
+them. One hull per row owns the gaps between lobes; that errs toward owning.
+
+Tests check the renderer's wrong-size error, determinism, clear corners and an opaque middle,
+the eye ink, the bleed rule, and a rendered edge with no dark fringe. The mask tests compare
+against an independent bilinear sampler: every pixel it samples at or above the cutoff is
+owned, for a soft ramp and for the rendered body at 48 and 84 px drawn at 1.0, 1.25, 1.5 and
+2.0 scale and at a size between, and each owned row stays within `ceil(scale) + 2` pixels of
+the sampled edge. They also cover the inclusive cutoff, empty images and placements, and a
+single texel.
