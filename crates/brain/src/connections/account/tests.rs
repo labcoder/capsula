@@ -3,6 +3,7 @@
 //! mutations. Exchange results are fed in as data: nothing touches a network.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
@@ -10,14 +11,18 @@ use kumochi_protocol::message::{AccountRecovery, Action, ErrorKey, UserError};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::connections::clock::FixedClock;
-use crate::connections::records::{Origin, Revocable};
+use crate::connections::clock::{Clock, FixedClock};
+use crate::connections::error::VaultError;
+use crate::connections::records::{
+    MAX_ENTRY_BYTES, MAX_REFRESH_BYTES, MAX_TOKEN_BYTES, Origin, Revocable,
+};
 use crate::connections::vault::fake::{FakeStore, Fault, Mutation};
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::SessionLock;
 use crate::test_support::{Captured, Scratch};
 
 mod lane;
+mod sweep;
 
 const NOW: u64 = 1_800_000_000;
 const EMAIL: &str = "person@example.invalid";
@@ -112,6 +117,15 @@ fn saved_account(subject: &str, refresh: &str) -> Secret<Account> {
     })
 }
 
+/// Wall time a test moves forward, as a running clock or a jump would.
+struct Wall(Arc<AtomicU64>);
+
+impl Clock for Wall {
+    fn unix_seconds(&self) -> Option<u64> {
+        Some(self.0.load(Ordering::SeqCst))
+    }
+}
+
 fn committed(result: &SaveResult) {
     assert!(
         matches!(result, SaveResult::Committed { leftovers: false }),
@@ -126,6 +140,7 @@ struct Harness {
     store: FakeStore,
     service: String,
     scratch: Scratch,
+    wall: Arc<AtomicU64>,
     views: Vec<AccountView>,
     errors: Vec<UserError>,
     /// The persisted marker after every credential job, in order.
@@ -134,6 +149,8 @@ struct Harness {
     closed: usize,
     /// Every token request sent, in order.
     sent: Vec<(u64, Authorization)>,
+    /// Every revocation run asked for, in order.
+    revoking: Vec<Vec<Secret<Revocable>>>,
     replied: usize,
     /// Hold the next credential job instead of running it.
     hold: bool,
@@ -151,15 +168,15 @@ impl Harness {
         let store = FakeStore::default();
         let seeding = scratch.db().with_file_name("seed.lock");
         seed(&mut Vault::with_service(store.clone(), &service, &seeding).expect("seed vault"));
-        Self::boot(scratch, service, store)
+        Self::boot(scratch, service, store, Arc::new(AtomicU64::new(NOW)))
     }
 
-    fn boot(scratch: Scratch, service: String, store: FakeStore) -> Self {
+    fn boot(scratch: Scratch, service: String, store: FakeStore, wall: Arc<AtomicU64>) -> Self {
         let lock = scratch.db().with_file_name(SESSION_LOCK);
         let (opener, name) = (store.clone(), service.clone());
         let worker = Worker::new(
             Box::new(move || Vault::with_service(opener.clone(), &name, &lock)),
-            Arc::new(FixedClock(NOW)),
+            Arc::new(Wall(Arc::clone(&wall))),
         );
         let (state, effects) = AccountState::start();
         let mut harness = Self {
@@ -168,12 +185,14 @@ impl Harness {
             store,
             service,
             scratch,
+            wall,
             views: Vec::new(),
             errors: Vec::new(),
             markers: Vec::new(),
             listening: Vec::new(),
             closed: 0,
             sent: Vec::new(),
+            revoking: Vec::new(),
             replied: 0,
             hold: false,
             held: None,
@@ -189,10 +208,15 @@ impl Harness {
             service,
             store,
             worker,
+            wall,
             ..
         } = self;
         drop(worker);
-        Self::boot(scratch, service, store)
+        Self::boot(scratch, service, store, wall)
+    }
+
+    fn advance(&self, seconds: u64) {
+        self.wall.fetch_add(seconds, Ordering::SeqCst);
     }
 
     fn feed(&mut self, input: Input) {
@@ -225,6 +249,7 @@ impl Harness {
                     attempt,
                     authorization,
                 } => self.sent.push((attempt, authorization)),
+                Effect::Revoke(entries) => self.revoking.push(entries),
             }
         }
         if let Some(job) = job {
@@ -475,6 +500,67 @@ fn an_unusable_response_that_named_a_refresh_token_lists_it() {
         )]
     );
     assert_eq!(h.marker(), marker(&["sweep"]));
+}
+
+/// CAPS-116: a set whose tokens fit their field bounds but escape past what a record holds is
+/// refused where it arrives, so no save that can never land is offered for Retry.
+#[test]
+fn a_set_too_long_once_escaped_is_refused_where_it_arrives() {
+    // 4,858 escaped backslashes and an `r` are 9,717 bytes, and the frame
+    // {"client_id":"client-issued","refresh_token":"","added_at":u64::MAX,"origin":"Exchange"}
+    // is 100, so this entry is exactly the bound.
+    assert_eq!(MAX_ENTRY_BYTES, 9_817);
+    let fits = format!("{}r", "\\".repeat(4_858));
+    let over = format!("{fits}r");
+    assert!(over.len() <= MAX_REFRESH_BYTES, "within the field bound");
+
+    let mut h = Harness::new("account-escaped-fits");
+    h.op(AccountOp::SignIn);
+    h.callback("client-issued");
+    h.reply(received(Some(&fits), "subject-1", PLAN));
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    assert_eq!(h.refresh_token(), Some(fits));
+
+    for reply in [
+        received(Some(&over), "subject-1", PLAN),
+        Err(ExchangeError::Unusable {
+            refresh_token: Some(secret(&over)),
+        }),
+    ] {
+        let mut h = Harness::new("account-escaped-over");
+        h.op(AccountOp::SignIn);
+        h.callback("client-issued");
+        h.reply(reply);
+        assert_eq!(
+            h.errors,
+            [user_error(ErrorKey::SignInFailed, &[Action::SignIn])]
+        );
+        assert_eq!(h.view(), &signed_out());
+        assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+        assert_eq!(h.refresh_token(), None);
+        assert!(h.revocations().is_empty(), "nothing owns it");
+    }
+
+    let mut h = Harness::new("account-escaped-access");
+    h.op(AccountOp::SignIn);
+    h.callback("client-issued");
+    let mut reply = received(Some("refresh-new"), "subject-1", PLAN);
+    reply.as_mut().expect("a set").tokens.access_token = secret(&"\0".repeat(MAX_TOKEN_BYTES));
+    h.reply(reply);
+    assert_eq!(
+        h.errors,
+        [user_error(ErrorKey::SignInFailed, &[Action::SignIn])]
+    );
+    assert_eq!(h.refresh_token(), None);
+    assert_eq!(
+        h.revocations(),
+        [(
+            "client-issued".to_owned(),
+            "refresh-new".to_owned(),
+            NOW,
+            Origin::Exchange
+        )]
+    );
 }
 
 #[test]
@@ -870,27 +956,37 @@ fn a_pending_sign_out_fences_the_account_and_starts_nothing() {
     assert!(h.listening.is_empty());
 }
 
+/// CAPS-117 M2: a patient load tries a busy session lock exactly five times in all.
 #[test]
-fn an_early_busy_lock_is_retried_and_a_lasting_one_is_retried_on_each_op() {
-    let scratch = Scratch::new("account-busy");
-    let lock = scratch.db().with_file_name(SESSION_LOCK);
-    let held = SessionLock::try_acquire(&lock).expect("lock");
-    let freed = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        drop(held);
-    });
-    let h = Harness::boot(
-        scratch,
-        "test-account-busy".to_owned(),
-        FakeStore::default(),
-    );
-    freed.join().expect("released");
-    assert_eq!(
-        h.views,
-        [signed_out()],
-        "the startup load waited for the lock"
-    );
+fn a_patient_load_tries_a_busy_lock_five_times_in_all() {
+    for (busy, opened) in [(4, true), (5, false)] {
+        let scratch = Scratch::new("account-busy");
+        let lock = scratch.db().with_file_name(SESSION_LOCK);
+        let store = FakeStore::default();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&opens);
+        let mut worker = Worker::new(
+            Box::new(move || {
+                if counted.fetch_add(1, Ordering::SeqCst) < busy {
+                    return Err(VaultError::Busy);
+                }
+                Vault::with_service(store.clone(), "test-account-busy", &lock)
+            }),
+            Arc::new(FixedClock(NOW)),
+        );
+        let done = worker.run(Job::Load { patient: true });
+        assert_eq!(matches!(done, Done::Loaded(Ok(_))), opened, "{busy}");
+        assert_eq!(
+            matches!(done, Done::Loaded(Err(VaultError::Busy))),
+            !opened,
+            "{busy}"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 5, "{busy}");
+    }
+}
 
+#[test]
+fn a_lasting_busy_lock_is_retried_on_each_op() {
     let scratch = Scratch::new("account-busy-lasting");
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let held = SessionLock::try_acquire(&lock).expect("lock");
@@ -898,6 +994,7 @@ fn an_early_busy_lock_is_retried_and_a_lasting_one_is_retried_on_each_op() {
         scratch,
         "test-account-busy".to_owned(),
         FakeStore::default(),
+        Arc::new(AtomicU64::new(NOW)),
     );
     assert_eq!(h.views, [AccountView::Busy]);
     h.op(AccountOp::SignIn);

@@ -1,7 +1,7 @@
 use super::*;
 use crate::connections::records::{
     MAX_EMAIL_BYTES, MAX_EXCHANGES, MAX_ID_BYTES, MAX_REFRESH_BYTES, MAX_SCOPE_BYTES,
-    MAX_TOKEN_BYTES,
+    MAX_TOKEN_BYTES, entry_fits,
 };
 
 #[test]
@@ -152,6 +152,30 @@ fn revocation_count_field_and_serialized_bounds_precede_marker_writes() {
             == record.expose(),
         "four exchanges and one account fit"
     );
+}
+
+/// CAPS-116: entries at the per-entry bound always fit together in one list record.
+#[test]
+fn a_full_list_of_entries_at_the_entry_bound_is_saved() {
+    let (_scratch, path, service, store) = setup("revocation-entry-bound");
+    let mut vault = open(&store, &service, &path);
+    let client_id = Zeroizing::new("x".repeat(MAX_ID_BYTES));
+    let mut refresh_token = Zeroizing::new("\0".repeat(MAX_REFRESH_BYTES));
+    while !entry_fits(&client_id, &refresh_token) {
+        refresh_token.pop();
+    }
+    let entry = Revocable {
+        client_id,
+        refresh_token,
+        added_at: u64::MAX,
+        origin: Origin::Exchange,
+    };
+    let mut entries = vec![entry.clone(); MAX_EXCHANGES];
+    entries.push(Revocable {
+        origin: Origin::Account,
+        ..entry
+    });
+    committed(vault.save_revocations(&Secret::new(RevocationList { entries })));
 }
 
 #[test]
