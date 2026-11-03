@@ -358,6 +358,7 @@ fn install(
             bounds,
             primitives: primitives.into(),
             transform: Affine::default(),
+            // shortcut: own updates lose inherited opacity; retain its separate factor in A7.
             opacity: crate::state::object::visual(&source)
                 .and_then(|visual| visual.opacity)
                 .map_or(1.0, crate::Finite::get),
@@ -395,6 +396,7 @@ pub(super) fn place(
                     let mut output = old.item.primitives.to_vec();
                     output.retain(|primitive| !matches!(primitive, Prim::Rect { .. }));
                     let mut column = 0;
+                    // shortcut: frozen rows retain their rule while bounds grow; revisit in A8's visual gate.
                     let mut bounds = old.item.bounds;
                     for primitive in &mut output {
                         if let Prim::Text {
@@ -484,6 +486,7 @@ fn place_table(
         .ok_or(PrepareError::Stale)?
         .clone();
     let old = state.objects.get(&id).ok_or(PrepareError::Stale)?;
+    let unchanged_opacity = (!sources.contains_key(&id)).then_some(old.item.opacity);
     let source = Arc::clone(sources.get(&id).map_or(&old.source, |(_, source)| source));
     let Op::Table(table) = &*source else {
         return Err(PrepareError::Stale);
@@ -534,6 +537,14 @@ fn place_table(
         bounds,
         primitives,
     );
+    if let Some(opacity) = unchanged_opacity {
+        state
+            .objects
+            .get_mut(&table.id)
+            .ok_or(PrepareError::Stale)?
+            .item
+            .opacity = opacity;
+    }
     for (index, (row_handle, (id, source))) in rows.into_iter().enumerate() {
         let Op::Row(row) = &*source else {
             unreachable!("row sources were filtered");

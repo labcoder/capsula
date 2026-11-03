@@ -1314,6 +1314,11 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
         json!({"id":"cells","set":[{"target":"r","cells":[2],"color":"red"}]}),
     );
     let next = picture(&scene, next, &tip, &mut measure).expect("detached cells");
+    assert_eq!(
+        next.after.bounds(&id("r")).expect("updated bounds"),
+        Some(expected),
+        "a detached update keeps the absorbed ancestor transform"
+    );
     let texts: Vec<_> = next.after.items()[0]
         .primitives
         .iter()
@@ -1334,6 +1339,43 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
     )
     .expect("detached replay");
     assert_eq!(replayed.items(), next.after.items());
+}
+
+#[test]
+fn row_only_rebuild_preserves_the_detached_tables_absorbed_opacity() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"diagram":{"id":"d","opacity":0.5}},
+            {"table":{"id":"t","in":"d","cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[1]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut Measure::default()).expect("table");
+    let table = first.after.handle(&id("t")).expect("table handle");
+    cut(&mut scene, &mut budget, 1, &["t", "r"], &first.after);
+    let detached = first.after.cut(&scene).expect("detached table");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"row","set":[{"target":"r","cells":[2]}]}),
+    );
+    let next = picture(&scene, next, &detached, &mut Measure::default()).expect("row update");
+    let table = next
+        .after
+        .items()
+        .into_iter()
+        .find(|item| item.handle == table)
+        .expect("table");
+    assert_eq!(
+        table.opacity.to_bits(),
+        0.5_f32.to_bits(),
+        "editing a child must not reset an untouched detached table's inherited opacity"
+    );
 }
 
 #[test]
