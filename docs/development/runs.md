@@ -6,6 +6,38 @@ takes inputs and returns effects, and the systems around it (the store, the engi
 timers) do the work and report back. So the order of Esc, late completions and interruption is
 tested as plain unit tests.
 
+## The shell's input target
+
+`crates/shell/src/runs.rs` owns `Target::{Kumo, Task(ThreadId), New}` separately from
+`Threads.open`, the history being viewed. Viewing doesn't change the target or selection
+revision. **Switch to this task**, **Back to Kumo** and **New task** advance the revision;
+switching to the id in `SettingsView.main_thread` normalizes to `Target::Kumo`.
+
+The default is Kumo at shell start, when `met()` meets a new brain incarnation and drops a
+non-durable target, and when the user confirms deletion of the targeted task. These fallbacks
+advance the revision too. A task known from a stored row or an answered run is durable and
+survives reconnect; an unconfirmed new task falls back to Kumo when the brain incarnation
+changes. This replaces slice 2's new-conversation default (OSC-157).
+
+Each submit captures the target in `TextSubmit` and queues the current revision in a FIFO.
+`Target::Kumo` resolves to the connection's `SettingsView.main_thread`; `Target::New` sends
+`None`. Submits are refused as offline until that connection has supplied its `SettingsView`,
+even for New task. Disconnect clears the main id and pending submissions, so a previous
+connection's id cannot be reused before the new view arrives.
+
+While `Target::New` has a submission pending at the current revision, another submit is
+refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
+stays, so after the first `RunState` adopts the task, retrying continues that task. Pending
+turns from older selections don't block New task: explicitly choosing **New task** again
+advances the revision and permits a separate task.
+
+A new `RunState` answers the oldest pending turn. Only a matching queued revision while the
+target is still `New` can adopt that run's thread, without advancing the revision. An empty
+FIFO never adopts, and a task holding a delete slot cannot become the target. A delayed state
+after an explicit switch still answers its own turn but doesn't move input. Esc cancels work,
+not the target or revision. Settings updates replace names and the main id without changing
+the input draft, keyboard focus, viewed history, target or revision.
+
 ## Ids and staleness
 
 The coordinator hands out thread and run ids, starting above the store's high-water marks, so an

@@ -64,7 +64,7 @@ sequenceDiagram
 ## The typing panel
 
 A double tap opens a small panel where the status panel would be, with one gpui-kit `Input`.
-Like the [threads panel](panels.md), it activates only on a user command, as described in
+Like the [tasks panel](panels.md), it activates only on a user command, as described in
 [Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
 front back to that window, but only if Kumochi still has the front and that window still exists.
@@ -73,7 +73,9 @@ foreground: the user has already chosen the new window. Hidden and stale deactiv
 do not normally dismiss a newly active panel, except for the rapid away/back cache limit in
 [presence](presence.md). The panel is hidden, not closed, so its draft survives.
 Hover never opens over it or dismisses it.
-It has no Send, history or other controls yet.
+Enter submits to the [captured input target](runs.md#the-shells-input-target). When the target
+isn't Kumo, the panel names it and offers **Back to Kumo**. A settings update preserves the
+draft and keyboard focus without changing that target.
 
 ### Taking the front
 
@@ -122,8 +124,9 @@ Rejected alternatives:
 
 ## Esc
 
-`escape.rs` decides each press: stop moving work first, clear an idle drawing second,
-otherwise dismiss the topmost local panel: the typing panel or the focused threads panel. The
+`escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
+an active inline rename third, otherwise dismiss the typing panel or focused tasks panel. Stop
+and clear leave an edit intact; cancelling an edit doesn't dismiss its panel. The
 local effect always happens first, and nothing waits on the brain:
 
 - **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
@@ -171,7 +174,7 @@ creates no file.
     holds exactly it. Only diagnostic runs keep that draft, in memory until the compare; no text,
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
-  - `escape action=Stop|Clear|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
+  - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process

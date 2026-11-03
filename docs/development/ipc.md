@@ -90,9 +90,12 @@ flowchart LR
 - **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
   shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
-  them breaks the connection like any malformed frame. The shell shows the text in the typing
-  panel and on the dock until the next turn is sent. A new key goes at the end of `ErrorKey`
-  and gets its catalog id in `strings.rs`'s `error_id`.
+  them breaks the connection like any malformed frame. The shell retains brain errors in one
+  field, shown in the typing panel, tasks panel and dock until a turn is successfully sent.
+  A failed submit leaves that error intact. Local submission refusals are separate, shown only
+  in the typing panel in preference to the retained brain error. Reconnecting or accepting a
+  `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
+  the end of `ErrorKey` and gets its catalog id in `strings.rs`'s `error_id`.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,
@@ -121,6 +124,8 @@ flowchart LR
 
 - Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
+  The shell confirms a task's displayed title by an authoritative page reread, not by sending
+  the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries
@@ -293,8 +298,10 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   loss. A lost brain fences every run it knew and forgets the unanswered turns. A reconnect to
   a new incarnation lifts that fence: a brain that crashed before storing a turn hands its run
   id out again, and the answer and scenes still shown belong to none of the new brain's runs.
-  The next turn goes to a new thread unless the shell knows its thread is stored: picked from
-  the threads list, or answered by a run, which starts only after its turn is stored.
+  A non-durable input target returns to Kumo; a stored task target stays. Disconnect clears
+  the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
+  a row only views it: explicit switches and per-turn selection revisions govern targeting,
+  as described in [runs](runs.md#the-shells-input-target).
 
 ## Starting and reconnecting
 

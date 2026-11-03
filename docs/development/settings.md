@@ -16,7 +16,11 @@ U+2028 or U+2029. A name that breaks the rule fails to decode, so a shell sends 
 checked. An empty user name is `None`, never an empty name. A name's `Debug` prints a length, and
 nothing logs a name, a value from the file, or the TOML parser's messages. Every `SettingsView`
 also names `main_thread`, the store's main thread, whose row the shell labels with
-`assistant_name`.
+`assistant_name`. The shell uses only received settings for that label, including in search
+results and the input-target label. An inline rename of Kumo sends `SetAssistantName` and
+keeps the previous displayed name until the next `SettingsView`; it never edits the empty
+stored title. A settings update preserves the draft, keyboard focus, viewed task, input
+target and selection revision, so saving a name never switches conversations.
 
 ## Changes
 

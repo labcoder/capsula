@@ -5,7 +5,7 @@ use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent};
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div,
+    Render, Styled as _, WeakEntity, Window, div,
 };
 
 use super::{
@@ -13,7 +13,9 @@ use super::{
     PresenceEvent, PresenceSurface, SharedString, configure_surface, constants, diagnostics,
     options, platform, send,
 };
+use crate::runs::{Refused, Target};
 use crate::strings::{Strings, Text};
+use crate::threads::row_label;
 
 #[derive(Clone, Copy)]
 pub(super) enum Hide {
@@ -126,6 +128,7 @@ impl Presence {
         let stop = self.escape_hold.shows_stop();
         let events = self.events.clone();
         let close_events = self.events.clone();
+        let owner = cx.weak_entity();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
@@ -136,10 +139,8 @@ impl Presence {
             cx.new(|_| TextView {
                 input,
                 stop,
-                steps: Vec::new(),
-                answer: SharedString::default(),
-                deleting: false,
-                notice: None,
+                conversation: Conversation::default(),
+                owner,
                 events,
             })
         })
@@ -249,8 +250,68 @@ impl Presence {
 }
 
 impl Presence {
+    pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let Some(text) = &self.text else {
+            return Ok(());
+        };
+        let draft = text.input.read(cx).value();
+        let (link, session) = (&self.link, &self.session);
+        let result = self.runs.submit(&draft, |turn| {
+            session
+                .as_ref()
+                .is_some_and(|session| link.send_data(session, turn))
+        });
+        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
+        let previous = (self.error.clone(), self.refusal);
+        submission_notice(&mut self.error, &mut self.refusal, result);
+        self.notices_changed(&previous, cx);
+        if result.is_ok() {
+            let input = text.input.clone();
+            text.window
+                .update(cx, |_, window, cx| {
+                    input.update(cx, |state, cx| state.set_value("", window, cx));
+                })
+                .map_err(|error| OpenError::Gpui(error.into()))?;
+        }
+        self.runs_changed(cx)
+    }
+
+    pub(super) fn notices_changed(
+        &self,
+        previous: &(Option<SharedString>, Option<Text>),
+        cx: &mut Context<'_, Self>,
+    ) {
+        let strings = cx.global::<Strings>();
+        if typing_notice(previous.0.as_ref(), previous.1, strings)
+            != typing_notice(self.error.as_ref(), self.refusal, strings)
+            && let Some(text) = &self.text
+        {
+            text.view.update(cx, |_, cx| cx.notify());
+        }
+        if previous.0 != self.error {
+            if let Some(panel) = &self.thread_panel {
+                panel.view.update(cx, |_, cx| cx.notify());
+            }
+            self.refresh_dock(cx);
+        }
+    }
+
+    pub(super) fn clear_refusal(&mut self, cx: &mut Context<'_, Self>) {
+        let previous = (self.error.clone(), self.refusal.take());
+        self.notices_changed(&previous, cx);
+    }
+
     /// Shows the drawing's steps and the end of the newest answer in the typing panel.
     pub(super) fn refresh_conversation(&self, cx: &mut Context<'_, Self>) {
+        if let Some(panel) = &self.thread_panel {
+            let target = self.runs.target();
+            panel.view.update(cx, |view, cx| {
+                if view.target != target {
+                    view.target = target;
+                    cx.notify();
+                }
+            });
+        }
         let Some(text) = &self.text else {
             return;
         };
@@ -269,14 +330,56 @@ impl Presence {
                 .thread
                 .is_some_and(|thread| self.runs.deleting().contains(&thread))
         });
+        let threads = self.threads.read(cx);
+        let strings = cx.global::<Strings>();
+        let label = match self.runs.target() {
+            Target::Kumo => None,
+            Target::Task(thread) => Some(threads.row(thread).map_or_else(
+                || strings.get(Text::TaskFallback),
+                |row| row_label(row, threads.settings.as_ref()),
+            )),
+            Target::New => Some(strings.get(Text::NewThread)),
+        };
+        let context = label.map(|label| {
+            let back_label = strings.back_to_kumo(
+                threads
+                    .settings
+                    .as_ref()
+                    .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {
+                        settings.assistant_name.as_str()
+                    }),
+            );
+            (strings.focus(&label).into(), back_label.into())
+        });
+        let conversation = Conversation {
+            steps,
+            answer,
+            deleting,
+            context,
+        };
         text.view.update(cx, |view, cx| {
-            if view.steps != steps || view.answer != answer || view.deleting != deleting {
-                view.steps = steps;
-                view.answer = answer;
-                view.deleting = deleting;
+            if view.conversation.update(conversation) {
                 cx.notify();
             }
         });
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct Conversation {
+    steps: Vec<SharedString>,
+    answer: SharedString,
+    deleting: bool,
+    context: Option<(SharedString, SharedString)>,
+}
+
+impl Conversation {
+    fn update(&mut self, next: Self) -> bool {
+        if *self == next {
+            return false;
+        }
+        *self = next;
+        true
     }
 }
 
@@ -286,29 +389,33 @@ pub(super) struct TextView {
     pub(super) input: Entity<InputState>,
     /// The Stop fallback, here too because this panel covers the status panel's.
     pub(super) stop: bool,
-    steps: Vec<SharedString>,
-    answer: SharedString,
-    /// The answer's thread is being deleted, so the next turn starts a new thread.
-    deleting: bool,
-    pub(super) notice: Option<SharedString>,
+    conversation: Conversation,
+    owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
 }
 
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
+        let owner = self.owner.upgrade();
+        let presence = owner.as_ref().map(|owner| owner.read(cx));
+        let notice = presence.and_then(|owner| {
+            typing_notice(owner.error.as_ref(), owner.refusal, cx.global::<Strings>())
+        });
+        let context = self.conversation.context.clone();
+        let back_owner = self.owner.clone();
         let stop = self.stop.then(|| {
             let events = self.events.clone();
             Button::new("stop")
                 .label(cx.global::<Strings>().get(Text::Stop))
                 .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
         });
-        let steps = (!self.steps.is_empty()).then(|| {
+        let steps = (!self.conversation.steps.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_wrap()
                 .gap_1()
-                .children(self.steps.iter().map(|label| {
+                .children(self.conversation.steps.iter().map(|label| {
                     div()
                         .px_1()
                         .rounded_sm()
@@ -329,6 +436,18 @@ impl Render for TextView {
             .flex_col()
             .gap_2()
             .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
+            .children(context.map(|(context, back_label)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(context))
+                    .child(Button::new("back-to-kumo").label(back_label).on_click(
+                        move |_, _, cx| {
+                            let _gone = back_owner.update(cx, Presence::back_to_kumo);
+                        },
+                    ))
+            }))
             .child(
                 div()
                     .flex_1()
@@ -339,27 +458,51 @@ impl Render for TextView {
                     .justify_end()
                     .gap_1()
                     .text_xs()
-                    .text_color(if self.deleting {
+                    .text_color(if self.conversation.deleting {
                         cx.theme().muted_foreground
                     } else {
                         cx.theme().popover_foreground
                     })
                     .children(steps)
-                    .child(self.answer.clone()),
+                    .child(self.conversation.answer.clone()),
             )
-            .children(self.deleting.then(|| {
+            .children(self.conversation.deleting.then(|| {
                 div()
                     .text_xs()
                     .child(cx.global::<Strings>().get(Text::ThreadDeleting))
             }))
-            .children(
-                self.notice
-                    .clone()
-                    .map(|notice| div().text_xs().child(notice)),
-            )
+            .children(notice.map(|notice| div().text_xs().child(notice)))
             .child(Input::new(&self.input))
             .children(stop)
     }
+}
+
+fn submission_notice(
+    error: &mut Option<SharedString>,
+    refusal: &mut Option<Text>,
+    result: Result<(), Refused>,
+) {
+    let text = match result {
+        Ok(()) => {
+            *error = None;
+            None
+        }
+        Err(Refused::Blank) => return,
+        Err(Refused::Busy) => Some(Text::TurnBusy),
+        Err(Refused::Offline) => Some(Text::TurnOffline),
+        Err(Refused::TooLong) => Some(Text::TurnTooLong),
+    };
+    *refusal = text;
+}
+
+fn typing_notice(
+    error: Option<&SharedString>,
+    refusal: Option<Text>,
+    strings: &Strings,
+) -> Option<SharedString> {
+    refusal
+        .map(|text| strings.get(text).into())
+        .or_else(|| error.cloned())
 }
 
 /// The end of an answer the typing panel has room for [guess], cut at a character boundary.
@@ -375,6 +518,121 @@ fn answer_tail(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Hide, Typing, answer_tail};
+
+    #[test]
+    fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
+        let strings = crate::strings::Strings::english();
+        let mut error = Some(gpui_kit::SharedString::from(
+            "Couldn't save that setting. Try again.",
+        ));
+        let mut refusal = None;
+        super::submission_notice(&mut error, &mut refusal, Err(crate::runs::Refused::Blank));
+        assert_eq!(
+            super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
+            Some("Couldn't save that setting. Try again.")
+        );
+        assert_eq!(refusal, None);
+        super::submission_notice(&mut error, &mut refusal, Ok(()));
+        assert_eq!(error, None);
+        assert_eq!(refusal, None);
+    }
+
+    #[test]
+    fn a_local_refusal_preserves_the_dock_facing_brain_error() {
+        let strings = crate::strings::Strings::english();
+        let mut error = Some(gpui_kit::SharedString::from(
+            "Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.",
+        ));
+        let mut refusal = None;
+        for (result, expected) in [
+            (
+                crate::runs::Refused::Offline,
+                "Not sent: the background process isn't connected.",
+            ),
+            (
+                crate::runs::Refused::TooLong,
+                "That message is too long to send.",
+            ),
+        ] {
+            super::submission_notice(&mut error, &mut refusal, Err(result));
+            assert_eq!(
+                error.as_deref(),
+                Some(
+                    "Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart."
+                )
+            );
+            assert_eq!(
+                super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
+                Some(expected)
+            );
+        }
+        super::submission_notice(&mut error, &mut refusal, Ok(()));
+        assert_eq!(error, None);
+        assert_eq!(refusal, None);
+    }
+
+    #[test]
+    fn a_pre_settings_refusal_never_becomes_a_dock_or_tasks_error() {
+        let strings = crate::strings::Strings::english();
+        let mut runs = crate::runs::Runs::default();
+        runs.connected(1);
+        let result = runs.submit("typed", |_| panic!("not ready"));
+        assert_eq!(result, Err(crate::runs::Refused::Offline));
+        let mut error = None;
+        let mut refusal = None;
+        super::submission_notice(&mut error, &mut refusal, result);
+        assert_eq!(error, None);
+        assert_eq!(refusal, Some(crate::strings::Text::TurnOffline));
+        assert_eq!(
+            super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
+            Some("Not sent: the background process isn't connected.")
+        );
+    }
+
+    #[test]
+    fn only_a_changed_conversation_requests_a_redraw() {
+        use super::Conversation;
+        let mut conversation = Conversation::default();
+        assert!(!conversation.update(Conversation::default()));
+        assert!(conversation.update(Conversation {
+            answer: "hello".into(),
+            ..Conversation::default()
+        }));
+        assert_eq!(conversation.answer.as_ref(), "hello");
+        assert!(!conversation.update(Conversation {
+            answer: "hello".into(),
+            ..Conversation::default()
+        }));
+        assert!(conversation.update(Conversation {
+            answer: "hello!".into(),
+            ..Conversation::default()
+        }));
+        assert_eq!(conversation.answer.as_ref(), "hello!");
+        assert!(conversation.update(Conversation {
+            steps: vec!["step".into()],
+            answer: "hello!".into(),
+            deleting: true,
+            context: Some(("You're in: Draft".into(), "Back to Kumo".into()))
+        }));
+        assert_eq!(
+            conversation.steps.as_slice(),
+            &[gpui_kit::SharedString::from("step")]
+        );
+        assert!(conversation.deleting);
+        assert_eq!(
+            conversation
+                .context
+                .as_ref()
+                .map(|(label, back)| (label.as_ref(), back.as_ref())),
+            Some(("You're in: Draft", "Back to Kumo"))
+        );
+        assert!(!conversation.update(Conversation {
+            steps: vec!["step".into()],
+            answer: "hello!".into(),
+            deleting: true,
+            context: Some(("You're in: Draft".into(), "Back to Kumo".into()))
+        }));
+    }
 
     #[test]
     fn a_short_answer_shows_whole() {
