@@ -56,6 +56,7 @@ impl Renderer {
                 });
             }
         }
+        bleed_lit(&mut lit, size);
         Self {
             look,
             size,
@@ -202,6 +203,37 @@ pub(crate) fn bleed_clear(pixels: &mut [u8], size: u16) {
             let from = index(size, ni, nj) * 4;
             let to = index(size, i, j) * 4;
             pixels.copy_within(from..from + 3, to);
+        }
+    }
+}
+
+/// Gives each empty texel beside the body the lit surface of its most covered 8-neighbour,
+/// keeping its coverage at 0. A squashed or lifted frame samples between texels, and an empty
+/// texel's black base and missing rim would otherwise darken the soft edge.
+fn bleed_lit(lit: &mut [Lit], size: u16) {
+    for j in 0..size {
+        for i in 0..size {
+            if lit[index(size, i, j)].coverage > 0.0 {
+                continue;
+            }
+            let near = |k: u16| [k.checked_sub(1), Some(k), (k + 1 < size).then_some(k + 1)];
+            let donor = near(j)
+                .into_iter()
+                .flatten()
+                .flat_map(|nj| {
+                    near(i)
+                        .into_iter()
+                        .flatten()
+                        .map(move |ni| index(size, ni, nj))
+                })
+                .filter(|&n| lit[n].coverage > 0.0)
+                .max_by(|&a, &b| lit[a].coverage.total_cmp(&lit[b].coverage));
+            if let Some(n) = donor {
+                lit[index(size, i, j)] = Lit {
+                    coverage: 0.0,
+                    ..lit[n]
+                };
+            }
         }
     }
 }
@@ -473,6 +505,55 @@ mod tests {
         bleed_clear(&mut px, 4);
         assert_eq!(px, vec![0; 4 * 4 * 4]);
         bleed_clear(&mut [], 0);
+    }
+
+    /// A squashed frame samples the bake between texels. Its soft edge must keep the colour the
+    /// unsquashed edge has at the same body point, not pull in the black of empty texels.
+    #[test]
+    fn a_squashed_edge_keeps_its_colour() {
+        let size = 84;
+        let look = Look {
+            shadow: false,
+            ..Look::default()
+        };
+        let renderer = Renderer::new(&Silhouette::emoji(), size, look);
+        let mut still = vec![0; renderer.image_len()];
+        let mut squashed = still.clone();
+        renderer
+            .render(&FrameState::IDLE, &mut still)
+            .expect("the buffer is the renderer's size");
+        let f = FrameState {
+            body_scale: super::v2(1.04, 0.95),
+            ..FrameState::IDLE
+        };
+        renderer
+            .render(&f, &mut squashed)
+            .expect("the buffer is the renderer's size");
+        let mut worst = 0;
+        for j in 0..size {
+            for i in 0..size {
+                let px = &squashed[index(size, i, j) * 4..][..4];
+                if px[3] == 0 || px[3] == 255 {
+                    continue;
+                }
+                let p = FRAMING.to_cloud(size, f32::from(i) + 0.5, f32::from(j) + 0.5);
+                let floor = Silhouette::emoji().floor;
+                let q = super::v2(p.x / f.body_scale.x, floor + (p.y - floor) / f.body_scale.y);
+                let at = FRAMING.to_pixel(size, q);
+                let still_px = &still[index(size, pixel(at.x), pixel(at.y)) * 4..][..4];
+                if still_px[3] == 0 {
+                    continue;
+                }
+                for c in 0..3 {
+                    worst = worst.max(px[c].abs_diff(still_px[c]));
+                }
+            }
+        }
+        // Black from empty texels put it 108 off; neighbouring surface colours differ by about 5.
+        assert!(
+            worst <= 8,
+            "a squashed edge pixel is {worst}/255 off the still edge's colour"
+        );
     }
 
     #[test]
