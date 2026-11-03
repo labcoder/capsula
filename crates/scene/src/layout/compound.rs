@@ -124,12 +124,11 @@ pub(super) fn member_rect(object: &Placed) -> Rect {
     }
 }
 
-/// Union of a diagram's children in its own space, as the final bounds pass computes it.
-pub(super) fn contents(state: &LayoutState, group: Handle) -> Option<Rect> {
-    state
-        .objects
-        .values()
-        .filter(|object| object.item.parent == Some(group))
+/// Union of a diagram's children in its own space, as the final bounds pass computes it when
+/// they come in id order.
+pub(super) fn contents<'a>(children: impl IntoIterator<Item = &'a Placed>) -> Option<Rect> {
+    children
+        .into_iter()
         .map(|object| {
             object
                 .item

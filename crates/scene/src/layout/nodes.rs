@@ -168,8 +168,25 @@ pub(super) fn place(
             owned_by.entry(owner.item.handle).or_default().push(id);
         }
     }
+    // Each group's children, placed or built below, in the id order the final bounds pass unions.
+    let mut children = BTreeMap::<Option<Handle>, BTreeSet<crate::WireId>>::new();
+    for (id, parent) in state
+        .objects
+        .iter()
+        .map(|(id, object)| (id, object.item.parent))
+        .chain(parents.iter().map(|(id, &(_, parent))| (id, parent)))
+        .chain(
+            owned_by
+                .iter()
+                .flat_map(|(&owner, ids)| ids.iter().map(move |&id| (id, Some(owner)))),
+        )
+    {
+        if groups.contains_key(&parent) {
+            children.entry(parent).or_default().insert(id.clone());
+        }
+    }
     let mut groups: Vec<_> = groups.into_iter().collect();
-    groups.sort_by_key(|(parent, _)| Reverse(compound::depth(state, *parent)));
+    groups.sort_by_cached_key(|(parent, _)| Reverse(compound::depth(state, *parent)));
     let mut glides = Vec::new();
     let mut prebuilt = BTreeSet::new();
     for (parent, mut new_ids) in groups {
@@ -185,12 +202,13 @@ pub(super) fn place(
             .unwrap_or(build.viewport);
         let direction = compound::direction(state, parent, surface);
         let initialized = group.is_some_and(|group| group.initialized);
+        let members = children.remove(&parent).unwrap_or_default();
         let mut all = Vec::new();
         let mut nodes = 0;
-        for (id, object) in &state.objects {
-            if object.item.parent != parent {
+        for id in &members {
+            let Some(object) = state.objects.get(id) else {
                 continue;
-            }
+            };
             if matches!(&*object.source, Op::Node(_)) {
                 nodes += 1;
                 all.push((object.item.handle, id.clone(), object.item.bounds.size));
@@ -379,9 +397,9 @@ pub(super) fn place(
         }
         if let Some(group_id) = group_id {
             // A cluster's parent ranks its contents, so they must be measured before it.
-            let contents = parent
-                .filter(|_| cluster)
-                .and_then(|handle| compound::contents(state, handle));
+            let contents = cluster
+                .then(|| compound::contents(members.iter().filter_map(|id| state.objects.get(id))))
+                .flatten();
             let group = state
                 .objects
                 .get_mut(&group_id)

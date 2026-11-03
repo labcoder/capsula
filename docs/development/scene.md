@@ -351,6 +351,8 @@ diagram, which ranks their containing clusters and routes the edge in that diagr
 coordinate space. Tables and charts are not implicit graph clusters.
 An edge's `in` must be exactly that least common diagram, or admission returns
 `OutOfRange` at `from` or `to`; that endpoint blame is a deterministic heuristic.
+Preparation indexes children once and caches group depths for bottom-up placement;
+content unions retain identifier order and ranked members retain handle order.
 
 The 48-node and 96-edge limits apply per diagram, not per nested drawing. Clusters
 consume the scene's existing object and depth budgets rather than its direct-node
