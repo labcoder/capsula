@@ -533,7 +533,8 @@ fn header(
         }
         let width = build.measure(&label, style, None)?.x.min(plot.frame.size.x);
         let left = (plot.at(value, 0.0).x - width * 0.5)
-            .clamp(plot.frame.origin.x, plot.frame.max().x - width);
+            .min(plot.frame.max().x - width)
+            .max(plot.frame.origin.x);
         if left < right + 8.0 {
             continue;
         }

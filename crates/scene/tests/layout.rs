@@ -1658,6 +1658,40 @@ fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
 }
 
 #[test]
+fn narrow_chart_labels_do_not_invert_their_rounded_clamp_bounds() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let commit = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"narrow","put":[
+            {"chart":{"id":"c","kind":"line","box":[0,0,64,300]}},
+            {"series":{"id":"s","in":"c","data":[0,1,2]}}
+        ]}),
+    );
+    let result = picture(&scene, commit, &before, &mut Measure::default()).expect("narrow chart");
+    assert_eq!(result.display.items.len(), 2);
+    let x_labels: Vec<_> = result.display.items[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Text {
+                origin,
+                text,
+                max_width,
+                ..
+            } if origin.y > 270.0 => Some((*origin, text.as_str(), *max_width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        x_labels,
+        [(kumochi_scene::geom::Vec2::new(25.6, 275.4), "0", Some(8.0))]
+    );
+}
+
+#[test]
 fn chart_color_sets_repaint_the_zero_baseline() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();
