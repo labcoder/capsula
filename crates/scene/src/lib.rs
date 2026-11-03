@@ -8,6 +8,8 @@ pub mod geom;
 pub mod id;
 pub mod layout;
 pub mod limits;
+#[cfg(test)]
+mod mermaid;
 pub mod motion;
 pub mod parse;
 mod path;
