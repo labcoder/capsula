@@ -8,12 +8,17 @@ use crate::{
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
     record::{Align, Direction, Node, NodeShape},
+    state::object,
 };
-use std::{cmp::Reverse, collections::BTreeMap, sync::Arc};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-/// Places nodes and clusters, and returns the generated glides plus the new edges a cluster
-/// owns, which are built here so their labels are in the cluster's size before it is ranked.
-/// New nodes take their prepared `rests` first, so those edges and sizes see resting bounds.
+/// Places nodes and clusters, and returns the generated glides plus the new contents a cluster
+/// owns that are built here, anchored inside it, so they are in its size before it is ranked.
+/// New nodes take their prepared `rests` first, so those contents and sizes see resting bounds.
 #[expect(
     clippy::too_many_lines,
     reason = "initial batch and stable incremental placement share the same measured node index"
@@ -25,7 +30,7 @@ pub(super) fn place(
     state: &mut LayoutState,
     build: &mut Build<'_>,
     surface: SurfaceGeometry,
-) -> Result<(Vec<Glide>, Vec<crate::WireId>), PrepareError> {
+) -> Result<(Vec<Glide>, BTreeSet<crate::WireId>), PrepareError> {
     let mut measured = BTreeMap::new();
     for id in order {
         let Some((_, source)) = sources.get(id) else {
@@ -90,6 +95,19 @@ pub(super) fn place(
         parents.insert(id.clone(), (*handle, parent));
         groups.entry(parent).or_default().push(id.clone());
     }
+    for (id, object) in &state.objects {
+        if object.rank.is_none() && compound::is_cluster(state, object) {
+            groups
+                .entry(object.item.parent)
+                .or_default()
+                .push(id.clone());
+            // Its own pass measures contents that aren't new nodes, such as a table.
+            groups.entry(Some(object.item.handle)).or_default();
+        }
+    }
+    if groups.is_empty() {
+        return Ok((Vec::new(), BTreeSet::new()));
+    }
     // An edge ranks once, in its endpoints' least common group, between the two members there
     // that hold them; edges inside one member never count toward that group's edge cap.
     let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
@@ -123,30 +141,28 @@ pub(super) fn place(
             ranked.entry(group).or_default().push((from, to));
         }
     }
-    for (id, object) in &state.objects {
-        if object.rank.is_none() && compound::is_cluster(state, object) {
-            groups
-                .entry(object.item.parent)
-                .or_default()
-                .push(id.clone());
-            // Its own pass measures contents that aren't new nodes, such as a table.
-            groups.entry(Some(object.item.handle)).or_default();
-        }
-    }
     let mut owned_by = BTreeMap::<Handle, Vec<&crate::WireId>>::new();
     for id in order {
         let Some((_, source)) = sources.get(id) else {
             continue;
         };
-        let Op::Edge(value) = &**source else {
-            continue;
-        };
-        if state.objects.contains_key(id) {
+        if state.objects.contains_key(id)
+            || !matches!(
+                &**source,
+                Op::Line(_)
+                    | Op::Arrow(_)
+                    | Op::Path(_)
+                    | Op::Shape(_)
+                    | Op::Text(_)
+                    | Op::Callout(_)
+                    | Op::Highlight(_)
+                    | Op::Edge(_)
+            )
+        {
             continue;
         }
-        if let Some(owner) = value
-            .parent
-            .as_ref()
+        if let Some(owner) = object::visual(source)
+            .and_then(|visual| visual.parent)
             .and_then(|owner| state.objects.get(owner))
         {
             owned_by.entry(owner.item.handle).or_default().push(id);
@@ -155,7 +171,7 @@ pub(super) fn place(
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by_key(|(parent, _)| Reverse(compound::depth(state, *parent)));
     let mut glides = Vec::new();
-    let mut owned_edges = Vec::new();
+    let mut prebuilt = BTreeSet::new();
     for (parent, mut new_ids) in groups {
         build.check_cancel()?;
         let group_id = parent.and_then(|handle| state.handles.get(&handle).cloned());
@@ -320,29 +336,49 @@ pub(super) fn place(
             state.objects.insert(id, object);
             focus = Some(focus.map_or(bounds, |previous: Rect| previous.union(bounds)));
         }
-        // Every endpoint below this cluster is placed, so its new edges can be built once.
-        if cluster && let Some(ids) = parent.and_then(|handle| owned_by.remove(&handle)) {
-            for id in ids {
+        // Everything below this cluster is placed, so its new contents anchored there are built
+        // once, in source order, before its parent ranks it; its own transform cancels in them.
+        // shortcut: contents anchored outside this cluster's subtree, or to the cluster itself,
+        // are still drawn, but late, after its parent ranks it, so they don't count toward its
+        // ranked size; A9's renders judge whether that needs placing first.
+        if cluster
+            && let Some(owner) = parent
+            && let Some(waiting) = owned_by.remove(&owner)
+        {
+            let mut waiting: Vec<_> = waiting
+                .into_iter()
+                .map(|id| {
+                    let mut references = object::reference_ids(&sources[id].1);
+                    if let Some(within) = references
+                        .iter()
+                        .position(|reference| Some(reference) == group_id.as_ref())
+                    {
+                        references.swap_remove(within);
+                    }
+                    (id, references)
+                })
+                .collect();
+            while let Some(index) = waiting.iter().position(|(_, references)| {
+                references
+                    .iter()
+                    .all(|reference| compound::inside(state, reference, owner))
+            }) {
+                build.check_cancel()?;
+                let (id, _) = waiting.remove(index);
                 let (handle, source) = &sources[id];
-                let Op::Edge(value) = &**source else {
-                    unreachable!("owned_by holds edges");
+                let mut object = if matches!(&**source, Op::Edge(_)) {
+                    edge(source, *handle, parent, state, build, None)?
+                } else {
+                    build.primitive(source, *handle, parent, state, None)?
                 };
-                if !state.objects.contains_key(&value.from)
-                    || !state.objects.contains_key(&value.to)
-                {
-                    continue;
-                }
-                let mut object = edge(source, *handle, parent, state, build, None)?;
                 object.rest = rests.get(id).copied().unwrap_or_default();
                 state.handles.insert(*handle, id.clone());
                 state.objects.insert(id.clone(), object);
-                owned_edges.push(id.clone());
+                prebuilt.insert(id.clone());
             }
         }
         if let Some(group_id) = group_id {
             // A cluster's parent ranks its contents, so they must be measured before it.
-            // shortcut: text, shapes and callouts in a cluster are placed after its parent ranks
-            // it, so they don't widen it; the parser/compiler PR measures them first.
             let contents = parent
                 .filter(|_| cluster)
                 .and_then(|handle| compound::contents(state, handle));
@@ -382,7 +418,7 @@ pub(super) fn place(
             }
         }
     }
-    Ok((glides, owned_edges))
+    Ok((glides, prebuilt))
 }
 
 fn free_slot(

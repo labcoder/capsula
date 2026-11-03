@@ -96,6 +96,21 @@ pub(super) fn ancestry(
     chain
 }
 
+/// Whether `id` is placed strictly below `group`, bounded by the depth limit.
+pub(super) fn inside(state: &LayoutState, id: &WireId, group: Handle) -> bool {
+    let mut parent = state.objects.get(id).and_then(|object| object.item.parent);
+    for _ in 0..=MAX_OBJECT_DEPTH {
+        let Some(handle) = parent else {
+            return false;
+        };
+        if handle == group {
+            return true;
+        }
+        parent = get(state, handle).and_then(|object| object.item.parent);
+    }
+    false
+}
+
 /// The rectangle a member occupies in its parent's space: a node's bounds, or a cluster's
 /// transformed contents with padding.
 pub(super) fn member_rect(object: &Placed) -> Rect {
