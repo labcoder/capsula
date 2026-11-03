@@ -13,8 +13,10 @@ The shell shows them and asks for changes; it never reads the file.
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
 both sides: trimmed, 1–24 Unicode scalar values, one line, with no control characters and no
 U+2028 or U+2029. A name that breaks the rule fails to decode, so a shell sends only names it has
-checked. An empty user name is `None`, never an empty name. Their `Debug` prints a length, and
-nothing logs a name, a value from the file, or the TOML parser's messages.
+checked. An empty user name is `None`, never an empty name. A name's `Debug` prints a length, and
+nothing logs a name, a value from the file, or the TOML parser's messages. Every `SettingsView`
+also names `main_thread`, the store's main thread, whose row the shell labels with
+`assistant_name`.
 
 ## Changes
 

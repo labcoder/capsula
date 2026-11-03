@@ -11,9 +11,9 @@
 mod delete;
 mod scenes;
 mod store_op;
-mod thread_op;
 #[cfg(test)]
 mod tests;
+mod thread_op;
 
 use std::collections::VecDeque;
 use std::time::Duration;

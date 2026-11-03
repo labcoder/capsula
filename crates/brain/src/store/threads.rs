@@ -1,7 +1,9 @@
 //! The main thread, and what the shell may change about a thread: a task's title and a thread's
 //! model choice. Neither change moves a thread in the list.
 
-use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, ThreadId, ThreadKind, ThreadTitle};
+use kumochi_protocol::message::{
+    Effort, ModelChoice, ModelSlug, ThreadId, ThreadKind, ThreadTitle,
+};
 use rusqlite::{OptionalExtension as _, params};
 
 use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
@@ -40,7 +42,8 @@ impl Store {
                 row.get(0)
             })
             .optional()?;
-        id.map(|id| ThreadId(row_id(id))).ok_or(StoreError::NoThread)
+        id.map(|id| ThreadId(row_id(id)))
+            .ok_or(StoreError::NoThread)
     }
 
     /// Retitles a live task. The main thread's stored title stays empty, and a title that can't

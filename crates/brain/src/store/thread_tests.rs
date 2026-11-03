@@ -33,7 +33,10 @@ fn task(store: &mut Store, title: &str) -> ThreadId {
     store.end_run(thread, run, &[], RunEnd::Done).expect("end");
     store
         .conn
-        .execute("UPDATE threads SET updated_ms = id WHERE id = ?1", [sql(thread)])
+        .execute(
+            "UPDATE threads SET updated_ms = id WHERE id = ?1",
+            [sql(thread)],
+        )
         .expect("stable time");
     thread
 }
@@ -51,8 +54,8 @@ fn title(store: &Store, thread: ThreadId) -> Option<(String, String)> {
         .expect("row")
 }
 
-fn titled(text: &str, source: &str) -> Option<(String, String)> {
-    Some((text.to_owned(), source.to_owned()))
+fn titled(text: &str, source: &str) -> (String, String) {
+    (text.to_owned(), source.to_owned())
 }
 
 fn rename(store: &mut Store, thread: ThreadId, text: &str, source: TitleSource) {
@@ -91,6 +94,9 @@ fn holds(scratch: &Scratch, needle: &str) -> bool {
         .any(|window| window == needle.as_bytes())
 }
 
+/// A `threads` row: id, kind, title, title source, model and effort.
+type StoredThread = (i64, String, String, String, Option<String>, Option<String>);
+
 /// Every earlier version, so the current merged schema and any combined prefix of later
 /// migrations are covered as they're appended.
 #[test]
@@ -112,19 +118,44 @@ fn every_older_schema_upgrades_to_one_main_thread_and_keeps_its_rows() {
         // A second start finds the main thread and makes no other.
         for _ in 0..2 {
             let store = opened(&scratch);
-            let rows: Vec<(i64, String, String, String, Option<String>, Option<String>)> = store
+            let rows: Vec<StoredThread> = store
                 .conn
-                .prepare("SELECT id, kind, title, title_source, model, effort FROM threads ORDER BY id")
+                .prepare(
+                    "SELECT id, kind, title, title_source, model, effort FROM threads ORDER BY id",
+                )
                 .expect("query")
                 .query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
                 })
                 .expect("rows")
                 .collect::<Result<_, _>>()
                 .expect("rows");
-            let main = |id| (id, "main".to_owned(), String::new(), "words".to_owned(), None, None);
+            let main = |id| {
+                (
+                    id,
+                    "main".to_owned(),
+                    String::new(),
+                    "words".to_owned(),
+                    None,
+                    None,
+                )
+            };
             let (expected, main_id) = if kept {
-                let older = (5, "thread".to_owned(), "kept".to_owned(), "words".to_owned(), None, None);
+                let older = (
+                    5,
+                    "thread".to_owned(),
+                    "kept".to_owned(),
+                    "words".to_owned(),
+                    None,
+                    None,
+                );
                 (vec![older, main(6)], 6)
             } else {
                 (vec![main(1)], 1)
@@ -135,7 +166,10 @@ fn every_older_schema_upgrades_to_one_main_thread_and_keeps_its_rows() {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(current, i64::try_from(schema::MIGRATIONS.len()).expect("small"));
+            assert_eq!(
+                current,
+                i64::try_from(schema::MIGRATIONS.len()).expect("small")
+            );
         }
     }
 }
@@ -161,9 +195,11 @@ fn a_main_thread_insert_that_fails_leaves_none_and_the_next_start_creates_one() 
     let store = opened(&scratch);
     let mains: i64 = store
         .conn
-        .query_row("SELECT count(*) FROM threads WHERE kind = 'main'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT count(*) FROM threads WHERE kind = 'main'",
+            [],
+            |row| row.get(0),
+        )
         .expect("count");
     assert_eq!(mains, 1);
     assert_eq!(store.main_thread().expect("main"), ThreadId(1));
@@ -208,13 +244,20 @@ fn page_one_starts_with_kumo_and_no_later_page_repeats_it() {
     let (first, next) = store.pages().thread_page(None, 3).expect("first");
     store
         .conn
-        .execute("UPDATE threads SET updated_ms = ?1 WHERE kind = 'main'", [i64::MAX])
+        .execute(
+            "UPDATE threads SET updated_ms = ?1 WHERE kind = 'main'",
+            [i64::MAX],
+        )
         .expect("newest");
     let (second, next) = store.pages().thread_page(next, 3).expect("second");
     let (third, next) = store.pages().thread_page(next, 3).expect("third");
     let thread = ThreadKind::Thread;
     assert_eq!(
-        [ids_and_kinds(&first), ids_and_kinds(&second), ids_and_kinds(&third)],
+        [
+            ids_and_kinds(&first),
+            ids_and_kinds(&second),
+            ids_and_kinds(&third)
+        ],
         [
             vec![(1, ThreadKind::Main), (8, thread), (7, thread)],
             vec![(6, thread), (5, thread), (4, thread)],
@@ -230,7 +273,10 @@ fn a_list_of_only_kumo_ends_there_and_a_full_first_page_counts_it() {
     let mut store = opened(&scratch);
     let (rows, next) = list(&store, None);
     assert_eq!(ids_and_kinds(&rows), [(1, ThreadKind::Main)]);
-    assert_eq!((rows[0].title.as_str(), &rows[0].choice, next), ("", &None, None));
+    assert_eq!(
+        (rows[0].title.as_str(), &rows[0].choice, next),
+        ("", &None, None)
+    );
     for _ in 0..MAX_PAGE_ROWS + 10 {
         task(&mut store, "task");
     }
@@ -279,7 +325,10 @@ fn search_rows_carry_kind_and_choice_and_rank_kumo_like_any_thread() {
         .begin_turn(main, None, run, "needle needle needle")
         .expect("a turn with Kumo");
     let (rows, _) = store.pages().search_page("needle", 50).expect("search");
-    let found: Vec<_> = rows.iter().map(|row| (row.id, row.kind, row.choice.clone())).collect();
+    let found: Vec<_> = rows
+        .iter()
+        .map(|row| (row.id, row.kind, row.choice.clone()))
+        .collect();
     assert_eq!(
         found,
         [
@@ -296,16 +345,16 @@ fn a_user_title_always_wins_and_a_model_title_only_replaces_first_words() {
     let (a, b) = (task(&mut store, "words a"), task(&mut store, "words b"));
     let current = TitleSource::Model(Generation(0));
     rename(&mut store, a, "Model a", current);
-    assert_eq!(title(&store, a), titled("Model a", "model"));
+    assert_eq!(title(&store, a), Some(titled("Model a", "model")));
     rename(&mut store, a, "Model again", current);
-    assert_eq!(title(&store, a), titled("Model a", "model"));
+    assert_eq!(title(&store, a), Some(titled("Model a", "model")));
     rename(&mut store, a, "User a", TitleSource::User);
-    assert_eq!(title(&store, a), titled("User a", "user"));
+    assert_eq!(title(&store, a), Some(titled("User a", "user")));
     rename(&mut store, b, "User b", TitleSource::User);
     rename(&mut store, b, "Late model", current);
-    assert_eq!(title(&store, b), titled("User b", "user"));
+    assert_eq!(title(&store, b), Some(titled("User b", "user")));
     rename(&mut store, b, "User again", TitleSource::User);
-    assert_eq!(title(&store, b), titled("User again", "user"));
+    assert_eq!(title(&store, b), Some(titled("User again", "user")));
 }
 
 /// CAPS-65 M4: a model title from before a deletion never lands.
@@ -316,18 +365,26 @@ fn a_model_title_from_another_generation_or_after_a_delete_changes_nothing() {
     let old = task(&mut store, "words");
     store
         .conn
-        .execute("UPDATE threads SET deletion_generation = 2 WHERE id = ?1", [sql(old)])
+        .execute(
+            "UPDATE threads SET deletion_generation = 2 WHERE id = ?1",
+            [sql(old)],
+        )
         .expect("a later generation");
     rename(&mut store, old, "Old", TitleSource::Model(Generation(1)));
-    assert_eq!(title(&store, old), titled("words", "words"));
-    rename(&mut store, old, "Current", TitleSource::Model(Generation(2)));
-    assert_eq!(title(&store, old), titled("Current", "model"));
+    assert_eq!(title(&store, old), Some(titled("words", "words")));
+    rename(
+        &mut store,
+        old,
+        "Current",
+        TitleSource::Model(Generation(2)),
+    );
+    assert_eq!(title(&store, old), Some(titled("Current", "model")));
 
     let hidden = task(&mut store, "words");
     let generation = store.begin_delete(hidden).expect("hidden");
     rename(&mut store, hidden, "Late", TitleSource::Model(generation));
     rename(&mut store, hidden, "Late", TitleSource::User);
-    assert_eq!(title(&store, hidden), titled("words", "words"));
+    assert_eq!(title(&store, hidden), Some(titled("words", "words")));
 
     let removed = task(&mut store, "words");
     let generation = store.begin_delete(removed).expect("hidden");
@@ -348,11 +405,11 @@ fn a_later_turn_keeps_a_user_or_model_title_and_kumos_title_stays_empty() {
         let run = RunId(store.high_water().expect("ids").1.0 + 1);
         store.begin_turn(thread, None, run, "more").expect("turn");
     }
-    assert_eq!(title(&store, user), titled("Mine", "user"));
-    assert_eq!(title(&store, model), titled("Its", "model"));
+    assert_eq!(title(&store, user), Some(titled("Mine", "user")));
+    assert_eq!(title(&store, model), Some(titled("Its", "model")));
     let main = store.main_thread().expect("main");
     rename(&mut store, main, "Not Kumo", TitleSource::User);
-    assert_eq!(title(&store, main), titled("", "words"));
+    assert_eq!(title(&store, main), Some(titled("", "words")));
 }
 
 #[test]
@@ -367,13 +424,20 @@ fn a_model_choice_round_trips_through_a_page_and_a_restart() {
     store.set_model(hidden, &picked).expect("nothing to change");
     let hidden_model: Option<String> = store
         .conn
-        .query_row("SELECT model FROM threads WHERE id = ?1", [sql(hidden)], |row| row.get(0))
+        .query_row(
+            "SELECT model FROM threads WHERE id = ?1",
+            [sql(hidden)],
+            |row| row.get(0),
+        )
         .expect("row");
     assert_eq!(hidden_model, None);
     drop(store);
     let store = opened(&scratch);
     let (rows, _) = list(&store, None);
-    let choices: Vec<_> = rows.iter().map(|row| (row.id, row.choice.clone())).collect();
+    let choices: Vec<_> = rows
+        .iter()
+        .map(|row| (row.id, row.choice.clone()))
+        .collect();
     assert_eq!(choices, [(ThreadId(1), None), (thread, Some(picked))]);
 }
 
@@ -390,15 +454,29 @@ fn a_deleted_tasks_title_and_model_leave_the_files_and_a_kept_choice_survives() 
     store.set_model(kept, &kept_choice).expect("model");
     let doomed = task(&mut store, "doomed");
     rename(&mut store, doomed, &TITLE.to_uppercase(), TitleSource::User);
-    store.set_model(doomed, &choice(SLUG, Effort::High)).expect("model");
+    store
+        .set_model(doomed, &choice(SLUG, Effort::High))
+        .expect("model");
     assert!(holds(&scratch, TITLE) && holds(&scratch, SLUG), "planted");
-    assert_eq!(store.delete(doomed).outcome, kumochi_protocol::message::Deleted::Removed);
+    assert_eq!(
+        store.delete(doomed).outcome,
+        kumochi_protocol::message::Deleted::Removed
+    );
     assert_eq!(purge(&mut store), Swap::Done);
-    assert!(!holds(&scratch, TITLE) && !holds(&scratch, SLUG), "found while open");
+    assert!(
+        !holds(&scratch, TITLE) && !holds(&scratch, SLUG),
+        "found while open"
+    );
     drop(store);
-    assert!(!holds(&scratch, TITLE) && !holds(&scratch, SLUG), "found after close");
+    assert!(
+        !holds(&scratch, TITLE) && !holds(&scratch, SLUG),
+        "found after close"
+    );
     let store = opened(&scratch);
     let (rows, _) = list(&store, None);
-    let choices: Vec<_> = rows.iter().map(|row| (row.id, row.choice.clone())).collect();
+    let choices: Vec<_> = rows
+        .iter()
+        .map(|row| (row.id, row.choice.clone()))
+        .collect();
     assert_eq!(choices, [(ThreadId(1), None), (kept, Some(kept_choice))]);
 }

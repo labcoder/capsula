@@ -441,7 +441,7 @@ enum Read {
 }
 
 const SLOW: &str = "0 text a\n5000 text never";
-const U: ThreadId = ThreadId(2);
+const U: ThreadId = ThreadId(3);
 
 /// The next control frame, skipping run 1's states and run 2's until it's interrupted.
 async fn next_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(

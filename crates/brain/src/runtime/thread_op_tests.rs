@@ -102,15 +102,24 @@ async fn a_tasks_rename_and_model_reach_the_list_and_kumos_rename_changes_nothin
     assert_eq!(next, None);
     assert_eq!(std::fs::read(&config).expect("settings"), saved);
     let logs = captured.text();
-    assert!(logs.contains("a rename of the main thread was refused"), "{logs}");
+    assert!(
+        logs.contains("a rename of the main thread was refused"),
+        "{logs}"
+    );
     assert!(!logs.contains(SENTINEL), "{logs}");
     let recorded = std::fs::read(&recording).expect("tap read");
     assert!(
-        !recorded.windows(SENTINEL.len()).any(|w| w == SENTINEL.as_bytes()),
+        !recorded
+            .windows(SENTINEL.len())
+            .any(|w| w == SENTINEL.as_bytes()),
         "the title was recorded"
     );
     let mut dumped = Vec::new();
     tap::dump(&mut recorded.as_slice(), &mut dumped).expect("dumps");
     let dumped = String::from_utf8(dumped).expect("utf-8");
-    assert_eq!(dumped.matches("shell -> brain  ThreadOp (").count(), 3, "{dumped}");
+    assert_eq!(
+        dumped.matches("shell -> brain  ThreadOp (").count(),
+        3,
+        "{dumped}"
+    );
 }

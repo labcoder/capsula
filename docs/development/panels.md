@@ -22,6 +22,10 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
 
+The plain list's first page starts with the main thread's row (`kind: Main`) and later pages
+leave it out (see [ipc](ipc.md#thread-ops)). shortcut: the row shows its empty stored title until
+the shell labels it from `SettingsView`.
+
 Search uses the store's literal FTS phrase matching, not query syntax, and settles for 150 ms
 [guess]. Results are ranked by the best matching event, with descending thread id breaking
 ties. Clearing the search restores updated-time ordering. Overlong searches are refused before

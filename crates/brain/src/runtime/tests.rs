@@ -222,7 +222,15 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         .expect("busy timeout");
     let fixture = Fixture::parse(script).expect("script");
     let scenes = store.scenes().expect("scenes");
-    Brain::new(store, main_thread, high_water, scenes, fixture, scratch.config()).expect("brain")
+    Brain::new(
+        store,
+        main_thread,
+        high_water,
+        scenes,
+        fixture,
+        scratch.config(),
+    )
+    .expect("brain")
 }
 
 /// A connection holding the store's write lock, so the brain's writes wait until it ends.

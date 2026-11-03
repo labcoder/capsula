@@ -36,7 +36,10 @@ impl Pages<'_> {
             PageOf::Threads { search, after } => {
                 let (threads, next);
                 (threads, cursors, next) = match search {
-                    Some(words) => paged(self.search_rows(&words, after, MAX_PAGE_ROWS)?, MAX_PAGE_ROWS),
+                    Some(words) => paged(
+                        self.search_rows(&words, after, MAX_PAGE_ROWS)?,
+                        MAX_PAGE_ROWS,
+                    ),
                     None => self.thread_rows(after, MAX_PAGE_ROWS)?,
                 };
                 DataToShell::ThreadList {
@@ -114,11 +117,7 @@ impl Pages<'_> {
     /// first page starts with the main thread, which counts toward `limit` but leaves room for a
     /// task; later pages leave it out, so it never repeats and its own updates never move a
     /// cursor. One statement reads them all.
-    fn thread_rows(
-        &self,
-        after: Option<ThreadCursor>,
-        limit: usize,
-    ) -> Result<(Vec<ThreadRow>, Vec<ThreadCursor>, Option<ThreadCursor>), StoreError> {
+    fn thread_rows(&self, after: Option<ThreadCursor>, limit: usize) -> Result<Listed, StoreError> {
         let mut query = self
             .0
             .prepare(
@@ -354,11 +353,11 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     })
 }
 
+/// A list's rows in order, the keys of the rows a page may end on, and the continuation.
+type Listed = (Vec<ThreadRow>, Vec<ThreadCursor>, Option<ThreadCursor>);
+
 /// The first `limit` rows, their keys, and the continuation when more were read.
-fn paged(
-    mut rows: Vec<(ThreadRow, ThreadCursor)>,
-    limit: usize,
-) -> (Vec<ThreadRow>, Vec<ThreadCursor>, Option<ThreadCursor>) {
+fn paged(mut rows: Vec<(ThreadRow, ThreadCursor)>, limit: usize) -> Listed {
     let more = rows.len() > limit;
     rows.truncate(limit);
     let (rows, cursors): (Vec<_>, Vec<_>) = rows.into_iter().unzip();

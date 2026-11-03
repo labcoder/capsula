@@ -514,6 +514,7 @@ impl StoreThread {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one short arm per store op")]
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
     match op {
         StoreOp::ReadPage { .. } => unreachable!("StoreThread::send hands reads to the reader"),
