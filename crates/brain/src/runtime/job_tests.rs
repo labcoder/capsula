@@ -153,8 +153,21 @@ async fn a_long_tasks_done_run_titles_it_then_stores_a_summary_of_its_oldest_run
         )
         .expect("oldest run");
     assert_eq!(found.2, SENTINEL);
+    let second_end: i64 = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT max(id) FROM events WHERE run =
+             (SELECT run FROM events WHERE thread = ?1 GROUP BY run ORDER BY min(id) LIMIT 1 OFFSET 1)",
+            [i64::try_from(task.0).expect("small")],
+            |row| row.get(0),
+        )
+        .expect("second run");
     assert_eq!(found.0, oldest.0, "it covers from the oldest event");
-    assert!(found.1 > oldest.1, "and whole runs past the first");
+    assert!(second_end > oldest.1);
+    assert_eq!(
+        found.1, second_end,
+        "through the second run, the last one outside the window"
+    );
     let logs = captured.text();
     assert!(!logs.contains(SENTINEL), "{logs}");
     assert!(!logs.contains("zqxoldask"), "{logs}");

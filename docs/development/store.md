@@ -24,7 +24,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
-| `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. Version 4 |
+| `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. A deleted task's summaries go in the deletion's second transaction, and the purge clears their leftover copies like the events'. Version 4 |
 
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
 `sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
@@ -220,7 +220,7 @@ sequenceDiagram
   S->>DB: tx 1: state=deleting, deletion_generation+1
   Note over S: hidden from lists and search, takes no new runs or events
   S->>S: stop the thread's producers (later slices)
-  S->>DB: tx 2: delete events (and FTS rows), runs, thread; purge_pending=1
+  S->>DB: tx 2: delete events (and FTS rows), runs, summaries, thread; purge_pending=1
   Note over S: no live thread's run active, no op for 200 ms
   S->>H: copy
   H->>DB: read-only: VACUUM INTO kumochi.db.purge-snapshot

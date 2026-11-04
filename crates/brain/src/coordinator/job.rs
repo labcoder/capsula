@@ -15,7 +15,7 @@ use std::fmt;
 use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadTitle};
 
 use super::admission::origin;
-use super::{Coordinator, Effect, SendKey, Stale, StoreOp, Unbuilt};
+use super::{Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
 use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin, RunSnapshot};
 use crate::engines::RunRequest;
@@ -305,7 +305,7 @@ impl Coordinator {
                 thread: key.thread,
                 generation: *generation,
                 covers,
-                text,
+                text: SummaryText(text),
                 model: model.take(),
             }),
             _ => None,
