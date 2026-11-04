@@ -9,7 +9,7 @@ use gpui_kit::{
 
 use super::{KumoView, WantsFrames, motion};
 use crate::platform::input::{Input, input};
-use crate::platform::{self, PresenceEvent};
+use crate::platform::{self, PresenceError, PresenceEvent};
 use crate::presence::drag::{End, Event, Generation, Outcome};
 use crate::presence::pulling::{Grab, Phase, PullSpace};
 
@@ -96,30 +96,27 @@ impl KumoView {
         }
     }
 
-    /// A move anywhere while the drag is live.
-    fn moved(&mut self, event: &MouseMoveEvent, window: &Window, cx: &mut Context<'_, Self>) {
+    /// A move or a release while the drag may be live, with the work area and scale read as it
+    /// arrived. Windows posts nothing the peek follows when they change, so each is checked
+    /// first: a change, or a read that failed, loses the drag.
+    fn pointer(
+        &mut self,
+        event: Event,
+        now: impl FnOnce() -> Result<PullSpace, PresenceError>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if !self.pull_live() {
             return;
         }
-        // Windows posts nothing the peek follows when the work area changes, so each move checks.
-        match platform::work_area() {
-            Ok(area) => {
-                let space = PullSpace {
-                    area,
-                    scale: window.scale_factor(),
-                };
-                let outcome = self.pulling.rescale(space);
-                Self::follow(outcome, cx);
+        let outcome = match now() {
+            Ok(space) => self.pulling.rescale(space),
+            Err(error) => {
+                tracing::debug!(%error, "can't read the work area mid-pull");
+                self.pulling.handle(Event::SourceClosed, self.origin)
             }
-            Err(error) => tracing::debug!(%error, "can't read the work area mid-pull"),
-        }
-        self.pull_event(
-            Event::Move {
-                at: event.position,
-                pressed: event.pressed_button,
-            },
-            cx,
-        );
+        };
+        Self::follow(outcome, cx);
+        self.pull_event(event, cx);
     }
 
     /// One event for the drag.
@@ -183,18 +180,32 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
     let moved = view.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
-            update(&moved, cx, |view, cx| view.moved(event, window, cx));
+            let event = Event::Move {
+                at: event.position,
+                pressed: event.pressed_button,
+            };
+            update(&moved, cx, |view, cx| {
+                view.pointer(event, || space(window), cx);
+            });
         }
     });
-    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
             let up = Event::Up {
                 button: event.button,
                 at: event.position,
             };
-            update(&view, cx, |view, cx| view.pull_event(up, cx));
+            update(&view, cx, |view, cx| view.pointer(up, || space(window), cx));
         }
     });
+}
+
+/// The work area and scale now.
+fn space(window: &Window) -> Result<PullSpace, PresenceError> {
+    Ok(PullSpace {
+        area: platform::work_area()?,
+        scale: window.scale_factor(),
+    })
 }
 
 fn update(
@@ -217,21 +228,17 @@ mod tests {
     use gpui_kit::{AppContext as _, Entity, MouseButton, point, px};
 
     use super::{KumoView, PullChanged};
-    use crate::platform::PresenceEvent;
     use crate::platform::input::input;
+    use crate::platform::{PresenceError, PresenceEvent};
     use crate::presence::drag::{End, Event};
     use crate::presence::kumo::{Motion, v2};
-    use crate::presence::pulling::{Grab, PullSpace};
+    use crate::presence::pulling::{Grab, Phase, PullSpace};
 
     const LEFT: MouseButton = MouseButton::Left;
 
     fn grab(view: &Entity<KumoView>, cx: &mut TestAppContext) {
-        let space = PullSpace {
-            area: [0, 0, 1280, 1024],
-            scale: 1.0,
-        };
         let grab = Grab::new(
-            space,
+            SPACE,
             [612, 1000, 56, 3],
             [608, 990, 64, 24],
             v2(640.0, 920.0),
@@ -356,11 +363,69 @@ mod tests {
         assert!(view.read_with(cx, |view, _| !view.pull_live()));
     }
 
+    /// The grab's space, as `grab` made it.
+    const SPACE: PullSpace = PullSpace {
+        area: [0, 0, 1280, 1024],
+        scale: 1.0,
+    };
+
+    /// The changes a release brings when the work area and scale read as `now` at the Up,
+    /// with no move before it.
+    fn release_reading(cx: &mut TestAppContext, now: Result<PullSpace, PresenceError>) -> End {
+        let (view, seen, _) = grabbed(cx);
+        let at = point(px(300.0), px(-40.0));
+        view.update(cx, |view, cx| {
+            view.pointer(Event::Up { button: LEFT, at }, || now, cx);
+        });
+        let changes = seen.borrow();
+        let [
+            PullChanged::Grabbed(generation),
+            PullChanged::Ended(ended, end),
+        ] = changes[..]
+        else {
+            panic!("one grab and one ending, not {changes:?}");
+        };
+        assert_eq!(ended, generation);
+        end
+    }
+
     #[gpui::test]
-    fn quitting_loses_a_live_drag_once_and_refuses_the_next_grab(cx: &mut TestAppContext) {
+    fn an_up_in_the_grabs_space_is_released(cx: &mut TestAppContext) {
+        assert_eq!(
+            release_reading(cx, Ok(SPACE)),
+            End::Released(point(px(300.0), px(-40.0)))
+        );
+    }
+
+    #[gpui::test]
+    fn an_up_after_the_work_area_changed_with_no_move_is_lost(cx: &mut TestAppContext) {
+        let taskbar = PullSpace {
+            area: [0, 0, 1280, 984],
+            ..SPACE
+        };
+        assert_eq!(release_reading(cx, Ok(taskbar)), End::Lost);
+        let scaled = PullSpace {
+            scale: 1.25,
+            ..SPACE
+        };
+        assert_eq!(release_reading(cx, Ok(scaled)), End::Lost);
+    }
+
+    #[gpui::test]
+    fn an_up_whose_work_area_cant_be_read_is_lost(cx: &mut TestAppContext) {
+        assert_eq!(release_reading(cx, Err(PresenceError::NotWin32)), End::Lost);
+    }
+
+    #[gpui::test]
+    fn quitting_loses_a_live_drag_once_and_refuses_a_grab_on_an_idle_peek(cx: &mut TestAppContext) {
         let (view, seen, _) = grabbed(cx);
         view.update(cx, KumoView::close);
         view.update(cx, KumoView::close);
+        view.update(cx, |view, _| {
+            assert!(view.pulling.step(1.0 / 72.0).is_some());
+            assert!(view.pulling.rested(), "reduced motion is home in one step");
+            assert_eq!(view.pulling.phase(), Phase::Idle);
+        });
         grab(&view, cx);
         let PullChanged::Grabbed(generation) = seen.borrow()[0] else {
             panic!("the first change is the grab");
@@ -370,7 +435,8 @@ mod tests {
             [
                 PullChanged::Grabbed(generation),
                 PullChanged::Ended(generation, End::Lost),
-            ]
+            ],
+            "only the closed peek refused the second grab"
         );
         assert!(view.read_with(cx, |view, _| !view.pull_live()));
     }
