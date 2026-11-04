@@ -18,6 +18,8 @@ enum Event {
     Loaded(PathBuf),
     /// A decode started, named by its sample count.
     Decoding(usize),
+    /// Serving ended in a loss; the engine waits for a release before it reports the error.
+    Lost,
     TornDown,
     Exited,
 }
@@ -87,6 +89,12 @@ impl Harness {
                 lose: Arc::clone(&losing),
             });
             if served == Served::Lost {
+                events_in.send(Event::Lost).expect("the test watches");
+                released
+                    .lock()
+                    .expect("one engine")
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the loss");
                 return Err(SpeechError::WorkerLost);
             }
             events_in.send(Event::TornDown).expect("the test watches");
@@ -299,6 +307,8 @@ fn a_lost_worker_fails_the_running_decode_and_leaves_it_unloaded_until_asked_aga
     harness.lose.store(true, Ordering::SeqCst);
     harness.release();
     assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
+    assert_eq!(harness.event(), Event::Lost);
+    harness.release();
     assert_eq!(
         answer(waiting),
         SttResult::NotLoaded,
@@ -312,6 +322,47 @@ fn a_lost_worker_fails_the_running_decode_and_leaves_it_unloaded_until_asked_aga
     harness.lose.store(false, Ordering::SeqCst);
     harness.handle.load("models".into());
     assert_eq!(harness.event(), Event::Loaded("models".into()));
+}
+
+#[test]
+fn a_load_asked_for_while_a_loss_is_cleaned_up_still_reaches_the_worker() {
+    let harness = Harness::loaded();
+    let running = harness.decode(1).expect("runs");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    let waiting = harness.decode(2).expect("waits");
+    harness.lose.store(true, Ordering::SeqCst);
+    harness.release();
+    assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
+    assert_eq!(harness.event(), Event::Lost);
+    harness.lose.store(false, Ordering::SeqCst);
+    harness.handle.load("models".into());
+    harness.release();
+    assert_eq!(
+        answer(waiting),
+        SttResult::NotLoaded,
+        "the lost model's waiter is settled, not carried over"
+    );
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+    harness.wait_ready();
+    let next = harness.decode(3).expect("runs");
+    assert_eq!(harness.event(), Event::Decoding(3));
+    harness.release();
+    assert_eq!(answer(next), text(3));
+}
+
+#[test]
+fn after_an_idle_loss_reload_reaches_the_worker_where_load_coalesces() {
+    let harness = Harness::loaded();
+    harness.handle.load("models".into());
+    harness.no_event();
+    harness.handle.reload("models".into());
+    assert_eq!(harness.event(), Event::TornDown);
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+    harness.wait_ready();
+    let next = harness.decode(1).expect("runs");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    harness.release();
+    assert_eq!(answer(next), text(1));
 }
 
 #[test]

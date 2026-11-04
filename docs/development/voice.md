@@ -169,7 +169,11 @@ flowchart LR
 - **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
   `load`. A new models folder reloads, and a decode left waiting is served by the new model.
 - **A lost worker:** the running decode is answered `Failed(WorkerLost)`, a waiting one
-  `NotLoaded`, and speech input stays unloaded until the next `load`.
+  `NotLoaded`, and speech input stays unloaded unless a `load` or `reload` was asked for after the
+  lost load started; a failure's cleanup never undoes a newer ask. `load` of the models already
+  served coalesces, so the coordinator answers `SpeechHandle::lost` with `reload`, which always
+  reaches the worker. Retrying a model that keeps failing is the coordinator's bounded policy;
+  nothing here retries on its own.
 - **Shutdown:** dropping the handle lets the request in flight finish, unloads and ends the
   thread; nothing waits for it.
 

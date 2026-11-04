@@ -101,6 +101,10 @@ type Engine =
 
 struct State {
     want: Option<PathBuf>,
+    /// Counts `load` and `reload` calls, so a failure's cleanup can't undo a newer one.
+    asks: u64,
+    /// Set by `reload` until the thread starts that load.
+    reload: bool,
     /// Set by the worker only while a loaded model serves `want`.
     ready: bool,
     waiting: Option<Decode>,
@@ -166,6 +170,8 @@ impl SttHandle {
         let control = Arc::new(Control {
             state: Mutex::new(State {
                 want: None,
+                asks: 0,
+                reload: false,
                 ready: false,
                 waiting: None,
                 shutdown: false,
@@ -179,8 +185,22 @@ impl SttHandle {
         Ok(Self { control })
     }
 
+    /// Coalesces: asking again for the models being served changes nothing.
     pub(crate) fn load(&self, models: PathBuf) {
-        self.control.update(|state| state.want = Some(models));
+        self.control.update(|state| {
+            state.want = Some(models);
+            state.asks += 1;
+        });
+    }
+
+    /// Loads `models` again even if they're being served: the coordinator's answer to
+    /// `SpeechHandle::lost`, whose respawned worker has no model.
+    pub(crate) fn reload(&self, models: PathBuf) {
+        self.control.update(|state| {
+            state.want = Some(models);
+            state.asks += 1;
+            state.reload = true;
+        });
     }
 
     /// Never waits: a waiting decode gets `Stale`, and a decode in progress finishes first.
@@ -228,10 +248,10 @@ impl std::fmt::Debug for SttHandle {
 }
 
 /// Loads, serves and unloads until shutdown. A failed load, or a lost worker, leaves speech
-/// input unloaded until the next `load`: the running decode was answered `Failed(WorkerLost)`,
-/// and a waiting one is answered `NotLoaded` by [`next_load`].
+/// input unloaded unless a `load` or `reload` came after that load started: the running decode
+/// was answered `Failed(WorkerLost)`, and a waiting one is answered `NotLoaded`.
 fn run(control: &Control, mut engine: Box<Engine>) {
-    while let Some(models) = next_load(control) {
+    while let Some((models, asked)) = next_load(control) {
         let mut serve = |decoder: &dyn Decoder| {
             while let Some(decode) = next_decode(control, &models) {
                 if decode.reply.is_closed() {
@@ -251,26 +271,31 @@ fn run(control: &Control, mut engine: Box<Engine>) {
         };
         if let Err(error) = engine(&models, &mut serve) {
             tracing::warn!(%error, "speech input stopped");
-            control.update(|state| {
+            let waiting = control.update(|state| {
                 state.ready = false;
-                if state.want.as_ref() == Some(&models) {
+                if state.asks == asked {
                     state.want = None;
                 }
+                state.waiting.take()
             });
+            if let Some(decode) = waiting {
+                decode.answer(SttResult::NotLoaded);
+            }
         }
     }
 }
 
-/// The models to load next, or `None` on shutdown. A decode left waiting by a failed load is
-/// answered `NotLoaded`.
-fn next_load(control: &Control) -> Option<PathBuf> {
+/// The models to load next with the ask count they answer, or `None` on shutdown. A decode left
+/// still waiting once nothing is wanted is answered `NotLoaded`.
+fn next_load(control: &Control) -> Option<(PathBuf, u64)> {
     let mut state = control.lock();
     loop {
         if state.shutdown {
             return None;
         }
-        if let Some(models) = &state.want {
-            return Some(models.clone());
+        if let Some(models) = state.want.clone() {
+            state.reload = false;
+            return Some((models, state.asks));
         }
         if let Some(decode) = state.waiting.take() {
             decode.answer(SttResult::NotLoaded);
@@ -283,7 +308,7 @@ fn next_load(control: &Control) -> Option<PathBuf> {
 fn next_decode(control: &Control, models: &Path) -> Option<Decode> {
     let mut state = control.lock();
     loop {
-        let wanted = !state.shutdown && state.want.as_deref() == Some(models);
+        let wanted = !state.shutdown && !state.reload && state.want.as_deref() == Some(models);
         state.ready = wanted;
         if !wanted {
             return None;
