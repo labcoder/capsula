@@ -35,8 +35,8 @@ fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
     assert_eq!(chain, 1);
     let observer = directory.join("observer.log");
     let mut log = String::from(
-        "geometry id=1 origin_y=0 rows=1 trimmed=true spans=0:4,0:4,-\n\
-         commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=-2,-3,10,10\n\
+        "geometry id=1 origin_y=-3 rows=10 trimmed=true spans=-,0:4,-;-,0:4,-;-,0:4,-;0:4,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-\n\
+         commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-3,4,10\n\
          startup version=1 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n\
          paint frame=1 qpc=12 kind=dock hover=0 drawn_epoch=1 drawn_geometry=1 mask_epoch=1\n\
          drawn frame=1 qpc=14\n\
