@@ -762,6 +762,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::Error(_)
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
+            | ControlToShell::CaptureDone { .. }
+            | ControlToShell::CaptureFailed { .. }
             | ControlToShell::Account(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -835,7 +837,7 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
+            Ok(Some(ControlToShell::RunState { run, thread, phase, .. })) => {
                 if events
                     .send_blocking(LinkEvent::RunState { run, thread, phase })
                     .is_err()
@@ -891,6 +893,7 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::CaptureDone { .. } | ControlToShell::CaptureFailed { .. })) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");

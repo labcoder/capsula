@@ -659,7 +659,7 @@ impl Brain {
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
-                Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
+                Some((turn, thread, text)) = turns.recv(), if take_turns => Input::Turn { turn, thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
                 () = sleep_until(self.retry_at) => {
@@ -928,7 +928,7 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
 }
 
 /// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (Option<ThreadId>, String);
+type Turn = (u32, Option<ThreadId>, String);
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
@@ -964,8 +964,8 @@ async fn read_data(
                 }
             }
             // Never waits for the core, so credit behind a turn is always read.
-            Ok(Some(DataToBrain::TextSubmit { thread, text })) => match turns
-                .try_send((thread, text))
+            Ok(Some(DataToBrain::TextSubmit { turn, thread, text, .. })) => match turns
+                .try_send((turn, thread, text))
             {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),

@@ -51,6 +51,11 @@ impl Tapped for ControlToBrain {
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
             Self::AccountOp(_) => "AccountOp",
+            Self::HoldRecognized { .. } => "HoldRecognized",
+            Self::KeyUp { .. } => "KeyUp",
+            Self::GestureCancel { .. } => "GestureCancel",
+            Self::FocusHint { .. } => "FocusHint",
+            Self::ExclusionLapsed { .. } => "ExclusionLapsed",
         }
     }
 
@@ -97,6 +102,8 @@ impl Tapped for ControlToShell {
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
+            Self::CaptureDone { .. } => "CaptureDone",
+            Self::CaptureFailed { .. } => "CaptureFailed",
         }
     }
 
@@ -109,7 +116,8 @@ impl Tapped for ControlToShell {
                 | Self::RunState {
                     run: _,
                     thread: _,
-                    phase: _
+                    phase: _,
+                    origin: _
                 }
                 | Self::Ping
                 | Self::Scenes { scenes: _ }
@@ -118,7 +126,7 @@ impl Tapped for ControlToShell {
                     outcome: _,
                     last_run: _
                 }
-                | Self::TurnRefused { thread: _ }
+                | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
         )
     }

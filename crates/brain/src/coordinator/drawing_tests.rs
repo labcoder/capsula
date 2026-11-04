@@ -116,6 +116,7 @@ fn provider_completion_waits_for_the_accepted_drawing_prefix() {
         .handle(Input::RunStored { run: R })
         .expect("stored outcome");
     assert!(end.contains(&Effect::Control(ControlToShell::RunState {
+        origin: None,
         run: R,
         thread: T,
         phase: Phase::Done
@@ -184,6 +185,7 @@ fn stop_before_a_scene_id_arrives_drains_then_durably_cuts_the_first_step() {
         })
         .expect("stop");
     assert!(stopped.contains(&Effect::Control(ControlToShell::RunState {
+        origin: None,
         run: R,
         thread: T,
         phase: Phase::Interrupted
@@ -486,6 +488,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
         .expect("first outcome ack");
     let next = kumochi_protocol::message::RunId(11);
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(T),
         text: "continue".to_owned(),
     })
@@ -550,6 +553,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
         .handle(Input::RunStored { run: next })
         .expect("outcome ack");
     assert!(done.contains(&Effect::Control(ControlToShell::RunState {
+        origin: None,
         run: next,
         thread: T,
         phase: Phase::Done
