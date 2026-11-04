@@ -89,6 +89,10 @@ pub const PIPE_TAP_ENV: &str = "KUMOCHI_PIPE_TAP";
 /// of the built-in one.
 pub const FIXTURE_ENV: &str = "KUMOCHI_FIXTURE";
 
+/// Dev builds only: the most model requests the brain may send, for live checks with a request
+/// budget. A value that isn't a count allows none.
+pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
+
 #[cfg(test)]
 mod tests {
     use super::{BRAIN_LOG, SHELL_LOG};
