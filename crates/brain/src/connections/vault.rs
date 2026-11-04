@@ -14,8 +14,7 @@ use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::credential::{
-    CHUNK_SIZE, CredentialStore, CredentialStoreError, MAX_CHUNKS, SecretBytes, delete_chunks,
-    get_chunks, set_chunks,
+    CHUNK_SIZE, CredentialStore, MAX_CHUNKS, SecretBytes, delete_chunks, get_chunks, set_chunks,
 };
 use crate::platform::{self, SessionLock};
 use lane_store::LaneStore;
@@ -316,21 +315,73 @@ impl<S: CredentialStore> Vault<S> {
                         return Err(VaultError::Fenced);
                     }
                     Ok(_) => {}
-                    Err(
-                        VaultError::Unreadable
-                        | VaultError::Bounds
-                        | VaultError::Store(
-                            CredentialStoreError::MissingChunk
-                            | CredentialStoreError::InvalidChunkLength
-                            | CredentialStoreError::InvalidBlob,
-                        ),
-                    ) if marker.outcome_unknown => {}
+                    Err(error) if error.is_damage() && marker.outcome_unknown => {}
                     Err(error) => return Err(error),
                 }
             }
             self.erase(Chunked::Revoke)
         })();
         deleted(result)
+    }
+
+    /// Deletes both records after the checkpoint, driven by the marker alone: a record's names
+    /// go whether or not its manifest survives. Keep retains a readable registration's live slot
+    /// and nothing else; with no readable registration, the record is erased.
+    pub fn delete_for_sign_out(&mut self) -> DeleteResult {
+        let result = (|| {
+            let sign_out = self
+                .marker()?
+                .sign_out
+                .filter(|sign_out| sign_out.phase == Phase::Deleting)
+                .ok_or(VaultError::Fenced)?;
+            if sign_out.disposition == Disposition::Erase || !self.keep_registration()? {
+                self.erase(Chunked::Account)?;
+            }
+            self.erase(Chunked::Revoke)
+        })();
+        deleted(result)
+    }
+
+    /// Rewrites the account to its registration, then deletes every other name of the record.
+    /// False when there's no registration or its data is damaged, so the caller erases instead.
+    fn keep_registration(&mut self) -> Result<bool, VaultError> {
+        // A refused read is retried, never taken as a reason to erase the registration.
+        let Some(account) = self.load::<Account>(Chunked::Account).or_else(|error| {
+            if error.is_damage() {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        })?
+        else {
+            return Ok(false);
+        };
+        let account = account.expose();
+        let registration = Account {
+            client_id: account.client_id.clone(),
+            subject: account.subject.clone(),
+            email: None,
+            plan_enabled: false,
+            tokens: None,
+        };
+        if *account != registration {
+            self.save(Chunked::Account, &encode(&registration, MAX_RECORD_BYTES)?)?;
+        }
+        let live = self
+            .manifest(Chunked::Account)?
+            .ok_or(VaultError::Unreadable)?;
+        let name = Chunked::Account.name();
+        delete_chunks(
+            &self.store,
+            &self.target(&format!("{name}/{}", 1 - live.slot)),
+            MAX_CHUNKS,
+        )?;
+        for index in live.chunks..MAX_CHUNKS {
+            self.store
+                .delete(&self.target(&format!("{name}/{}/{index}", live.slot)))?;
+        }
+        self.assert_absent(Chunked::Account, Some(live))?;
+        Ok(true)
     }
 
     fn target(&self, entry: &str) -> String {
