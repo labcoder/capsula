@@ -13,7 +13,7 @@ use crate::connections::error::VaultError;
 use crate::connections::marker::{MarkerUpdate, SignOutMarker};
 use crate::connections::records::{Account, Origin, Revocable, RevocationList};
 use crate::connections::vault::{DeleteResult, SaveResult, Vault};
-use crate::platform::credential::{CredentialStore, WindowsCredentialStore};
+use crate::platform::credential::{CredentialStore, NativeCredentialStore};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
 /// lock a little after the process ends.
@@ -42,9 +42,13 @@ pub enum Job {
     Marker(MarkerUpdate),
     /// Save a verified sign-in; once committed, release its lane fact and an old notice.
     Commit(Secret<Account>),
-    /// Add a received refresh token to the revocation list; once committed, release its lane
-    /// fact. Its `added_at` is stamped when it's saved.
-    List(Secret<Revocable>),
+    /// Add a refresh token to the revocation list. Its `added_at` is stamped when it's saved.
+    List {
+        /// The entry.
+        entry: Secret<Revocable>,
+        /// Whether this save ends the lane's request, releasing its fact once committed.
+        finish: bool,
+    },
     /// Drop these confirmed entries, and with `age_out` the expired ones, from the revocation
     /// list. A list left empty has its names deleted and checked, then its sweep fact cleared.
     Relist {
@@ -60,6 +64,15 @@ pub enum Job {
     Checkpoint(Vec<Secret<Revocable>>),
     /// Sign-out's Delete, then Finish.
     Finish,
+    /// Save a refresh flight's account: its rotated set, the set once verified, or the
+    /// registration left when the session ended. Only the lane's save, `finish`, releases the
+    /// lane fact once committed.
+    Rotate {
+        /// What to save.
+        account: Secret<Account>,
+        /// Whether this save ends the lane's request.
+        finish: bool,
+    },
 }
 
 impl fmt::Debug for Job {
@@ -69,11 +82,12 @@ impl fmt::Debug for Job {
             Self::Register(_) => "Register",
             Self::Marker(_) => "Marker",
             Self::Commit(_) => "Commit",
-            Self::List(_) => "List",
+            Self::List { .. } => "List",
             Self::Relist { .. } => "Relist",
             Self::Prepare => "Prepare",
             Self::Checkpoint(_) => "Checkpoint",
             Self::Finish => "Finish",
+            Self::Rotate { .. } => "Rotate",
         })
     }
 }
@@ -109,6 +123,8 @@ pub enum Done {
     Checkpointed(Result<bool, VaultError>),
     /// Delete and Finish ended.
     SignedOut(Result<(), VaultError>),
+    /// A refresh flight's save, and the wall time it ended, for the bearer's expiry.
+    Rotated(SaveResult, Option<u64>),
 }
 
 /// What the vault held when it was read. Each record fails on its own, so one damaged record
@@ -144,10 +160,10 @@ impl<S: CredentialStore> fmt::Debug for Worker<S> {
     }
 }
 
-impl Worker<WindowsCredentialStore> {
+impl Worker<NativeCredentialStore> {
     /// The worker on the real credential store: the only way the brain reaches it outside tests.
     pub fn system(clock: Arc<dyn Clock>) -> Self {
-        Self::new(Box::new(|| Vault::open(WindowsCredentialStore)), clock)
+        Self::new(Box::new(|| Vault::open(NativeCredentialStore)), clock)
     }
 }
 
@@ -178,9 +194,8 @@ impl<S: CredentialStore> Worker<S> {
         // Never before this process's own time, so a clock set back then corrected can't age an
         // entry out early (CAPS-130). shortcut: with no wall time an entry never ages out; only a
         // confirmed revocation or a sign-out removes it.
-        let added_at = self
-            .clock
-            .unix_seconds()
+        let now = self.clock.unix_seconds();
+        let added_at = now
             .max(self.started.0.map(|wall| wall.saturating_add(self.ran())))
             .unwrap_or(u64::MAX);
         let Some(vault) = self.vault.as_mut() else {
@@ -193,7 +208,7 @@ impl<S: CredentialStore> Worker<S> {
                     result: refused(),
                     notice_cleared: false,
                 },
-                Job::List(_) => Done::Listed {
+                Job::List { .. } => Done::Listed {
                     result: refused(),
                     entries: Vec::new(),
                 },
@@ -201,6 +216,7 @@ impl<S: CredentialStore> Worker<S> {
                 Job::Prepare => Done::Prepared(Err(VaultError::Busy)),
                 Job::Checkpoint(_) => Done::Checkpointed(Err(VaultError::Busy)),
                 Job::Finish => Done::SignedOut(Err(VaultError::Busy)),
+                Job::Rotate { .. } => Done::Rotated(refused(), now),
             };
         };
         match job {
@@ -224,11 +240,21 @@ impl<S: CredentialStore> Worker<S> {
                     notice_cleared,
                 }
             }
-            Job::List(entry) => {
+            Job::Rotate { account, finish } => {
+                let result = rotate(vault, &account, finish);
+                // A bearer's expiry is judged when its save ends, which can be long after it began.
+                Done::Rotated(result, self.clock.unix_seconds())
+            }
+            Job::List { entry, finish } => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
                         list.map_or_else(RevocationList::default, |list| list.expose().clone());
                     let mut entry = entry.expose().clone();
+                    // A refresh's successor replaces the account entry it rotated.
+                    if entry.origin == Origin::Account {
+                        list.entries
+                            .retain(|listed| listed.origin != Origin::Account);
+                    }
                     entry.added_at = added_at;
                     list.entries.push(entry);
                     list
@@ -243,7 +269,7 @@ impl<S: CredentialStore> Worker<S> {
                     }
                 };
                 let result = vault.save_revocations(&Secret::new(list.clone()));
-                if matches!(result, SaveResult::Committed { .. }) {
+                if finish && matches!(result, SaveResult::Committed { .. }) {
                     finish_request(vault);
                 }
                 Done::Listed {
@@ -291,7 +317,8 @@ impl<S: CredentialStore> Worker<S> {
     }
 
     fn load(&mut self, mut tries: u32) -> Result<Snapshot, VaultError> {
-        if self.vault.is_none() {
+        let opening = self.vault.is_none();
+        if opening {
             let vault = loop {
                 tries -= 1;
                 match (self.open)() {
@@ -313,6 +340,20 @@ impl<S: CredentialStore> Worker<S> {
                     revocable: Err(VaultError::Fenced),
                 });
             }
+        };
+        // A request the last run left pending may have issued a token nobody owns: that's
+        // uncertainty now, before any later save can finish the flag as if it were known.
+        let marker = if opening && marker.request_pending {
+            vault
+                .update_marker(MarkerUpdate::RequestFinished {
+                    outcome_unknown: true,
+                })
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the last run's pending flag stays as it is");
+                    marker
+                })
+        } else {
+            marker
         };
         // Nothing leaves the list but a confirmed revocation while a sign-out is pending.
         let revocable = if marker.sign_out.is_some() {
@@ -336,6 +377,22 @@ impl<S: CredentialStore> Worker<S> {
             revocable,
         })
     }
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Job::Rotate's own field, passed through"
+)]
+fn rotate<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    account: &Secret<Account>,
+    finish: bool,
+) -> SaveResult {
+    let result = vault.save_account(account);
+    if finish && matches!(result, SaveResult::Committed { .. }) {
+        finish_request(vault);
+    }
+    result
 }
 
 /// The saved result is owned now, so the lane's pending flag can go. A refused write leaves it

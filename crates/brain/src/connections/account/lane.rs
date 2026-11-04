@@ -8,6 +8,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey};
 use zeroize::Zeroizing;
 
+use super::refresh::{Rotation, error_of};
 use super::{AccountState, Done, Effect, Job, Live, Step, Why, error, exchanges};
 use crate::connections::error::VaultError;
 use crate::connections::marker::MarkerUpdate;
@@ -37,12 +38,26 @@ pub(super) enum Lane {
         /// attempt moves, or on Retry, never on every pass.
         held: Option<u64>,
     },
+    /// A refresh for `generation`: its pending flag is being written, then, with its client,
+    /// it's out.
+    Refreshing {
+        generation: u64,
+        client: Option<Secret<Zeroizing<String>>>,
+    },
 }
 
 #[derive(Debug)]
 pub(super) enum Save {
     Account(Secret<Account>),
     List(Secret<Revocable>),
+    /// A refresh token for the list that no request on the lane owns: its save finishes no
+    /// request, so it can't clear another's pending flag.
+    Discard(Secret<Revocable>),
+    /// A refresh's rotated set, for the generation it serves.
+    Rotated {
+        generation: u64,
+        account: Secret<Account>,
+    },
 }
 
 /// Credential work waiting for the lane's thread.
@@ -67,6 +82,10 @@ pub(super) enum Queued {
     },
     /// A sign-out step.
     Leaving(Job),
+    /// A save of the account outside the lane, for a refresh flight.
+    Rotate(Secret<Account>, Rotation),
+    /// A check's save, built at dispatch from the account as it is then.
+    Verify(u64),
 }
 
 /// The credential job in flight.
@@ -83,6 +102,7 @@ pub(super) enum Flight {
     List,
     Relist(Why),
     Leaving,
+    Rotate(Rotation),
 }
 
 /// A sign-in op that arrived while the current attempt's save was running (R2-4): it waits for
@@ -93,12 +113,28 @@ pub(super) enum Deferred {
     Cancel,
 }
 
+/// A token request waiting for the lane, in arrival order.
+#[derive(Debug)]
+pub(super) enum Waiting {
+    /// An attempt's code.
+    Exchange(u64, Authorization),
+    /// The refresh for a generation.
+    Refresh(u64),
+    /// A refresh token for the list, none when no entry could hold it, and the jobs that run
+    /// only once it's listed or counted unknown.
+    Discard {
+        entry: Option<Secret<Revocable>>,
+        then: Vec<Queued>,
+    },
+}
+
 impl AccountState {
     pub(super) fn wait_for_lane(&mut self, authorization: Authorization) {
         if let Some(live) = &mut self.live {
             live.step = Step::Exchanging;
         }
-        self.waiting.push_back((self.attempt, authorization));
+        self.waiting
+            .push_back(Waiting::Exchange(self.attempt, authorization));
     }
 
     pub(super) fn done(&mut self, done: Done, effects: &mut Vec<Effect>) {
@@ -179,6 +215,7 @@ impl AccountState {
                         }
                         self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
+                        self.jobs.extend(mem::take(&mut self.after_list));
                         // An entry was added: revoke it now (design §2).
                         self.revoke(entries, effects);
                     }
@@ -191,6 +228,10 @@ impl AccountState {
             (Some(Flight::Relist(why)), Done::Relisted(result)) => {
                 self.relisted(why, result, effects);
             }
+            (Some(Flight::Rotate(why)), Done::Rotated(result, now)) => {
+                self.now = now;
+                self.rotated(why, result, effects);
+            }
             (Some(Flight::Leaving), done) => self.left(done, effects),
             (flight, done) => {
                 debug_assert!(false, "{done:?} doesn't answer {flight:?}");
@@ -200,6 +241,9 @@ impl AccountState {
 
     /// The pending flag's write ended: send the code, or end the attempt it was for.
     fn started(&mut self, result: Result<(), VaultError>, effects: &mut Vec<Effect>) {
+        if let Lane::Refreshing { generation, .. } = self.lane {
+            return self.refresh_started(generation, result, effects);
+        }
         let Lane::Starting {
             attempt,
             authorization,
@@ -251,6 +295,7 @@ impl AccountState {
                 let plan = account.expose().plan_enabled;
                 self.loaded.account = Some(account.clone());
                 self.lane = Lane::Free;
+                self.moved(effects);
                 if attempt == self.attempt
                     && let Some(live) = self.live.take()
                     && live.intent == Intent::EnablePlan
@@ -268,7 +313,7 @@ impl AccountState {
 
     /// The lane's save was refused: the set stays in memory until Retry, or the next attempt,
     /// saves it. A live attempt ends, since its code could only wait behind the held set.
-    fn hold(&mut self, effects: &mut Vec<Effect>) {
+    pub(super) fn hold(&mut self, effects: &mut Vec<Effect>) {
         if let Lane::Owning { held, .. } = &mut self.lane {
             *held = Some(self.attempt);
         }
@@ -277,9 +322,18 @@ impl AccountState {
                 effects.push(Effect::Close);
             }
             let current = self.attempt;
-            self.waiting.retain(|(attempt, _)| *attempt != current);
+            self.waiting.retain(
+                |waiting| !matches!(waiting, Waiting::Exchange(attempt, _) if *attempt == current),
+            );
         }
         effects.push(error(ErrorKey::CredentialsUnavailable, Action::Retry));
+        // A refresh waiting behind the held set can't go out, so its callers are told now.
+        self.waiting
+            .retain(|waiting| !matches!(waiting, Waiting::Refresh(_)));
+        self.fail(
+            error_of(ErrorKey::CredentialsUnavailable, Action::Retry),
+            effects,
+        );
     }
 
     /// Moves work forward: a held set whose attempt moved on goes to the revocation list, the
@@ -292,8 +346,43 @@ impl AccountState {
             self.jobs.push_back(Queued::Save);
         }
         while matches!(self.lane, Lane::Free) {
-            let Some((attempt, authorization)) = self.waiting.pop_front() else {
-                break;
+            let (attempt, authorization) = match self.waiting.pop_front() {
+                None => break,
+                Some(Waiting::Exchange(attempt, authorization)) => (attempt, authorization),
+                Some(Waiting::Discard { entry, then }) => {
+                    let Some(entry) = entry.filter(|_| self.loaded.exchanges < MAX_EXCHANGES)
+                    else {
+                        tracing::warn!(
+                            "a discarded set no list slot can hold has an unknown outcome"
+                        );
+                        self.jobs.push_back(Queued::Finished {
+                            outcome_unknown: true,
+                        });
+                        // shortcut: the save behind runs even if this write is refused, so the
+                        // token can leave unrecorded; give the write its own flight in 10b.
+                        self.jobs.extend(then);
+                        continue;
+                    };
+                    self.after_list = then;
+                    self.lane = Lane::Owning {
+                        attempt: self.attempt,
+                        save: Save::Discard(entry),
+                        held: None,
+                    };
+                    self.jobs.push_back(Queued::Save);
+                    continue;
+                }
+                // A replaced account's refresh is never sent.
+                Some(Waiting::Refresh(generation)) => {
+                    if generation == self.generation {
+                        self.lane = Lane::Refreshing {
+                            generation,
+                            client: None,
+                        };
+                        self.jobs.push_back(Queued::Started);
+                    }
+                    continue;
+                }
             };
             // A replaced attempt's code is never sent.
             if attempt != self.attempt {
@@ -334,8 +423,25 @@ impl AccountState {
                     Flight::Finished,
                     Job::Marker(MarkerUpdate::RequestFinished { outcome_unknown }),
                 ),
+                // A save for a replaced account never overwrites its successor.
+                Queued::Rotate(_, Rotation::Ended(generation) | Rotation::Unmarked(generation))
+                    if generation != self.generation =>
+                {
+                    continue;
+                }
+                Queued::Verify(generation) => match self.verify_save(generation) {
+                    Some(flight) => flight,
+                    None => continue,
+                },
+                Queued::Rotate(account, why) => (
+                    Flight::Rotate(why),
+                    Job::Rotate {
+                        account,
+                        finish: false,
+                    },
+                ),
                 Queued::Save => {
-                    let current = self.attempt;
+                    let (current, generation_now) = (self.attempt, self.generation);
                     let Lane::Owning { attempt, save, .. } = &mut self.lane else {
                         debug_assert!(false, "a save was queued with no set owned");
                         continue;
@@ -348,9 +454,42 @@ impl AccountState {
                         let tokens = account.tokens.as_ref().expect("a sign-in save has tokens");
                         *save = listed(account.client_id.clone(), tokens.refresh_token.clone());
                     }
+                    // A replaced account's rotated set is its successor: the `Account` entry.
+                    if let Save::Rotated {
+                        generation,
+                        account,
+                    } = save
+                        && *generation != generation_now
+                    {
+                        let account = account.expose();
+                        let tokens = account.tokens.as_ref().expect("a rotated set has tokens");
+                        *save = Save::List(Secret::new(Revocable {
+                            client_id: account.client_id.clone(),
+                            refresh_token: tokens.refresh_token.clone(),
+                            added_at: 0,
+                            origin: Origin::Account,
+                        }));
+                    }
+                    let finish = matches!(save, Save::List(_));
                     match save {
                         Save::Account(account) => (Flight::Commit, Job::Commit(account.clone())),
-                        Save::List(entry) => (Flight::List, Job::List(entry.clone())),
+                        Save::List(entry) | Save::Discard(entry) => (
+                            Flight::List,
+                            Job::List {
+                                entry: entry.clone(),
+                                finish,
+                            },
+                        ),
+                        Save::Rotated {
+                            generation,
+                            account,
+                        } => (
+                            Flight::Rotate(Rotation::Rotated(*generation)),
+                            Job::Rotate {
+                                account: account.clone(),
+                                finish: true,
+                            },
+                        ),
                     }
                 }
                 Queued::Relist { confirmed, why } => (
@@ -378,7 +517,7 @@ impl AccountState {
 
     pub(super) fn lane_attempt(&self) -> Option<u64> {
         match &self.lane {
-            Lane::Free => None,
+            Lane::Free | Lane::Refreshing { .. } => None,
             Lane::Starting { attempt, .. }
             | Lane::Outstanding { attempt, .. }
             | Lane::Owning { attempt, .. } => Some(*attempt),

@@ -13,6 +13,11 @@ use std::sync::Arc;
 const SUBDIVISIONS: usize = 4;
 const FRACTIONS: [f32; SUBDIVISIONS] = [0.0, 0.25, 0.5, 0.75];
 const CLEARANCE: f32 = 4.0;
+const _: () = assert!(
+    crate::path::PROCEDURAL_CURVE_PIECES > 0
+        && crate::path::PROCEDURAL_CURVE_PIECES.is_multiple_of(2),
+    "label candidates require a positive even number of curve pieces"
+);
 
 pub(super) fn separate(state: &mut LayoutState, build: &Build<'_>) -> Result<(), PrepareError> {
     let ids: Vec<_> = state
@@ -25,6 +30,7 @@ pub(super) fn separate(state: &mut LayoutState, build: &Build<'_>) -> Result<(),
         return Ok(());
     }
     let mut occupied = obstacles(state)?;
+    // shortcut: revisiting every label makes placement quadratic in label count; add a spatial index if any legal scene's measured preparation exceeds 50 ms or preparation is on the M2 or B9 critical path.
     for id in ids {
         build.check_cancel()?;
         let object = &state.objects[&id];

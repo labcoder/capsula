@@ -79,30 +79,26 @@ impl From<ModelSlug> for String {
     }
 }
 
-/// How hard the model thinks. A catalog effort outside these is dropped when the catalog is read.
+/// How hard the model thinks: the documented effort vocabulary, which isn't proof that a model
+/// accepts a value, so a refusal shows at run time. A stored effort a build doesn't know reads as
+/// no choice, so adding one needs no store migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effort {
-    /// The least.
-    Minimal,
     /// Less than usual.
     Low,
     /// The usual.
     Medium,
     /// More than usual.
     High,
-    /// The most.
+    /// Much more than usual.
     XHigh,
+    /// The most.
+    Max,
 }
 
 impl Effort {
-    /// Every effort, including choices stored before a catalog change.
-    pub const ALL: [Self; 5] = [
-        Self::Minimal,
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::XHigh,
-    ];
+    /// Every effort, in ascending order.
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
 }
 
 /// The model and effort a thread runs on.

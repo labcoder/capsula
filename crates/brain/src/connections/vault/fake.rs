@@ -1,6 +1,7 @@
 //! An in-memory credential store for tests: it can refuse, or "crash" after, any mutation.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
@@ -29,6 +30,8 @@ pub(crate) struct FakeState {
     pub(crate) missed_reads: usize,
     /// Deletes of present names that succeed but leave the name, as a parallel delete did.
     pub(crate) sticky_deletes: usize,
+    /// The next write moves this clock forward by these seconds, as a slow save does.
+    pub(crate) slow_write: Option<(Arc<AtomicU64>, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -84,6 +87,9 @@ impl FakeStore {
             };
             if !matches!(fault, Some(Fault::Refuse)) {
                 if let Some(value) = value {
+                    if let Some((clock, seconds)) = state.slow_write.take() {
+                        clock.fetch_add(seconds, Ordering::SeqCst);
+                    }
                     state.values.insert(target.to_owned(), value.clone());
                 } else if state.sticky_deletes > 0 && state.values.contains_key(target) {
                     state.sticky_deletes -= 1;

@@ -65,6 +65,10 @@ const ENGINE_QUEUE: usize = 16;
 /// How long closing waits for ended runs to reach the store, then for the store to close, and
 /// how long a whole Quit may take from the moment it's accepted [guess].
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long closing waits for a refresh already out, and its save, before the account's session
+/// lock is released; past it the token stays marked as sent, so the next start never sends it
+/// again [guess].
+const REFRESH_WAIT: Duration = Duration::from_secs(5);
 /// How long a new connection may wait for the visible set to settle before `Scenes` [guess].
 const SCENES_WAIT: Duration = Duration::from_secs(2);
 /// How long the control pipe is still read after another pipe ended, so a `Quitting` already
@@ -331,7 +335,9 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
-        self.account.close(deadline).await;
+        self.account
+            .close(deadline, Instant::now() + REFRESH_WAIT)
+            .await;
         if cleared && !undeleted {
             Quit::Complete
         } else {
@@ -370,7 +376,9 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
-        self.account.close(deadline).await;
+        self.account
+            .close(deadline, Instant::now() + REFRESH_WAIT)
+            .await;
     }
 
     /// Keeps runs that ended moving through the store, and settings changes being written,

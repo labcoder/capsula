@@ -10,6 +10,7 @@
 
 mod job;
 mod lane;
+mod refresh;
 mod sign_out;
 mod sweep;
 #[cfg(test)]
@@ -25,7 +26,7 @@ use kumochi_protocol::message::{
 use zeroize::Zeroizing;
 
 pub use job::{Done, Job, Snapshot, Worker};
-use lane::{Deferred, Flight, Lane, Queued, Save, listed};
+use lane::{Deferred, Flight, Lane, Queued, Save, Waiting, listed};
 use sign_out::Leaving;
 use sweep::{Pass, Why};
 
@@ -60,6 +61,41 @@ pub enum Input {
     },
     /// A revocation run ended with these entries confirmed.
     Revoked(Vec<Secret<Revocable>>),
+    /// A caller wants the bearer, refreshed first if it's due.
+    Access {
+        /// Names the caller's answer.
+        ticket: u64,
+        /// Wall time, for the expiry check.
+        now: Option<u64>,
+    },
+    /// The refresh for `generation` ended.
+    Refreshed {
+        /// The account generation it was sent for.
+        generation: u64,
+        /// The rotated set, or why there's none.
+        result: Result<TokenSet, ExchangeError>,
+        /// Wall time when it arrived, for its expiry.
+        now: Option<u64>,
+    },
+    /// The identity check of `generation`'s rotated set ended.
+    Validated {
+        /// The account generation it checked.
+        generation: u64,
+        /// The verified identity, or why it isn't.
+        result: Result<VerifiedIdentity, IdentityError>,
+        /// Wall time when it ended, for the bearer's expiry.
+        now: Option<u64>,
+    },
+}
+
+/// Why [`Input::Access`] gave no bearer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Denied {
+    /// No usable account: signed out, signing out or busy, or the account the caller asked
+    /// about was replaced while it waited.
+    Unusable,
+    /// The provider or the store refused; this is what to tell the user.
+    Failed(UserError),
 }
 
 /// How a listener ended.
@@ -117,6 +153,33 @@ pub enum Effect {
     },
     /// Revoke these listed entries within one network budget, then report [`Input::Revoked`].
     Revoke(Vec<Secret<Revocable>>),
+    /// Send the refresh, then report [`Input::Refreshed`]. Never aborted once started.
+    Refresh {
+        /// The account generation it's for.
+        generation: u64,
+        /// The issued client.
+        client: Secret<Zeroizing<String>>,
+        /// The account's current refresh token.
+        refresh_token: Secret<Zeroizing<String>>,
+    },
+    /// Verify a rotated set's identity token, then report [`Input::Validated`].
+    Validate {
+        /// The account generation it's for.
+        generation: u64,
+        /// The issued client.
+        client: Secret<Zeroizing<String>>,
+        /// The subject this account already verified.
+        subject: Secret<Zeroizing<String>>,
+        /// The rotated identity token.
+        id_token: Secret<Zeroizing<String>>,
+    },
+    /// Answer an [`Input::Access`].
+    Access {
+        /// The caller's ticket.
+        ticket: u64,
+        /// The bearer, or why there's none.
+        result: Result<Secret<Zeroizing<String>>, Denied>,
+    },
 }
 
 /// The account's state as last read, and what the machine learned since.
@@ -156,15 +219,37 @@ type Verified = (Zeroizing<String>, Option<Zeroizing<String>>, u64);
 
 /// The pure account machine.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts: the lock, a load, a revocation pass owed, a renewal sent"
+)]
 pub struct AccountState {
     busy: bool,
     loading: bool,
     loaded: Loaded,
+    /// Names the account's token set; it moves when that set is replaced or removed.
+    generation: u64,
     attempt: u64,
     live: Option<Live>,
     deferred: Option<Deferred>,
     lane: Lane,
-    waiting: VecDeque<(u64, Authorization)>,
+    waiting: VecDeque<Waiting>,
+    /// The generation a refresh flight serves, from its request until its set is verified.
+    refreshing: Option<u64>,
+    /// The generation whose rotated set is being verified.
+    validating: Option<u64>,
+    /// Callers waiting for the refresh flight.
+    tickets: Vec<u64>,
+    /// The flight already sent a refresh, so it hands out what that brought rather than
+    /// renewing again.
+    renewed: bool,
+    /// The wall time the latest timed input carried, for the expiry of a set saved since.
+    now: Option<u64>,
+    /// The generation a session the provider ended left: the registration and email stay, shown
+    /// as `SignInAgain` until the account moves again.
+    ended: Option<u64>,
+    /// The jobs that wait for the lane's list save to commit.
+    after_list: Vec<Queued>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -185,11 +270,19 @@ impl AccountState {
             busy: true,
             loading: false,
             loaded: Loaded::default(),
+            generation: 0,
             attempt: 0,
             live: None,
             deferred: None,
             lane: Lane::Free,
             waiting: VecDeque::new(),
+            refreshing: None,
+            validating: None,
+            tickets: Vec::new(),
+            renewed: false,
+            now: None,
+            ended: None,
+            after_list: Vec::new(),
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
@@ -221,18 +314,24 @@ impl AccountState {
             return AccountView::SigningIn;
         }
         match self.loaded.account.as_ref().map(Secret::expose) {
-            Some(account) if account.tokens.is_some() => AccountView::SignedIn {
-                email: account
-                    .email
-                    .as_ref()
-                    .and_then(|email| AccountEmail::new(email).ok()),
-                plan: if account.plan_enabled {
-                    PlanState::Enabled
-                } else {
-                    PlanState::Declined
-                },
-                recovery: self.held().then_some(AccountRecovery::Retry),
-            },
+            Some(account) if account.tokens.is_some() || self.session_ended() => {
+                AccountView::SignedIn {
+                    email: account
+                        .email
+                        .as_ref()
+                        .and_then(|email| AccountEmail::new(email).ok()),
+                    plan: if account.plan_enabled {
+                        PlanState::Enabled
+                    } else {
+                        PlanState::Declined
+                    },
+                    recovery: if self.session_ended() {
+                        Some(AccountRecovery::SignInAgain)
+                    } else {
+                        self.held().then_some(AccountRecovery::Retry)
+                    },
+                }
+            }
             _ => AccountView::SignedOut {
                 revocation_unconfirmed: self.loaded.notice,
             },
@@ -255,6 +354,17 @@ impl AccountState {
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
             Input::Revoked(confirmed) => self.revoked(confirmed),
+            Input::Access { ticket, now } => self.access(ticket, now, &mut effects),
+            Input::Refreshed {
+                generation,
+                result,
+                now,
+            } => self.refreshed(generation, result, now, &mut effects),
+            Input::Validated {
+                generation,
+                result,
+                now,
+            } => self.validated(generation, result.map(drop), now, &mut effects),
         }
         self.pump(&mut effects);
         if answer {
@@ -497,11 +607,9 @@ impl AccountState {
                 return;
             }
         };
+        let expires_at = now.and_then(|now| now.checked_add(tokens.expires_in));
         let verdict = if current {
-            self.verdict(
-                identity,
-                now.and_then(|now| now.checked_add(tokens.expires_in)),
-            )
+            self.verdict(identity, expires_at)
         } else {
             Err(None)
         };
@@ -519,6 +627,7 @@ impl AccountState {
                         scope: tokens.scope.expose().clone(),
                         expires_at,
                         pending_identity_validation: false,
+                        refresh_sent: false,
                     }),
                 };
                 if account.validate().is_ok() {
@@ -639,6 +748,16 @@ impl AccountState {
         if let Some(sign_out) = marker.sign_out {
             self.resume(sign_out);
         }
+        // A refresh whose answer was never saved may have consumed its token: the token stays
+        // for sign-out to revoke and is never sent again, so the session needs a new sign-in.
+        if account
+            .as_ref()
+            .and_then(|account| account.expose().tokens.as_ref())
+            .is_some_and(|tokens| tokens.refresh_sent)
+        {
+            tracing::warn!("a refresh's answer was never saved; the session needs a new sign-in");
+            self.ended = Some(self.generation);
+        }
         self.loaded = Loaded {
             notice: marker.notice,
             host,
@@ -684,6 +803,7 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
             code: OAuthCode::InvalidClient,
             ..
         } => (false, ErrorKey::AccountMisconfigured),
+        ExchangeError::Http(HttpError::Connect) => (false, ErrorKey::AccountOffline),
         ExchangeError::Http(HttpError::TrustStoreUnavailable) => {
             (false, ErrorKey::TrustStoreUnavailable)
         }
@@ -700,7 +820,9 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
 
 fn identity_key(failure: IdentityError) -> ErrorKey {
     match failure {
-        IdentityError::Http(HttpError::Timeout | HttpError::Transport) => ErrorKey::AccountOffline,
+        IdentityError::Http(HttpError::Timeout | HttpError::Transport | HttpError::Connect) => {
+            ErrorKey::AccountOffline
+        }
         IdentityError::Status { status } if status >= 500 => ErrorKey::AccountOffline,
         IdentityError::OtherAccount => ErrorKey::SignInOtherAccount,
         _ => ErrorKey::SignInFailed,

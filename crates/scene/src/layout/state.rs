@@ -5,7 +5,7 @@ use crate::{
     display::Item,
     geom::{Affine, Vec2},
     mermaid::Extra,
-    record::{KeyValue, Rgb, Track},
+    record::{Direction, KeyValue, Rgb, Track},
     theme::Theme,
 };
 use std::{
@@ -71,6 +71,7 @@ pub(super) struct Placed {
     pub item: Item,
     pub source: Arc<Op>,
     pub anchors: [Vec2; 2],
+    pub edge_direction: Direction,
     pub rest: Rest,
     pub rank: Option<usize>,
     pub motion: Option<Arc<Motions>>,
@@ -90,6 +91,7 @@ impl Placed {
             item,
             source,
             anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
+            edge_direction: cached.map_or(Direction::Down, |old| old.edge_direction),
             rest: cached.map_or_else(Rest::default, |old| old.rest),
             rank: cached.and_then(|old| old.rank),
             motion: cached.and_then(|old| old.motion.as_ref().map(Arc::clone)),

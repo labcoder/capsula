@@ -85,7 +85,7 @@ rows read as `thread` and `words` with no model:
 |---|---|
 | `kind` | `main` for Kumo's thread, `thread` for a task. A unique partial index allows one `main`. It keeps these two values for good: changing a `CHECK` rebuilds the table, so later facts (origin, parent, archive) get their own nullable columns |
 | `title_source` | Who wrote the title: `words` (the first turn's first line, from `BeginTurn`), `model` or `user` |
-| `model`, `effort` | The thread's model slug and effort as free text, both set or both null (a `CHECK`). They're checked against the catalog per run, so a catalog change never needs a migration, and a page carries a stored choice even once the catalog drops it |
+| `model`, `effort` | The thread's model slug and effort as free text, both set or both null (a `CHECK`). They're checked against the catalog per run, so a catalog change never needs a migration, and a page carries a stored choice even once the catalog drops it. An effort this build doesn't know (an older build's `minimal`, or a newer build's) reads as no choice, so one row never fails a page; a slug no build wrote still does |
 
 - **The main thread** is created by the recovery scan when it's missing, after unfinished
   deletions and before `high_water()` is read, as one statement of its own. A start cut short

@@ -318,7 +318,7 @@ fn search_rows_carry_kind_and_choice_and_rank_kumo_like_any_thread() {
     let mut store = opened(&scratch);
     let main = store.main_thread().expect("main");
     let thread = task(&mut store, "task");
-    let picked = choice("gpt-6.1-sol", Effort::Minimal);
+    let picked = choice("gpt-6.1-sol", Effort::Low);
     store.set_model(thread, &picked).expect("model");
     let run = RunId(store.high_water().expect("ids").1.0 + 1);
     store
@@ -439,6 +439,42 @@ fn a_model_choice_round_trips_through_a_page_and_a_restart() {
         .map(|row| (row.id, row.choice.clone()))
         .collect();
     assert_eq!(choices, [(ThreadId(1), None), (thread, Some(picked))]);
+}
+
+/// CAPS-90 M1: an effort this build doesn't know, an older build's `minimal` or a newer build's,
+/// reads as no choice instead of failing the page, and the other rows are unchanged.
+#[test]
+fn an_unknown_stored_effort_reads_as_no_choice() {
+    let scratch = Scratch::new("choice-unknown-effort");
+    let mut store = opened(&scratch);
+    let newer = task(&mut store, "newer");
+    let older = task(&mut store, "older");
+    let kept = task(&mut store, "kept");
+    let picked = choice("gpt-6.1-sol", Effort::Max);
+    store.set_model(kept, &picked).expect("model");
+    for (thread, effort) in [(newer, "ultra"), (older, "minimal")] {
+        store
+            .conn
+            .execute(
+                "UPDATE threads SET model = 'gpt-6.1-sol', effort = ?2 WHERE id = ?1",
+                rusqlite::params![sql(thread), effort],
+            )
+            .expect("planted");
+    }
+    let (rows, _) = list(&store, None);
+    let choices: Vec<_> = rows
+        .iter()
+        .map(|row| (row.id, row.choice.clone()))
+        .collect();
+    assert_eq!(
+        choices,
+        [
+            (ThreadId(1), None),
+            (kept, Some(picked)),
+            (older, None),
+            (newer, None)
+        ]
+    );
 }
 
 /// CAPS-65 H2: deleting a task's row takes its title and model with it, and the purge's copy
