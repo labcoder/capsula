@@ -151,7 +151,7 @@ flowchart LR
 |---|---|---|
 | `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
 | `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
-| `Models` | Data, brain to shell | at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,403 bytes, under the data frame cap |
+| `Models` | Data, brain to shell | the `ConnectionKind` the list belongs to, then at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,404 bytes, under the data frame cap |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
@@ -163,6 +163,24 @@ flowchart LR
   the shell never moves the account on its own. See [accounts](accounts.md).
 - The shell retains the current connection's Account view for Settings → Accounts. Views and
   errors are fenced by the reading connection's generation; disconnect clears the account UI.
+
+## Claude connections
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `Connection` | Control, shell to brain | a `ConnectionOp`: `AnthropicKeyStaged`, `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode` or `FindClaudeCode`; no fields |
+| `Warm` | Control, shell to brain | the `ThreadId` the user is about to type into |
+| `Connections` | Control, brain to shell | a `ConnectionsView`: the key's `KeyView` and Claude Code's `ClaudeCodeView` |
+
+- No key, token or anything Claude Code printed crosses the pipe. The shell stages a pasted key
+  in Credential Manager and sends only `AnthropicKeyStaged`; the brain checks it and moves it.
+- Every reason is a closed enum: a refused key's `KeyRejection`, an `Unsupported` install, the
+  audit check that failed (`AuditFailed`, never what it saw) and the `PolicyFailed` that closed
+  the route. A `ClaudeVersion` is three 16-bit numbers.
+- All three messages are on the tap's content-free list.
+- A `ModelChoice` names its `ConnectionKind`; one saved before Claude existed reads as `ChatGpt`.
+- shortcut: nothing sends or answers these until A1, C2 and C5b, and the shell ignores
+  `Connections` until its Connect screen reads it.
 
 ## Scenes and recovery
 
