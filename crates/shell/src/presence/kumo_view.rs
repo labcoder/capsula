@@ -15,9 +15,9 @@ use gpui_kit::{
 };
 
 use super::kumo::{Animator, CARRY_WIDTH, Look, Mood, Motion, Renderer, Silhouette};
-use super::line::on_next_frame;
-use super::pull_picture::{PullArt, PullPicture, Rows};
-use super::pulling::{Phase, Pulling};
+use super::line::{on_next_frame, slot};
+use super::pull_picture::{PullArt, PullPicture, Rows, largest_area};
+use super::pulling::Pulling;
 use super::{Presence, diagnostics};
 pub(super) use pull::{PullChanged, PullSite, bridge};
 
@@ -56,21 +56,19 @@ pub(super) struct KumoView {
     /// The next pulled picture, waiting for the dock to accept its mask, and its pixels.
     next: Option<PullPicture>,
     next_rows: Rows,
-    /// The pixels of the picture the dock shows.
-    shown_rows: Rows,
     /// Which window shows the body.
     pulled: Pulled,
+    /// The released body is home and still: the dock's next accepted mask is the line alone,
+    /// and the pull wants no frame until then. Whichever window showed the body still does.
+    resting: bool,
 }
 
-/// Which window shows the body.
+/// Which window shows the body: the peek until the dock has drawn a pulled picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pulled {
     Peek,
-    /// The dock shows the pulled body, so the peek's slot is empty.
+    /// The dock has drawn the pulled body, so the peek's slot is empty.
     Dock,
-    /// The released body is home and still: the dock's next accepted picture is the line
-    /// alone, and no frame is wanted until then.
-    Resting,
 }
 
 impl EventEmitter<WantsFrames> for KumoView {}
@@ -96,8 +94,8 @@ impl KumoView {
             art: None,
             next: None,
             next_rows: Rows::default(),
-            shown_rows: Rows::default(),
             pulled: Pulled::Peek,
+            resting: false,
         }
     }
 
@@ -125,6 +123,7 @@ impl KumoView {
                         carry,
                         Silhouette::emoji(),
                         Look::default(),
+                        pull_rows(scale),
                     );
                     (
                         Renderer::new(&Silhouette::emoji(), size, Look::default()),
@@ -142,6 +141,7 @@ impl KumoView {
                 view.art = art
                     .inspect_err(|error| tracing::error!(%error, "can't bake the pulled Kumo"))
                     .ok();
+                view.next_rows = Rows::with_capacity(pull_rows(scale));
                 // An image from another size would show at the wrong scale.
                 view.retired = view.image.take().or(view.retired.take());
                 diagnostics::record(cx, format_args!("kumo baked size={size} us={baked_us}"));
@@ -184,10 +184,10 @@ impl KumoView {
         }
     }
 
-    /// Whether the next frame has something to draw or to drop, or a pull to step.
+    /// Whether the next frame has something to draw or to drop. A pull's frames come from the
+    /// dock, which stays shown through its return.
     pub(super) fn wants_frame(&self) -> bool {
         self.retired.is_some()
-            || (self.pulling.phase() != Phase::Idle && self.pulled != Pulled::Resting)
             || (self.shown
                 && self.renderer.is_some()
                 && (self.image.is_none() || self.animator.is_animating()))
@@ -207,7 +207,6 @@ impl KumoView {
             reason = "a frame step is at most two intervals"
         )]
         let dt = dt as f32;
-        self.picture(dt);
         if let Some(retired) = self.retired.take()
             && let Err(error) = window.drop_image(retired)
         {
@@ -308,11 +307,7 @@ impl Presence {
             .frame(Instant::now(), cap, window.refresh_interval(cx))
         {
             None => true,
-            Some(dt) => {
-                let wanted = self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx));
-                self.show_pull(cx);
-                wanted
-            }
+            Some(dt) => self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx)),
         };
         if wanted {
             on_next_frame(window, cx.weak_entity(), Self::frame);
@@ -331,6 +326,11 @@ pub(super) fn motion(cx: &mut App) -> Motion {
     } else {
         Motion::Full
     }
+}
+
+/// The tallest pull area at `scale`, in rows.
+pub(super) fn pull_rows(scale: f32) -> usize {
+    usize::try_from(largest_area(slot(scale), scale)[1]).unwrap_or(0)
 }
 
 /// `logical` pixels in device pixels at `scale`.

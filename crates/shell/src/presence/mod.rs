@@ -59,7 +59,6 @@ use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
-use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
@@ -816,16 +815,7 @@ pub(crate) fn open(
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, |_, _| false);
-        cx.new(|_| Dock {
-            pending_paint: PendingPaint::default(),
-            paint: None,
-            origin: [0; 2],
-            drawn: Drawn::default(),
-            listening: false,
-            pull: None,
-            retired: Vec::new(),
-            aged: Vec::new(),
-        })
+        cx.new(|_| Dock::new())
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
     let scale = dock_window
@@ -886,7 +876,7 @@ pub(crate) fn open(
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
-            pull_dock: pull_dock::PullDock::default(),
+            pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
         }
     });

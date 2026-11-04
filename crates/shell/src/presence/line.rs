@@ -117,7 +117,11 @@ pub(super) trait Surfaces {
 /// What Windows holds now, as far as the surfaces' last successful calls say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Held {
+    /// The line's band, when the mask Windows holds is exactly it.
     mask: Option<LineFrame>,
+    /// Where the mask Windows holds takes clicks, whoever gave it: the line's band or a
+    /// pull's area. Failing closed empties it.
+    proxy: Option<[i32; 4]>,
     /// None while the overlay is hidden.
     overlay: Option<[i32; 4]>,
     /// The tray entry, None while the proxy is hidden.
@@ -163,16 +167,21 @@ impl Line {
         self.accepted.map(|placement| placement.frame)
     }
 
-    /// A pull has the mask and the overlay: the next attempt gives them back to the line.
-    pub(super) fn disturb(&mut self) {
-        self.held.mask = None;
+    /// A pull moved the overlay: the next attempt moves it back to the line's.
+    pub(super) fn pull_overlay(&mut self) {
         self.held.overlay = None;
+    }
+
+    /// Windows accepted a pull's mask over `area`: the next attempt gives the line its band
+    /// back, and failing closed empties the pull's area.
+    pub(super) fn pull_mask(&mut self, area: [i32; 4]) {
+        self.held.mask = None;
+        self.held.proxy = Some(area);
     }
 
     /// The pull is done with the mask and the overlay: ask for the line again, the pending
     /// placement if there is one, with a fresh run of attempts.
     pub(super) fn reclaim(&mut self) {
-        self.disturb();
         self.requested = self.requested.or(self.accepted);
         self.failed = 0;
     }
@@ -225,6 +234,7 @@ impl Line {
         if self.held.mask != Some(target.frame) {
             surfaces.upload(&target.frame)?;
             self.held.mask = Some(target.frame);
+            self.held.proxy = Some(target.frame.hit);
         }
         let overlay = target.layout.overlay;
         if self.held.overlay != Some(overlay) {
@@ -235,7 +245,10 @@ impl Line {
                     && self.held.mask != Some(accepted.frame)
                 {
                     match surfaces.upload(&accepted.frame) {
-                        Ok(()) => self.held.mask = Some(accepted.frame),
+                        Ok(()) => {
+                            self.held.mask = Some(accepted.frame);
+                            self.held.proxy = Some(accepted.frame.hit);
+                        }
                         Err(restore) => tracing::warn!(%restore, "can't put the hit mask back"),
                     }
                 }
@@ -259,8 +272,8 @@ impl Line {
         }
         if let Err(error) = surfaces.hide_proxy() {
             tracing::warn!(%error, "can't hide the dock's proxy; emptying its mask");
-            if let Some(mask) = self.held.mask {
-                surfaces.clear_mask(mask.hit)?;
+            if let Some(proxy) = self.held.proxy {
+                surfaces.clear_mask(proxy)?;
             }
         }
         *self = Self::default();
@@ -273,10 +286,12 @@ impl Line {
             == self.accepted.map_or(
                 Held {
                     mask: self.held.mask,
+                    proxy: self.held.proxy,
                     ..Held::default()
                 },
                 |accepted| Held {
                     mask: Some(accepted.frame),
+                    proxy: Some(accepted.frame.hit),
                     overlay: Some(accepted.layout.overlay),
                     shown: Some(accepted.index),
                 },
@@ -467,6 +482,25 @@ pub(super) struct Dock {
     /// GPUI's atlas at this render.
     pub(super) retired: Vec<Arc<RenderImage>>,
     pub(super) aged: Vec<Arc<RenderImage>>,
+    /// `pull` was accepted and hasn't been rendered yet.
+    pub(super) undrawn: bool,
+}
+
+impl Dock {
+    pub(super) fn new() -> Self {
+        Self {
+            pending_paint: PendingPaint::default(),
+            paint: None,
+            origin: [0; 2],
+            drawn: Drawn::default(),
+            listening: false,
+            pull: None,
+            // A pull's frame retires at most its two goo images.
+            retired: Vec::with_capacity(2),
+            aged: Vec::with_capacity(2),
+            undrawn: false,
+        }
+    }
 }
 
 impl Render for Dock {
@@ -489,6 +523,7 @@ impl Render for Dock {
             }
         }
         std::mem::swap(&mut self.aged, &mut self.retired);
+        self.undrawn = false;
         let scale = window.scale_factor();
         let fill = if self.listening {
             cx.theme().primary
@@ -647,6 +682,8 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         mask: Option<LineFrame>,
+        /// A pull's mask over this area, which the line's surfaces didn't give.
+        pulled: Option<[i32; 4]>,
         overlay: Option<[i32; 4]>,
         shown: Option<usize>,
         refuse_uploads: Vec<bool>,
@@ -669,6 +706,7 @@ mod tests {
                 return Err("upload refused");
             }
             self.mask = Some(*frame);
+            self.pulled = None;
             Ok(())
         }
 
@@ -708,6 +746,10 @@ mod tests {
             if self.refuse_clears {
                 return Err("clear refused");
             }
+            if self.pulled == Some(hit) {
+                self.pulled = None;
+                return Ok(());
+            }
             if self.mask.map(|mask| mask.hit) != Some(hit) {
                 return Err("cleared a band it doesn't hold");
             }
@@ -731,7 +773,7 @@ mod tests {
 
         /// A shown proxy with a band: it takes clicks.
         fn takes_clicks(&self) -> bool {
-            self.shown.is_some() && self.mask.is_some()
+            self.shown.is_some() && (self.mask.is_some() || self.pulled.is_some())
         }
     }
 
@@ -745,6 +787,23 @@ mod tests {
 
     fn failed([retry, closed]: [bool; 2]) -> impl Fn(&Attempt<&'static str>) -> bool {
         move |attempt| matches!(attempt, Attempt::Failed { retry: r, closed: c, .. } if *r == retry && *c == closed)
+    }
+
+    #[test]
+    fn a_pull_mask_a_failed_reclaim_leaves_is_emptied_when_the_proxy_wont_hide() {
+        let (mut line, mut fake) = at_a();
+        let area = [-228, -228, 514, 477];
+        (fake.mask, fake.pulled) = (None, Some(area));
+        line.pull_overlay();
+        line.pull_mask(area);
+        fake.refuse_uploads = vec![true; 3];
+        fake.refuse_proxy_hides = true;
+        line.reclaim();
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([false, true])(&line.attempt(&mut fake)));
+        assert_eq!(fake.pulled, None, "the pull's area was emptied");
+        assert!(!fake.takes_clicks(), "nothing on screen takes clicks");
     }
 
     #[test]

@@ -62,6 +62,9 @@ impl Presence {
             self.activity = activity;
             self.sync_escape(cx)?;
         }
+        if activity.pulling {
+            self.want_pull_frames(cx);
+        }
         self.pointer_changed(cx)
     }
 }

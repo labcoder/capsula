@@ -7,7 +7,7 @@ use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, Pixels, Point, WeakEntity, Window,
 };
 
-use super::{KumoView, WantsFrames, motion};
+use super::{KumoView, motion};
 use crate::platform::input::{Input, input};
 use crate::platform::{self, PresenceError, PresenceEvent};
 use crate::presence::drag::{End, Event, Generation, Outcome};
@@ -92,7 +92,6 @@ impl KumoView {
         if let Some(generation) = self.pulling.press(button, seq, origin, at, grab) {
             self.origin = origin;
             cx.emit(PullChanged::Grabbed(generation));
-            cx.emit(WantsFrames);
         }
     }
 

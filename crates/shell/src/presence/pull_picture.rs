@@ -36,6 +36,19 @@ pub(super) struct Rows {
 }
 
 impl Rows {
+    /// Room for `rows` rows, so filling them never allocates.
+    pub(super) fn with_capacity(rows: usize) -> Self {
+        Self {
+            top: 0,
+            rows: Vec::with_capacity(rows),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.rows.capacity()
+    }
+
     /// Empties it for `rows` rows from `top`, keeping what it has allocated.
     pub(super) fn clear(&mut self, top: i32, rows: usize) {
         self.top = top;
@@ -132,28 +145,36 @@ pub(super) struct PullArt {
 }
 
 impl PullArt {
-    /// The art for `renderer`'s bake, `side` device pixels square, of `shape` with `look`.
+    /// The art for `renderer`'s bake, `side` device pixels square, of `shape` with `look`,
+    /// with its scratch sized for a pull area `rows` tall, so no frame grows it.
     pub(super) fn new(
         renderer: &Renderer,
         side: u16,
         shape: Silhouette,
         look: Look,
+        rows: usize,
     ) -> Result<Self, PictureError> {
         let mut pixels = vec![0; renderer.image_len()];
         renderer.render(&FrameState::IDLE, &mut pixels)?;
         let mut hulls = vec![None; usize::from(side)];
         row_hulls(&pixels, side, &mut hulls);
+        let (neck, stub) = (GooShader::neck(CARRY_WIDTH), GooShader::stub(CARRY_WIDTH));
         Ok(Self {
             body: wrap(side.into(), side.into(), pixels)?,
             side,
             hulls,
-            neck: GooShader::neck(CARRY_WIDTH),
-            stub: GooShader::stub(CARRY_WIDTH),
+            piece_hulls: Vec::with_capacity(neck.capacity().max(stub.capacity())),
+            spans: Vec::with_capacity(rows + 2),
+            neck,
+            stub,
             shape,
             look,
-            piece_hulls: Vec::new(),
-            spans: Vec::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn scratch_capacity(&self) -> [usize; 2] {
+        [self.piece_hulls.capacity(), self.spans.capacity()]
     }
 
     /// The picture of `pull` grabbed in `space`, and in `rows` the device pixels it can show.
