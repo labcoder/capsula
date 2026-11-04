@@ -97,6 +97,7 @@ impl Tapped for ControlToShell {
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
+            Self::ThreadsChanged => "ThreadsChanged",
         }
     }
 
@@ -109,7 +110,8 @@ impl Tapped for ControlToShell {
                 | Self::RunState {
                     run: _,
                     thread: _,
-                    phase: _
+                    phase: _,
+                    error: _
                 }
                 | Self::Ping
                 | Self::Scenes { scenes: _ }
@@ -120,6 +122,7 @@ impl Tapped for ControlToShell {
                 }
                 | Self::TurnRefused { thread: _ }
                 | Self::Error(_)
+                | Self::ThreadsChanged
         )
     }
 }

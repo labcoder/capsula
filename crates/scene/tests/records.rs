@@ -286,3 +286,439 @@ fn every_operation_round_trips_as_a_record() {
         round_trip(&record);
     }
 }
+
+mod three {
+    use super::*;
+    use kumochi_scene::{
+        Budget, Record,
+        record::{Geometry, ShapeError, Solid, View3d},
+    };
+    use serde_json::{Value, json};
+
+    fn solid(value: &Value) -> Solid {
+        serde_json::from_value(value.clone()).expect("decoded solid")
+    }
+    fn exact_round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T) {
+        let json = serde_json::to_vec(value).expect("JSON");
+        assert_eq!(
+            &serde_json::from_slice::<T>(&json).expect("JSON decode"),
+            value,
+            "JSON preserves every field"
+        );
+        let bytes = postcard::to_allocvec(value).expect("postcard");
+        assert_eq!(
+            &postcard::from_bytes::<T>(&bytes).expect("postcard decode"),
+            value,
+            "postcard preserves every field"
+        );
+    }
+    fn fields() -> Vec<Value> {
+        vec![
+            json!({"shape":"box","size":[1,2,3]}),
+            json!({"shape":"sphere","r":2}),
+            json!({"shape":"cylinder","r":2,"h":3}),
+            json!({"shape":"cone","r":2,"r2":0,"h":3}),
+            json!({"shape":"torus","r":2,"r2":1}),
+            json!({"shape":"extrude","points":[[0,0],[1,0],[0,1]],"depth":3}),
+            json!({"shape":"lathe","points":[[0,0],[1,2]]}),
+            json!({"shape":"tube","path":[[0,0,0],[1,2,3]],"r2":1}),
+        ]
+    }
+    fn fixture(mut value: Value) -> Value {
+        value["in"] = json!("v");
+        value["id"] = json!("s");
+        value
+    }
+    fn shape_error(value: &Value, field: &'static str, code: ErrorCode) {
+        let value = solid(value);
+        assert_eq!(
+            value.geometry().expect_err("invalid geometry"),
+            ShapeError { field, code },
+            "JSON shape validation reports the exact field and code"
+        );
+        let bytes = postcard::to_allocvec(&value).expect("decoded but invalid geometry");
+        let decoded: Solid =
+            postcard::from_bytes(&bytes).expect("shape rules are not decode bounds");
+        assert_eq!(
+            decoded.geometry().expect_err("invalid binary geometry"),
+            ShapeError { field, code },
+            "postcard shape validation reports the same field and code"
+        );
+    }
+
+    #[test]
+    fn all_shapes_resolve_exact_fields_and_round_trip_full_records() {
+        let expected = [
+            Geometry::Box {
+                size: [1.0, 2.0, 3.0],
+            },
+            Geometry::Sphere { r: 2.0 },
+            Geometry::Cylinder { r: 2.0, h: 3.0 },
+            Geometry::Cone {
+                r: 2.0,
+                top: 0.0,
+                h: 3.0,
+            },
+            Geometry::Torus {
+                ring: 2.0,
+                tube: 1.0,
+            },
+            Geometry::Extrude {
+                outline: &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+                    .map(|p| p.map(|v| Finite::try_from(v).expect("finite"))),
+                depth: 3.0,
+            },
+            Geometry::Lathe {
+                profile: &[[0.0, 0.0], [1.0, 2.0]]
+                    .map(|p| p.map(|v| Finite::try_from(v).expect("finite"))),
+            },
+            Geometry::Tube {
+                path: &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]
+                    .map(|p| p.map(|v| Finite::try_from(v).expect("finite"))),
+                thickness: 1.0,
+            },
+        ];
+        for (index, fields) in fields().into_iter().enumerate() {
+            let mut value = fixture(fields);
+            value.as_object_mut().expect("object").extend(json!({
+                "pos":[1,2,3],"rot":[4,5,6],"scale":2,"attach":"a",
+                "label":"private-label-sentinel","info":"private-info-sentinel","color":"accent","opacity":0.5
+            }).as_object().expect("object").clone());
+            if !matches!(index, 0 | 5) {
+                value["segments"] = json!(12);
+            }
+            let solid = solid(&value);
+            assert_eq!(solid.geometry().expect("geometry"), expected[index]);
+            let input = json!({"step":{"id":"s","put":[{"solid":value}]}});
+            let record =
+                parse_record(&serde_json::to_vec(&input).expect("fixture")).expect("record");
+            exact_round_trip(&record);
+            assert!(!format!("{solid:?}").contains("private"));
+            assert!(!format!("{solid:?}").contains("1.0"));
+        }
+        let mut cone = fixture(json!({"shape":"cone","r":2,"h":3}));
+        assert_eq!(
+            solid(&cone).geometry().expect("default top"),
+            Geometry::Cone {
+                r: 2.0,
+                top: 0.0,
+                h: 3.0
+            }
+        );
+        cone["r2"] = json!(1);
+        assert_eq!(
+            solid(&cone).geometry().expect("truncated cone"),
+            Geometry::Cone {
+                r: 2.0,
+                top: 1.0,
+                h: 3.0
+            }
+        );
+    }
+
+    #[test]
+    fn viewport_defaults_and_full_fields_are_exact_and_redacted() {
+        let empty: View3d = serde_json::from_str(r#"{"id":"v"}"#).expect("empty viewport");
+        assert_eq!(empty.id.as_str(), "v");
+        assert_eq!(
+            (
+                empty.bounds,
+                empty.camera,
+                empty.light,
+                empty.orbit,
+                empty.spin
+            ),
+            (None, None, None, true, None)
+        );
+        let full: View3d = serde_json::from_value(json!({
+            "id":"private-id-sentinel","box":[1,2,300,400],
+            "camera":{"yaw":30,"pitch":45,"dist":12,"fov":60,"target":[1,2,3]},
+            "light":{"dir":[4,5,6],"ambient":0.25},"orbit":false,"spin":-90
+        }))
+        .expect("full viewport");
+        exact_round_trip(&full);
+        let encoded = serde_json::to_value(&full).expect("encoded viewport");
+        assert_eq!(
+            encoded["camera"],
+            json!({"yaw":30.0,"pitch":45.0,"dist":12.0,"fov":60.0,"target":[1.0,2.0,3.0]})
+        );
+        assert_eq!(
+            encoded["light"],
+            json!({"dir":[4.0,5.0,6.0],"ambient":0.25})
+        );
+        assert_eq!(encoded["orbit"], false);
+        assert_eq!(encoded["spin"], -90.0);
+        let debug = format!("{full:?}");
+        assert!(!debug.contains("private"));
+        assert!(!debug.contains("300"));
+        let camera: kumochi_scene::record::Camera = serde_json::from_str("{}").expect("camera");
+        assert_eq!(
+            (
+                camera.yaw,
+                camera.pitch,
+                camera.dist,
+                camera.fov,
+                camera.target
+            ),
+            (None, None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn each_shape_requires_its_fields_before_rejecting_unused_fields() {
+        let required: &[&[&str]] = &[
+            &["size"],
+            &["r"],
+            &["r", "h"],
+            &["r", "h"],
+            &["r", "r2"],
+            &["points", "depth"],
+            &["points"],
+            &["path", "r2"],
+        ];
+        for (value, required) in fields().into_iter().zip(required) {
+            for &field in *required {
+                let mut value = fixture(value.clone());
+                value.as_object_mut().expect("object").remove(field);
+                shape_error(&value, field, ErrorCode::MissingField);
+            }
+        }
+        shape_error(
+            &fixture(json!({"shape":"box","r":1})),
+            "size",
+            ErrorCode::MissingField,
+        );
+        for (field, unused) in [
+            ("r", json!(1)),
+            ("r2", json!(1)),
+            ("h", json!(1)),
+            ("depth", json!(1)),
+            ("points", json!([[0, 0]])),
+            ("path", json!([[0, 0, 0]])),
+            ("segments", json!(3)),
+        ] {
+            let mut value = fixture(json!({"shape":"box","size":[1,1,1]}));
+            value[field] = unused;
+            shape_error(&value, field, ErrorCode::UnknownField);
+        }
+        let mut sphere = fixture(json!({"shape":"sphere","r":1,"size":[1,1,1]}));
+        shape_error(&sphere, "size", ErrorCode::UnknownField);
+        sphere.as_object_mut().expect("object").remove("size");
+        sphere["points"] = json!([]);
+        sphere["path"] = json!([]);
+        assert_eq!(
+            solid(&sphere).geometry().expect("unused empty lists"),
+            Geometry::Sphere { r: 1.0 }
+        );
+    }
+
+    #[test]
+    fn every_shape_refuses_each_field_it_does_not_use() {
+        let all = [
+            ("size", json!([1, 1, 1])),
+            ("r", json!(1)),
+            ("r2", json!(0.5)),
+            ("h", json!(1)),
+            ("depth", json!(1)),
+            ("points", json!([[0, 0], [1, 0], [0, 1]])),
+            ("path", json!([[0, 0, 0], [1, 1, 1]])),
+            ("segments", json!(3)),
+        ];
+        let used: [&[&str]; 8] = [
+            &["size"],
+            &["r", "segments"],
+            &["r", "h", "segments"],
+            &["r", "r2", "h", "segments"],
+            &["r", "r2", "segments"],
+            &["points", "depth"],
+            &["points", "segments"],
+            &["path", "r2", "segments"],
+        ];
+        for (fields, used) in fields().into_iter().zip(used) {
+            for (field, value) in &all {
+                if used.contains(field) {
+                    continue;
+                }
+                let mut solid = fixture(fields.clone());
+                solid[*field] = value.clone();
+                shape_error(&solid, field, ErrorCode::UnknownField);
+            }
+        }
+    }
+
+    #[test]
+    fn list_presence_counts_and_radius_relations_are_shape_dependent() {
+        for (fields, field, min, max) in [
+            (json!({"shape":"extrude","depth":1}), "points", 3, 128),
+            (json!({"shape":"lathe"}), "points", 2, 512),
+            (json!({"shape":"tube","r2":1}), "path", 2, 512),
+        ] {
+            let mut value = fixture(fields);
+            shape_error(&value, field, ErrorCode::MissingField);
+            value[field] = json!([]);
+            shape_error(&value, field, ErrorCode::MissingField);
+            for count in 1..min {
+                value[field] = if field == "path" {
+                    json!(vec![[0, 0, 0]; count])
+                } else {
+                    json!(vec![[0, 0]; count])
+                };
+                shape_error(&value, field, ErrorCode::OutOfRange);
+            }
+            for count in [min, max] {
+                value[field] = if field == "path" {
+                    json!(vec![[0, 0, 0]; count])
+                } else {
+                    json!(vec![[0, 0]; count])
+                };
+                let solid = solid(&value);
+                let count = match solid.geometry().expect("exact count boundary") {
+                    Geometry::Extrude { outline, .. } => outline.len(),
+                    Geometry::Lathe { profile } => profile.len(),
+                    Geometry::Tube { path, .. } => path.len(),
+                    _ => panic!("list shape"),
+                };
+                assert_eq!(count, value[field].as_array().expect("list").len());
+                exact_round_trip(&solid);
+            }
+            if field == "points" && min == 3 {
+                value[field] = json!(vec![[0, 0]; 129]);
+                shape_error(&value, field, ErrorCode::OverBudget(Budget::PathPoints));
+            }
+        }
+        for tube in [0.0, 2.0, 2.001] {
+            shape_error(
+                &fixture(json!({"shape":"torus","r":2,"r2":tube})),
+                "r2",
+                ErrorCode::OutOfRange,
+            );
+        }
+        for tube in [0.001_f32, f32::from_bits(2.0_f32.to_bits() - 1)] {
+            let value = fixture(json!({"shape":"torus","r":2,"r2":tube}));
+            assert_eq!(
+                solid(&value).geometry().expect("legal torus radius edges"),
+                Geometry::Torus { ring: 2.0, tube }
+            );
+        }
+        let value = fixture(json!({"shape":"tube","r2":0.001,"path":[[0,0,0],[1,0,0]]}));
+        assert_eq!(
+            solid(&value).geometry().expect("minimum thickness"),
+            Geometry::Tube {
+                path: &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+                    .map(|p| p.map(|v| Finite::try_from(v).expect("finite"))),
+                thickness: 0.001,
+            }
+        );
+        shape_error(
+            &fixture(json!({"shape":"tube","r2":0,"path":[[0,0,0],[1,0,0]]})),
+            "r2",
+            ErrorCode::OutOfRange,
+        );
+        shape_error(
+            &fixture(json!({"shape":"lathe","points":[[-0.001,0],[1,1]]})),
+            "points",
+            ErrorCode::OutOfRange,
+        );
+    }
+
+    #[test]
+    fn three_dimensional_malformed_records_have_exact_paths() {
+        for (op, code, path) in [
+            (
+                r#"{"solid":{"id":"s","in":"v","shape":"unknown"}}"#,
+                ErrorCode::OutOfRange,
+                "solid.shape",
+            ),
+            (
+                r#"{"solid":{"id":"s","shape":"box"}}"#,
+                ErrorCode::MissingField,
+                "solid.in",
+            ),
+            (
+                r#"{"solid":{"id":"s","in":"v","shape":"box","pos":[1,2]}}"#,
+                ErrorCode::Malformed,
+                "solid.pos",
+            ),
+            (
+                r#"{"solid":{"id":"s","in":"v","shape":"box","pos":[1,2,3,4]}}"#,
+                ErrorCode::Malformed,
+                "solid.pos",
+            ),
+            (
+                r#"{"solid":{"id":"s","id":"t","in":"v","shape":"box"}}"#,
+                ErrorCode::DuplicateKey,
+                "solid",
+            ),
+            (
+                r#"{"solid":{"id":"s","in":"v","shape":"box","unknown":0}}"#,
+                ErrorCode::UnknownField,
+                "solid",
+            ),
+            (
+                r#"{"view3d":{"id":"v","unknown":0}}"#,
+                ErrorCode::UnknownField,
+                "view3d",
+            ),
+            (
+                r#"{"view3d":{"id":"v","camera":{"unknown":0}}}"#,
+                ErrorCode::UnknownField,
+                "view3d.camera",
+            ),
+            (
+                r#"{"view3d":{"id":"v","light":{"unknown":0}}}"#,
+                ErrorCode::UnknownField,
+                "view3d.light",
+            ),
+        ] {
+            let failure = error(&format!(r#"{{"step":{{"id":"s","put":[{op}]}}}}"#));
+            assert_eq!(failure.code, code);
+            assert_eq!(failure.path.as_str(), format!("put[0].{path}"));
+        }
+        for key in ["[]", "[1]", "[1,2,3,4]"] {
+            let failure = error(&format!(
+                r#"{{"step":{{"id":"s","put":[{{"anim":{{"target":"s","track":"pos3","keys":[[0,{key}]]}}}}]}}}}"#
+            ));
+            assert_eq!(failure.code, ErrorCode::Malformed);
+            assert_eq!(failure.path.as_str(), "put[0].anim.keys[0][1]");
+        }
+        let v3: KeyValue = serde_json::from_str("[1,2,3]").expect("V3");
+        assert_eq!(
+            v3,
+            KeyValue::V3([1.0, 2.0, 3.0].map(|v| Finite::try_from(v).expect("finite")))
+        );
+        exact_round_trip(&v3);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let raw = postcard::to_allocvec(&[value, 0.0, 0.0]).expect("raw position");
+            let mut bytes = vec![3];
+            bytes.extend_from_slice(&raw);
+            assert_eq!(
+                postcard::from_bytes::<KeyValue>(&bytes).expect_err("nonfinite V3"),
+                postcard::Error::SerdeDeCustom
+            );
+            let value = solid(&fixture(json!({"shape":"box","pos":[0,0,0]})));
+            let mut bytes = postcard::to_allocvec(&value).expect("solid");
+            bytes[13..25].copy_from_slice(&raw);
+            assert_eq!(
+                postcard::from_bytes::<Solid>(&bytes).expect_err("nonfinite position"),
+                postcard::Error::SerdeDeCustom
+            );
+        }
+        let bytes = postcard::to_allocvec(&solid(&fixture(json!({"shape":"sphere","r":1}))))
+            .expect("solid");
+        assert_eq!(
+            postcard::from_bytes::<Solid>(&bytes[..bytes.len() - 1]).expect_err("truncated solid"),
+            postcard::Error::DeserializeUnexpectedEnd
+        );
+        assert_eq!(
+            postcard::from_bytes::<KeyValue>(&[3, 0, 0, 0, 0]).expect_err("truncated V3"),
+            postcard::Error::DeserializeUnexpectedEnd
+        );
+        let Record::Step(step) =
+            parse_record(br#"{"step":{"id":"s","put":[{"view3d":{"id":"v"}}]}}"#)
+                .expect("empty view")
+        else {
+            panic!("step")
+        };
+        assert_eq!(step.put.len(), 1);
+    }
+}

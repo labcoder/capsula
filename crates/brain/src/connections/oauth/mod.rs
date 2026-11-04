@@ -108,7 +108,12 @@ pub trait Launcher {
 pub struct SystemBrowser;
 
 impl Launcher for SystemBrowser {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "webbrowser spawns with std Command; held under spawn_lock"
+    )]
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
+        let _spawning = crate::platform::spawn_lock();
         webbrowser::open(target.url()).map_err(|_| LaunchError::Launch)
     }
 }

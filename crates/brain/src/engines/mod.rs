@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use crate::context::{ModelRequest, Origin};
-use crate::coordinator::{BuildKey, Input, LeaseId};
+use crate::coordinator::{Input, JobKey, LeaseId, SendKey};
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
 const ROUND_QUEUE: usize = 1;
@@ -33,9 +33,10 @@ const ROUND_QUEUE: usize = 1;
 /// What an engine is asked to answer: a request the coordinator admitted, and nothing else.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RunRequest {
-    /// The admitted build, which the round's send asks to go out under.
-    pub(crate) key: BuildKey,
-    /// The run the round belongs to; every event it produces is tagged with it.
+    /// The admitted build, or the background job, whose send asks to go out under it.
+    pub(crate) key: SendKey,
+    /// The run the round belongs to; every event it produces is tagged with it. A job's is the
+    /// run whose end started it.
     pub run: RunId,
     /// The thread the turn was typed in.
     pub thread: ThreadId,
@@ -62,11 +63,11 @@ impl RunRequest {
     /// A Kumo request with `text` as its instructions and nothing else.
     pub(crate) fn for_tests(run: RunId, thread: ThreadId, text: &str) -> Self {
         Self {
-            key: BuildKey {
+            key: SendKey::Build(crate::coordinator::BuildKey {
                 run,
                 round: 1,
                 attempt: 1,
-            },
+            }),
             run,
             thread,
             origin: Origin::Kumo,
@@ -83,7 +84,7 @@ impl RunRequest {
 #[cfg(test)]
 impl SendGate {
     /// A gate whose asks reach nobody, so every answer is `Rebuild`.
-    pub(crate) fn closed(key: BuildKey) -> Self {
+    pub(crate) fn closed(key: SendKey) -> Self {
         let (inputs, _) = mpsc::unbounded_channel();
         Self::new(key, Asks::default(), inputs)
     }
@@ -101,19 +102,19 @@ pub trait Engine: Send + Sync + fmt::Debug {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round;
 }
 
-/// Asks waiting for the coordinator's answer, by build.
-pub(crate) type Asks = Arc<Mutex<Vec<(BuildKey, oneshot::Sender<Answer>)>>>;
+/// Asks waiting for the coordinator's answer, by build or job.
+pub(crate) type Asks = Arc<Mutex<Vec<(SendKey, oneshot::Sender<Answer>)>>>;
 
 /// How a round asks to send its body (docs/development/engines.md, "The send lease").
 #[derive(Debug)]
 pub struct SendGate {
-    key: BuildKey,
+    key: SendKey,
     asks: Asks,
     inputs: mpsc::UnboundedSender<Input>,
 }
 
 impl SendGate {
-    pub(crate) fn new(key: BuildKey, asks: Asks, inputs: mpsc::UnboundedSender<Input>) -> Self {
+    pub(crate) fn new(key: SendKey, asks: Asks, inputs: mpsc::UnboundedSender<Input>) -> Self {
         Self { key, asks, inputs }
     }
 
@@ -172,7 +173,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Answers the round waiting on `key`, if it still waits. A grant nobody takes is dropped
 /// here, which settles it.
-pub(crate) fn answer(asks: &Asks, key: BuildKey, answer: Answer) {
+pub(crate) fn answer(asks: &Asks, key: SendKey, answer: Answer) {
     let waiting = {
         let mut asks = lock(asks);
         asks.iter()
@@ -300,6 +301,9 @@ impl CallId {
     }
 }
 
+/// The draw tool's name on the wire.
+pub(crate) const DRAW: &str = "draw";
+
 /// The tools a call can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolName {
@@ -381,6 +385,61 @@ pub fn start(
     Cancel(tokio::spawn(pump(run, round, events, inputs)).abort_handle())
 }
 
+/// Starts a background job's one round behind its own task, which takes the round's text and
+/// reports what it came to as `JobDone` on `inputs`. Dropping the `Cancel` drops the round.
+pub(crate) fn start_job(
+    engine: &dyn Engine,
+    request: RunRequest,
+    key: JobKey,
+    inputs: mpsc::UnboundedSender<Input>,
+    gate: SendGate,
+) -> Cancel {
+    let (events_tx, events) = mpsc::channel(ROUND_QUEUE);
+    let round = engine.start(request, events_tx, gate);
+    Cancel(tokio::spawn(collect(key, round, events, inputs)).abort_handle())
+}
+
+/// Takes a title job's text until its round completes. Anything but text and native items,
+/// more than [`crate::jobs::MAX_OUTPUT`] bytes, or a round that ends any other way fails it.
+/// It logs the outcome, never the text.
+async fn collect(
+    key: JobKey,
+    mut round: Round,
+    mut events: mpsc::Receiver<TurnEvent>,
+    inputs: mpsc::UnboundedSender<Input>,
+) {
+    let mut text = String::new();
+    let mut playing = true;
+    let title = loop {
+        let event = tokio::select! {
+            biased;
+            event = events.recv() => event.unwrap_or(TurnEvent::Finished(Finish::Truncated)),
+            () = &mut round, if playing => {
+                playing = false;
+                events.close();
+                continue;
+            }
+        };
+        match event {
+            TurnEvent::TextDelta(delta) if text.len() + delta.len() <= crate::jobs::MAX_OUTPUT => {
+                text.push_str(&delta);
+            }
+            TurnEvent::OutputItem { .. } => {}
+            TurnEvent::Finished(Finish::Completed) => break crate::jobs::clean_title(&text),
+            _ => break None,
+        }
+    };
+    tracing::info!(
+        thread = key.thread.0,
+        serial = key.serial,
+        titled = title.is_some(),
+        "a title job ended"
+    );
+    if inputs.send(Input::JobDone { key, title }).is_err() {
+        tracing::debug!("a title job ended after the brain");
+    }
+}
+
 /// Forwards one round's events, waiting while `inputs` is full, until the first `Finished`.
 async fn pump(
     run: RunId,
@@ -418,7 +477,7 @@ mod tests {
         Answer, Asks, CallId, Cancel, Engine, Finish, Opaque, Refused, Round, RunRequest, SendGate,
         SendLease, ToolName, TurnEvent, answer, start,
     };
-    use crate::coordinator::{Input, LeaseId};
+    use crate::coordinator::{Input, JobKey, LeaseId};
 
     /// What a test round does once its events are sent.
     #[derive(Clone, Copy, Debug)]
@@ -535,6 +594,64 @@ mod tests {
 
     fn text(delta: &str) -> TurnEvent {
         TurnEvent::TextDelta(delta.to_owned())
+    }
+
+    /// What a title job's round of `events` reports.
+    async fn job_title(events: Vec<TurnEvent>, then: Then) -> Option<String> {
+        let (alive, _gone) = mpsc::channel(1);
+        let engine = Sends {
+            events,
+            then,
+            alive,
+        };
+        let key = JobKey {
+            thread: ThreadId(2),
+            serial: 3,
+        };
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let gate = SendGate::closed(request().key);
+        let _cancel = super::start_job(&engine, request(), key, inputs, gate);
+        let Some(Input::JobDone { key: done, title }) = received.recv().await else {
+            panic!("a job reports JobDone");
+        };
+        assert_eq!(done, key, "it reports its own key");
+        title.map(|title| title.as_str().to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
+        let completed = TurnEvent::Finished(Finish::Completed);
+        let item = TurnEvent::OutputItem {
+            index: 0,
+            item: Opaque::new(b"{}".to_vec()).expect("small"),
+        };
+        assert_eq!(
+            job_title(
+                vec![
+                    item,
+                    text("  Lisbon"),
+                    text(" trip\nmore"),
+                    completed.clone()
+                ],
+                Then::Hang
+            )
+            .await,
+            Some("Lisbon trip".to_owned())
+        );
+        let over = "x".repeat(crate::jobs::MAX_OUTPUT + 1);
+        let call = TurnEvent::ToolCallStarted {
+            call: CallId::new("call-1").expect("ascii"),
+            name: ToolName::Draw,
+        };
+        for events in [
+            vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
+            vec![text("Lisbon")],
+            vec![text(&over), completed.clone()],
+            vec![call, completed.clone()],
+            vec![text("\u{7}"), completed],
+        ] {
+            assert_eq!(job_title(events, Then::End).await, None);
+        }
     }
 
     /// Plays `events` through a pump into a queue of `depth`; the last receiver closes once the
@@ -670,8 +787,8 @@ mod tests {
         );
         assert_eq!(
             printed,
-            "RunRequest { key: BuildKey { run: RunId(7), round: 1, attempt: 1 }, run: RunId(7), \
-             thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
+            "RunRequest { key: Build(BuildKey { run: RunId(7), round: 1, attempt: 1 }), \
+             run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
              choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
              ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
         );

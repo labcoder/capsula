@@ -28,6 +28,8 @@ pub enum StoreOp {
     },
     /// Build a round's context on the page reader, in one read transaction.
     BuildContext(super::BuildContext),
+    /// Read a title job's request on the page reader, in one read transaction.
+    ReadTitle(super::ReadTitle),
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
@@ -87,7 +89,7 @@ pub enum StoreOp {
         thread: ThreadId,
     },
     /// Retitle a live task. A user title always applies; a model title only over first words,
-    /// and only in the deletion generation it names. Nothing answers it.
+    /// and only in the deletion generation it names. `TitleSet` answers it.
     SetTitle {
         /// The task.
         thread: ThreadId,
@@ -95,6 +97,8 @@ pub enum StoreOp {
         title: ThreadTitle,
         /// Who set it, with a model's generation.
         source: TitleSource,
+        /// The job that wrote it; `None` for the user's rename.
+        job: Option<super::JobKey>,
     },
     /// Store a live thread's model and effort. Nothing answers it.
     SetModel {
@@ -119,6 +123,7 @@ impl StoreOp {
             Self::Drawing { .. }
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
+            | Self::ReadTitle(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
@@ -144,6 +149,14 @@ impl StoreOp {
                 snapshot: build.snapshot.clone(),
                 result: Err(super::Unbuilt::Failed),
             }),
+            Self::ReadTitle(read) => Input::JobBuilt(super::JobBuilt {
+                key: read.key,
+                result: Err(super::Unbuilt::Failed),
+            }),
+            Self::SetTitle { job, .. } => Input::TitleSet {
+                job: *job,
+                applied: false,
+            },
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
@@ -160,7 +173,7 @@ impl StoreOp {
                 outcome: Deleted::NotHidden,
                 last_run: None,
             },
-            Self::SetTitle { .. } | Self::SetModel { .. } => return None,
+            Self::SetModel { .. } => return None,
         })
     }
 }

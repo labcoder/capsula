@@ -5,8 +5,9 @@ mod tests;
 
 use std::collections::HashSet;
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::Jwk};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use kumochi_protocol::Secret;
+use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::{Deserialize, de::DeserializeOwned};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -225,52 +226,14 @@ fn signed(
     now: u64,
 ) -> Result<VerifiedIdentity, IdentityError> {
     check_inputs(token, client, binding)?;
-    let header = decode_header(token).map_err(|_| IdentityError::Token)?;
-    if header.alg != Algorithm::RS256 {
-        return Err(IdentityError::Token);
-    }
-    let kid = header
-        .kid
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or(IdentityError::Token)?;
-    if kid.len() > MAX_ID_BYTES || keys.keys.len() > MAX_JWKS_KEYS {
-        return Err(IdentityError::Bounds);
-    }
-    let mut seen = HashSet::new();
-    let mut selected = None;
-    for key in &keys.keys {
-        let Some(key_id) = key.get("kid").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if !seen.insert(key_id) {
-            return Err(IdentityError::Discovery);
-        }
-        if key_id == kid {
-            selected = Some(key);
-        }
-    }
-    let key = selected.ok_or(IdentityError::UnknownKey)?;
-    if key.get("use").is_some_and(|usage| usage != "sig")
-        || key.get("alg").is_some_and(|algorithm| algorithm != "RS256")
-    {
-        return Err(IdentityError::Token);
-    }
-    let key: Jwk = serde_json::from_value(key.clone()).map_err(|_| IdentityError::Token)?;
-    let decoding_key = DecodingKey::from_jwk(&key).map_err(|_| IdentityError::Token)?;
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[ISSUER]);
-    validation.set_audience(&[client]);
-    // GHSA-h395-gr6q-cpjc: require iss/aud/sub; validate our own Claims.exp: u64.
-    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-    validation.validate_exp = false;
-    let claims = decode::<Claims>(token, &decoding_key, &validation)
-        .map_err(|_| IdentityError::Token)?
-        .claims;
+    let claims = signed_claims(token, keys)?;
     let audiences = match &claims.aud {
         Audience::One(audience) => std::slice::from_ref(audience),
         Audience::Many(audiences) => audiences.as_slice(),
     };
+    if claims.iss.as_str() != ISSUER || audiences.iter().all(|a| a.as_str() != client) {
+        return Err(IdentityError::Token);
+    }
     if claims.iss.len() > MAX_ID_BYTES
         || claims.sub.len() > MAX_ID_BYTES
         || claims
@@ -319,6 +282,74 @@ fn signed(
         subject: Secret::new(claims.sub),
         email: claims.email.map(Secret::new),
     })
+}
+
+/// The claims of a token whose RS256 signature verifies under the key its header names.
+fn signed_claims(token: &str, keys: &KeySet) -> Result<Claims, IdentityError> {
+    let (signing_input, signature) = token.rsplit_once('.').ok_or(IdentityError::Token)?;
+    let (header, payload) = signing_input.split_once('.').ok_or(IdentityError::Token)?;
+    let header: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&base64url(header)?).map_err(|_| IdentityError::Token)?;
+    // RFC 7515 §4.1.11: an extension we'd have to understand is refused, since we understand none.
+    if header.get("alg").and_then(serde_json::Value::as_str) != Some("RS256")
+        || header.contains_key("crit")
+    {
+        return Err(IdentityError::Token);
+    }
+    let kid = header
+        .get("kid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or(IdentityError::Token)?;
+    if kid.len() > MAX_ID_BYTES || keys.keys.len() > MAX_JWKS_KEYS {
+        return Err(IdentityError::Bounds);
+    }
+    let mut seen = HashSet::new();
+    let mut selected = None;
+    for key in &keys.keys {
+        let Some(key_id) = key.get("kid").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !seen.insert(key_id) {
+            return Err(IdentityError::Discovery);
+        }
+        if key_id == kid {
+            selected = Some(key);
+        }
+    }
+    let key = selected.ok_or(IdentityError::UnknownKey)?;
+    if key.get("kty").is_none_or(|kind| kind != "RSA")
+        || key.get("use").is_some_and(|usage| usage != "sig")
+        || key.get("alg").is_some_and(|algorithm| algorithm != "RS256")
+    {
+        return Err(IdentityError::Token);
+    }
+    let component = |name| {
+        key.get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or(IdentityError::Token)
+            .and_then(base64url)
+    };
+    RsaPublicKeyComponents {
+        n: component("n")?,
+        e: component("e")?,
+    }
+    .verify(
+        &RSA_PKCS1_2048_8192_SHA256,
+        signing_input.as_bytes(),
+        &base64url(signature)?,
+    )
+    .map_err(|_| IdentityError::Token)?;
+    // Typed claims: one with the wrong JSON type fails to parse rather than counting as absent.
+    serde_json::from_slice(&base64url(payload)?).map_err(|_| IdentityError::Token)
+}
+
+/// One unpadded base64url part of a token or key.
+fn base64url(part: &str) -> Result<Zeroizing<Vec<u8>>, IdentityError> {
+    URL_SAFE_NO_PAD
+        .decode(part)
+        .map(Zeroizing::new)
+        .map_err(|_| IdentityError::Token)
 }
 
 /// Require the verified subject to preserve a returning registration's identity.

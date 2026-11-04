@@ -250,6 +250,9 @@ pub enum ControlToShell {
         thread: ThreadId,
         /// Its new phase.
         phase: Phase,
+        /// Why it failed, sent only with [`Phase::Failed`] and only when there's something to
+        /// tell. shortcut: it isn't stored, so a reloaded page shows the generic failure.
+        error: Option<UserError>,
     },
     /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
     Ping,
@@ -304,6 +307,9 @@ pub enum ControlToShell {
     /// change, and once per [`ControlToBrain::AccountOp`]. It carries the display email, so
     /// the tap never records it.
     Account(AccountView),
+    /// The brain changed a listed thread on its own, such as a task's title, so the shell reads
+    /// its list again. It carries nothing.
+    ThreadsChanged,
 }
 
 /// Shell to brain, on the data pipe.

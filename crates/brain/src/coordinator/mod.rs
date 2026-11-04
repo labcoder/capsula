@@ -10,8 +10,10 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod admission;
+mod availability;
 mod delete;
 mod drawing;
+mod job;
 mod lease;
 mod run;
 mod scenes;
@@ -25,13 +27,17 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
+    ThreadTitle, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
-pub use lease::{LeaseId, SEND_DEADLINE};
+pub use availability::{Availability, Ready};
+pub(crate) use job::TitleAsk;
+pub use job::{JobBuilt, JobKey, ReadTitle};
+pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -103,10 +109,37 @@ pub enum Input {
     },
     /// A round's context was built, or failed to be.
     ContextBuilt(ContextBuilt),
-    /// The transport is about to send this build's body and waits for `Grant` or `Rebuild`.
+    /// The transport is about to send this build's or job's body and waits for `Grant` or
+    /// `Rebuild`.
     SendReady {
-        /// The build.
-        key: BuildKey,
+        /// The build or job.
+        key: SendKey,
+    },
+    /// A background job's read finished.
+    JobBuilt(JobBuilt),
+    /// A background job's request ended: the cleaned title, or `None` when it failed.
+    JobDone {
+        /// The job.
+        key: JobKey,
+        /// The title.
+        title: Option<ThreadTitle>,
+    },
+    /// A `SetTitle` finished.
+    TitleSet {
+        /// The job that wrote it; `None` for the user's rename.
+        job: Option<JobKey>,
+        /// It changed the title.
+        applied: bool,
+    },
+    /// An account can send model requests, as account generation `generation`.
+    SignedIn {
+        /// The account generation.
+        generation: u64,
+    },
+    /// The account signed in as `generation` can't send any more.
+    SignedOut {
+        /// The account generation.
+        generation: u64,
     },
     /// A granted send stopped: it finished, failed, or was dropped.
     SendSettled {
@@ -199,6 +232,8 @@ pub enum Input {
     },
     /// The shell renamed a task or set a thread's model.
     ThreadOp(ThreadOp),
+    /// Whether runs can be answered changed.
+    Engines(Availability),
 }
 
 /// Something for the systems around the coordinator to do, in order.
@@ -217,8 +252,17 @@ pub enum Effect {
     },
     /// Let the transport send this lease's body; its guard reports `SendSettled` when dropped.
     Grant(LeaseId),
-    /// Tell the transport to drop this build's body unsent.
-    Rebuild(BuildKey),
+    /// Tell the transport to drop this build's or job's body unsent.
+    Rebuild(SendKey),
+    /// Start a background job's request; it reports `JobDone`.
+    StartJob {
+        /// The job.
+        job: JobKey,
+        /// What it sends.
+        request: RunRequest,
+    },
+    /// Drop a background job's request and whatever it still produces.
+    CancelJob(JobKey),
     /// Report `SendDeadline` for `lease` after `after`.
     ArmSendDeadline {
         /// The lease.
@@ -299,8 +343,13 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
+    /// The connection that was ready when the run's turn arrived; none means the run failed
+    /// then.
+    connection: Option<crate::context::ConnectionTag>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
+    /// Why the run failed, for the shell.
+    error: Option<UserError>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
     finishing: bool,
     ending: Option<Ending>,
@@ -390,6 +439,14 @@ pub struct Coordinator {
     sends: u64,
     /// A lease failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
+    /// Whether runs can be answered, and on which connection.
+    availability: Availability,
+    /// The one background job.
+    job: Option<job::Job>,
+    /// The signed-in account's generation, while one can send.
+    account: Option<u64>,
+    /// The newest account generation that signed out.
+    signed_out: Option<u64>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -440,7 +497,24 @@ impl Coordinator {
             leases: Vec::new(),
             sends: 0,
             transport_failed: false,
+            availability: Availability::Unavailable(availability::sign_in_needed()),
+            job: None,
+            account: None,
+            signed_out: None,
         }
+    }
+
+    /// A coordinator the dev fixture answers for, as most tests need.
+    #[cfg(all(debug_assertions, any(test, feature = "test-support")))]
+    pub fn ready_for_tests(
+        main_thread: ThreadId,
+        last_thread: ThreadId,
+        last_run: RunId,
+        scenes: Vec<SceneState>,
+    ) -> Self {
+        let mut core = Self::new(main_thread, last_thread, last_run, scenes);
+        core.availability = Availability::Ready(Ready::fixture());
+        core
     }
 
     /// The run in flight, if any.
@@ -513,7 +587,23 @@ impl Coordinator {
             }
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
-            Input::SendReady { key } => self.send_ready(key, &mut effects),
+            Input::SendReady {
+                key: SendKey::Build(key),
+            } => self.send_ready(key, &mut effects),
+            Input::SendReady {
+                key: SendKey::Job(key),
+            } => self.job_ready(key, &mut effects),
+            Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
+            Input::JobDone { key, title } => self.job_done(key, title, &mut effects)?,
+            Input::TitleSet { job, applied } => {
+                // A committed title is news to the shell, whoever wrote it.
+                if applied {
+                    effects.push(Effect::Control(ControlToShell::ThreadsChanged));
+                }
+                self.title_written(job);
+            }
+            Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
+            Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
@@ -569,6 +659,7 @@ impl Coordinator {
                 self.deletion(&input, &mut effects)?;
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
+            Input::Engines(now) => self.available(now, &mut effects),
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
@@ -605,6 +696,14 @@ impl Coordinator {
         let done = self.ending.swap_remove(at);
         if let Some(Ending {
             outcome: RunEnd::Done,
+            failed: false,
+            ..
+        }) = done.ending
+        {
+            self.title_job(done.thread, done.id, effects);
+        }
+        if let Some(Ending {
+            outcome: RunEnd::Done,
             notify: Notify::Shell,
             failed: false,
             ..
@@ -616,6 +715,7 @@ impl Coordinator {
     }
 
     fn turn(&mut self, thread: Option<ThreadId>, text: String, effects: &mut Vec<Effect>) {
+        self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
             self.end(current, replaced, None, Notify::Shell, effects);
@@ -650,7 +750,9 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: None,
             build: None,
+            connection: self.connection(),
             draw: None,
+            error: None,
             finishing: false,
             ending: None,
         });
@@ -659,11 +761,18 @@ impl Coordinator {
             run,
             thread,
             phase: Phase::Thinking,
+            error: None,
         }));
         effects.push(Effect::ArmDeadline {
             run,
             after: WALL_CLOCK,
         });
+        // The turn is kept, but nothing answers it.
+        if let Availability::Unavailable(reason) = &self.availability {
+            let reason = reason.clone();
+            self.fail_with(run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+        }
     }
 
     /// Queues held turns whose older runs all have their outcomes queued, so the store keeps a
@@ -711,6 +820,7 @@ impl Coordinator {
                 run: id,
                 thread,
                 phase: Phase::Failed,
+                error: None,
             }));
             // Every ending but Done was already told, with its data's end.
             if ending.outcome == RunEnd::Done {
@@ -881,6 +991,7 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         run: run.id,
         thread: run.thread,
         phase,
+        error: run.error.clone().filter(|_| phase == Phase::Failed),
     })
 }
 

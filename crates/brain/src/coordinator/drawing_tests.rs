@@ -118,7 +118,8 @@ fn provider_completion_waits_for_the_accepted_drawing_prefix() {
     assert!(end.contains(&Effect::Control(ControlToShell::RunState {
         run: R,
         thread: T,
-        phase: Phase::Done
+        phase: Phase::Done,
+        error: None,
     })));
     assert!(end.contains(&Effect::Data(DataToShell::RunEnd { run: R })));
 }
@@ -186,7 +187,8 @@ fn stop_before_a_scene_id_arrives_drains_then_durably_cuts_the_first_step() {
     assert!(stopped.contains(&Effect::Control(ControlToShell::RunState {
         run: R,
         thread: T,
-        phase: Phase::Interrupted
+        phase: Phase::Interrupted,
+        error: None,
     })));
     assert!(!stopped.contains(&Effect::Data(DataToShell::RunEnd { run: R })));
     let stored = commit(&mut core, &mut store, &first);
@@ -246,7 +248,7 @@ fn real_store_recovery_produces_decodable_descriptors_and_chunks() {
     let first = commit(&mut core, &mut store, &lookup);
     let second = commit(&mut core, &mut store, &first);
     commit(&mut core, &mut store, &second);
-    let mut recovered = Coordinator::new(ThreadId(1), T, R, Vec::new());
+    let mut recovered = Coordinator::ready_for_tests(ThreadId(1), T, R, Vec::new());
     assert!(
         recovered
             .restore_drawings(store.drawing_scenes())
@@ -552,7 +554,8 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     assert!(done.contains(&Effect::Control(ControlToShell::RunState {
         run: next,
         thread: T,
-        phase: Phase::Done
+        phase: Phase::Done,
+        error: None,
     })));
 }
 

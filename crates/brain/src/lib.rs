@@ -11,14 +11,24 @@ pub mod credential;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
+mod jobs;
 pub mod logging;
 pub mod platform;
 mod relaunch;
 mod runtime;
+pub mod screen;
 pub mod store;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "PR 7 wires spoken replies; PR 8 wires voice installation"
+    )
+)]
+mod voice;
 
 use std::io;
 use std::path::PathBuf;
@@ -26,7 +36,7 @@ use std::thread;
 use std::time::Duration;
 
 use kumochi_protocol::BUILD_ID;
-use kumochi_protocol::constants::{self, SHELL_EXE};
+use kumochi_protocol::constants::SHELL_EXE;
 use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -34,7 +44,7 @@ use tokio::task::JoinSet;
 use crate::engines::fixture::{self, Fixture};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
-use crate::runtime::Brain;
+use crate::runtime::{Brain, Selected};
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
 /// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
@@ -116,14 +126,14 @@ pub async fn run() -> Result<(), BrainError> {
         main_thread,
         high_water,
         scenes,
-        Box::new(fixture()?),
+        engine()?,
         config,
         account,
     )
     .map_err(BrainError::StoreThread)?;
-    let jobs = Job::new().map_err(BrainError::Helpers)?;
-    // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
-    let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
+    let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    let screen = screen::ScreenSupervisor::start(exe.clone(), std::sync::Arc::clone(&jobs))
+        .map_err(BrainError::Helpers)?;
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
     let identity = Identity {
@@ -140,6 +150,7 @@ pub async fn run() -> Result<(), BrainError> {
         }
         Ok(None) | Err(_) => brain.close().await,
     }
+    drop(screen);
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.terminate()).await {
         Ok(Ok(())) => {}
@@ -172,17 +183,31 @@ fn accounts() -> io::Result<runtime::account::Accounts> {
     runtime::account::Accounts::spawn(worker, net)
 }
 
-/// The script the fixture engine plays: the built-in one, or in a dev build the file
-/// [`constants::FIXTURE_ENV`] names.
-fn fixture() -> Result<Fixture, BrainError> {
-    let path = std::env::var_os(constants::FIXTURE_ENV).filter(|_| cfg!(debug_assertions));
-    let Some(path) = path else {
-        let parsed = Fixture::parse(fixture::DEFAULT);
-        return Ok(parsed.expect("the built-in script parses, as a test checks"));
-    };
-    let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
-    Fixture::parse(&script)
-        .map_err(|error| BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error)))
+/// The engine runs use: in a dev build that names a script in
+/// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
+/// account's engine answers, once the account is ready.
+#[cfg_attr(
+    not(debug_assertions),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only a dev build reads a script, which can fail"
+    )
+)]
+fn engine() -> Result<Selected, BrainError> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
+        let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
+        let fixture = Fixture::parse(&script).map_err(|error| {
+            BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
+        return Ok(Selected::Fixture(Box::new(fixture)));
+    }
+    // shortcut: the built-in script answers a ready account's runs until 13b-1b sends them to
+    // the Responses engine.
+    let parsed = Fixture::parse(fixture::DEFAULT);
+    Ok(Selected::Account(Box::new(
+        parsed.expect("the built-in script parses, as a test checks"),
+    )))
 }
 
 /// Serves shells until one quits or is from another build, relaunching a shell that dies. A quit

@@ -31,6 +31,8 @@ mod accounts;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "page_tests.rs"]
@@ -228,7 +230,9 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         loop {
             let message = self.next_control().await.expect("readable").expect("open");
             match message {
-                ControlToShell::RunState { run, thread, phase } => {
+                ControlToShell::RunState {
+                    run, thread, phase, ..
+                } => {
                     self.thread = Some(thread);
                     return (run, phase);
                 }
@@ -364,7 +368,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
         main_thread,
         high_water,
         scenes,
-        engine,
+        crate::runtime::Selected::Fixture(engine),
         scratch.config(),
         crate::test_support::accounts(scratch),
     )

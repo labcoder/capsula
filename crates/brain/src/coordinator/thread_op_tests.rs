@@ -91,6 +91,7 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
             thread: T,
             title: title.clone(),
             source: TitleSource::User,
+            job: None,
         })])
     );
     let choice = ModelChoice {
