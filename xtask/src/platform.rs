@@ -143,6 +143,21 @@ pub(crate) fn launch(
         .spawn()?)
 }
 
+/// The command that force-ends `pid` and every process it started. std can end one child, not
+/// its descendants (cargo's rustc, a run's brain), so this is the platform's own tool.
+pub(crate) fn kill_tree(pid: u32) -> Result<Command> {
+    let system_root = std::env::var_os("SystemRoot").context("SystemRoot is unavailable")?;
+    let mut command = Command::new(Path::new(&system_root).join("System32/taskkill.exe"));
+    command
+        .args(["/T", "/F", "/PID"])
+        .arg(pid.to_string())
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
 pub(crate) fn capture_dwm(samples: u64, path: &Path) -> Result<Child> {
     let system_root = std::env::var_os("SystemRoot").context("SystemRoot is unavailable")?;
     Ok(
