@@ -38,7 +38,7 @@ fn started_over(scenes: &[u64]) -> Coordinator {
         text: "hi".to_owned(),
     })
     .expect("a turn is never stale");
-    core.handle(Input::TurnStored { run: R }).expect("current");
+    super::admit(&mut core, R);
     core
 }
 
@@ -242,15 +242,13 @@ fn waiting() -> (Coordinator, Vec<Effect>) {
 /// A later run in thread 4 begins its own scene from index 0, with nothing of run 10's.
 fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
     let next = RunId(11);
-    for input in [
-        Input::Turn {
-            thread: Some(T),
-            text: "next".to_owned(),
-        },
-        Input::TurnStored { run: next },
-        engine(next, draw_call()),
-        engine(next, delta("z")),
-    ] {
+    let turn = Input::Turn {
+        thread: Some(T),
+        text: "next".to_owned(),
+    };
+    effects.extend(core.handle(turn).expect("a turn is never stale"));
+    effects.extend(super::admit(core, next));
+    for input in [engine(next, draw_call()), engine(next, delta("z"))] {
         effects.extend(core.handle(input).expect("the new run is current"));
     }
     assert_eq!(written(effects), ["a", "z"], "b and c never leak");
@@ -304,10 +302,7 @@ fn a_replacement_drops_steps_waiting_for_the_scene_and_the_run_settles() {
     assert_eq!(written(&acked), Vec::<&str>::new());
     core.handle(Input::RunStored { run: R }).expect("ending");
     assert_eq!(core.ending_runs(), 0);
-    effects.extend(
-        core.handle(Input::TurnStored { run: RunId(11) })
-            .expect("current"),
-    );
+    effects.extend(super::admit(&mut core, RunId(11)));
     effects.extend(draw_step(&mut core, RunId(11), "z").expect("current"));
     assert_eq!(written(&effects), ["a", "z"], "b and c never leak");
 }

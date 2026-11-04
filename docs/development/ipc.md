@@ -161,8 +161,8 @@ flowchart LR
   until PR 18b's picker shows it.
 - The view is authoritative: every op is answered by one `Account`, a refused one included, and
   the shell never moves the account on its own. See [accounts](accounts.md).
-- shortcut: until slice 3 PR 9b wires the account system the brain ignores `AccountOp`, and the
-  shell ignores `Account` until Settings → Accounts (PR 19).
+- The shell retains the current connection's Account view for Settings → Accounts. Views and
+  errors are fenced by the reading connection's generation; disconnect clears the account UI.
 
 ## Scenes and recovery
 

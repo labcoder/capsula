@@ -6,6 +6,7 @@ pub mod frame;
 pub mod message;
 mod secret;
 pub mod tap;
+pub mod voice;
 
 pub use secret::Secret;
 
