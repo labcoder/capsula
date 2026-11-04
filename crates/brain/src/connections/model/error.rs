@@ -121,11 +121,11 @@ impl ProviderError {
             (Some(Code::Unavailable), _) => (ErrorKey::AccountOffline, Some(Action::Retry)),
             (Some(Code::NotEligible), _) => (ErrorKey::PlanUnavailable, None),
             (Some(Code::Unsupported | Code::RouteRefused), _) => (ErrorKey::RequestRefused, None),
+            (Some(Code::NotAuthorized), _) => (ErrorKey::AccountMisconfigured, None),
             // Not a confirmed revocation, so the token set stays; a new sign-in replaces it.
             (Some(Code::InvalidUser), _) | (_, 401) => {
                 (ErrorKey::AccountRefused, Some(Action::SignIn))
             }
-            (Some(Code::NotAuthorized), _) => (ErrorKey::AccountMisconfigured, None),
             (_, 403) => (ErrorKey::PlanUnavailable, None),
             (_, 200 | 429 | 500..) => (ErrorKey::AccountOffline, Some(Action::Retry)),
             (_, 400..=499) => (ErrorKey::RequestRefused, None),

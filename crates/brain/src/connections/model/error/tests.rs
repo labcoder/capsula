@@ -117,21 +117,15 @@ fn each_ledger_code_maps_to_its_recovery_before_its_status() {
                 param
             }
         );
-        assert_eq!(
-            Failure::Provider(error).user_error(),
-            user_error(key, actions),
-            "{code:?}"
-        );
-        // The same code inside the stream, after text, means the same.
-        let streamed = ProviderError {
-            status: 200,
-            ..error
-        };
-        assert_eq!(
-            Failure::Provider(streamed).user_error(),
-            user_error(key, actions),
-            "{code:?} streamed"
-        );
+        // The same code inside the stream (200), or under the status with its own fallback
+        // (401), means the same: the code decides first.
+        for status in [status, 200, 401] {
+            assert_eq!(
+                Failure::Provider(ProviderError { status, ..error }).user_error(),
+                user_error(key, actions),
+                "{code:?} at {status}"
+            );
+        }
     }
 }
 

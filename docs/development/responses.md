@@ -28,7 +28,7 @@ stateDiagram-v2
 | --- | --- |
 | A line, its line feed excluded | 1 MiB |
 | One event's data, lines joined | 1 MiB |
-| The whole stream | 16 MiB |
+| The stream, up to its terminal event | 16 MiB |
 | Visible text (`response.output_text.delta`) | 1 MiB |
 
 Only `response.completed` succeeds. The run-wide caps and the 120-second run deadline belong to
