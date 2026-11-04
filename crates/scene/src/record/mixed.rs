@@ -464,12 +464,15 @@ pub enum KeyValue {
     V2([Finite; 2]),
     /// Color value.
     Color(Color),
+    /// Three finite coordinates.
+    V3([Finite; 3]),
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
 enum KeyValueBinary {
     Num(Finite),
     V2([Finite; 2]),
     Color(Color),
+    V3([Finite; 3]),
 }
 impl KeyValue {
     fn from_binary(value: KeyValueBinary) -> Self {
@@ -477,6 +480,7 @@ impl KeyValue {
             KeyValueBinary::Num(v) => Self::Num(v),
             KeyValueBinary::V2(v) => Self::V2(v),
             KeyValueBinary::Color(v) => Self::Color(v),
+            KeyValueBinary::V3(v) => Self::V3(v),
         }
     }
 }
@@ -487,12 +491,14 @@ impl Serialize for KeyValue {
                 Self::Num(v) => v.serialize(s),
                 Self::V2(v) => v.serialize(s),
                 Self::Color(v) => v.serialize(s),
+                Self::V3(v) => v.serialize(s),
             };
         }
         match self {
             Self::Num(v) => KeyValueBinary::Num(*v),
             Self::V2(v) => KeyValueBinary::V2(*v),
             Self::Color(v) => KeyValueBinary::Color(*v),
+            Self::V3(v) => KeyValueBinary::V3(*v),
         }
         .serialize(s)
     }
@@ -522,9 +528,20 @@ impl<'de> Deserialize<'de> for KeyValue {
             fn visit_str<E: de::Error>(self, value: &str) -> Result<KeyValue, E> {
                 Color::from_text(value).map(|v| KeyValue::from_binary(KeyValueBinary::Color(v)))
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<KeyValue, A::Error> {
-                let pair = <[Finite; 2]>::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
-                Ok(KeyValue::from_binary(KeyValueBinary::V2(pair)))
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<KeyValue, A::Error> {
+                let x = seq
+                    .next_element::<Finite>()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let y = seq
+                    .next_element::<Finite>()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let Some(z) = seq.next_element::<Finite>()? else {
+                    return Ok(KeyValue::V2([x, y]));
+                };
+                if seq.next_element::<de::IgnoredAny>()?.is_some() {
+                    return Err(de::Error::invalid_length(4, &self));
+                }
+                Ok(KeyValue::V3([x, y, z]))
             }
         }
         if !d.is_human_readable() {

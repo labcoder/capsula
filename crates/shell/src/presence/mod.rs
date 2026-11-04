@@ -1,6 +1,8 @@
 //! The resting dock line, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
+#[cfg(debug_assertions)]
+mod accounts_fixture;
 mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
@@ -18,7 +20,6 @@ mod link;
 pub(crate) mod observer;
 mod paint;
 mod panels;
-mod pull_input;
 mod pulling;
 mod settings;
 mod settings_view;
@@ -57,6 +58,8 @@ use crate::runs::Runs;
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
+#[cfg(debug_assertions)]
+pub(crate) use accounts_fixture::run as run_accounts_fixture;
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
@@ -116,8 +119,6 @@ struct Presence {
     drawn: Drawn,
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
-    /// Pulling Kumo out of the peek.
-    pulling: pulling::Pulling,
     /// The one source of animation frames.
     frames: FrameLoop,
     /// Retries deletes the control queue had no room for.
@@ -198,7 +199,7 @@ impl Presence {
             let motion = kumo_view::motion(cx);
             self.kumo.update(cx, |kumo, cx| match visibility {
                 PanelVisibility::Visible => kumo.show(motion, cx),
-                PanelVisibility::Hidden => kumo.hide(),
+                PanelVisibility::Hidden => kumo.hide(cx),
             });
         }
         self.panel_visibility = visibility;
@@ -216,18 +217,14 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         let visibility = if self.line.contains(platform::cursor_position()?) {
-            panels::over_line(self.panel_owner())
+            panels::over_line(self.panel_owner(cx))
         } else {
-            panels::pointer(self.panel_visibility, self.panel_owner())
+            panels::pointer(self.panel_visibility, self.panel_owner(cx))
         };
         if visibility != self.panel_visibility {
             self.set_panel_from(visibility, entered_qpc, cx)?;
         }
-        if self.text_open()
-            || self.threads_open()
-            || self.settings_open()
-            || self.escape_hold.shows_stop()
-        {
+        if self.panel_owner(cx) != panels::Owner::Pointer {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -246,7 +243,7 @@ impl Presence {
             let result = this.update(cx, |this, cx| {
                 let point = platform::cursor_position()?;
                 if !this.hovered(point, PanelVisibility::Visible) {
-                    let visibility = panels::left(this.panel_owner());
+                    let visibility = panels::left(this.panel_owner(cx));
                     if !this.text_open() && visibility != this.panel_visibility {
                         this.set_panel(visibility, cx)?;
                     }
@@ -392,6 +389,7 @@ impl Presence {
             working: runs.working(),
             speaking: false,
             drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+            pulling: false,
         }
     }
 
@@ -404,7 +402,10 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let activity = Self::activity(&self.runs, panel, &self.presenter);
+        let activity = Activity {
+            pulling: self.kumo.read(cx).pull_live(),
+            ..Self::activity(&self.runs, panel, &self.presenter)
+        };
         if activity == self.activity {
             return Ok(());
         }
@@ -501,6 +502,7 @@ impl Presence {
         if !self.link.begin_quit() {
             return;
         }
+        self.end_pull(cx);
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
@@ -709,6 +711,8 @@ pub(crate) enum OpenError {
     ObserverDeadline,
     #[error("--receipt-fixture needs --gate-observer and comes at most once")]
     ReceiptFixture,
+    #[error("--accounts-fixture needs a debug build, one fixed state and a quit deadline")]
+    AccountsFixture,
     #[error("the scene dropper thread couldn't start")]
     Dropper(#[source] std::io::Error),
 }
@@ -881,13 +885,11 @@ pub(crate) fn open(
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
-            pulling: pulling::Pulling::default(),
             frames: FrameLoop::default(),
         }
     });
     owner.update(cx, |this, cx| {
-        cx.subscribe(&kumo, |this, _, _, cx| this.want_frames(cx))
-            .detach();
+        this.follow_kumo(cx);
         this.kumo.update(cx, |kumo, cx| kumo.rebake(scale, cx));
     });
     let status_panel = owner.read(cx).panel.clone();
@@ -970,10 +972,9 @@ fn listen(
                     PresenceEvent::Escape => this.escape(cx)?,
                     PresenceEvent::Quit => this.quit(cx),
                     PresenceEvent::Repaint => this.dock.update(cx, |_, cx| cx.notify()),
-                    PresenceEvent::CaptureLost { seq, released } => {
-                        this.capture_lost(seq, released, cx);
+                    event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
+                        kumo_view::bridge(&this.kumo, event, cx);
                     }
-                    PresenceEvent::Reconcile => this.reconcile_pull(),
                 }
                 Ok::<_, OpenError>(())
             });

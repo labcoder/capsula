@@ -1,0 +1,13 @@
+# The workspace's clippy.toml, plus the brain's spawn rule; clippy reads only the nearest file.
+# From BeautifulRust's lints/clippy.toml (MIT, a9cdcfa94d13).
+max-fn-params-bools = 0
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "hold platform::spawn_lock() so no child inherits another's handles" },
+    { path = "std::process::Command::output", reason = "hold platform::spawn_lock() so no child inherits another's handles" },
+    { path = "std::process::Command::status", reason = "hold platform::spawn_lock() so no child inherits another's handles" },
+    { path = "webbrowser::open", reason = "it spawns with std Command; hold platform::spawn_lock()" },
+]

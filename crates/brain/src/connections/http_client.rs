@@ -204,6 +204,24 @@ fn connecting_within(
     roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
     connect: Duration,
 ) -> Result<reqwest::Client, HttpError> {
+    let tls = client_config(roots)?;
+    // shortcut: proxied networks can't sign in, until there's a user-set proxy setting
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .https_only(true)
+        .no_proxy()
+        .redirect(Policy::none())
+        .connect_timeout(connect)
+        .read_timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| HttpError::Configuration)
+}
+
+/// TLS through ring with the usable public roots from `roots`; the model connection uses it too.
+pub(crate) fn client_config(
+    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
+) -> Result<rustls::ClientConfig, HttpError> {
     let roots = roots.map_err(|error| {
         tracing::warn!(loader_error = ?error, "account trust roots unavailable");
         HttpError::TrustStoreUnavailable
@@ -228,19 +246,9 @@ fn connecting_within(
     .map_err(|_| HttpError::Configuration)?
     .with_root_certificates(store)
     .with_no_client_auth();
-    // shortcut: proxied networks can't sign in, until there's a user-set proxy setting
     // shortcut: a root Windows hasn't fetched yet fails as UnknownIssuer; revisit if users hit it
     // shortcut: server-supplied intermediate distrust, usage-specific not-before and revocation aren't checked; revisit before broad release
-    reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
-        .https_only(true)
-        .no_proxy()
-        .redirect(Policy::none())
-        .connect_timeout(connect)
-        .read_timeout(Duration::from_secs(60))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|_| HttpError::Configuration)
+    Ok(tls)
 }
 
 impl Http for Client {

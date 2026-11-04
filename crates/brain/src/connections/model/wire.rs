@@ -67,8 +67,19 @@ pub struct Head {
     pub framing: Framing,
     /// `Connection: close`, so the connection isn't reused.
     pub close: bool,
-    /// The body is `text/event-stream`.
-    pub event_stream: bool,
+    /// What the Content-Type says the body is.
+    pub media: Media,
+}
+
+/// What a response head's Content-Type says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Media {
+    /// There's no Content-Type.
+    Absent,
+    /// `text/event-stream`.
+    EventStream,
+    /// Another type, or more than one Content-Type.
+    Other,
 }
 
 /// The head at the start of `bytes` and its length, or `None` while it's incomplete.
@@ -92,7 +103,7 @@ pub fn head(bytes: &[u8]) -> Result<Option<(Head, usize)>, Failure> {
         status,
         framing: Framing::Length(0),
         close: false,
-        event_stream: false,
+        media: Media::Absent,
     };
     match status {
         100 | 103 => return Ok(Some((head, length))),
@@ -122,9 +133,16 @@ pub fn head(bytes: &[u8]) -> Result<Option<(Head, usize)>, Failure> {
             }
         } else if header.name.eq_ignore_ascii_case("content-type") {
             let media = value.split(|&byte| byte == b';').next().unwrap_or_default();
-            head.event_stream = media
-                .trim_ascii()
-                .eq_ignore_ascii_case(b"text/event-stream");
+            head.media = match head.media {
+                Media::Absent
+                    if media
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"text/event-stream") =>
+                {
+                    Media::EventStream
+                }
+                _ => Media::Other,
+            };
         }
     }
     head.framing = match (content_length, chunked) {
