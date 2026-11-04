@@ -37,6 +37,9 @@ tasks:
                     approved final-main gate; stdout and stderr must already be
                     redirected create-new to this file; one real Ready click,
                     one persistent fixture, at most one hour, no input retries
+  hover-gate <path-session.txt>
+                    the hover phase alone, same redirect rule; injection opens only
+                    after ten minutes with no input on Rez, then the quiet second
   input-fixture     internal bounded separate-process EDIT/Ready fixture
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;
@@ -82,6 +85,8 @@ fn main() -> Result<()> {
         Some("bench") => bench::run(args),
         #[cfg(windows)]
         Some("gate-session") => gate::run(args),
+        #[cfg(windows)]
+        Some("hover-gate") => gate::hover(args),
         #[cfg(windows)]
         Some("live") => live::run(args),
         #[cfg(windows)]
