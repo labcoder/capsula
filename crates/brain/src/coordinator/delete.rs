@@ -3,6 +3,8 @@
 //! before it has been read, a turn naming the thread is refused before it gets a run. The answer
 //! retires the thread's runs and scenes, so nothing of them reaches the store or the shell again.
 
+use std::collections::BTreeSet;
+
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
@@ -26,6 +28,11 @@ pub(super) struct Deleting {
 impl Coordinator {
     pub(super) fn deleting_thread(&self, thread: ThreadId) -> bool {
         self.deleting.iter().any(|entry| entry.thread == thread)
+    }
+
+    /// Threads with a delete accepted and not answered yet.
+    pub(super) fn pending_deletes(&self) -> BTreeSet<ThreadId> {
+        self.deleting.iter().map(|entry| entry.thread).collect()
     }
 
     /// A delete is waiting on the store.
@@ -154,6 +161,7 @@ impl Coordinator {
             thread,
             watermark: Some(after_turns),
         });
+        self.expose(thread);
         effects.push(Effect::Store(StoreOp::Delete { thread }));
     }
 
@@ -175,6 +183,7 @@ impl Coordinator {
         if watermark.is_none() {
             self.crossed.push(thread);
         }
+        self.unblock(effects);
         if outcome == Deleted::NotHidden {
             let answer = ControlToShell::ThreadDeleted {
                 thread,

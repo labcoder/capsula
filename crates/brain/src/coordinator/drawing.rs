@@ -104,7 +104,7 @@ impl Coordinator {
             | Input::Record { thread, run, .. }
             | Input::CallFinished { thread, run, .. } => {
                 let current = self.current(*run)?;
-                if current.thread != *thread || !current.turn_stored || current.finishing {
+                if current.thread != *thread || !current.started() || current.finishing {
                     return Err(Stale);
                 }
             }
