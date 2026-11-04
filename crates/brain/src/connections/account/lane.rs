@@ -50,8 +50,8 @@ pub(super) enum Lane {
 pub(super) enum Save {
     Account(Secret<Account>),
     List(Secret<Revocable>),
-    /// A refresh token for the list that no request on the lane owns: its save finishes no
-    /// request, so it can't clear another's pending flag.
+    /// A refresh's successor for the list, which no account holds: its save ends that refresh's
+    /// request.
     Discard(Secret<Revocable>),
     /// A refresh's rotated set, for the generation it serves.
     Rotated {

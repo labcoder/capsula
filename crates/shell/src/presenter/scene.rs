@@ -17,25 +17,34 @@ use kumochi_scene::{
 
 use super::Effect;
 
+/// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
+pub(super) const WINDOW: usize = 8;
+
 pub(super) struct Scene {
     pub(super) state: SceneState,
-    /// The layout at the activated bound: recovered at rest, or empty for a fresh scene.
+    /// The layout at the activated bound: recovered at rest, empty, or the last consumed step's.
     pub(super) rest: LayoutState,
     pub(super) retained: usize,
     pub(super) queue: VecDeque<Ticket>,
     pub(super) running: Option<Running>,
-    /// Prepared and not activated; nothing activates before B6.
-    pub(super) ready: Vec<Deferred<PreparedStep>>,
+    /// Prepared and not consumed, oldest first.
+    pub(super) ready: VecDeque<Ready>,
     pub(super) cut: Cut,
     /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
     pub(super) skipping: bool,
 }
 
+/// A prepared result, with the worker's full charge of its layout for when it becomes rest.
+pub(super) struct Ready {
+    pub(super) step: Deferred<PreparedStep>,
+    pub(super) full_after: usize,
+}
+
 pub(super) struct Ticket {
     pub(super) run: RunId,
     pub(super) index: u32,
-    /// When it could first start: its commit, or its predecessor's answer.
-    pub(super) queued: Instant,
+    /// Stamped once, when its predecessor is ready and the window has room; untimed until then.
+    pub(super) eligible_at: Option<Instant>,
     pub(super) preparation: Deferred<Preparation>,
 }
 
@@ -43,7 +52,7 @@ pub(super) struct Running {
     pub(super) id: u64,
     pub(super) run: RunId,
     pub(super) index: u32,
-    pub(super) started: Instant,
+    pub(super) eligible_at: Instant,
     pub(super) cancel: Arc<AtomicBool>,
 }
 
@@ -101,32 +110,37 @@ impl Scene {
             rest,
             queue: VecDeque::new(),
             running: None,
-            ready: Vec::new(),
+            ready: VecDeque::new(),
             cut,
             skipping: false,
         }
     }
 
-    /// The step the watchdog times, and since when: the running one, or else the next queued one,
-    /// which only waits while every worker slot is taken.
+    /// The step the watchdog times, and since when it was eligible: the running one, or else the
+    /// next queued one once eligible, which then only waits for a worker slot.
     pub(super) fn due(&self) -> Option<(Instant, RunId, u32)> {
         match (&self.running, self.queue.front()) {
-            (Some(running), _) => Some((running.started, running.run, running.index)),
-            (None, Some(ticket)) => Some((ticket.queued, ticket.run, ticket.index)),
+            (Some(running), _) => Some((running.eligible_at, running.run, running.index)),
+            (None, Some(ticket)) => Some((ticket.eligible_at?, ticket.run, ticket.index)),
             (None, None) => None,
         }
+    }
+
+    /// Whether the next step's predecessor is ready and the window has a position for it.
+    pub(super) fn open(&self) -> bool {
+        self.running.is_none() && self.ready.len() < WINDOW
     }
 
     /// The layout the next step prepares on.
     pub(super) fn tip(&self) -> &LayoutState {
         self.ready
-            .last()
-            .map_or(&self.rest, |prepared| &prepared.after)
+            .back()
+            .map_or(&self.rest, |ready| &ready.step.after)
     }
 
     pub(super) fn residency(&self) -> usize {
-        self.ready.iter().fold(self.retained, |sum, prepared| {
-            sum.saturating_add(prepared.resident_bytes)
+        self.ready.iter().fold(self.retained, |sum, ready| {
+            sum.saturating_add(ready.step.resident_bytes)
         })
     }
 
@@ -136,7 +150,8 @@ impl Scene {
             .saturating_add(self.state.attributed_bytes())
     }
 
-    /// Drops queued and prepared work, and asks a running job to stop.
+    /// Drops queued and prepared work, and asks a running job to stop. Its window positions free
+    /// here, once; a late answer finds nothing running.
     pub(super) fn halt(&mut self) {
         if let Some(running) = self.running.take() {
             running.cancel.store(true, Ordering::Relaxed);

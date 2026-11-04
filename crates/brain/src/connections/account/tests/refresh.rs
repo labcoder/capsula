@@ -438,6 +438,8 @@ fn a_rotated_set_that_fails_its_check_ends_the_session_and_stays_in_chatgpt() {
     }
 }
 
+/// A key the check's key set lacks, even fetched again, leaves the set pending like a discovery
+/// failure: the session goes on, and the next use checks again.
 #[test]
 fn a_check_whose_key_is_missing_stays_pending() {
     let mut h = Harness::seeded("refresh-unknown-key", account_at(NOW, None));
@@ -483,6 +485,7 @@ fn a_rotated_set_too_big_to_save_lists_its_successor() {
     assert_eq!(h.refreshes.len(), 1);
 }
 
+/// H1: a check that lands while a sign-in's commit runs never overwrites the new account.
 #[test]
 fn a_check_that_lands_during_a_sign_in_commit_never_overwrites_it() {
     let mut h = Harness::seeded("refresh-commit-race", account_at(NOW, None));

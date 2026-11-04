@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "PLANTED-PROSE an_unlisted_code",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "an_unlisted_code"
+  }
+}

@@ -222,6 +222,35 @@ fn an_unfit_replaced_token_is_marked_unknown_before_the_commit() {
     assert_eq!(h.view(), &unconfirmed());
 }
 
+/// CAPS-152: a Commit whose `outcome_unknown` write is refused saves nothing, so the old account
+/// stays and the sign-in is held; Retry writes the marker and commits.
+#[test]
+fn a_refused_unknown_write_keeps_the_old_account_until_retry() {
+    let mut dry = Harness::seeded("ownership-unknown-trace", seed(&quotes(), Vec::new()));
+    until_commit(&mut dry);
+    dry.store.arm(usize::MAX, Fault::Refuse);
+    dry.release();
+    let marker_write = write_to(&dry, &mutations(&dry), "signout", 0);
+    let mut h = Harness::seeded("ownership-unknown", seed(&quotes(), Vec::new()));
+    until_commit(&mut h);
+    let before = h.marker();
+    h.store.arm(marker_write, Fault::Refuse);
+    h.release();
+    assert_eq!(
+        h.errors,
+        [user_error(
+            ErrorKey::CredentialsUnavailable,
+            &[Action::Retry]
+        )]
+    );
+    assert_eq!(h.refresh_token(), Some(quotes()));
+    assert_eq!(h.marker(), before);
+    h.op(AccountOp::Retry);
+    assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
+    assert!(h.revocations().is_empty());
+}
+
 /// A restart between listing the replaced token and the account's commit: the next sign-in finds
 /// it listed and keeps its first stamp, so it's listed once.
 #[test]

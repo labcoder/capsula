@@ -145,7 +145,7 @@ impl Pull {
 
 #[cfg(test)]
 mod tests {
-    use super::{CARRY_WIDTH, MAX_STEP, PEEK_WIDTH, Pull};
+    use super::{CARRY_WIDTH, MAX_STEP, PEEK_WIDTH, Pull, SETTLED};
     use crate::presence::kumo::expression::Motion;
     use crate::presence::kumo::math::{Vec2, v2};
     use crate::presence::kumo::neck::{Piece, Rect, SNAP_LEN};
@@ -356,5 +356,58 @@ mod tests {
         };
         let (slow, fast) = (at(72, 9), at(144, 18));
         assert!(near(slow, fast, 0.5), "{slow:?} {fast:?}");
+    }
+
+    /// A released pull at `offset` from home moving at `velocity`, after a step of no time.
+    fn released_at(offset: Vec2, velocity: Vec2) -> Pull {
+        let mut pull = grab(Motion::Full);
+        pull.release();
+        pull.offset = offset;
+        pull.velocity = velocity;
+        pull.update(0.0);
+        pull
+    }
+
+    #[test]
+    fn a_released_body_rests_at_the_threshold_and_not_one_step_over() {
+        let over = SETTLED.next_up();
+        let still = v2(0.0, 0.0);
+        for (offset, velocity, rests) in [
+            (v2(SETTLED, 0.0), still, true),
+            (v2(over, 0.0), still, false),
+            (still, v2(0.0, SETTLED), true),
+            (still, v2(0.0, over), false),
+            (v2(0.0, SETTLED), v2(SETTLED, 0.0), true),
+        ] {
+            let pull = released_at(offset, velocity);
+            assert_eq!(pull.settled(), rests, "{offset:?} {velocity:?}");
+            if rests {
+                assert_eq!(pull.body(), HOME);
+            }
+        }
+    }
+
+    #[test]
+    fn a_vector_whose_parts_are_under_but_length_is_over_does_not_rest() {
+        let near = v2(0.04, 0.04);
+        assert!(near.len() > SETTLED);
+        assert!(!released_at(near, v2(0.0, 0.0)).settled());
+        assert!(!released_at(v2(0.0, 0.0), near).settled());
+    }
+
+    #[test]
+    fn a_fast_pass_through_home_keeps_moving() {
+        let mut pull = released_at(v2(0.0, 0.0), v2(0.0, 40.0));
+        assert!(!pull.settled());
+        pull.update(FRAME);
+        assert!(pull.body().y > HOME.y, "{:?}", pull.body());
+    }
+
+    #[test]
+    fn a_held_pull_never_rests_even_still_at_home() {
+        let mut pull = grab(Motion::Full);
+        run(&mut pull, 144);
+        assert_eq!(pull.body(), HOME);
+        assert!(!pull.settled());
     }
 }

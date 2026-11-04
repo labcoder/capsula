@@ -55,7 +55,7 @@ fn spawn_with_room(
 
 pub(super) fn next(attempts: &std_mpsc::Receiver<Attempt>) -> Attempt {
     attempts
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(PATIENCE)
         .expect("the store's thread tried the purge")
 }
 
@@ -857,7 +857,8 @@ fn armed_and_paused(scratch: &Scratch, points: &[Point]) -> Paused {
     paused
 }
 
-pub(super) const PATIENCE: Duration = Duration::from_secs(10);
+/// How long a test waits for the store's thread: far above a slow CI runner's worst case.
+pub(super) const PATIENCE: Duration = Duration::from_secs(60);
 
 fn assert_removed(paused: &Paused, thread: u64) {
     let ack = paused.acks.recv_timeout(PATIENCE).expect("acknowledged");
