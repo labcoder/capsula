@@ -35,6 +35,11 @@ const STUB_FROM: f32 = BREAK_AT + 0.05;
 /// The fillet where the goo melts into the body, as a fraction of the body. The shader blends in
 /// the body's field within 1.5 fillets of a capsule.
 const FILLET: f32 = 0.09;
+/// How softly the root's ellipse blends into the neck's capsules, as a fraction of the body.
+/// The blend dips at most a quarter of it below either term.
+const ROOT_BLEND: f32 = 0.05;
+/// How far from the body's centre the goo blends into it, as a fraction of the body.
+const BODY_REACH: f32 = 0.5 + FILLET;
 /// Goo tiles, pixels: a tile no capsule, fillet or body can reach is cleared without shading.
 const TILE: usize = 8;
 /// The largest scale the goo is shaded at; above it GPUI scales the image up.
@@ -292,15 +297,15 @@ impl Neck {
     pub(crate) fn bounds(&self, piece: Piece) -> Option<Rect> {
         let (segs, root) = self.piece(piece)?;
         let pad = Self::pad(piece, self.body_size);
-        // The root fillet is an ellipse 2.2 times as wide as it is tall, centred on the dock.
         let ends = segs
             .iter()
-            .flat_map(|&(a, b, ra, rb)| [(a, v2(ra, ra)), (b, v2(rb, rb))]);
+            .flat_map(|&(a, b, ra, rb)| [(a, v2(ra + pad, ra + pad)), (b, v2(rb + pad, rb + pad))]);
+        // The root fillet is an ellipse 2.2 times as wide as it is tall, centred on the dock.
+        let fillet = (root > 0.0).then_some((self.dock, v2(root * 2.2 + pad, root + pad)));
         let (mut lo, mut hi) = (v2(f32::MAX, f32::MAX), v2(f32::MIN, f32::MIN));
-        let fillet = (root > 0.0).then_some((self.dock, v2(root * 2.2, root)));
-        for (p, r) in ends.chain(fillet) {
-            lo = v2(lo.x.min(p.x - r.x - pad), lo.y.min(p.y - r.y - pad));
-            hi = v2(hi.x.max(p.x + r.x + pad), hi.y.max(p.y + r.y + pad));
+        for (p, r) in ends.chain(fillet).chain(self.root_join(piece, root, pad)) {
+            lo = v2(lo.x.min(p.x - r.x), lo.y.min(p.y - r.y));
+            hi = v2(hi.x.max(p.x + r.x), hi.y.max(p.y + r.y));
         }
         Some(Rect {
             origin: v2(lo.x.floor(), lo.y.floor()),
@@ -312,8 +317,41 @@ impl Neck {
     /// the curve lies in the hull of its own control points, all within [`SNAP_LEN`] of the dock
     /// for the neck, within the drip's reach of the dock for the drip, and within
     /// `(1 − STUB_FROM²) × 2 × SNAP_LEN` of the attachment for the stub. Its widest capsule,
-    /// fillet and pad go around that, and two pixels of rounding. The root fillet's half-width,
-    /// at most `2.2 × 0.9 × 0.73 × 0.15` of the body, is under the neck's widest radius.
+    /// fillet and pad go around that, and two pixels of rounding. The root's join reaches at most
+    /// `2.2 × (0.9 × 0.73 × 0.15 + 1.5 × FILLET + ROOT_BLEND / 4)`, 0.54 of the body, from the
+    /// dock, well inside the neck's cap.
+    /// The box, as a centre and half-size, holding the body's join around the root, or `None`
+    /// when there's none. The join reaches `pad` past the root's blend with the capsules, which
+    /// dips up to a quarter of the blend below the ellipse's own distance, both in its 2.2× wide
+    /// metric. The shader joins only within [`BODY_REACH`] of the body's centre, so that disc
+    /// cuts it, at its widest over the rows the two share.
+    fn root_join(&self, piece: Piece, root: f32, pad: f32) -> Option<(Vec2, Vec2)> {
+        if piece == Piece::Drip || root <= 0.0 {
+            return None;
+        }
+        let r = root + pad + self.body_size * ROOT_BLEND / 4.0;
+        let disc = self.body_size * BODY_REACH;
+        let (top, bottom) = (
+            (self.dock.y - r).max(self.body.y - disc),
+            (self.dock.y + r).min(self.body.y + disc),
+        );
+        if top > bottom {
+            return None;
+        }
+        let dy = self.body.y - self.body.y.clamp(top, bottom);
+        let half = (disc * disc - dy * dy).max(0.0).sqrt();
+        let (left, right) = (
+            (self.dock.x - r * 2.2).max(self.body.x - half),
+            (self.dock.x + r * 2.2).min(self.body.x + half),
+        );
+        (left <= right).then(|| {
+            (
+                v2(f32::midpoint(left, right), f32::midpoint(top, bottom)),
+                v2((right - left) / 2.0, (bottom - top) / 2.0),
+            )
+        })
+    }
+
     /// The margin a region keeps around its capsules: a tenth of the body for the drip, and for
     /// the pieces that join the body, the join's reach of 1.5 fillets, past which no body field
     /// is blended in.
@@ -455,7 +493,7 @@ impl GooShader {
             glow_k: f.glow_k * 0.8,
             ..*f
         };
-        let body_reach = s * 0.5 + fillet;
+        let body_reach = s * BODY_REACH;
         let squashed = |q: Vec2| {
             v2(
                 q.x / f.body_scale.x,
@@ -521,7 +559,7 @@ impl GooShader {
                     }
                     // A soft fillet where the neck leaves the line, so it grows out of the dock.
                     let rel = p - neck.dock;
-                    smin(d, v2(rel.x / 2.2, rel.y).len() - root_r, s * 0.05)
+                    smin(d, v2(rel.x / 2.2, rel.y).len() - root_r, s * ROOT_BLEND)
                 };
                 let body_at = |p: Vec2| {
                     let q = squashed(to_body(p));
@@ -834,31 +872,73 @@ mod tests {
         assert!(clipped.is_empty(), "{r:?} clips {clipped:?}");
     }
 
+    /// Every pixel with alpha that a 40 px wider image of `piece` on the same grid holds outside
+    /// its region, as logical centres.
+    fn clipped(neck: &Neck, piece: Piece, scale: f32) -> Vec<(f32, f32, u8)> {
+        let Some(r) = neck.bounds(piece) else {
+            return Vec::new();
+        };
+        let grow = 40.0;
+        let wide = Rect {
+            origin: r.origin - v2(grow, grow),
+            size: r.size + v2(2.0 * grow, 2.0 * grow),
+        };
+        let (w, h) = GooShader::size(r, scale);
+        let mut shader = GooShader::sized(Neck::cap(piece, BODY) + 2.0 * grow);
+        let (ww, wh, out) = shade_in(neck, piece, wide, scale, &mut shader);
+        let skip = pixels(grow, scale);
+        let centre = |i: usize| (super::index_f32(i) + 0.5) / scale;
+        (0..wh)
+            .flat_map(|j| (0..ww).map(move |i| (i, j)))
+            .filter(|&(i, j)| !((skip..skip + w).contains(&i) && (skip..skip + h).contains(&j)))
+            .map(|(i, j)| {
+                let a = out[(j * ww + i) * 4 + 3];
+                (wide.origin.x + centre(i), wide.origin.y + centre(j), a)
+            })
+            .filter(|&(.., a)| a > 0)
+            .collect()
+    }
+
     #[test]
-    fn the_stub_keeps_its_whole_join_with_the_body_in_its_region() {
-        let mut neck = Neck::new(DOCK, BODY);
-        neck.update(0.0, v2(400.0, 170.08));
-        assert!(matches!(neck.state, State::Recoiling { since: 0.0, .. }));
-        for scale in [0.5, MAX_SCALE] {
-            let r = neck.bounds(Piece::Stub).expect("a stub");
-            // Shade a wider image on the same pixel grid; nothing may land outside the region.
-            let grow = 40.0;
-            let wide = Rect {
-                origin: r.origin - v2(grow, grow),
-                size: r.size + v2(2.0 * grow, 2.0 * grow),
-            };
-            let (w, h) = GooShader::size(r, scale);
-            let (ww, wh, out) =
-                shade_in(&neck, Piece::Stub, wide, scale, &mut GooShader::stub(BODY));
-            let skip = pixels(grow, scale);
-            let clipped: Vec<(usize, usize, u8)> = (0..wh)
-                .flat_map(|j| (0..ww).map(move |i| (i, j)))
-                .filter(|&(i, j)| !((skip..skip + w).contains(&i) && (skip..skip + h).contains(&j)))
-                .map(|(i, j)| (i, j, out[(j * ww + i) * 4 + 3]))
-                .filter(|&(.., a)| a > 0)
-                .collect();
-            assert!(clipped.is_empty(), "{scale}: {r:?} clips {clipped:?}");
+    fn no_piece_draws_outside_its_region() {
+        let mut states = Vec::new();
+        // CAPS-139's two: a stub on its first recoil frame, and a pull's first step.
+        for body in [v2(400.0, 170.08), v2(400.0, 20.08)] {
+            let mut neck = Neck::new(DOCK, BODY);
+            neck.update(0.0, body);
+            states.push(neck);
         }
+        for len in [0.0, 0.08, 2.0, 6.0, 15.0, 30.0, 55.0, 80.0, 110.0, 143.9] {
+            for dx in [-70.0, -15.0, 0.0, 5.0, 20.0, 60.0] {
+                let mut neck = Neck::new(DOCK, BODY);
+                for _ in 0..72 {
+                    neck.update(FRAME, below(len) + v2(dx, 0.0));
+                }
+                states.push(neck);
+            }
+        }
+        for len in [144.5, 170.0, 400.0] {
+            let mut neck = snapped(len);
+            states.push(neck.clone());
+            for frames in [3, 8, 14, 22] {
+                for _ in 0..frames {
+                    neck.update(FRAME, below(len) + v2(30.0, 0.0));
+                }
+                states.push(neck.clone());
+            }
+        }
+        let mut bad = Vec::new();
+        for (k, neck) in states.iter().enumerate() {
+            for piece in [Piece::Neck, Piece::Drip, Piece::Stub] {
+                for scale in [0.5, MAX_SCALE] {
+                    let c = clipped(neck, piece, scale);
+                    if !c.is_empty() {
+                        bad.push((k, piece, scale, c.into_iter().take(4).collect::<Vec<_>>()));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     #[test]

@@ -114,13 +114,13 @@ neck's and the body's bands.
   - **The stub** is the frozen curve from 0.21 to the attachment. It travels with the live body, keeps its frozen shape, and melts up into the cloud within 0.12 s.
   - The body springs back to round with a damped wobble. After the recoil, nothing of the neck is drawn.
 - **Reduced motion.** The neck still breaks at the same point, so the snap and drop decisions don't change, but no goo is drawn, the body stays round, and there's no recoil. Turning it on mid-recoil ends the recoil.
-- **Pieces.** `Piece::Neck`, `Drip` and `Stub` are shaded separately, each into the image of its own `bounds`. A region covers the piece's capsule ends and its root fillet's ellipse, each padded. The drip pads by a tenth of the body. The neck and the stub, which melt into the body, pad by 1.5 fillets (0.135 of the body), the furthest from a capsule the shader blends in the body's field, so the join's shading stays inside the region. A test shades a stub into a region 40 px wider and finds nothing outside its own.
+- **Pieces.** `Piece::Neck`, `Drip` and `Stub` are shaded separately, each into the image of its own `bounds`. A region covers the piece's capsule ends, padded, and its root fillet's ellipse, 2.2 times as wide as it is tall. The drip pads by a tenth of the body. The neck and the stub melt into the body, which the shader blends in wherever the neck's field is within 1.5 fillets (0.135 of the body). That field is the capsules' smooth union with the root ellipse, so the neck's region also covers the ellipse grown by 1.5 fillets plus the union's dip (a quarter of 0.05 of the body) in its own wide metric, cut to the disc around the body's centre where the shader joins at all. Only short pulls, with the body near the dock, widen: up to 92 px instead of 61 at 1.0. A test shades every piece, over pull lengths, sideways offsets, the breaking step and recoil frames, into a region 40 px wider and finds nothing outside its own.
 - **Caps.** Each piece's curve lies in the hull of its own control points, so its region has a fixed cap for a body size:
   - the neck within 144 of the dock;
   - the drip within (2u − u²) × 144 = 42.39 of the dock at u = 0.16. With the control and the end perpendicular, the point at 0.16 is (38.7072, 3.6864), and 42.3936 is the collinear bound;
   - the stub within (1 − 0.21²) × 288 = 275.3 of the attachment.
 
-  Its widest capsule, fillet and pad go around that, rounded outward. Tests put each piece inside its cap after a 3,000 px jump on the crossing step, with extremal controls, and after far moves on the first recoil frame and mid-recoil. They also check that a short sideways pull loses nothing outside its region.
+  Its widest capsule, fillet and pad go around that, rounded outward. Tests put each piece inside its cap after a 3,000 px jump on the crossing step, with extremal controls, and after far moves on the first recoil frame and mid-recoil. They also check that a short sideways pull, and every piece over the sweep above, loses nothing outside its region.
 
 `GooShader` shades a piece into a straight-alpha BGRA image of its region at a caller-chosen scale, half the display's for D1, up to `MAX_SCALE`, 1.0.
 - **Scratch.** `GooShader::neck` serves the attached neck and the drip, which never coexist. `GooShader::stub` serves the stub. Each one's tile table and distance rows are sized once, from its pieces' caps at `MAX_SCALE` (350 and 613 pixels a side for an 84 px body), and reused, so shading allocates nothing. Tests check the exact limit and one pixel over on each axis.
@@ -130,18 +130,18 @@ neck's and the body's bands.
 
 `coverage::device_spans` takes a source width plus one row hull per source row, so the goo's rectangles map to device spans as the body's square does.
 
-Measured on Rez, release build, under the measuring lock. Each frame is timed on its own, 140 frames per case, two runs, with the output black-boxed and checksummed and the shape built outside the loop. The goo belongs to an 84 px body:
+Measured on Rez, release build, under the measuring lock (03:36:51–54Z). Each frame is timed on its own, 140 frames per case, two runs, with the output black-boxed and checksummed and the shape built outside the loop. The goo belongs to an 84 px body. These cases' regions and shading are the same at the final head as when measured; the short pulls that the root's join widens aren't timed:
 
 | Piece, scale | Region, px | Median, µs | Slowest frame, µs |
 |---|---|---|---|
-| neck, attachment 60 px down, 0.5 | 28 × 53 | 281 | 424 |
-| neck, 140 px down, 0.5 | 28 × 92 | 352 | 502 |
-| neck, 60 px down, 1.0 | 55 × 105 | 1,032 | 1,480 |
-| neck, 140 px down, 1.0 | 55 × 183 | 1,273 | 2,287 |
-| drip at the break, 0.5 | 22 × 29 | 84 | 99 |
-| stub at the break, 0.5 | 28 × 76 | 291 | 435 |
+| neck, attachment 60 px down, 0.5 | 31 × 55 | 293 | 365 |
+| neck, 140 px down, 0.5 | 31 × 95 | 376 | 775 |
+| neck, 60 px down, 1.0 | 61 × 110 | 1,062 | 1,567 |
+| neck, 140 px down, 1.0 | 61 × 189 | 1,309 | 2,059 |
+| drip at the break, 0.5 | 22 × 29 | 83 | 126 |
+| stub at the break, 0.5 | 31 × 79 | 306 | 428 |
 
-The cost per pixel is about 125 to 190 ns, highest in the smallest region, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). At half scale the medians are under C2a's 400 µs goo gate, but single frames near the snap reach 502 µs. The gate is a maximum, so C2a tunes the goo before claiming it.
+The cost per pixel is about 115 to 170 ns, highest in the smallest region, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). The join pad then gave back 3–7%. At half scale the medians are under C2a's 400 µs goo gate, but single frames reach 775 µs. The gate is a maximum, so C2a tunes the goo before claiming it.
 
 ## Expressions
 
