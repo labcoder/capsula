@@ -21,6 +21,9 @@ use std::{collections::BTreeMap, sync::Arc};
 /// Space between a cluster's contents and the rectangle its parent ranks.
 pub(super) const PAD: f32 = 16.0;
 
+/// Breathing room inside a titled group's frame, half the inter-cluster padding.
+const FRAME_PAD: f32 = PAD * 0.5;
+
 fn get(state: &LayoutState, handle: Handle) -> Option<&Placed> {
     state
         .handles
@@ -143,14 +146,23 @@ pub(super) fn banded(contents: Rect, title: Vec2) -> (Rect, Vec2) {
     let band = title.y + PAD;
     let width = contents.size.x.max(title.x);
     let bounds = Rect {
-        origin: Vec2::new(contents.center().x - width * 0.5, contents.origin.y - band),
-        size: Vec2::new(width, contents.size.y + band),
+        origin: Vec2::new(
+            contents.center().x - width * 0.5 - FRAME_PAD,
+            contents.origin.y - band - FRAME_PAD,
+        ),
+        size: Vec2::new(
+            width + 2.0 * FRAME_PAD,
+            contents.size.y + band + 2.0 * FRAME_PAD,
+        ),
     };
     (
         bounds,
         text_origin(
             Rect {
-                origin: Vec2::new(bounds.center().x - title.x * 0.5, bounds.origin.y),
+                origin: Vec2::new(
+                    bounds.center().x - title.x * 0.5,
+                    bounds.origin.y + FRAME_PAD,
+                ),
                 size: title,
             },
             Some(180.0),
@@ -159,11 +171,22 @@ pub(super) fn banded(contents: Rect, title: Vec2) -> (Rect, Vec2) {
     )
 }
 
-/// A group's primitives with its title moved to `origin`.
-pub(super) fn retitle(primitives: &[Prim], origin: Vec2) -> Arc<[Prim]> {
+/// A group's frame and title moved to its final padded bounds and title origin.
+pub(super) fn retitle(primitives: &[Prim], bounds: Rect, origin: Vec2) -> Arc<[Prim]> {
     primitives
         .iter()
         .map(|primitive| match primitive {
+            Prim::Rect {
+                radius,
+                fill,
+                border,
+                ..
+            } => Prim::Rect {
+                rect: bounds,
+                radius: *radius,
+                fill: *fill,
+                border: *border,
+            },
             Prim::Text {
                 text,
                 style,
