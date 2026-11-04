@@ -58,6 +58,52 @@ fn initial_fit_has_exact_unscaled_floor_and_clipped_boundaries() {
 }
 
 #[test]
+fn a_long_horizontal_edge_label_widens_the_second_rank_origin() {
+    let mut scene = new_scene("label_gap");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"ranks","put":[
+            {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
+            {"node":{"id":"a","in":"diagram","label":"A"}},
+            {"node":{"id":"b","in":"diagram","label":"B"}},
+            {"edge":{"id":"edge","in":"diagram","from":"a","to":"b","label":"abcdefgh"}}
+        ]}),
+    );
+    assert_eq!(
+        picture.after.bounds(&id("b")).expect("second rank"),
+        Some(Rect {
+            origin: Vec2::new(224.0, 16.0),
+            size: Vec2::new(80.0, 40.0)
+        })
+    );
+}
+
+#[test]
+fn a_long_diamond_label_enlarges_both_square_dimensions() {
+    let mut scene = new_scene("diamond_size");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"diamond","put":[
+            {"diagram":{"id":"diagram","box":[0,0,360,300]}},
+            {"node":{"id":"diamond","in":"diagram","label":"abcdefghij","shape":"diamond"}}
+        ]}),
+    );
+    assert_eq!(
+        picture.after.bounds(&id("diamond")).expect("diamond"),
+        Some(Rect {
+            origin: Vec2::new(113.0, 16.0),
+            size: Vec2::new(134.0, 134.0)
+        })
+    );
+}
+
+#[test]
 fn a_fitted_diagram_keeps_its_fit_and_old_local_nodes_when_it_grows() {
     let mut scene = new_scene("fit_growth");
     let mut budget = GlobalBudget::default();

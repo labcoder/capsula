@@ -416,7 +416,7 @@ comparisons retain that original workload and label the wider glide/property var
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
 It returns rectangles in input order and has no scene, clock, activation or rendering
-dependency. A batch is initial when it contains every remaining ranked member;
+dependency. A batch is initial when no member of the group already has a rank;
 cutting away all members lets the next batch start fresh. Unboxed, originally top-level
 diagrams fit that batch inside 16-pixel margins, between scale 0.8 and 1.0, keeping default
 15-pixel labels at least 12 pixels. Wider content stays at the floor and starts at the
