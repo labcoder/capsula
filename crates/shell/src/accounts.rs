@@ -40,12 +40,24 @@ impl Accounts {
     }
 
     pub(crate) fn error(&mut self, error: &UserError) {
-        if !matches!(
-            error.key(),
-            ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable
-        ) {
-            self.error = Some(error.clone());
-            self.unexplained = true;
+        match error.key() {
+            ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable => {}
+            ErrorKey::SignInTimedOut
+            | ErrorKey::SignInFailed
+            | ErrorKey::SignInOtherAccount
+            | ErrorKey::BrowserUnavailable
+            | ErrorKey::AccountOffline
+            | ErrorKey::CredentialsUnavailable
+            | ErrorKey::RevocationBacklog
+            | ErrorKey::TrustStoreUnavailable
+            | ErrorKey::PlanNotEnabled
+            | ErrorKey::AccountMisconfigured
+            | ErrorKey::SignOutNotDurable
+            | ErrorKey::SessionEnded
+            | ErrorKey::PlanUnavailable => {
+                self.error = Some(error.clone());
+                self.unexplained = true;
+            }
         }
     }
 
@@ -71,8 +83,7 @@ impl Accounts {
                 AccountOp::SignIn => *recovery == Some(AccountRecovery::SignInAgain),
                 AccountOp::EnablePlan => recovery.is_none() && *plan == PlanState::Declined,
                 AccountOp::Retry => {
-                    *recovery == Some(AccountRecovery::Retry)
-                        || recovery.is_none() && self.error_action(Action::Retry)
+                    *recovery == Some(AccountRecovery::Retry) || self.error_action(Action::Retry)
                 }
                 _ => false,
             },

@@ -290,7 +290,7 @@ fn retry_errors_supplement_valid_states_without_unlocking_forbidden_operations()
         ),
         (
             signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain)),
-            vec![AccountOp::SignIn, AccountOp::SignOut],
+            vec![AccountOp::SignIn, AccountOp::SignOut, AccountOp::Retry],
         ),
     ] {
         receive(&mut accounts, view);
