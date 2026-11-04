@@ -606,6 +606,10 @@ impl AccountState {
             }
         };
         self.busy = false;
+        // A load dispatched before a sign-out was admitted can't undo it.
+        if self.admitted() {
+            return;
+        }
         let marker = match snapshot.marker {
             Ok(marker) => marker,
             Err(failure) => return self.unread(&failure),

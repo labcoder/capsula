@@ -1149,3 +1149,56 @@ fn a_sign_in_before_the_final_load_waits_for_the_kept_registration() {
         ("client-saved", Some("subject-1"))
     );
 }
+
+/// CAPS-130 87-R1: a load Retry dispatched before a sign-out was admitted can't undo it, whether
+/// it reads the marker or is refused: the sign-out keeps its fence and notice, and finishes.
+#[test]
+fn a_load_dispatched_before_the_sign_out_leaves_it_fenced() {
+    for refused_marker in [false, true] {
+        let (store, service) = prepared(|vault, _| {
+            account_only(vault);
+            vault.host_id().expect("host");
+        });
+        store.0.lock().expect("fake lock").denied_read = Some(format!("{service}/revoke"));
+        let mut h = boot(&store, &service);
+        assert_eq!(
+            h.views,
+            [signed_in(PlanState::Enabled, None)],
+            "{refused_marker}"
+        );
+        allow_reads(&h);
+        if refused_marker {
+            deny_read(&h, "signout");
+        }
+        h.hold = true;
+        h.op(AccountOp::Retry);
+        assert!(
+            matches!(h.held, Some(Job::Load { .. })),
+            "{refused_marker}: Retry's load is held"
+        );
+        let shown = h.views.len();
+        h.op(AccountOp::SignOut);
+        assert_eq!(
+            h.view(),
+            &signing_out(Cleanup::Running, true),
+            "{refused_marker}"
+        );
+        h.release();
+        allow_reads(&h);
+        finish(&mut h, true, 0);
+        let (cleanup, last) = h.views[shown..].split_at(h.views.len() - shown - 1);
+        assert!(
+            cleanup
+                .iter()
+                .all(|view| matches!(view, AccountView::SigningOut { .. })),
+            "{refused_marker}: {cleanup:?}"
+        );
+        assert_eq!(last, [signed_out()], "{refused_marker}");
+        assert_eq!(
+            tokens(&h.revoking[0]),
+            [("refresh-old".to_owned(), Origin::Account)],
+            "{refused_marker}: the saved token is revoked"
+        );
+        assert_eq!(names(&h), left(true, false), "{refused_marker}");
+    }
+}

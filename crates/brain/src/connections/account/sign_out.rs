@@ -94,6 +94,13 @@ impl AccountState {
         };
     }
 
+    /// A sign-out is past admission and no load owns its fence: only a `Read` step waits on one.
+    pub(super) fn admitted(&self) -> bool {
+        self.leaving
+            .as_ref()
+            .is_some_and(|leaving| leaving.step != Step::Read)
+    }
+
     /// The local cleanup's progress, while a sign-out is pending.
     pub(super) fn cleanup(&self) -> Option<Cleanup> {
         let leaving = self.leaving.as_ref()?;
