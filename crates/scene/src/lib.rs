@@ -17,6 +17,7 @@ pub mod record;
 pub mod state;
 pub mod text;
 pub mod theme;
+pub mod three;
 pub mod tokenize;
 
 pub use budget::GlobalBudget;

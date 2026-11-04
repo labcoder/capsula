@@ -114,6 +114,9 @@ pub enum ErrorCode {
     /// The scene is charged to a different global budget instance.
     #[error("scene.BudgetContext")]
     BudgetContext,
+    /// Geometry cannot form a representable surface.
+    #[error("scene.Degenerate")]
+    Degenerate,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {

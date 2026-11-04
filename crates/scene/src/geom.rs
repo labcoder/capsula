@@ -1,6 +1,23 @@
 //! Renderer-independent geometry in logical pixels.
 use std::ops::{Add, Mul, Sub};
 
+/// A point or displacement in right-handed three-dimensional scene space.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Vec3 {
+    /// Horizontal coordinate.
+    pub x: f32,
+    /// Vertical coordinate, positive upwards.
+    pub y: f32,
+    /// Depth coordinate.
+    pub z: f32,
+}
+impl Vec3 {
+    /// Constructs a point without applying transforms.
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+}
+
 /// A point or displacement in the scene's logical coordinate system.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Vec2 {
