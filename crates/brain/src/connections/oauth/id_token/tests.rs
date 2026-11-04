@@ -902,3 +902,37 @@ async fn verify_checks_inputs_first_and_needs_a_clock() {
     let result = verify(&http, &secret(&token(&claims())), CLIENT, NONCE, &NoClock).await;
     assert_eq!(result.map(|_| ()), Err(IdentityError::Clock));
 }
+
+/// Design §3 rule 3: a refreshed set's token is bound to the subject already verified, with no
+/// nonce of ours and no expiry check; a sign-in keeps both.
+#[test]
+fn a_refreshed_token_is_bound_to_the_saved_subject_alone() {
+    use super::{Binding, signed};
+    use IdentityError::{Bounds, OtherAccount, Token};
+    let keys = keys(jwks());
+    let refreshed = token(&with(&[("exp", Some(json!(NOW - 3600))), ("nonce", None)]));
+    let subject = |token: &str, binding| {
+        signed(token, &keys, CLIENT, binding, NOW)
+            .map(|identity| identity.subject.expose().as_str().to_owned())
+    };
+    assert_eq!(
+        subject(&refreshed, Binding::Refresh(SUBJECT)),
+        Ok(SUBJECT.to_owned())
+    );
+    assert_eq!(subject(&refreshed, Binding::SignIn(NONCE)), Err(Token));
+    assert_eq!(
+        subject(&refreshed, Binding::Refresh("user-other")),
+        Err(OtherAccount)
+    );
+    assert_eq!(subject(&refreshed, Binding::Refresh("")), Err(Token));
+    let longest = "x".repeat(256);
+    let at_limit = token(&with(&[("sub", Some(json!(longest))), ("nonce", None)]));
+    assert_eq!(
+        subject(&at_limit, Binding::Refresh(&longest)),
+        Ok(longest.clone())
+    );
+    assert_eq!(
+        subject(&at_limit, Binding::Refresh(&"x".repeat(257))),
+        Err(Bounds)
+    );
+}

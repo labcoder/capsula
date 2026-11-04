@@ -90,7 +90,7 @@ fn received(refresh: Option<&str>, subject: &str, scope: &str) -> Result<Receive
         tokens: TokenSet {
             access_token: secret("access"),
             refresh_token: refresh.map(secret),
-            id_token: secret("identity"),
+            id_token: Some(secret("identity")),
             scope: secret(scope),
             expires_in: 3600,
         },
@@ -835,7 +835,7 @@ fn no_secret_reaches_the_logs_or_debug_output() {
             tokens: TokenSet {
                 access_token: secret("access-SENTINEL"),
                 refresh_token: Some(secret("refresh-SENTINEL")),
-                id_token: secret("idtoken-SENTINEL"),
+                id_token: Some(secret("idtoken-SENTINEL")),
                 scope: secret(PLAN),
                 expires_in: 3600,
             },

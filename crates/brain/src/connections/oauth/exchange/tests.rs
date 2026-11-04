@@ -162,7 +162,13 @@ async fn exchange_sends_the_exact_grant_and_retains_the_issued_tokens() {
             .as_str(),
         "fixture-refresh"
     );
-    assert_eq!(issued.id_token.expose().as_str(), "fixture-id");
+    assert_eq!(
+        issued
+            .id_token
+            .as_ref()
+            .map(|token| token.expose().as_str()),
+        Some("fixture-id")
+    );
     assert_eq!(
         issued.scope.expose().as_str(),
         "openid chatgpt.tokens.use.direct"
@@ -224,7 +230,13 @@ async fn a_partial_grant_without_a_refresh_token_is_representable() {
         "absence isn't fabricated or refused"
     );
     assert_eq!(issued.access_token.expose().as_str(), "fixture-access");
-    assert_eq!(issued.id_token.expose().as_str(), "fixture-id");
+    assert_eq!(
+        issued
+            .id_token
+            .as_ref()
+            .map(|token| token.expose().as_str()),
+        Some("fixture-id")
+    );
 }
 
 #[tokio::test]

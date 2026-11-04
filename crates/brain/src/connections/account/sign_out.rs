@@ -94,6 +94,15 @@ impl AccountState {
         };
     }
 
+    /// The load a `Read` step waits on failed before reading anything; Retry runs it again.
+    pub(super) fn read_refused(&mut self) {
+        if let Some(leaving) = &mut self.leaving
+            && leaving.step == Step::Read
+        {
+            leaving.stuck = Some(Cleanup::Refused);
+        }
+    }
+
     /// A sign-out is past admission and no load owns its fence: only a `Read` step waits on one.
     pub(super) fn admitted(&self) -> bool {
         self.leaving

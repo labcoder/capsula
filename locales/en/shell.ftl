@@ -96,4 +96,6 @@ error-revocation-backlog = Still trying to end earlier ChatGPT sessions, so a ne
 error-trust-store-unavailable = Couldn't load trusted certificates from Windows, so the app can't connect to ChatGPT safely.
 error-plan-not-enabled = Plan use wasn't turned on. Enable it to use your ChatGPT plan.
 error-account-misconfigured = ChatGPT didn't accept this app's sign-in. Trying again won't help.
-error-sign-out-not-durable = Couldn't record the sign-out in Windows Credential Manager. The account stays unused, but if the app restarts before Retry works, it will be signed in again.
+error-sign-out-not-durable = Couldn't record the sign-out in the system's credential store. The account stays unused, but if the app restarts before Retry works, it will be signed in again.
+error-session-ended = Your ChatGPT session ended. Sign in again to keep using your plan.
+error-plan-unavailable = This ChatGPT account can't use its plan in this app.

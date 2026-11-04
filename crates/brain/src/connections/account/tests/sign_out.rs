@@ -1202,3 +1202,25 @@ fn a_load_dispatched_before_the_sign_out_leaves_it_fenced() {
         assert_eq!(names(&h), left(true, false), "{refused_marker}");
     }
 }
+
+/// OSC-117: a lock error from the load after Finish leaves the sign-out refused, so Retry runs
+/// that load again instead of the view staying Running with nothing to retry.
+#[test]
+fn a_lock_error_on_the_final_load_is_refused_for_retry() {
+    let mut h = Harness::seeded("sign-out-final-lock", account_only);
+    h.op(AccountOp::SignOut);
+    h.hold = true;
+    h.feed(Input::Revoked(h.revoking[0].clone()));
+    for _ in 0..2 {
+        h.hold = true;
+        h.release();
+    }
+    assert!(matches!(h.held.take(), Some(Job::Load { .. })));
+    h.feed(Input::Vault(Done::Loaded(Err(VaultError::Lock(
+        std::io::Error::other("lock"),
+    )))));
+    assert_eq!(h.view(), &signing_out(Cleanup::Refused, false));
+    h.op(AccountOp::Retry);
+    assert_eq!(h.view(), &signed_out());
+    assert_eq!(h.account(), Some(registration()));
+}
