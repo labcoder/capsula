@@ -25,7 +25,7 @@ const WELCOME: Duration = Duration::from_secs(5);
 
 /// A frame the brain sent, or the end of one of its pipes.
 #[derive(Debug)]
-pub(super) enum Frame {
+pub(crate) enum Frame {
     Control(ControlToShell),
     /// A data frame and its size on the pipe, header included.
     Data(DataToShell, u32),
@@ -35,9 +35,9 @@ pub(super) enum Frame {
 
 /// A frame and when its reader took it.
 #[derive(Debug)]
-pub(super) struct Seen {
+pub(crate) struct Seen {
     pub(super) at: Instant,
-    pub(super) frame: Frame,
+    pub(crate) frame: Frame,
 }
 
 /// Whether the data reader reads, and whether it grants what it read as credit.
@@ -114,7 +114,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// One connection to the brain, as the shell would hold it.
 #[derive(Debug)]
-pub(super) struct Client {
+pub(crate) struct Client {
     shared: Arc<Shared>,
     frames: Receiver<Seen>,
     readers: Vec<JoinHandle<()>>,
@@ -124,7 +124,7 @@ pub(super) struct Client {
 
 impl Client {
     /// Connects and authenticates both pipes, retrying while the brain starts.
-    pub(super) fn connect() -> Result<Self> {
+    pub(crate) fn connect() -> Result<Self> {
         Self::connect_with(None)
     }
 
@@ -147,7 +147,7 @@ impl Client {
         }
     }
 
-    pub(super) fn control(&self, message: &ControlToBrain) -> Result<Instant> {
+    pub(crate) fn control(&self, message: &ControlToBrain) -> Result<Instant> {
         self.shared.write_control(message)
     }
 
@@ -197,7 +197,7 @@ impl Client {
     }
 
     /// Takes frames until `pick` chooses one, failing after `limit` or when a pipe ends.
-    pub(super) fn until<T>(
+    pub(crate) fn until<T>(
         &mut self,
         limit: Duration,
         mut pick: impl FnMut(&Seen) -> Option<T>,

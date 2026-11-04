@@ -195,15 +195,20 @@ GPUI starts. The UI thread only stamps the performance counter and moves a recor
 queue without waiting; the writer formats it and flushes whenever it catches up. Each record
 is one line:
 
-- `startup version=1 pid= dock_hwnd= panel_hwnd= proxy_hwnd= scale= position= work_area= dock= overlay=
+- `startup version=2 pid= dock_hwnd= panel_hwnd= proxy_hwnd= scale= position= work_area= dock= overlay=
   panel= qpc_frequency= row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331`. It
   follows the first position's commit and the paints GPUI makes while it opens each window.
   Rectangles are `x,y,width,height` in physical pixels.
 - `geometry id=G origin_y=Y rows=N trimmed=true|false spans=…`, sent the first time a mask
   proposal's rows differ from the last one sent. Each of the `N` rows from `Y` is
-  `drawn,owned,owned` separated by `;`, each span `left:right` (half-open) or `-`. `drawn` is the
-  line's `paint` and `owned` the band's `row_spans` the mask is given, not a copy; the second
-  owned span is always `-` for the line, and `trimmed` always `true`.
+  two `drawn` spans and then four `owned` spans, comma-separated, rows separated by `;`, each
+  span `left:right` (half-open) or `-`. The drawn spans are one per shape: the line with its
+  drip, then the body with its stub. Four is `ROW_SPANS`, what a hit-mask row holds: two shapes,
+  each with a current and a previous snapshot. For the line, the first `drawn` is its `paint`
+  and the first `owned` the band's `row_spans` the mask is given, not a copy; the rest are `-`,
+  and `trimmed` is always `true`. Version 2 is this row; version 1 had one drawn and two owned.
+  The gate harness requires
+  each row to own what it draws, and a committed geometry to own exactly its `proxy` rectangle.
   Taller than 512 rows, it's `… overflow` with no rows, never truncated.
 - `commit seq= begin_qpc= qpc= result=shape|moved|unchanged|failed proposal=G epoch=E
   geometry=A proxy=…`, after every `UpdateLayeredWindow` call. `begin_qpc` is read right before
@@ -215,8 +220,8 @@ is one line:
   and leaves both.
 - `hover id=H qpc= visible=true|false click_qpc=`, on every status panel show or hide. The
   legacy name and paint IDs are unchanged. `qpc` is state entry, before native placement;
-  `click_qpc` is zero: clicks no longer change the panel, and the hover phase that follows B2b
-  carries the proxy's native pointer-entry counter here instead.
+  `click_qpc` keeps its legacy name but carries the native pointer-entry counter when a pointer
+  entry opened the panel, and zero otherwise; older builds always log zero.
 - `paint frame=F qpc= kind=dock|panel hover= drawn_epoch= drawn_geometry= mask_epoch=`. A dock
   frame is stamped by the dock's zero-size `Stamp` element with `hover=0`; `drawn_geometry`'s `drawn` spans
   are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size

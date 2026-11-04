@@ -196,7 +196,7 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
     }
     assert!(warnings.contains(&format!("row={}", scenes[0].0)));
     assert!(!warnings.contains("private drawing"));
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
+    let reply = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())
         .await
         .expect("durable recovery clear deadline")
         .expect("clear acknowledgement");
@@ -417,10 +417,11 @@ async fn timed_out_crash_clear_cannot_authorize_launch() {
     let (mut brain, scene) = typed_brain(&scratch, None);
     let release =
         brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::ClearScenes { .. }));
+    super::product_waits();
     assert!(!brain.clear_before_relaunch(&[scene]).await);
     assert!(!brain.coordinator.settled());
     release.send(()).expect("release timed out clear");
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
+    let reply = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())
         .await
         .expect("eventual commit deadline")
         .expect("clear reply");
@@ -461,7 +462,7 @@ async fn quit_drains_a_held_typed_cut_then_confirms_its_clear_before_success() {
         )
     });
     brain.offline(cut(scene));
-    let quit = brain.quit(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+    let quit = brain.quit(tokio::time::Instant::now() + super::PATIENCE);
     let released = async {
         while !matches!(
             observed.recv().await.expect("quit observation"),
@@ -536,7 +537,7 @@ async fn a_refused_snapshot_scene_is_durably_cleared_before_the_other_scene_is_d
     );
     assert!(controls.try_recv().is_err());
     assert_eq!(queue.borrow().bytes(), 0);
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
+    let reply = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())
         .await
         .expect("clear deadline")
         .expect("clear reply");
@@ -602,7 +603,7 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
     drop(repair);
     assert_eq!(
         brain
-            .quit(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .quit(tokio::time::Instant::now() + super::PATIENCE)
             .await,
         super::super::Quit::Incomplete
     );
@@ -629,7 +630,7 @@ async fn quit_supersedes_failed_typed_cut_debt_and_durably_clears_the_scene() {
         ),
     );
     brain.offline(cut(scene));
-    let failed = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
+    let failed = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())
         .await
         .expect("cut reply before timeout")
         .expect("cut reply");
@@ -640,7 +641,7 @@ async fn quit_supersedes_failed_typed_cut_debt_and_durably_clears_the_scene() {
     brain.offline(failed);
     assert_eq!(
         brain
-            .quit(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .quit(tokio::time::Instant::now() + super::PATIENCE)
             .await,
         super::super::Quit::Complete
     );
@@ -665,7 +666,7 @@ async fn quit_with_an_unconfirmed_typed_clear_is_incomplete() {
     );
     assert_eq!(
         brain
-            .quit(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .quit(tokio::time::Instant::now() + super::PATIENCE)
             .await,
         super::super::Quit::Incomplete
     );

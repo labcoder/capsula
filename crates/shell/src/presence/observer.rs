@@ -20,7 +20,9 @@ use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE
 
 use super::geometry::{PanelVisibility, Position};
 use super::line::LineFrame;
-use crate::platform::{self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote};
+use crate::platform::{
+    self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote, ROW_SPANS,
+};
 
 /// Rows one geometry record holds; the line's band at 200 % is under 50.
 pub(super) const ROW_CAP: usize = 512;
@@ -29,9 +31,12 @@ const QUEUE: usize = 256;
 /// Frames painted before the proxy exists, while GPUI opens the windows; one more is a failed post.
 const PENDING: usize = 8;
 
-/// One row: the drawn span, then up to two owned spans, each `[left, right)`. An empty span
-/// has `left == right`; real spans never do.
-type Row = [i32; 6];
+/// Drawn spans per row, one per shape: the line with its drip first, then the body with its stub.
+const DRAWN_SPANS: usize = 2;
+/// One row: [`DRAWN_SPANS`] drawn spans, then [`ROW_SPANS`] owned spans, each `[left, right)`.
+/// An empty span has `left == right`; real spans never do.
+type Row = [i32; 2 * (DRAWN_SPANS + ROW_SPANS)];
+static EMPTY_ROWS: [Row; ROW_CAP] = [[0; 2 * (DRAWN_SPANS + ROW_SPANS)]; ROW_CAP];
 
 /// One commit's exact rows: the line's painted pixels and the band the mask is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,13 +63,12 @@ impl fmt::Display for Geometry {
             if index > 0 {
                 f.write_str(";")?;
             }
-            write!(
-                f,
-                "{},{},{}",
-                Span(row[0], row[1]),
-                Span(row[2], row[3]),
-                Span(row[4], row[5])
-            )?;
+            for (index, [left, right]) in row.as_chunks::<2>().0.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, "{}", Span(*left, *right))?;
+            }
         }
         Ok(())
     }
@@ -79,7 +83,7 @@ impl Geometry {
             origin_y: top,
             rows: usize::try_from(height).unwrap_or(0),
             trimmed: true,
-            spans: [[0; 6]; ROW_CAP],
+            spans: EMPTY_ROWS,
         };
         if geometry.overflowed() {
             return geometry;
@@ -91,15 +95,11 @@ impl Geometry {
                     .contains(&y)
                     .then_some([paint_left, paint_left + paint_width]),
             );
-            let [first, second] = frame.row_spans(y).map(span);
-            *row = [
-                drawn_left,
-                drawn_right,
-                first[0],
-                first[1],
-                second[0],
-                second[1],
-            ];
+            row[..2].copy_from_slice(&[drawn_left, drawn_right]);
+            let owned = row[2 * DRAWN_SPANS..].as_chunks_mut::<2>().0;
+            for (at, span_of_row) in owned.iter_mut().zip(frame.row_spans(y)) {
+                *at = span(span_of_row);
+            }
         }
         geometry
     }
@@ -109,7 +109,7 @@ impl Geometry {
             origin_y: 0,
             rows: 0,
             trimmed: true,
-            spans: [[0; 6]; ROW_CAP],
+            spans: EMPTY_ROWS,
         }
     }
 
@@ -682,7 +682,7 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
             qpc_frequency,
         } => writeln!(
             out,
-            "startup version=1 pid={pid} dock_hwnd={:#x} panel_hwnd={:#x} proxy_hwnd={proxy_hwnd:#x} scale={} \
+            "startup version=2 pid={pid} dock_hwnd={:#x} panel_hwnd={:#x} proxy_hwnd={proxy_hwnd:#x} scale={} \
              position={:?} work_area={} dock={} overlay={} panel={} qpc_frequency={qpc_frequency} \
              row_cap={ROW_CAP} queue={QUEUE} repaint_message={OBSERVER_REPAINT_MESSAGE:#x} \
              marker={INPUT_SESSION_MARKER:#x}",
@@ -773,7 +773,8 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Commit, Drawn, Geometry, Ledger, Observer, ROW_CAP, Record, Shared, Surface, Totals, line,
+        Commit, Drawn, EMPTY_ROWS, Geometry, Ledger, Observer, ROW_CAP, Record, Shared, Surface,
+        Totals, line,
     };
     use crate::presence::line::LineFrame;
 
@@ -795,21 +796,29 @@ mod tests {
             (geometry.origin_y, geometry.rows, geometry.trimmed),
             (10, 24, true)
         );
-        assert_eq!(geometry.spans[0], [0, 0, 10, 80, 0, 0], "band, not drawn");
-        assert_eq!(geometry.spans[9], [0, 0, 10, 80, 0, 0]);
+        assert_eq!(
+            geometry.spans[0],
+            [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
+            "band, not drawn"
+        );
+        assert_eq!(geometry.spans[9], [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
             geometry.spans[10],
-            [10, 80, 10, 80, 0, 0],
+            [10, 80, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
             "the line's first row"
         );
-        assert_eq!(geometry.spans[13], [10, 80, 10, 80, 0, 0], "its last row");
-        assert_eq!(geometry.spans[14], [0, 0, 10, 80, 0, 0]);
+        assert_eq!(
+            geometry.spans[13],
+            [10, 80, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
+            "its last row"
+        );
+        assert_eq!(geometry.spans[14], [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
             geometry.spans[23],
-            [0, 0, 10, 80, 0, 0],
+            [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
             "the band's last row"
         );
-        assert_eq!(geometry.spans[24], [0; 6], "past the band");
+        assert_eq!(geometry.spans[24], [0; 12], "past the band");
     }
 
     #[test]
@@ -817,7 +826,7 @@ mod tests {
         let geometry = Geometry::of(&frame([0, 290, 600, 20], [0, 0, 600, 601]));
         assert!(geometry.rows > ROW_CAP);
         assert!(geometry.overflowed());
-        assert_eq!(geometry.spans, [[0; 6]; ROW_CAP], "no partial rows");
+        assert_eq!(geometry.spans, EMPTY_ROWS, "no partial rows");
         assert_eq!(
             text(&Record::Geometry { id: 4, geometry }),
             "geometry id=4 origin_y=0 rows=601 trimmed=true overflow\n"
@@ -872,11 +881,23 @@ mod tests {
     }
 
     #[test]
+    fn a_row_writes_both_shapes_and_every_owned_span() {
+        let mut geometry = Geometry::empty();
+        geometry.rows = 1;
+        geometry.spans[0] = [0, 0, 20, 22, 1, 2, 4, 5, 7, 8, 10, 11];
+        assert_eq!(
+            text(&Record::Geometry { id: 2, geometry }),
+            "geometry id=2 origin_y=0 rows=1 trimmed=true spans=-,20:22,1:2,4:5,7:8,10:11\n",
+            "the second shape's drawn span and all four owned spans are written, none merged"
+        );
+    }
+
+    #[test]
     fn records_are_one_line_each() {
         let geometry = Geometry::of(&frame([10, 6, 4, 1], [10, 5, 4, 3]));
         assert_eq!(
             text(&Record::Geometry { id: 1, geometry }),
-            "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,10:14,-;10:14,10:14,-;-,10:14,-\n"
+            "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,-,10:14,-,-,-;10:14,-,10:14,-,-,-;-,-,10:14,-,-,-\n"
         );
         let drawn = Drawn {
             epoch: 7,

@@ -2,6 +2,7 @@
 //! physical-input/session guards, click receipts, Esc lease and cover placement.
 
 use std::cell::{Cell, RefCell};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
@@ -12,6 +13,7 @@ use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ACTIVATE_KEYBOARD_LAYOUT_FLAGS, ActivateKeyboardLayout, EnableWindow, GetCapture, GetFocus,
     GetKeyState, GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
@@ -29,15 +31,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetMessageExtraInfo, GetMessageTime, GetMessageW, GetPropW,
     GetQueueStatus, GetWindowLongPtrW, ISMEX_NOSEND, InSendMessageEx, IsWindow, MSG, MoveWindow,
     PostQuitMessage, QS_INPUT, RegisterClassW, SW_HIDE, SW_SHOWNA, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetPropW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetPropW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
+use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict, away};
 use super::guard::{self, StopCause, physical_input};
 use super::switch_window;
 use super::{
@@ -67,6 +69,8 @@ pub(super) const COVER: u32 = WM_APP + 20;
 pub(super) const UNCOVER: u32 = WM_APP + 21;
 pub(super) const REARM: u32 = WM_APP + 22;
 pub(super) const OPEN_GATE: u32 = WM_APP + 23;
+/// Arms without a Ready press once input has been idle for `wparam` milliseconds.
+pub(super) const ARM_IDLE: u32 = WM_APP + 25;
 
 /// How often one fixture may take or give back its Esc reservation.
 const MAX_ESCAPE_TOGGLES: u32 = 64;
@@ -204,7 +208,9 @@ unsafe extern "system" fn ready_proc(
         && property(root, READY) == 0
         && property(root, OPEN) == 0
         && property(root, ABORT) == 0
-        && arm(root, up_time).is_err()
+        && selections()
+            .and_then(|feel| arm(root, up_time, feel))
+            .is_err()
     {
         // SAFETY: a failed arm stops only this fixture's own message loop.
         unsafe { PostQuitMessage(1) };
@@ -214,9 +220,8 @@ unsafe extern "system" fn ready_proc(
 
 /// Freezes the verdicts, focuses the EDIT, arms the physical-input and session guards, and only
 /// then publishes Ready. Any input after the release spoils this attempt, not the session.
-fn arm(root: HWND, up_time: u32) -> Result<()> {
+fn arm(root: HWND, up_time: u32, feel: usize) -> Result<()> {
     let controls = controls()?;
-    let feel = selections()?;
     for verdict in controls.verdicts {
         // SAFETY: disables this thread's own combo box; it returns the prior state, not an error.
         let _was_disabled = unsafe { EnableWindow(verdict, false) };
@@ -231,6 +236,27 @@ fn arm(root: HWND, up_time: u32) -> Result<()> {
     set_property(root, INTERRUPTED, usize::from(armed != up_time))?;
     set_property(root, ARMED_INPUT, usize::try_from(armed)?)?;
     set_property(root, READY, 1)
+}
+
+/// The owner's away rule: arms with no feel verdicts once nobody has touched Rez for `away_ms`.
+/// 1 armed, 2 not idle yet, 3 the fixture could not take the foreground.
+fn arm_idle(root: HWND, away_ms: usize) -> Result<usize> {
+    ensure!(
+        property(root, READY) == 0 && property(root, OPEN) == 0 && property(root, ABORT) == 0,
+        "only an unarmed fixture may arm on idle"
+    );
+    let input = last_input()?;
+    // SAFETY: reads the system tick count only.
+    let now = unsafe { GetTickCount() };
+    if !away(input, now, Duration::from_millis(u64::try_from(away_ms)?)) {
+        return Ok(2);
+    }
+    // SAFETY: raises only this fixture's own window; idle past the foreground lock timeout allows it.
+    if !unsafe { SetForegroundWindow(root) }.as_bool() {
+        return Ok(3);
+    }
+    arm(root, input, 0)?;
+    Ok(1)
 }
 
 fn selections() -> Result<usize> {
@@ -402,6 +428,10 @@ unsafe extern "system" fn fixture_proc(
         COVER => return answer(cover(window, wp, lp)),
         UNCOVER => return answer(uncover(window)),
         REARM => return answer(rearm(window)),
+        ARM_IDLE => {
+            return arm_idle(window, wp.0)
+                .map_or(LRESULT(0), |response| LRESULT(response.cast_signed()));
+        }
         OPEN_GATE => {
             return open_gate(window, wp.0)
                 .map_or(LRESULT(0), |response| LRESULT(response.cast_signed()));

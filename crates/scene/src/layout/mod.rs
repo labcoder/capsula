@@ -158,6 +158,12 @@ impl PreparedStep {
     pub fn step(&self) -> &crate::Step {
         &self.ticket.step
     }
+
+    /// Requested bytes of the original record and its Arc, even when the run aliases it.
+    /// Walks the record; compute on the worker before returning ownership that can outlive its log.
+    pub fn original_bytes(&self) -> usize {
+        heap::ARC_HEADER + heap::step_bytes(&self.ticket.step)
+    }
     /// Compiled input for entrance and explicit-track compilation in A7; the original unless
     /// it held Mermaid.
     pub(crate) fn run(&self) -> &crate::Step {
