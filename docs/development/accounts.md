@@ -159,10 +159,13 @@ from that key set, skips unparseable keys and rejects duplicate key identifiers.
 lacks gets the set fetched once more, since one fetched while the provider rotates its keys can
 lack the new key; still missing, it's `UnknownKey`. The clock is read again after that refetch,
 so a token that expires while it runs is refused. A selected key
-must permit signatures and RS256 when those metadata fields are present. It verifies the
-signature before trusting claims.
+must be RSA, and must permit signatures and RS256 when those metadata fields are present. It
+verifies the signature itself, with ring's RSA PKCS#1 v1.5 SHA-256 check for 2048- to 8192-bit
+keys, before trusting claims: the token is exactly three unpadded base64url parts, the header's
+`alg` is `RS256`, and a header with `crit` is refused. Claims parse into typed fields, so a
+claim with the wrong JSON type is refused rather than read as absent.
 Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
-wall `Clock`, not the JWT library's hidden clock; nonce comparison is constant-time.
+wall `Clock`, not a library's hidden clock; nonce comparison is constant-time.
 `check_subject` rejects a different saved subject, and `permits_plan` requires the exact
 returned `chatgpt.tokens.use.direct` scope. A verified ID token alone doesn't enable inference.
 
