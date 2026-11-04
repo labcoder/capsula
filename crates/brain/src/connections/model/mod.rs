@@ -12,6 +12,7 @@ pub mod wire;
 mod tests;
 
 use std::fmt;
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
@@ -70,6 +71,27 @@ impl fmt::Debug for ResponsesBody {
     }
 }
 
+/// Where a stream's events go: each one in order, then, after each read, a wait until that
+/// read's events are taken, which can stop the stream.
+pub trait Events {
+    /// The next event.
+    fn event(&mut self, event: &SseEvent);
+
+    /// Waits until the events so far are taken; `Break` stops reading, and the stream ends
+    /// with [`Failure::Protocol`].
+    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send;
+}
+
+impl<F: FnMut(&SseEvent)> Events for F {
+    fn event(&mut self, event: &SseEvent) {
+        self(event);
+    }
+
+    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+        std::future::ready(ControlFlow::Continue(()))
+    }
+}
+
 /// One send's state. Fields drop in declaration order, so the connection always closes before
 /// the lease settles.
 struct Attempt<Io, L> {
@@ -77,10 +99,10 @@ struct Attempt<Io, L> {
     lease: Option<L>,
 }
 
-/// Sends `body` once `ask` grants a lease, and hands each event to `on_event` until
-/// `response.completed`, which it hands out too. `ask` is the coordinator's gate for this one
-/// attempt: `None` means Rebuild, and the lease settles when it drops. A retry is another call,
-/// so it asks again.
+/// Sends `body` once `ask` grants a lease, and hands each event to `out` until
+/// `response.completed`, which it hands out too, waiting after each read until `out` took them.
+/// `ask` is the coordinator's gate for this one attempt: `None` means Rebuild, and the lease
+/// settles when it drops. A retry is another call, so it asks again.
 ///
 /// The lease settles once the request's last byte is flushed to the kernel, or once the
 /// connection holding it is closed. Nothing is retried after a byte is written; an idle
@@ -97,7 +119,7 @@ pub async fn stream<C: Connect, L>(
     bearer: &Secret<Zeroizing<String>>,
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
-    mut on_event: impl FnMut(&SseEvent),
+    mut out: impl Events,
 ) -> Result<(), Failure> {
     let request = wire::request(bearer.expose(), body.0.expose())?;
     let lease = ask.await.ok_or(Failure::Rebuild)?;
@@ -139,7 +161,13 @@ pub async fn stream<C: Connect, L>(
     let mut body = Body::new(head.framing);
     let mut progress = match head.media {
         Media::EventStream => Progress::More,
-        Media::Absent => events.feed(&sniff(conn, &mut body).await?, &mut on_event)?,
+        Media::Absent => {
+            let fed = events.feed(&sniff(conn, &mut body).await?, &mut |event| out.event(event))?;
+            if out.taken().await.is_break() {
+                return Err(Failure::Protocol);
+            }
+            fed
+        }
         Media::Other => return Err(Failure::Protocol),
     };
     while progress == Progress::More {
@@ -147,9 +175,12 @@ pub async fn stream<C: Connect, L>(
             .next(&mut body, IDLE)
             .await?
             .ok_or(Failure::Truncated)?;
-        let fed = events.feed(&conn.buf[..length], &mut on_event);
+        let fed = events.feed(&conn.buf[..length], &mut |event| out.event(event));
         conn.buf.drain(..length);
         progress = fed?;
+        if out.taken().await.is_break() {
+            return Err(Failure::Protocol);
+        }
     }
     // `response.completed` isn't the body's end: reuse needs the framing read to its end.
     let drained = timeout(DRAIN, async {

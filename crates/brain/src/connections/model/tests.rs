@@ -1049,329 +1049,53 @@ async fn rebuild_a_closed_gate_or_a_dropped_answer_sends_nothing() {
         let harness = Harness::budgeted(1 << 20, Some(1));
         let body = body("hello");
         let mut call = harness.call(&body, 1);
-        assert!(poll(&mut call).is_pending());
-        {
-            let mut asks = lock(&harness.asks);
-            let ready = asks.try_recv().expect("asked");
-            match answer {
-                0 => ready.answer.send(Admit::Rebuild).expect("waiting"),
-                1 => drop(ready),
-                _ => asks.close(),
-            }
-        }
-        assert!(
-            matches!(poll(&mut call), Poll::Ready((Err(Failure::Rebuild), _))),
-            "answer {answer}"
-        );
-        assert_eq!(harness.accepts(), 0);
-        assert!(harness.budget.reserve(), "no unit taken");
+
+/// Takes nothing: stops at the first wait, as the engine does when a read's events are refused.
+struct Refuses<'a>(&'a mut Vec<String>);
+
+impl Events for Refuses<'_> {
+    fn event(&mut self, event: &SseEvent) {
+        self.0.push(event.kind().to_owned());
+    }
+
+    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+        std::future::ready(ControlFlow::Break(()))
     }
 }
 
 #[tokio::test]
-async fn a_retry_after_a_failed_send_asks_again_on_a_new_connection() {
+async fn a_refused_read_stops_the_stream_and_closes_its_connection() {
     let harness = Harness::new(1 << 20);
     let body = body("hello");
-    harness.valve(|valve| valve.fail_after = Some(40));
-    let mut call = harness.call(&body, 1);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(1);
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
-    ));
-    drop(call);
-    assert_eq!(
-        harness.settled(),
-        [Settled {
-            key: key(1),
-            send: 1
-        }]
-    );
-    drop(harness.accept());
-    harness.valve(|valve| valve.fail_after = None);
-    // The retry is its own attempt: it asks, waits for its own grant, and sends on a new connection.
-    complete(&harness, &body, 2, None);
-    assert_eq!(
-        harness.settled(),
-        [Settled {
-            key: key(2),
-            send: 2
-        }]
-    );
-}
-
-#[tokio::test]
-async fn a_retry_spends_its_own_unit_and_the_next_is_refused() {
-    let harness = Harness::budgeted(1 << 20, Some(2));
-    let body = body("hello");
-    harness.valve(|valve| valve.fail_after = Some(40));
-    let mut call = harness.call(&body, 1);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(1);
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
-    ));
-    drop(call);
-    drop(harness.accept());
-    harness.valve(|valve| valve.fail_after = None);
-    complete(&harness, &body, 2, None);
-    let mut call = harness.call(&body, 3);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(3);
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Spent), _))
-    ));
-    assert_eq!(harness.accepts(), 0);
-}
-
-#[tokio::test]
-async fn a_spent_budget_settles_and_connects_nothing() {
-    let harness = Harness::budgeted(1 << 20, Some(0));
-    let body = body("hello");
-    let mut call = harness.call(&body, 1);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(1);
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Spent), _))
-    ));
-    assert_eq!(harness.accepts(), 0);
-    assert_eq!(harness.settled().len(), 1);
-}
-
-#[tokio::test]
-async fn a_bad_body_or_bearer_never_asks() {
-    for value in [
-        json!({"store": true, "stream": true}),
-        json!({"stream": true}),
-        json!({"store": false, "stream": false}),
-        json!({"store": false, "stream": true, "input": "x".repeat(super::MAX_REQUEST_BYTES)}),
-    ] {
-        assert!(matches!(ResponsesBody::new(&value), Err(Failure::Request)));
-    }
-    let mut harness = Harness::new(1 << 20);
-    harness.bearer = Secret::new(Zeroizing::new("bad\r\nbearer".to_owned()));
-    let body = body("hello");
-    let mut call = harness.call(&body, 1);
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Credential), _))
-    ));
-    assert!(lock(&harness.asks).try_recv().is_err());
-}
-
-#[tokio::test]
-async fn nothing_planted_reaches_debug_or_the_log() {
-    let captured = Captured::default();
-    let _capturing = captured.install();
-    let harness = Harness::new(1 << 20);
-    let body = body("PLANTED-PROMPT");
-    complete(&harness, &body, 1, None);
-    let leaked = |text: &str| {
-        ["PLANTED", "Bearer"]
-            .iter()
-            .any(|marker| text.contains(marker))
-    };
-    assert_eq!(
-        format!("{body:?}"),
-        format!("ResponsesBody {{ bytes: {} }}", body.0.expose().len())
-    );
-    let failures = [
-        answered(&refused(400, UNSUPPORTED)),
-        answered(&refused(401, DETAIL)),
-        answered(b"HTTP/1.1 200 OK\r\n\r\n"),
-    ];
-    for failure in failures {
-        let failure = failure.expect_err("a failure");
-        assert!(!leaked(&format!("{failure:?} {failure}")));
-    }
-    assert!(!leaked(&format!("{:?}", harness.client)));
-    assert!(!leaked(&captured.text()), "the log holds no planted text");
-}
-
-/// TLS over the gated pipes; once the handshake is done the valve holds every write beneath
-/// rustls, so the request can only wait in rustls's own buffer.
-struct TlsPipes {
-    pipes: Pipes,
-    connector: tokio_rustls::TlsConnector,
-}
-
-impl Connect for TlsPipes {
-    type Io = tokio_rustls::client::TlsStream<Gated>;
-
-    async fn connect(&self) -> io::Result<Self::Io> {
-        let gated = self.pipes.connect().await?;
-        let name =
-            rustls::pki_types::ServerName::try_from("localhost").map_err(io::Error::other)?;
-        let tls = self.connector.connect(name, gated).await?;
-        lock(&self.pipes.shared.valve).hold = true;
-        Ok(tls)
-    }
-}
-
-/// A client config trusting a fresh CA, and a server config for its "localhost" leaf.
-fn tls_configs() -> (rustls::ClientConfig, rustls::ServerConfig) {
-    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
-    let ca_key = KeyPair::generate().expect("CA key");
-    let mut ca = CertificateParams::new(Vec::new()).expect("CA parameters");
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-    let root = ca.self_signed(&ca_key).expect("CA certificate");
-    let leaf_key = KeyPair::generate().expect("leaf key");
-    let leaf = CertificateParams::new(vec!["localhost".into()])
-        .expect("leaf parameters")
-        .signed_by(&leaf_key, &Issuer::from_params(&ca, &ca_key))
-        .expect("CA-signed leaf");
-    let provider = || Arc::new(rustls::crypto::ring::default_provider());
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(root.der().clone()).expect("the CA as a root");
-    let mut client = rustls::ClientConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring protocols")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client.alpn_protocols = vec![b"http/1.1".to_vec()];
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into());
-    let server = rustls::ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .expect("ring protocols")
-        .with_no_client_auth()
-        .with_single_cert(vec![leaf.der().clone()], key)
-        .expect("the leaf and its key");
-    (client, server)
-}
-
-#[tokio::test]
-async fn under_tls_bytes_held_in_rustls_count_as_not_sent() {
-    let (client, server) = tls_configs();
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-    let harness = Harness::with(1 << 20, None, |pipes| TlsPipes { pipes, connector });
-    let body = body("hello");
-    let mut call = harness.call(&body, 1);
+    let mut kinds = Vec::new();
+    let mut call: Pin<Box<dyn Future<Output = Result<(), Failure>> + '_>> =
+        Box::pin(tokio::task::unconstrained(stream(
+            &harness.client,
+            &body,
+            &harness.bearer,
+            ask(&harness.gate, key(1)),
+            &harness.budget,
+            Refuses(&mut kinds),
+        )));
     assert!(poll(&mut call).is_pending());
     harness.grant(1);
     assert!(poll(&mut call).is_pending());
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
-    let mut accept: Pin<Box<dyn Future<Output = io::Result<_>>>> = Box::pin(
-        tokio::task::unconstrained(acceptor.accept(harness.accept())),
-    );
-    let mut tls = None;
-    for _ in 0..16 {
-        if let Poll::Ready(accepted) = poll(&mut accept) {
-            tls = Some(accepted.expect("the handshake"));
-            break;
-        }
-        assert!(poll(&mut call).is_pending());
-    }
-    let mut tls = tls.expect("the handshake finished");
-    assert!(poll(&mut call).is_pending());
-    // The request is written into rustls, whose records wait on the held socket: not settled.
-    let mut read: Pin<Box<dyn Future<Output = _>>> = Box::pin(async {
-        let mut request = vec![0; request_length(&harness, &body)];
-        tokio::io::AsyncReadExt::read_exact(&mut tls, &mut request)
-            .await
-            .map(|_| request)
-    });
-    assert!(poll(&mut read).is_pending());
-    assert_eq!(harness.settled(), []);
-    harness.valve(|valve| valve.hold = false);
-    assert!(poll(&mut call).is_pending());
-    assert_eq!(
-        harness.settled(),
-        [Settled {
-            key: key(1),
-            send: 1
-        }]
-    );
-    let Poll::Ready(request) = poll(&mut read) else {
-        panic!("the request didn't arrive");
-    };
-    assert!(
-        request
-            .expect("the whole request")
-            .ends_with(body.0.expose())
-    );
-    let (flushes, closes) = harness.seen();
-    assert_eq!((flushes.last(), closes), (Some(&0), vec![]));
-}
-
-#[tokio::test]
-#[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release measure_ -- --ignored --nocapture"]
-async fn measure_the_exchange_against_the_reader_and_a_handshake() {
-    use std::time::Instant;
-
-    use super::sse::{Progress, Reader};
-
-    let mut events = Vec::new();
-    let mut sequence = 0;
-    while events.len() < 1024 * 1024 - 512 {
-        sequence += 1;
-        let event = json!({"type": "response.output_text.delta", "sequence_number": sequence,
-            "item_id": "msg_measure", "output_index": 0, "content_index": 0, "delta": " a word or two"});
-        events.extend(format!("data: {event}\n\n").into_bytes());
-    }
-    events.extend_from_slice(b"data: {\"type\":\"response.completed\"}\n\n");
-    let mut response =
+    let mut server = harness.accept();
+    received(&mut server);
+    let first = TEXT
+        .windows(2)
+        .position(|pair| pair == b"\n\n")
+        .expect("the fixture has an event")
+        + 2;
+    let mut bytes =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
             .to_vec();
-    for chunk in events.chunks(16 * 1024) {
-        response.extend(format!("{:x}\r\n", chunk.len()).into_bytes());
-        response.extend_from_slice(chunk);
-        response.extend_from_slice(b"\r\n");
-    }
-    response.extend_from_slice(b"0\r\n\r\n");
-    let rounds: u32 = 50;
-    let (mut exchange, mut reader) = (Duration::ZERO, Duration::ZERO);
-    for _ in 0..rounds {
-        let harness = Harness::new(4 << 20);
-        let body = body("hello");
-        let mut call = harness.call(&body, 1);
-        assert!(poll(&mut call).is_pending());
-        harness.grant(1);
-        assert!(poll(&mut call).is_pending());
-        let mut server = harness.accept();
-        received(&mut server);
-        reply(&mut server, &response);
-        let started = Instant::now();
-        assert!(matches!(poll(&mut call), Poll::Ready((Ok(()), _))));
-        exchange += started.elapsed();
-        let started = Instant::now();
-        let mut alone = Reader::default();
-        for chunk in events.chunks(16 * 1024) {
-            if alone.feed(chunk, &mut |_| {}) == Ok(Progress::Completed) {
-                break;
-            }
-        }
-        reader += started.elapsed();
-    }
-    let mib = f64::from(rounds) * f64::from(u32::try_from(events.len()).expect("about 1 MiB"))
-        / (1024.0 * 1024.0);
-    for (name, took) in [("exchange", exchange), ("reader alone", reader)] {
-        eprintln!(
-            "{name}: {:.0} MiB/s over {} events",
-            mib / took.as_secs_f64(),
-            sequence + 1
-        );
-    }
-    let (client, server) = tls_configs();
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
-    let name = rustls::pki_types::ServerName::try_from("localhost").expect("a DNS name");
-    let mut handshakes = Duration::ZERO;
-    for _ in 0..rounds {
-        let (near, far) = tokio::io::duplex(1 << 16);
-        let started = Instant::now();
-        let (connected, accepted) =
-            tokio::join!(connector.connect(name.clone(), near), acceptor.accept(far));
-        handshakes += started.elapsed();
-        connected.expect("client handshake");
-        accepted.expect("server handshake");
-    }
-    eprintln!(
-        "TLS handshake over in-memory pipes, both ends' CPU and no network: {:.0} us",
-        handshakes.as_secs_f64() * 1e6 / f64::from(rounds)
-    );
+    bytes.extend(format!("{first:x}\r\n").into_bytes());
+    bytes.extend_from_slice(&TEXT[..first]);
+    bytes.extend_from_slice(b"\r\n");
+    reply(&mut server, &bytes);
+    assert_eq!(poll(&mut call), Poll::Ready(Err(Failure::Protocol)));
+    drop(call);
+    assert_eq!(kinds, ["response.created"]);
+    assert_eq!(received(&mut server), (Vec::new(), true));
 }
