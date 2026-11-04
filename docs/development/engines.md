@@ -235,3 +235,34 @@ its call ready.
 A round keeps at most 64 calls and items and 1 MiB of ids, arguments and items [guesses], charged
 before each is kept. A stream whose bytes run out has no ending of its own, so the round's pump
 reports it as `Truncated`.
+
+## The Claude Code stream
+
+Claude Code is driven through its public CLI with `--output-format stream-json --verbose
+--include-partial-messages`. `engines/claude_code/stream.rs` reads its stdout in two steps, both
+sync and one line at a time, so the launch can audit `system:init` before it passes the next line
+on:
+
+- **`LineFramer`** charges every byte to a 16 MiB budget [guess] before framing, ignored lines
+  included, and yields complete lines of at most 1 MiB [guess], line feed excluded. A partial line
+  past the bound fails at once.
+- **`StreamMapper::line`** maps one line to `Event` (a text delta), `End` (the question's usage
+  and how it ended), `Control` (a `control_response`, for the audit before input), `Init` (the
+  facts for the audit after it) or `Ignored`. Unknown types are counted and ignored.
+
+| Line | Maps to |
+|---|---|
+| `stream_event` `content_block_delta` with `text_delta` | `TextDelta`; text comes only from here, so without `--include-partial-messages` an answer is empty |
+| `assistant`, `user`, `system:status`, `system:api_retry` | ignored; `assistant` repeats the streamed text |
+| `stream_event` `message_start` | one native request; the first one's usage is kept for the prompt-cache decision. A 9th fails the question with `TurnCap` and marks the version's turn cap broken |
+| `result` | `Usage { whole, first_request }`, then `Completed`, `Failed(TurnCap)` for `error_max_turns` (the cap working, not broken), or `Failed(Provider)`; anything after it is ignored |
+| EOF before a result | `Truncated` |
+
+Claude Code retries a cut request itself (`system:api_retry`, up to 10 times in 2.1.306) and
+streams only the attempt that finished, so a retry doesn't count as a second native request. No
+line's content is ever logged, and every type here prints only kinds, lengths and counts in `Debug`.
+
+`Init` keeps `analytics_disabled` as reported (`None` when it's missing or not a boolean) for the
+connection to show; it's never a reason to refuse the route. The recordings in
+`fixtures/claude-code/` are checked by a normal test: no decoded string may hold a drive, UNC or
+`/`-rooted path, `Users\`, or a UUID other than the all-zero placeholder.
