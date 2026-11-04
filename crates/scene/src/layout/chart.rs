@@ -45,7 +45,8 @@ struct Plot {
 }
 impl Plot {
     fn payload_bytes(&self) -> usize {
-        size_of::<Self>()
+        super::heap::ARC_HEADER
+            + size_of::<Self>()
             + self.categories.len() * size_of::<Text>()
             + self
                 .categories
@@ -69,7 +70,7 @@ pub(super) struct Basis {
 }
 impl Basis {
     fn bytes(&self) -> usize {
-        size_of::<Self>() + self.baselines.len() * size_of::<[f64; 2]>()
+        super::heap::ARC_HEADER + size_of::<Self>() + self.baselines.len() * size_of::<[f64; 2]>()
     }
 }
 impl fmt::Debug for Basis {
@@ -589,12 +590,15 @@ fn reflow(
 mod tests {
     use super::axis::compact;
     use super::*;
-    use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare};
+    use crate::layout::{
+        Glide, PrepareInput, PreparedStep, SurfaceGeometry, heap, prepare, state::Motions,
+    };
     use crate::{
         Admission, GlobalBudget, Record, SceneState, StopCut,
         display::{MeasureError, TextMeasure},
         parse_record,
         record::Chart,
+        state::work::Motion,
         text::Bounded,
         theme::Theme,
     };
@@ -897,17 +901,35 @@ mod tests {
         let before = LayoutState::new(&scene);
         let [c, s, t]: [WireId; 3] =
             ["c", "s", "t"].map(|id| id.to_owned().try_into().expect("id"));
-        // Each one-byte id has two heap copies; a series source owns its id, "c" and two points.
-        let index = size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3 + 2;
-        let series = size_of::<Op>() + 2 + 2 * size_of::<Point>();
+        let arc = heap::ARC_HEADER;
+        // Both trees fit one leaf, each one-byte id has two heap copies and the version is one Arc.
+        let index = |objects: usize| {
+            heap::btree::<WireId, Placed>(objects)
+                + heap::btree::<Handle, WireId>(objects)
+                + 2 * objects
+                + arc
+        };
+        // A series source owns its id, "c" and two points.
+        let series = arc + size_of::<Op>() + 2 + 2 * size_of::<Point>();
+        let motion = arc + size_of::<Motions>() + heap::btree::<&str, Motion>(1);
+        let own = |step: &PreparedStep| {
+            step.display.items.capacity() * size_of::<Item>()
+                + step.removed.capacity() * size_of::<Handle>()
+                + step.glides.capacity() * size_of::<Glide>()
+                + arc
+                + size_of::<BTreeMap<usize, usize>>()
+        };
+        // Three primitive arrays and six two-point lines, then the plot and both bases.
         let full = 18 * size_of::<Prim>()
             + 12 * size_of::<Vec2>()
             + 10
-            + 3 * index
+            + 9 * arc
+            + index(3)
+            + arc
             + size_of::<Plot>()
             + 2 * size_of::<Text>()
             + 3
-            + 2 * (size_of::<Basis>() + 2 * size_of::<[f64; 2]>());
+            + 2 * (arc + size_of::<Basis>() + 2 * size_of::<[f64; 2]>());
         let bases = |state: &LayoutState| {
             [&s, &t].map(|id| Arc::clone(state.objects[id].chart_basis.as_ref().expect("basis")))
         };
@@ -928,10 +950,12 @@ mod tests {
             &before,
             r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300],"opacity":0.5,"categories":["ab","c"],"x":{"min":-0.5,"max":1.5},"y":{"min":-5,"max":5}}},{"series":{"id":"s","in":"c","opacity":0.5,"data":[1,2]}},{"series":{"id":"t","in":"c","data":[2,1]}},{"anim":{"target":"s","track":"opacity","keys":[[0,0.75]]}}]}}"#,
         );
+        // The chart source owns its id, two category texts and their three bytes.
+        let chart = arc + size_of::<Op>() + 4 + 2 * size_of::<Text>();
         assert_eq!(
             first.resident_bytes,
-            full + size_of::<Op>() + 4 + 2 * size_of::<Text>() + 2 * series,
-            "the chart source owns its id, two category texts and their three bytes"
+            full + chart + 2 * series + motion + own(&first),
+            "every source once, and s's track owns a motion map"
         );
         let initial = bases(&first.after);
         assert!(
@@ -949,7 +973,11 @@ mod tests {
             &first.after,
             r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
         );
-        assert_eq!(second.resident_bytes, full + series);
+        assert_eq!(
+            second.resident_bytes,
+            full + series + own(&second),
+            "the refit shares s's motion map"
+        );
         let refit = bases(&second.after);
         assert!(
             !Arc::ptr_eq(&initial[0], &refit[0])
@@ -988,7 +1016,20 @@ mod tests {
         );
         assert_eq!(
             next.resident_bytes,
-            2 * size_of::<Prim>() + 2 * index + series
+            arc + 2 * size_of::<Prim>() + index(2) + series + motion + own(&next),
+            "the new track copies s's motion map instead of writing through the detached prefix"
+        );
+        let envelope = |state: &LayoutState| {
+            let motion = state.objects[&s]
+                .motion
+                .as_ref()
+                .expect("s owns an opacity track");
+            motion["opacity"].min[0].to_bits()
+        };
+        assert_eq!(
+            (envelope(&detached), envelope(&next.after)),
+            (0.75_f32.to_bits(), 0.25_f32.to_bits()),
+            "the detached prefix keeps its own envelope"
         );
         let kept = bases(&next.after);
         assert!(

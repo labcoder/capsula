@@ -549,15 +549,22 @@ The shell's recovery deadline is sized from the measurement below.
 `PreparedStep::resident_bytes` charges what a result adds to its predecessor: new
 primitive and vertex arrays, chart bases and plots, and the layout's own `Op` source
 copies, plus the result's full index, because every result holds its own copy of the
-maps. `LayoutState::resident_bytes()` charges everything a retained layout holds,
+maps, the display/removal/glide vectors at capacity, and the ticket's compiled record
+and private facts. Motion maps are shared between prefixes and copied only when an
+explicit track or generated glide changes them. `LayoutState::resident_bytes()` charges everything a retained layout holds,
 counting each shared allocation once by pointer. So the retained layout plus the
 queued results make up the scene's residency, and a recovered layout charges exactly
 what the live one did. Source copies are counted field by field for each record
 type: each string's bytes and each sequence's elements at their own size, which
 matches what they allocate because cloned records have exact capacities. The index
-charge is a fixed allowance per object for its two map entries, plus both heap copies
-of its id; map node overhead, motion maps and allocator headers aren't counted beyond
-it. Preparation rejects a single estimate over 64 MiB, and the shell enforces the
+charge covers all three B-trees with a conservative node allowance pinned to Rust 1.98,
+plus both heap copies of each id and the version allocation. Shared source copies,
+motion maps, geometry, chart storage and private facts include their Arc headers
+and are counted once by allocation identity. Empty indexes release retained root
+leaves, and preparation discards sizing facts before publishing its result. These
+are requested-byte allowances, not RSS or allocator bookkeeping bounds. When a ready
+result becomes the rest, charge its layout in full and keep only later ready deltas.
+Preparation rejects a single estimate over 64 MiB, and the shell enforces the
 64 MiB cap across visible scenes.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
