@@ -26,6 +26,30 @@ Installed files live in `%LOCALAPPDATA%\<DATA_DIR>\models\<part>\<file>`, where 
 are `speech-input` and `spoken-replies`. The native libraries ship beside `kumochid.exe`, and
 nothing downloads them.
 
+## Download path
+
+`brain::voice::download::Downloader` installs one part from the pinned manifest. Its caller
+supplies the models folder under `platform::data_dir`. Construction makes no request, and
+startup never resumes anything automatically; the install task and UI arrive in PR 8.
+
+The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
+compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
+port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP literals are refused.
+Signed CDN queries never enter diagnostics.
+
+Existing final files are size- and SHA-256-checked; a bad final is removed before any request.
+Free space must cover the remaining bytes plus 10%, rounded up. An exclusively locked `.part`
+is rehashed before a Range request. A valid 206 appends; 200 replaces the prefix. A bad range
+or 416 restarts once. The manifest bounds the stream, even without Content-Length; a 200 with
+a different length is rejected before reading its body. Only a complete hash match is synced
+and atomically moved into place.
+
+Cancellation, a short body, transport failure, 429, 5xx or a 30-second idle timeout keep the
+partial for the next explicit attempt. Size and hash failures delete it. Cancellation also
+interrupts prefix hashing. Connecting is bounded to 30 seconds; there is no total download
+deadline. Byte progress is coalesced to at most four updates a second. Tests use only injected
+loopback TLS fixtures; the ignored `measure_download_head` requires explicit permission.
+
 ## Spoken replies
 
 `brain::voice::tts` turns text into 24 kHz mono PCM with Phonon 31M (Q8) and the Juniper voice.

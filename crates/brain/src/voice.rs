@@ -1,3 +1,4 @@
-//! Optional local voice: spoken replies now; speech input and downloads in their own PRs.
+//! Optional local voice: models installed only on an explicit request, and spoken replies.
 
+pub(crate) mod download;
 pub(crate) mod tts;
