@@ -990,3 +990,41 @@ fn write_control(control: &PipeClient, queue: &Receiver<ControlToBrain>) {
         }
     }
 }
+
+/// Writes queued turns in order, and after each wake-up any credit that has added up, until the
+/// queue closes or the pipe fails.
+fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
+    while let Ok(out) = queue.recv_blocking() {
+        let submitted = match out {
+            DataOut::Submit(message) => frame::write(&mut &*data, &message, Pipe::Data),
+            DataOut::Credit => Ok(()),
+        };
+        let bytes = credit.bytes.swap(0, Ordering::SeqCst);
+        let credited = if bytes > 0 {
+            frame::write(&mut &*data, &DataToBrain::Credit { bytes }, Pipe::Data)
+        } else {
+            Ok(())
+        };
+        match submitted.and(credited) {
+            Ok(()) => {}
+            Err(FrameError::Io(error)) => {
+                tracing::debug!(%error, "data pipe write failed");
+                return;
+            }
+            // Never one the shell sends: turns are checked against the cap before they're queued.
+            Err(error) => tracing::error!(%error, "a data message couldn't be encoded"),
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[path = "link_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "link_delete_tests.rs"]
+mod delete_tests;
+
+#[cfg(all(test, windows))]
+#[path = "link_measure_tests.rs"]
+mod measure_tests;
