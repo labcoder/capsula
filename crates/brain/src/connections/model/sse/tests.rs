@@ -217,10 +217,12 @@ fn an_events_data_may_be_exactly_the_cap_and_no_longer() {
         stream.extend(vec![b' '; rest]);
         stream.extend_from_slice(b"\ndata: }\n\n");
         stream.extend_from_slice(COMPLETED);
-        let (seen, _, got) = read(&stream, 64 * 1024);
-        assert_eq!(got, end, "{rest}");
-        if end.is_ok() {
-            assert_eq!(seen, kinds(&["keepalive", "response.completed"]));
+        for size in [stream.len(), 64 * 1024] {
+            let (seen, _, got) = read(&stream, size);
+            assert_eq!(got, end, "{rest} in chunks of {size}");
+            if end.is_ok() {
+                assert_eq!(seen, kinds(&["keepalive", "response.completed"]));
+            }
         }
     }
 }
@@ -236,9 +238,21 @@ fn a_stream_may_be_exactly_the_cap_and_no_longer() {
     }
     stream.extend_from_slice(COMPLETED);
     assert_eq!(stream.len(), MAX_STREAM_BYTES);
-    assert_eq!(read(&stream, 64 * 1024).2, Ok(()));
-    stream.insert(0, b'\n');
-    assert_eq!(read(&stream, 64 * 1024).2, Err(Failure::Protocol));
+    let at_cap = stream.clone();
+    // A trailing [DONE] after the terminal event isn't read, whether or not it shares a chunk.
+    stream.extend_from_slice(b"data: [DONE]\n\n");
+    for size in [stream.len(), MAX_STREAM_BYTES, 64 * 1024] {
+        assert_eq!(read(&stream, size).2, Ok(()), "chunks of {size}");
+    }
+    let mut over = at_cap;
+    over.insert(0, b'\n');
+    for size in [over.len(), 64 * 1024] {
+        assert_eq!(
+            read(&over, size).2,
+            Err(Failure::Protocol),
+            "chunks of {size}"
+        );
+    }
 }
 
 #[test]
@@ -253,7 +267,9 @@ fn text_may_be_exactly_the_cap_and_no_longer() {
         let mut stream = delta(MAX_TEXT_BYTES / 2);
         stream.extend(delta(last));
         stream.extend_from_slice(COMPLETED);
-        assert_eq!(read(&stream, 64 * 1024).2, end, "{last}");
+        for size in [stream.len(), 64 * 1024] {
+            assert_eq!(read(&stream, size).2, end, "{last} in chunks of {size}");
+        }
     }
 }
 

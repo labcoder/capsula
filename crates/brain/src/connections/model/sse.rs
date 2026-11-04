@@ -111,14 +111,10 @@ impl Reader {
         mut bytes: &[u8],
         on_event: &mut impl FnMut(&SseEvent),
     ) -> Result<Progress, Failure> {
-        self.received = self
-            .received
-            .checked_add(bytes.len())
-            .filter(|received| *received <= MAX_STREAM_BYTES)
-            .ok_or(Failure::Protocol)?;
         while let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
             let (head, rest) = bytes.split_at(end);
             bytes = &rest[1..];
+            self.consume(end + 1)?;
             let progress = if self.line.is_empty() {
                 self.line_ended(head, on_event)?
             } else {
@@ -136,11 +132,22 @@ impl Reader {
                 return Ok(progress);
             }
         }
+        self.consume(bytes.len())?;
         if self.line.len() + bytes.len() > MAX_LINE_BYTES {
             return Err(Failure::Protocol);
         }
         self.line.extend_from_slice(bytes);
         Ok(Progress::More)
+    }
+
+    /// Counts bytes read, so the stream cap doesn't depend on what follows the terminal event.
+    fn consume(&mut self, bytes: usize) -> Result<(), Failure> {
+        self.received = self
+            .received
+            .checked_add(bytes)
+            .filter(|received| *received <= MAX_STREAM_BYTES)
+            .ok_or(Failure::Protocol)?;
+        Ok(())
     }
 
     fn line_ended(
