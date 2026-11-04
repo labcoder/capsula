@@ -85,6 +85,18 @@ pub(crate) fn open(
                                 if cancelled.borrow_mut().take().is_some() {
                                     window.close_dialog(cx);
                                 }
+                            })
+                            .map(|button| {
+                                #[cfg(test)]
+                                {
+                                    gpui_kit::div()
+                                        .debug_selector(|| "confirmation-cancel".into())
+                                        .child(button)
+                                }
+                                #[cfg(not(test))]
+                                {
+                                    button
+                                }
                             }),
                     )
                     .child(
@@ -188,6 +200,7 @@ mod tests {
         }
         paint(cx);
         assert_eq!(sends.get(), 0);
+        assert!(!cx.update(gpui_kit::component::WindowExt::has_active_dialog));
     }
 
     #[gpui::test]
@@ -250,6 +263,20 @@ mod tests {
         assert!(!cx.update(gpui_kit::component::WindowExt::has_active_dialog));
         press(cx, "enter");
         assert_eq!(sends.get(), 1);
+    }
+
+    #[gpui::test]
+    fn pointer_cancel_closes_without_sending(cx: &mut TestAppContext) {
+        let (cx, sends, _) = setup(cx);
+        paint(cx);
+        let point = cx
+            .debug_bounds("confirmation-cancel")
+            .expect("cancel button")
+            .center();
+        cx.simulate_click(point, gpui_kit::Modifiers::default());
+        paint(cx);
+        assert_eq!(sends.get(), 0);
+        assert!(!cx.update(gpui_kit::component::WindowExt::has_active_dialog));
     }
 
     #[gpui::test]
