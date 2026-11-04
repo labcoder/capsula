@@ -129,7 +129,7 @@ pub(super) fn place(
     }
     // An edge ranks once, in its endpoints' least common group, between the two members there
     // that hold them; edges inside one member never count toward that group's edge cap.
-    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
+    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle, bool)>>::new();
     let mut labels = BTreeMap::<Option<Handle>, Vec2>::new();
     let mut edges = BTreeMap::new();
     for object in state.objects.values() {
@@ -158,7 +158,10 @@ pub(super) fn place(
         if let Some((group, from, to)) = common
             && from != to
         {
-            ranked.entry(group).or_default().push((from, to));
+            ranked
+                .entry(group)
+                .or_default()
+                .push((from, to, edge.label.is_some()));
             if let Some(label) = &edge.label
                 && groups.contains_key(&group)
             {
@@ -236,7 +239,7 @@ pub(super) fn place(
             })
             .unwrap_or(build.viewport);
         let direction = compound::direction(state, parent, surface);
-        let gap = labels.get(&parent).map_or(diagram::RANK_GAP, |label| {
+        let mut gap = labels.get(&parent).map_or(diagram::RANK_GAP, |label| {
             let along = if direction.0 == Direction::Right {
                 label.x
             } else {
@@ -297,9 +300,25 @@ pub(super) fn place(
             .get(&parent)
             .into_iter()
             .flatten()
-            .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
+            .filter_map(|&(from, to, _)| Some((slot(from)?, slot(to)?)))
             .collect();
-        let placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
+        let initial = fresh.iter().all(|fresh| *fresh);
+        let mut placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
+        let links = ranked.get(&parent).map_or(&[][..], Vec::as_slice);
+        if initial
+            && direction.0 == Direction::Right
+            && gap < 2.0 * diagram::RANK_GAP
+            && links.iter().filter(|(_, _, labelled)| *labelled).count() > 1
+            && links.iter().any(|&(from, to, labelled)| {
+                labelled
+                    && slot(from).zip(slot(to)).is_some_and(|(from, to)| {
+                        placement.ranks[from].abs_diff(placement.ranks[to]) > 1
+                    })
+            })
+        {
+            gap = 2.0 * diagram::RANK_GAP;
+            placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
+        }
         let mut ranks = placement.ranks.clone();
         for (slot, (_, id, _)) in all.iter().enumerate() {
             if let Some(rank) = state.objects.get(id).and_then(|object| object.rank) {
@@ -313,7 +332,6 @@ pub(super) fn place(
                 }
             }
         }
-        let initial = fresh.iter().all(|fresh| *fresh);
         // shortcut: only unboxed top-level diagrams fit their initial batch; boxed, nested and
         // diagram-less batches stay unscaled until a render shows one overflowing.
         let fits = initial

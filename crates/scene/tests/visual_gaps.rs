@@ -140,7 +140,7 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
             _ => None,
         })
         .expect("second label");
-    assert_eq!(origin, Vec2::new(72.0, 31.0));
+    assert_eq!(origin, Vec2::new(73.125, 31.0));
     assert_eq!(
         chip(&picture.after, first),
         Rect {
@@ -151,7 +151,7 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
     assert_eq!(
         chip(&picture.after, second),
         Rect {
-            origin: Vec2::new(154.0, 29.0),
+            origin: Vec2::new(155.125, 29.0),
             size: Vec2::new(16.0, 14.0)
         }
     );
@@ -298,7 +298,7 @@ fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
     assert_eq!(
         chip(&picture.after, handle),
         Rect {
-            origin: Vec2::new(236.0, 29.0),
+            origin: Vec2::new(243.0, 29.0),
             size: Vec2::new(16.0, 14.0)
         }
     );
@@ -311,6 +311,46 @@ fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
         panic!("curve")
     };
     assert_eq!(points[8], Vec2::new(300.0, 36.0));
+}
+
+#[test]
+fn labelled_skipped_ranks_leave_room_for_separate_chips() {
+    let mut scene = new_scene("skip_labels");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"skip","put":[
+            {"diagram":{"id":"diagram","dir":"right","box":[0,0,600,300]}},
+            {"node":{"id":"a","in":"diagram","label":"A"}},
+            {"node":{"id":"b","in":"diagram","label":"B"}},
+            {"node":{"id":"c","in":"diagram","label":"C"}},
+            {"edge":{"id":"e1","in":"diagram","from":"a","to":"b","label":"x"}},
+            {"edge":{"id":"e2","in":"diagram","from":"b","to":"c","label":"x"}},
+            {"edge":{"id":"e3","in":"diagram","from":"a","to":"c","label":"shared"}}
+        ]}),
+    );
+    assert_eq!(
+        picture.after.bounds(&id("c")).expect("last rank"),
+        Some(Rect {
+            origin: Vec2::new(484.0, 16.0),
+            size: Vec2::new(80.0, 40.0)
+        })
+    );
+    for (name, x, width) in [
+        ("e1", 180.0, 16.0),
+        ("e2", 404.0, 16.0),
+        ("e3", 203.0, 56.0),
+    ] {
+        assert_eq!(
+            chip(&picture.after, scene.handle(&id(name)).expect("edge")),
+            Rect {
+                origin: Vec2::new(x, 29.0),
+                size: Vec2::new(width, 14.0)
+            }
+        );
+    }
 }
 
 fn rightward_chain() -> serde_json::Value {

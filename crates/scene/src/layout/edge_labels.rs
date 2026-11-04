@@ -9,6 +9,9 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// Quarter-segment candidates can occupy narrow gaps without changing the drawn curve.
+const SUBDIVISIONS: usize = 4;
+
 pub(super) fn separate(state: &mut LayoutState, build: &Build<'_>) -> Result<(), PrepareError> {
     let ids: Vec<_> = state
         .objects
@@ -64,19 +67,27 @@ pub(super) fn separate(state: &mut LayoutState, build: &Build<'_>) -> Result<(),
             unreachable!("edge starts with its curve");
         };
         let world = state.resting_transform(object.item.handle)?;
-        let middle = points.len() / 2;
+        let curve_middle = points.len() / 2;
+        let middle = curve_middle * SUBDIVISIONS;
         let candidates = std::iter::once(middle)
             .chain((1..middle).flat_map(|offset| [middle - offset, middle + offset]));
         // shortcut: interior curve samples can run out of room; keep the midpoint label until post-D1 routing can make space.
         let chip = candidates
-            .map(|index| Rect::centered(points[index], old.size))
+            .map(|index| {
+                let segment = index / SUBDIVISIONS;
+                let t = [0.0, 0.25, 0.5, 0.75][index % SUBDIVISIONS];
+                Rect::centered(
+                    points[segment] * (1.0 - t) + points[segment + 1] * t,
+                    old.size,
+                )
+            })
             .find(|candidate| {
                 let bounds = world.bounds(*candidate);
                 candidate.within_canvas()
                     && bounds.within_canvas()
                     && occupied.iter().all(|other| !bounds.intersects(*other))
             })
-            .unwrap_or_else(|| Rect::centered(points[middle], old.size));
+            .unwrap_or_else(|| Rect::centered(points[curve_middle], old.size));
         occupied.push(world.bounds(chip));
         let mut bounds = point_bounds(points)?.union(chip);
         for primitive in &*object.item.primitives {
