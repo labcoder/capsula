@@ -74,6 +74,13 @@ use three-component keys; existing tracks retain their existing key types.
 including rotations, targets, directions, outlines and paths, use the existing
 ±20,000 coordinate bound. Decode bounds apply in JSON and postcard, regardless of shape.
 
+`rot` uses degrees about x, then y, then z: `Rz·Ry·Rx` on column vectors,
+followed by uniform `scale`, then `pos`. An attached child's transform is applied
+before its parent's. This does not change the 2D `rotate` convention. Three-dimensional
+space is right-handed with y up. A lathe's `[radius,y]` profile runs from lower y
+towards higher y for outward winding; reversing the profile reverses the surface.
+Lathe ends are open, without caps; with back-face culling the inside is invisible.
+
 A decoded solid is not yet valid geometry. `Solid::geometry()` checks required
 fields first, then rejects unused shape fields (including `segments` on a box or an extrusion),
 then checks counts and radius relations:
@@ -92,9 +99,56 @@ then checks counts and radius relations:
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
 All lists decode at most 512 points; extrude counts above 128 are
-`OverBudget(PathPoints)`. Degeneracy checks belong to the future tessellator.
+`OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
+
+### 3D tessellation sizing
+
+`three::size::triangles` validates one decoded solid and returns its candidate
+triangle capacity without allocating. This count does not depend on world transforms.
+Triangle generation is a separate module; sizing alone does not establish world-space
+representability. Admission still refuses 3D until its later slice lands.
+
+Let n be `segments` (default 24), k the retained outline count, p the retained
+profile count and q the retained path count:
+
+| Shape | Candidate triangles | At n = 3 / n = 48 |
+|---|---|---|
+| box | 12 | 12 / 12 |
+| sphere | 20·4ᴸ | 20 / 1,280 |
+| cylinder | 4n − 4 | 8 / 188 |
+| cone, top zero | 2n − 2 | 4 / 94 |
+| cone, top positive | 4n − 4 | 8 / 188 |
+| torus | 2n² | 18 / 4,608 |
+| extrude | 4k − 4 | 508 at k = 128 |
+| lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
+| tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
+
+Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
+Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
+count at 49,148. Counts over the future per-view triangle budget remain legal here.
+Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
+
+The shared numeric policy is `three::REL = 1e-6` and
+`dist_eps(radius) = REL × max(radius, 0.001)`. The local radius is half the diagonal
+of the shape's AABB, not a distance from the origin. Tube bounds include the tube
+thickness; lathe bounds include the revolved radii. Calculations use f64; the shared
+source-area cutoff is `dist_eps²`. Transforms compose f64 affine matrices and check
+finiteness after narrowing points to f32. Sub-ulp distortion is accepted because the
+camera's near-plane precision floor bounds its screen size.
+Consecutive points strictly closer than `dist_eps` merge against the last retained
+point. Closing outline duplicates merge by the same rule. An origin offset in an
+outline or path does not alter the radius or tolerance.
+
+Sizing refuses a merged outline with fewer than three points, absolute twice-area
+below `dist_eps²`, self-intersections, nonadjacent touches or overlapping edges.
+A redundant collinear outline vertex is accepted. Profiles and paths need two
+retained points; a lathe needs a retained off-axis point. A tube turn with unit
+tangent dot product strictly below `−1 + REL` is refused. These failures are typed
+`MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
+original typed field and code. `ErrorCode::Degenerate` is appended for the later
+admission boundary, which alone will convert these errors into sanitized paths.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
