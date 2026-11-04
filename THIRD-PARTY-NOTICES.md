@@ -111,6 +111,7 @@ Kumochi downloads these only when the user installs voice. Pins and provenance a
   [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime). It includes protobuf, re2,
   abseil, flatbuffers, cpuinfo, ONNX, Eigen (MPL-2.0; source at
   [gitlab.com/libeigen/eigen](https://gitlab.com/libeigen/eigen)) and Boost (BSL-1.0), among the
-  components its `ThirdPartyNotices.txt` lists. That file ships beside the DLL.
+  components its `ThirdPartyNotices.txt` lists. This is a summary: that file and the other upstream
+  license and NOTICE texts ship beside the DLLs.
 
 The audit behind this list is in [docs/development/voice-natives.md](docs/development/voice-natives.md).
