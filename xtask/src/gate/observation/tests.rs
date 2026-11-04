@@ -6,8 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const STARTUP: &str = "startup version=1 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n";
 pub(super) const GEOMETRY: &str =
-    "geometry id=1 origin_y=-1 rows=2 trimmed=true spans=0:4,0:4,-;-,-,-\n";
-pub(super) const COMMIT: &str = "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=-2,-3,10,10\n";
+    "geometry id=1 origin_y=-1 rows=2 trimmed=true spans=0:4,0:4,-;-,0:4,-\n";
+pub(super) const COMMIT: &str =
+    "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-1,4,2\n";
 
 pub(super) fn directory() -> std::path::PathBuf {
     let stamp = SystemTime::now()
@@ -105,7 +106,10 @@ fn incremental_reader_buffers_partial_lines_and_retains_bootstrap_frames() {
     let geometry = &observation.geometries[&1];
     assert!(geometry.contains_drawn([0, -1]), "left edge is drawn");
     assert!(!geometry.contains_owned([4, -1]), "right edge is excluded");
-    assert!(!geometry.contains_owned([0, 0]), "empty row owns nothing");
+    assert!(
+        geometry.contains_owned([0, 0]) && !geometry.contains_drawn([0, 0]),
+        "the band owns a row the line doesn't draw"
+    );
     reader.complete().unwrap();
     assert_eq!(
         reader.update().unwrap().frames.len(),
@@ -166,6 +170,30 @@ fn rejects_unknown_fields_refs_losses_and_invalid_span_unions() {
             .is_ok(),
         "disjoint ownership keeps current/previous order, not coordinate order"
     );
+}
+
+#[test]
+fn accepts_current_main_band_geometry_only_when_it_owns_exactly_the_proxy() {
+    let band =
+        "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,10:14,-;10:14,10:14,-;-,10:14,-\n";
+    let commit = "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=10,5,4,3\n";
+    let valid = finish(format!("{band}{commit}{STARTUP}"), 0, 0);
+    let observation = parsed(&valid).unwrap();
+    assert_eq!(observation.commits[0].proxy, [10, 5, 4, 3]);
+    let geometry = &observation.geometries[&1];
+    assert!(geometry.contains_owned([10, 5]) && !geometry.contains_drawn([10, 5]));
+    assert!(geometry.contains_drawn([13, 6]));
+    for text in [
+        valid.replace("proxy=10,5,4,3", "proxy=10,5,4,4"),
+        valid.replace("proxy=10,5,4,3", "proxy=10,6,4,3"),
+        valid.replace("proxy=10,5,4,3", "proxy=9,5,5,3"),
+        valid.replace(";10:14,10:14,-;", ";9:14,10:14,-;"),
+        valid.replace(";10:14,10:14,-;", ";10:15,10:14,-;"),
+        valid.replace("-,10:14,-;10:14", "-,10:13,-;10:14"),
+        valid.replace("-,10:14,-;10:14", "-,10:14,0:2;10:14"),
+    ] {
+        assert!(parsed(&text).is_err(), "must reject {text:?}");
+    }
 }
 
 #[test]

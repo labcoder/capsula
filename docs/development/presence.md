@@ -203,7 +203,8 @@ is one line:
   proposal's rows differ from the last one sent. Each of the `N` rows from `Y` is
   `drawn,owned,owned` separated by `;`, each span `left:right` (half-open) or `-`. `drawn` is the
   line's `paint` and `owned` the band's `row_spans` the mask is given, not a copy; the second
-  owned span is always `-` for the line, and `trimmed` always `true`.
+  owned span is always `-` for the line, and `trimmed` always `true`. The gate harness requires
+  each row to own what it draws, and a committed geometry to own exactly its `proxy` rectangle.
   Taller than 512 rows, it's `… overflow` with no rows, never truncated.
 - `commit seq= begin_qpc= qpc= result=shape|moved|unchanged|failed proposal=G epoch=E
   geometry=A proxy=…`, after every `UpdateLayeredWindow` call. `begin_qpc` is read right before

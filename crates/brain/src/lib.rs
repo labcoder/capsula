@@ -5,6 +5,8 @@
 
 mod config;
 pub mod connections;
+#[cfg_attr(not(test), expect(dead_code, reason = "PR 12b calls the builder"))]
+mod context;
 pub mod coordinator;
 pub mod credential;
 pub mod drawing;

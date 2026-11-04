@@ -180,6 +180,9 @@ creates no file.
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
   - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
+  - status lines that aren't input: `link state=`, `run phase=`, `submit sent=`, `dock settled`,
+    `dock paints settled=`, `kumo baked`, `kumo frame shade_us=` and `kumo reshades=`. The
+    harness reads them as status and still refuses any other unknown event.
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process
