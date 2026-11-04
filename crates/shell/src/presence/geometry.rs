@@ -82,7 +82,7 @@ pub(crate) enum PanelVisibility {
     Visible,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Layout {
     /// The resting dock's slot, which holds the line and its trigger band.
     pub(crate) dock: [i32; 4],

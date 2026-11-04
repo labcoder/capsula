@@ -871,11 +871,7 @@ pub(crate) fn open(
             scene_deadline: None,
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
-            layout: Layout {
-                dock: [0; 4],
-                panel: [0; 4],
-                overlay: [0; 4],
-            },
+            layout: Layout::default(),
             typing_bounds: [0; 4],
             panel_visibility: PanelVisibility::Hidden,
             scale,
@@ -938,7 +934,6 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
         .detach();
     }
 }
-
 
 /// The peek's height in logical pixels: Kumo's row, one row of actions and the insets.
 const PEEK_HEIGHT: f32 = 124.0;
