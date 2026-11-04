@@ -207,8 +207,8 @@ that use them.
 An engine (`crates/brain/src/engines/`) implements one trait: `Engine::start` takes a `RunRequest`
 (the run, its thread and the turn) and plays **one model round**, sending `TurnEvent`s: `TextDelta`,
 `ToolCallStarted { call, name }` (always before the call's first argument delta),
-`ToolArgsDelta`, `ToolCallReady` with the whole arguments, `OutputItem` for native items kept for
-replay, and `Finished` with `Completed`, `Truncated`, `Failed` or `Interrupted`. Call ids are the
+`ToolArgsDelta`, `ToolCallReady` with the whole arguments, `OutputItem` with its output index for
+native items kept for replay, and `Finished` with `Completed`, `Truncated`, `Failed` or `Interrupted`. Call ids are the
 provider's, ASCII and at most 64 bytes, refused rather than cut. `Debug` prints only the sizes of
 text, arguments, turns and items.
 

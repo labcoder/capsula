@@ -199,7 +199,7 @@ impl Presence {
             let motion = kumo_view::motion(cx);
             self.kumo.update(cx, |kumo, cx| match visibility {
                 PanelVisibility::Visible => kumo.show(motion, cx),
-                PanelVisibility::Hidden => kumo.hide(),
+                PanelVisibility::Hidden => kumo.hide(cx),
             });
         }
         self.panel_visibility = visibility;
@@ -217,18 +217,14 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         let visibility = if self.line.contains(platform::cursor_position()?) {
-            panels::over_line(self.panel_owner())
+            panels::over_line(self.panel_owner(cx))
         } else {
-            panels::pointer(self.panel_visibility, self.panel_owner())
+            panels::pointer(self.panel_visibility, self.panel_owner(cx))
         };
         if visibility != self.panel_visibility {
             self.set_panel_from(visibility, entered_qpc, cx)?;
         }
-        if self.text_open()
-            || self.threads_open()
-            || self.settings_open()
-            || self.escape_hold.shows_stop()
-        {
+        if self.panel_owner(cx) != panels::Owner::Pointer {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -247,7 +243,7 @@ impl Presence {
             let result = this.update(cx, |this, cx| {
                 let point = platform::cursor_position()?;
                 if !this.hovered(point, PanelVisibility::Visible) {
-                    let visibility = panels::left(this.panel_owner());
+                    let visibility = panels::left(this.panel_owner(cx));
                     if !this.text_open() && visibility != this.panel_visibility {
                         this.set_panel(visibility, cx)?;
                     }
@@ -393,6 +389,7 @@ impl Presence {
             working: runs.working(),
             speaking: false,
             drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+            pulling: false,
         }
     }
 
@@ -405,7 +402,10 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let activity = Self::activity(&self.runs, panel, &self.presenter);
+        let activity = Activity {
+            pulling: self.kumo.read(cx).pull_live(),
+            ..Self::activity(&self.runs, panel, &self.presenter)
+        };
         if activity == self.activity {
             return Ok(());
         }
@@ -502,6 +502,7 @@ impl Presence {
         if !self.link.begin_quit() {
             return;
         }
+        self.end_pull(cx);
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
@@ -888,8 +889,7 @@ pub(crate) fn open(
         }
     });
     owner.update(cx, |this, cx| {
-        cx.subscribe(&kumo, |this, _, _, cx| this.want_frames(cx))
-            .detach();
+        this.follow_kumo(cx);
         this.kumo.update(cx, |kumo, cx| kumo.rebake(scale, cx));
     });
     let status_panel = owner.read(cx).panel.clone();
@@ -972,6 +972,9 @@ fn listen(
                     PresenceEvent::Escape => this.escape(cx)?,
                     PresenceEvent::Quit => this.quit(cx),
                     PresenceEvent::Repaint => this.dock.update(cx, |_, cx| cx.notify()),
+                    event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
+                        kumo_view::bridge(&this.kumo, event, cx);
+                    }
                 }
                 Ok::<_, OpenError>(())
             });

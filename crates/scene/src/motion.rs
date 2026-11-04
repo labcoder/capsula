@@ -182,7 +182,7 @@ fn at_word(op: &Op) -> Option<u16> {
         Op::Chart(r) => r.at_word,
         Op::Series(r) => r.at_word,
         Op::Anim(r) => r.at_word,
-        Op::Mermaid(_) => None,
+        Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => None,
     }
 }
 
@@ -197,6 +197,7 @@ fn default_duration(op: &Op) -> u32 {
         }),
         Op::Shape(_) | Op::Node(_) | Op::Callout(_) | Op::Row(_) => 350,
         Op::Series(_) => 800,
+        Op::View3d(_) | Op::Solid(_) => 0,
         _ => 250,
     }
 }
@@ -227,6 +228,7 @@ fn compile(value: &KeyValue, theme: &Theme) -> Value {
         KeyValue::Num(value) => Value::Num(value.get()),
         KeyValue::V2(value) => Value::V2(Vec2::new(value[0].get(), value[1].get())),
         KeyValue::Color(color) => Value::Color(channels(theme.resolve(color))),
+        KeyValue::V3(_) => unreachable!("admission refuses 3D tracks until slice 5 PR 5"),
     }
 }
 fn interpolate(track: Track, from: Value, to: Value, progress: f32) -> Value {
@@ -358,7 +360,7 @@ struct Node {
     opacity: f32,
     inherited: f32,
     timing: Timing,
-    owners: [Option<usize>; 8],
+    owners: [Option<usize>; 10],
 }
 
 fn slot(track: Track) -> usize {
@@ -371,6 +373,8 @@ fn slot(track: Track) -> usize {
         Track::Rotate => 5,
         Track::Draw => 6,
         Track::Color => 7,
+        Track::Pos3 => 8,
+        Track::Rot3 => 9,
     }
 }
 
@@ -415,7 +419,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
                 opacity: item.opacity,
                 inherited,
                 timing: timing(item),
-                owners: [None; 8],
+                owners: [None; 10],
             }
         })
         .collect()

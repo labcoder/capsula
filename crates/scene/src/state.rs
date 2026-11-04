@@ -11,7 +11,7 @@ use crate::{
     layout::heap,
     limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
     mermaid::{self, Expansion},
-    record::Start,
+    record::{Start, Track},
     text::Bounded,
 };
 use object::Object;
@@ -382,6 +382,19 @@ impl SceneState {
                 FieldPath::default(),
                 ErrorCode::OverBudget(Budget::Steps),
             ));
+        }
+        for (index, op) in step.put.iter().enumerate() {
+            let three = match op {
+                crate::Op::View3d(_) | crate::Op::Solid(_) => true,
+                crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
+                _ => false,
+            };
+            if three {
+                return Err(fail(
+                    FieldPath::default().field("put").index(index),
+                    ErrorCode::Unsupported,
+                ));
+            }
         }
         if let Start::After { step: earlier, .. } = &step.start
             && !self

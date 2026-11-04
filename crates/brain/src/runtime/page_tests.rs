@@ -1,8 +1,8 @@
 use kumochi_protocol::message::{DATA_WINDOW, MAX_PENDING_PAGES, PageOf, ThreadKind};
 
 use super::*;
-use crate::coordinator::{Coordinator, Effect, StoreOp};
-use crate::engines::RunRequest;
+use crate::context::Origin;
+use crate::coordinator::{BuildContext, BuildKey, Coordinator, Effect, StoreOp};
 use crate::runtime::DATA_CAP;
 
 /// The frames a connection opens with, before any run state.
@@ -98,13 +98,17 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     assert_eq!(coordinator.ending_runs(), 0);
     assert_eq!(
         coordinator.handle(Input::TurnStored { run: RunId(1) }),
-        Ok(vec![Effect::StartEngine {
-            request: RunRequest {
+        Ok(vec![Effect::Store(StoreOp::BuildContext(BuildContext {
+            key: BuildKey {
                 run: RunId(1),
-                thread: ThreadId(2),
-                turn: "go".to_owned()
-            }
-        }])
+                round: 1,
+                attempt: 1,
+            },
+            thread: ThreadId(2),
+            origin: Origin::Task(ThreadId(2)),
+            snapshot: None,
+            first: true,
+        }))])
     );
 }
 

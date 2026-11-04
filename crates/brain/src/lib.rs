@@ -5,7 +5,6 @@
 
 mod config;
 pub mod connections;
-#[cfg_attr(not(test), expect(dead_code, reason = "PR 12b calls the builder"))]
 mod context;
 pub mod coordinator;
 pub mod credential;
@@ -20,6 +19,8 @@ pub mod store;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg_attr(not(test), expect(dead_code, reason = "PR 8 wires voice installation"))]
+mod voice;
 
 use std::io;
 use std::path::PathBuf;

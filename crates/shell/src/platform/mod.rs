@@ -1,5 +1,7 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
+pub(crate) mod input;
+
 #[cfg(windows)]
 #[expect(
     unsafe_code,

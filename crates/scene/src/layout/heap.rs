@@ -169,6 +169,16 @@ fn op_bytes(op: &Op) -> usize {
         Op::Series(series) => optional(series.name.as_ref()) + elements(&series.data),
         Op::Anim(anim) => anim.target.as_str().len() + elements(&anim.keys),
         Op::Mermaid(mermaid) => mermaid.parent.as_str().len() + mermaid.src.as_str().len(),
+        Op::View3d(view) => view.id.as_str().len(),
+        Op::Solid(solid) => {
+            solid.id.as_str().len()
+                + solid.parent.as_str().len()
+                + solid.attach.as_ref().map_or(0, |id| id.as_str().len())
+                + optional(solid.label.as_ref())
+                + optional(solid.info.as_ref())
+                + elements(&solid.points)
+                + elements(&solid.path)
+        }
     }
 }
 
@@ -351,6 +361,19 @@ mod tests {
 
     #[test]
     fn sources_charge_owned_sequence_elements_at_their_own_size() {
+        assert_eq!(op_bytes(&op(r#"{"view3d":{"id":"view"}}"#)), 4);
+        let solid = op(
+            r#"{"solid":{"id":"solid","in":"view","shape":"box","points":[[1,2]],"path":[[1,2,3]],"attach":"anchor","label":"label","info":"info"}}"#,
+        );
+        assert_eq!(
+            op_bytes(&solid),
+            24 + size_of::<[Finite; 2]>() + size_of::<[Finite; 3]>()
+        );
+        let Record::Step(step) = parse_record(br#"{"step":{"id":"s","put":[{"view3d":{"id":"view"}},{"solid":{"id":"solid","in":"view","shape":"box","points":[[1,2]],"path":[[1,2,3]],"attach":"anchor","label":"label","info":"info"}}]}}"#).expect("3D step") else { panic!("step") };
+        let original = Arc::new(step);
+        let (copied, _, [allocated, released]) =
+            allocation::usage(|| Arc::new((*original).clone()));
+        assert_eq!(compiled_bytes(&original, &copied), allocated - released);
         assert_eq!(
             op_bytes(&op(r#"{"series":{"id":"s","in":"c","data":[1,2,3]}}"#)),
             2 + 3 * size_of::<Point>(),
