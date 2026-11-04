@@ -2,10 +2,37 @@
 
 A signed-in account answers turns through OpenAI's Responses API on the user's ChatGPT plan:
 `POST https://api.openai.com/v1/responses` with `store: false` and `stream: true`. This page
-covers what the brain does with the answer. The transport that sends the request, and the send
-lease that keeps a deleted task's text from leaving, come with PR 11b.
+covers the HTTP/1.1 framing the transport uses and what the brain does with the answer. The
+transport itself, and the send lease that keeps a deleted task's text from leaving, come with PR
+11c.
 
 Code: `crates/brain/src/connections/model/`.
+
+## HTTP framing
+
+`wire` holds the HTTP/1.1 the transport speaks, so the transport, not a library buffer, decides
+when the request's last byte has left. `request` builds the request in one buffer, sized once and
+wiped on drop, and refuses a bearer that isn't a valid header value (no CR, LF, NUL, space or
+other control bytes). `head` parses a response head with `httparse`, and `Body` steps through the
+body's framing, handing out the data between framing bytes.
+
+| Bound | Limit |
+| --- | --- |
+| A response head | 16 KiB and 32 headers |
+| Interim heads (100, 103) | 4; 101 and other 1xx are refused |
+| A chunk-size line, extensions included | 1 KiB, at most 16 hex digits |
+| Trailers | 16 KiB |
+
+Framing is one clear choice: `Content-Length`, `Transfer-Encoding: chunked`, or read to close
+with `Connection: close`. Both length and chunked, a repeated length, another transfer coding, or
+no framing at all is refused, and so is anything but HTTP/1.1. The request sends
+`Accept-Encoding: identity`, and a head with any other Content-Encoding is refused, so no
+compressed bytes reach the framer or a reader. Header names and tokens match
+case-insensitively, lengths parse with checked arithmetic, and no peer-supplied length sizes an
+allocation. A body that ends inside its framing is `Truncated`.
+
+`budget` caps model requests for live checks: debug builds read `KUMOCHI_LIVE_BUDGET`, which
+`cargo xtask live` sets, and a value that isn't a count allows none. Release builds have no cap.
 
 ## Reading the stream
 

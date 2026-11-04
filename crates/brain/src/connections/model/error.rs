@@ -149,6 +149,9 @@ pub enum Failure {
     /// Bytes that aren't a Responses stream, or a cap passed.
     #[error("the response couldn't be read")]
     Protocol,
+    /// The bearer isn't a valid header value; nothing was sent.
+    #[error("the credential can't be sent")]
+    Credential,
 }
 
 impl Failure {
@@ -162,6 +165,7 @@ impl Failure {
             Self::Provider(error) => error.recovery(),
             Self::Incomplete | Self::Truncated => (ErrorKey::AccountOffline, Some(Action::Retry)),
             Self::Protocol => (ErrorKey::ResponseUnreadable, Some(Action::Retry)),
+            Self::Credential => (ErrorKey::AccountRefused, Some(Action::SignIn)),
         };
         UserError::new(key, Vec::new(), action.into_iter().collect())
             .expect("one action is within the limit")
