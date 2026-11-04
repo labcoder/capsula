@@ -302,7 +302,7 @@ fn instructions(run: &RunSnapshot) -> String {
 }
 
 /// Replaces each `{key}` in `template` in one pass, so a value is never read as a key.
-fn fill(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('{') {

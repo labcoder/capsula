@@ -13,6 +13,7 @@ mod admission;
 mod availability;
 mod delete;
 mod drawing;
+mod job;
 mod lease;
 mod run;
 mod scenes;
@@ -26,7 +27,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
-    UserError,
+    ThreadTitle, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -34,7 +35,9 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use availability::{Availability, Ready};
-pub use lease::{LeaseId, SEND_DEADLINE};
+pub(crate) use job::TitleAsk;
+pub use job::{JobBuilt, JobKey, ReadTitle};
+pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -106,10 +109,37 @@ pub enum Input {
     },
     /// A round's context was built, or failed to be.
     ContextBuilt(ContextBuilt),
-    /// The transport is about to send this build's body and waits for `Grant` or `Rebuild`.
+    /// The transport is about to send this build's or job's body and waits for `Grant` or
+    /// `Rebuild`.
     SendReady {
-        /// The build.
-        key: BuildKey,
+        /// The build or job.
+        key: SendKey,
+    },
+    /// A background job's read finished.
+    JobBuilt(JobBuilt),
+    /// A background job's request ended: the cleaned title, or `None` when it failed.
+    JobDone {
+        /// The job.
+        key: JobKey,
+        /// The title.
+        title: Option<ThreadTitle>,
+    },
+    /// A `SetTitle` finished.
+    TitleSet {
+        /// The job that wrote it; `None` for the user's rename.
+        job: Option<JobKey>,
+        /// It changed the title.
+        applied: bool,
+    },
+    /// An account can send model requests, as account generation `generation`.
+    SignedIn {
+        /// The account generation.
+        generation: u64,
+    },
+    /// The account signed in as `generation` can't send any more.
+    SignedOut {
+        /// The account generation.
+        generation: u64,
     },
     /// A granted send stopped: it finished, failed, or was dropped.
     SendSettled {
@@ -222,8 +252,17 @@ pub enum Effect {
     },
     /// Let the transport send this lease's body; its guard reports `SendSettled` when dropped.
     Grant(LeaseId),
-    /// Tell the transport to drop this build's body unsent.
-    Rebuild(BuildKey),
+    /// Tell the transport to drop this build's or job's body unsent.
+    Rebuild(SendKey),
+    /// Start a background job's request; it reports `JobDone`.
+    StartJob {
+        /// The job.
+        job: JobKey,
+        /// What it sends.
+        request: RunRequest,
+    },
+    /// Drop a background job's request and whatever it still produces.
+    CancelJob(JobKey),
     /// Report `SendDeadline` for `lease` after `after`.
     ArmSendDeadline {
         /// The lease.
@@ -402,6 +441,12 @@ pub struct Coordinator {
     transport_failed: bool,
     /// Whether runs can be answered, and on which connection.
     availability: Availability,
+    /// The one background job.
+    job: Option<job::Job>,
+    /// The signed-in account's generation, while one can send.
+    account: Option<u64>,
+    /// The newest account generation that signed out.
+    signed_out: Option<u64>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -453,6 +498,9 @@ impl Coordinator {
             sends: 0,
             transport_failed: false,
             availability: Availability::Unavailable(availability::sign_in_needed()),
+            job: None,
+            account: None,
+            signed_out: None,
         }
     }
 
@@ -539,7 +587,23 @@ impl Coordinator {
             }
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
-            Input::SendReady { key } => self.send_ready(key, &mut effects),
+            Input::SendReady {
+                key: SendKey::Build(key),
+            } => self.send_ready(key, &mut effects),
+            Input::SendReady {
+                key: SendKey::Job(key),
+            } => self.job_ready(key, &mut effects),
+            Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
+            Input::JobDone { key, title } => self.job_done(key, title, &mut effects)?,
+            Input::TitleSet { job, applied } => {
+                // A committed title is news to the shell, whoever wrote it.
+                if applied {
+                    effects.push(Effect::Control(ControlToShell::ThreadsChanged));
+                }
+                self.title_written(job);
+            }
+            Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
+            Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
@@ -632,6 +696,14 @@ impl Coordinator {
         let done = self.ending.swap_remove(at);
         if let Some(Ending {
             outcome: RunEnd::Done,
+            failed: false,
+            ..
+        }) = done.ending
+        {
+            self.title_job(done.thread, done.id, effects);
+        }
+        if let Some(Ending {
+            outcome: RunEnd::Done,
             notify: Notify::Shell,
             failed: false,
             ..
@@ -643,6 +715,7 @@ impl Coordinator {
     }
 
     fn turn(&mut self, thread: Option<ThreadId>, text: String, effects: &mut Vec<Effect>) {
+        self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
             self.end(current, replaced, None, Notify::Shell, effects);

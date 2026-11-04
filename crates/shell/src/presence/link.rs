@@ -91,6 +91,7 @@ impl Presence {
                     self.runs.refused();
                     self.sync_deletes(cx);
                 }
+                LinkEvent::ThreadsChanged => self.threads_changed(cx),
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }
@@ -135,6 +136,15 @@ impl Presence {
             cx.notify();
         });
         self.sync_deletes(cx);
+        self.request_pages(cx);
+    }
+
+    /// The brain changed a listed thread: the list is read again.
+    fn threads_changed(&mut self, cx: &mut Context<'_, Self>) {
+        self.threads.update(cx, |state, cx| {
+            state.changed();
+            cx.notify();
+        });
         self.request_pages(cx);
     }
 

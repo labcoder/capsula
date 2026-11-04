@@ -1,5 +1,6 @@
-//! The 2D scene vocabulary. Defaults are applied at decode, never by truncation.
+//! The scene vocabulary. Defaults are applied at decode, never by truncation.
 mod mixed;
+mod three;
 use crate::{
     id::{Ms, WireId},
     limits::{
@@ -11,6 +12,10 @@ use crate::{
 pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+pub use three::{
+    Camera, Fov, Geometry, Length, Light, LightDir, Pitch, Segments, ShapeError, Size, Solid,
+    SolidShape, Spin, Unit, View3d,
+};
 
 /// One externally tagged scene record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,7 +110,7 @@ impl fmt::Debug for Step {
             .finish_non_exhaustive()
     }
 }
-/// An externally tagged 2D operation.
+/// An externally tagged scene operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
@@ -141,6 +146,10 @@ pub enum Op {
     Anim(Anim),
     /// Mermaid operation.
     Mermaid(Mermaid),
+    /// 3D viewport operation.
+    View3d(View3d),
+    /// 3D solid operation.
+    Solid(Solid),
 }
 /// Enter vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +324,10 @@ pub enum Track {
     Draw,
     /// Color.
     Color,
+    /// 3D position.
+    Pos3,
+    /// 3D rotation.
+    Rot3,
 }
 /// Ease vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

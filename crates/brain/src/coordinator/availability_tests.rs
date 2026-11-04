@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
-use crate::coordinator::{Availability, Ready};
+use crate::coordinator::{Availability, Ready, SendKey};
 use crate::store::{Failure, RunEnd};
 
 fn info(slug: &str) -> ModelInfo {
@@ -209,8 +209,10 @@ fn a_sign_out_during_the_first_build_ends_the_run_and_its_late_result_is_stale()
     );
     assert_eq!(core.handle(built(Some("m"), Vec::new())), Err(super::Stale));
     assert_eq!(
-        core.handle(Input::SendReady { key: key(1) }),
-        Ok(vec![Effect::Rebuild(key(1))])
+        core.handle(Input::SendReady {
+            key: SendKey::Build(key(1)),
+        }),
+        Ok(vec![Effect::Rebuild(SendKey::Build(key(1)))])
     );
 }
 
@@ -228,9 +230,14 @@ fn the_grant_checks_the_runs_connection_itself() {
         models: vec![info("m")],
         trusted_draw: false,
     });
-    let mut refused = vec![Effect::Rebuild(key(1))];
+    let mut refused = vec![Effect::Rebuild(SendKey::Build(key(1)))];
     refused.extend(failed(Some(sign_in())));
-    assert_eq!(core.handle(Input::SendReady { key: key(1) }), Ok(refused));
+    assert_eq!(
+        core.handle(Input::SendReady {
+            key: SendKey::Build(key(1)),
+        }),
+        Ok(refused)
+    );
 }
 
 #[test]
@@ -249,8 +256,10 @@ fn a_catalog_change_keeps_the_run_and_another_connection_ends_it_before_any_gran
         Ok(failed(Some(reason(ErrorKey::SignInNeeded, Action::SignIn))))
     );
     assert_eq!(
-        core.handle(Input::SendReady { key: key(1) }),
-        Ok(vec![Effect::Rebuild(key(1))]),
+        core.handle(Input::SendReady {
+            key: SendKey::Build(key(1)),
+        }),
+        Ok(vec![Effect::Rebuild(SendKey::Build(key(1)))]),
         "the old round's held ask is answered with no send"
     );
 }

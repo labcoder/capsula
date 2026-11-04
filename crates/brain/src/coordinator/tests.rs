@@ -3,8 +3,8 @@ use kumochi_protocol::message::{
 };
 
 use super::{
-    BuildContext, BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, Stale,
-    StoreOp, WALL_CLOCK,
+    BuildContext, BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, SendKey,
+    Stale, StoreOp, WALL_CLOCK,
 };
 use crate::context::{Built, ModelRequest, Origin};
 use crate::engines::{CallId, Finish, RunRequest, ToolName, TurnEvent};
@@ -20,6 +20,8 @@ mod deletes;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "scene_tests.rs"]
@@ -129,11 +131,11 @@ fn built(run: RunId, attempt: u64, sources: &[ThreadId]) -> Input {
 fn start_engine(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::StartEngine {
         request: RunRequest {
-            key: BuildKey {
+            key: SendKey::Build(BuildKey {
                 run,
                 round: 1,
                 attempt,
-            },
+            }),
             run,
             thread,
             origin: Origin::Task(thread),

@@ -82,8 +82,9 @@ its pending result is stale.
 ## The send lease
 
 Admission closes the window from the read to `StartEngine`, and the send lease closes the one
-from `StartEngine` to the bytes leaving. A round gets a `SendGate` and asks it right before any
-of the body goes to the network, and again before every retry. A pooled requeue of a request
+from `StartEngine` to the bytes leaving. A round, or a background job's request, gets a
+`SendGate` under its `SendKey` (`Build` or `Job`) and asks it right before any of the body goes
+to the network, and again before every retry. A pooled requeue of a request
 that never started is the same attempt under the same lease; an application retry asks again.
 
 ```mermaid
@@ -102,7 +103,8 @@ sequenceDiagram
 - **Grant.** Only the current run's admitted build is granted, and only if no accepted or pending
   delete reached its sources. A touched build gets `Rebuild`: the body is dropped unsent and built
   again, after the delete's answer when it's still pending. An ask from an ended run gets
-  `Rebuild` and nothing is built.
+  `Rebuild` and nothing is built. A job's ask is granted only while it holds the job slot under
+  its account (see [Background jobs](#background-jobs)).
 - **Lease.** Each grant is a `LeaseId { key, send }` with its sources. Leases belong to send
   attempts, not runs, so Stop, a replacement and a lost shell keep them.
 - **Settle.** The `SendLease` guard travels inside the grant. Dropping it, wherever it is (a lost
@@ -123,6 +125,58 @@ body carrying an accepted delete's thread starts sending, and the delete doesn't
 such a body may still be sending. The fixture engine sends nothing and never asks; the provider
 transport (PR 11, then 13a) asks, holds the lease until no more of the body can go, and proves
 that.
+
+## Background jobs
+
+A job is one model request outside any run, in a one-job slot the coordinator owns
+(`coordinator/job.rs`; the pure parts are in `jobs.rs`). PR 16 adds the title job, and PR 17
+adds compaction.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Reading: a task's run ends Done while an account is signed in
+    Reading --> Sending: the read finds first words and no delete reached the task
+    Sending --> Writing: the round completes with a title
+    Writing --> Idle: TitleSet for this job
+    Reading --> Idle: a new run, a delete, sign-out, no first words, failure
+    Sending --> Idle: a new run, a delete, sign-out, a lease deadline, failure
+```
+
+- **When.** Every stored `Done` of a run in a task, never Kumo's, starts a title job while an
+  account is signed in, no run is current and sends haven't failed closed. The read finds nothing
+  once the title isn't first words (a user's rename or an earlier model title), so the trigger
+  keeps no state of its own: a failed job, or a first run that didn't end `Done`, tries again at
+  the next `Done`. A job never retries on its own.
+- **Key.** `JobKey { thread, serial }`, the serial from the build attempts' counter, so no key
+  repeats. An input for any other key is stale.
+- **Read.** `StoreOp::ReadTitle` runs on the page reader after every op sent before it, in one read
+  transaction: the task's first user message, its deletion generation and its model choice. Like a
+  build, the job keeps the threads a delete pending at its start, or accepted since, reached, so a
+  delete of the task voids it at the read, at the grant and when the answer arrives.
+- **Request.** `prompts/title.md` with the run's names, the first ask cut to 2,000 characters
+  [guess] as the only input, no tools, and the task's model at `Low` effort (shortcut: the catalog
+  lists no efforts yet, so 13b's check decides support). It goes through the runtime's engine as a
+  round does, under `SendKey::Job`: it asks for a lease, a delete of the task is held while its
+  body goes out, and the transport reserves from the shared budget. The fixture engine never asks.
+- **Answer.** The round's text, at most 4 KiB [guess], taken only when the round completes: its
+  first line that isn't blank, without control characters, trimmed and cut to 80 characters. An
+  empty title, more text, a tool call or a round that ends any other way fails the job, and the
+  first words stay.
+- **Write.** `SetTitle { source: Model(generation), job }`, which the store applies only over first
+  words and in the generation the read found, so a rename or a delete during the job wins. The
+  store answers every `SetTitle` with `TitleSet { job, applied }`. A committed title, the user's
+  or a model's, sends `ThreadsChanged`; only the slot's own key empties the slot, so an old job's
+  answer never clears a newer job.
+- **Cancel.** Accepting any turn cancels the job (`CancelJob`), and the runtime drops its round;
+  a granted lease still settles when the transport drops it. A job lease past its deadline cancels
+  the job and fails closed, as a round's does.
+- **Sign-out.** The runtime reports `SignedIn { generation }` and `SignedOut { generation }` when
+  the account starts or stops being able to send, the generation being the catalog's epoch, before
+  anything else that account input does. Sign-out cancels the job, so nothing is written and no
+  request starts until an account signs in again. A grant and a write each need the job's own
+  account generation, and an older generation's `SignedOut` changes nothing.
+- **Logs** carry the job's key and whether it titled, never the title, the ask or the prompt.
 
 ## The bound
 

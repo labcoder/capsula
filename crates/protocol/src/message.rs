@@ -307,6 +307,9 @@ pub enum ControlToShell {
     /// change, and once per [`ControlToBrain::AccountOp`]. It carries the display email, so
     /// the tap never records it.
     Account(AccountView),
+    /// The brain changed a listed thread on its own, such as a task's title, so the shell reads
+    /// its list again. It carries nothing.
+    ThreadsChanged,
 }
 
 /// Shell to brain, on the data pipe.

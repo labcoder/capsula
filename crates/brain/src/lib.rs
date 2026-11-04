@@ -11,14 +11,24 @@ pub mod credential;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
+mod jobs;
 pub mod logging;
 pub mod platform;
 mod relaunch;
 mod runtime;
+pub mod screen;
 pub mod store;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "PR 7 wires spoken replies; PR 8 wires voice installation"
+    )
+)]
+mod voice;
 
 use std::io;
 use std::path::PathBuf;
@@ -121,9 +131,9 @@ pub async fn run() -> Result<(), BrainError> {
         account,
     )
     .map_err(BrainError::StoreThread)?;
-    let jobs = Job::new().map_err(BrainError::Helpers)?;
-    // shortcut: a fake screen worker that only waits; slice 6 gives it work and respawns it.
-    let _screen = Job::spawn(&exe, SCREEN_WORKER, &[&jobs]).map_err(BrainError::Helpers)?;
+    let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    let screen = screen::ScreenSupervisor::start(exe.clone(), std::sync::Arc::clone(&jobs))
+        .map_err(BrainError::Helpers)?;
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
     let identity = Identity {
@@ -140,6 +150,7 @@ pub async fn run() -> Result<(), BrainError> {
         }
         Ok(None) | Err(_) => brain.close().await,
     }
+    drop(screen);
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.terminate()).await {
         Ok(Ok(())) => {}

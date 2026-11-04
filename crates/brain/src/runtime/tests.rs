@@ -31,6 +31,8 @@ mod accounts;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "page_tests.rs"]

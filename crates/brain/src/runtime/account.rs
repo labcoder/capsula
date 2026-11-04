@@ -35,6 +35,7 @@ use crate::coordinator::{Availability, Ready};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link, settings};
+use crate::coordinator::Input as CoreInput;
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
 pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
@@ -302,6 +303,11 @@ impl Accounts {
         Availability::Unavailable(reason)
     }
 
+    /// The account's catalog epoch while it can send model requests: its generation for jobs.
+    pub(super) fn sendable(&self) -> Option<u64> {
+        self.catalog.usable.then_some(self.catalog.epoch)
+    }
+
     /// The last catalog read in this epoch, if one succeeded.
     pub(super) fn models(&self) -> Option<&[ModelInfo]> {
         self.catalog.models.as_deref()
@@ -455,7 +461,19 @@ impl Brain {
     ) -> Result<(), Full> {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
+        let sendable = self.account.sendable();
         let frames = self.account.handle(event);
+        // The coordinator hears it before anything else, so a job's write is fenced at once.
+        let now = self.account.sendable();
+        if now != sendable {
+            let out = sendable.map(|generation| CoreInput::SignedOut { generation });
+            let signed_in = now.map(|generation| CoreInput::SignedIn { generation });
+            for input in out.into_iter().chain(signed_in) {
+                if let Some(effects) = self.handle(input) {
+                    self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
+                }
+            }
+        }
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
         if read

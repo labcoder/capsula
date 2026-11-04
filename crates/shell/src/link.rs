@@ -110,6 +110,8 @@ pub(crate) enum LinkEvent {
     },
     /// The brain refused the oldest unanswered turn, from the control pipe.
     TurnRefused,
+    /// The brain changed a listed thread, from the control pipe.
+    ThreadsChanged,
     /// Something the user should be told, from the control pipe.
     Error {
         generation: u64,
@@ -763,7 +765,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::Error(_)
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
-            | ControlToShell::Account(_),
+            | ControlToShell::Account(_)
+            | ControlToShell::ThreadsChanged,
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -810,6 +813,7 @@ fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
 
 /// Reads the control pipe until the connection ends: answers pings and passes run states and
 /// scenes on. A repeated handshake ends the connection, as the brain treats a protocol violation.
+#[expect(clippy::too_many_lines, reason = "one arm per control message")]
 fn watch(
     control: &PipeClient,
     out: &Sender<ControlToBrain>,
@@ -883,6 +887,11 @@ fn watch(
             }
             Ok(Some(ControlToShell::TurnRefused { .. })) => {
                 if events.send_blocking(LinkEvent::TurnRefused).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::ThreadsChanged)) => {
+                if events.send_blocking(LinkEvent::ThreadsChanged).is_err() {
                     return;
                 }
             }
