@@ -578,6 +578,50 @@ local/cross views at the shared 1,500-object cap. Three warm-ups precede 16 time
 the histories, resident-byte totals and result destruction are outside the timer, and
 text measurement is the fixed fake. Run it like the preparation measurement above.
 
+### Deferred destruction
+
+`deferred::Deferred<T>` hands a discarded value to one long-lived `scene-dropper`
+thread, so freeing a large prefix or semantic state never runs on the thread that
+discarded it, above all the shell's UI thread. Dropping one costs a `Box` and an
+unbounded channel send, and never waits.
+
+```mermaid
+flowchart LR
+    D[Discard on the UI or a worker] -->|Box and send| Q[Unbounded queue, metered]
+    Q --> T[scene-dropper runs the destructor]
+    T -->|thread dies| F[running is false: stop intake, leak later values]
+```
+
+The host must call `deferred::start()` once before intake, and refuse intake when it
+fails. Production startup is not wired yet; this foundation keeps v1 off and does not
+change when applications destroy values. Until startup, and on the dropper itself,
+values drop in place, so tests and nested
+values behave as before. `running()` turns false once the dropper thread has died,
+which only a panicking destructor in an unwinding build can cause; `start()` then
+fails too. Later values are leaked rather than destroyed on the caller, because a dead
+dropper is a failure, not a shutdown path. There is no shutdown call: at exit, whatever
+is queued goes with the process.
+
+`pending()` reports the values queued or still being destroyed and the bytes their
+owners attributed; `take_peak()` returns the attributed high water since its last
+call. Attributions are owner estimates, not heap measurements, and nested values
+aren't counted again. The queue has no byte bound and sits outside the 64 MiB
+presenter cap: it is metered, not limited, which is a known shortcut.
+
+The allocation regressions exercise clear with track undo records, successful and stale
+commit, rejection of a late invalid track, and Stop both at rest and when dropping a
+step with removals and cell changes. They also measure outgoing activation over 256
+untracked rectangles; the paint frame is created outside that measurement. Each fixture
+waits for the live dropper's pending values and bytes to drain after its assertions.
+These are caller-side allocation checks, not latency measurements.
+
+They do not prove every admission error, compiled-candidate rejection, rejected
+predecessor, stale activation, layout-cut error or undo-release path. Settled and
+superseded animation tracks still need retirement or measurement in the consuming
+layer's activation gate. `SceneState::attributed_bytes()` estimates whole-state ownership
+for the host's queue meter, not a heap bound. The host must protect its own held values
+and clear a paint frame before retiring the view whose geometry it shares.
+
 ### Tables
 
 `layout::table` ports S1's fitted column widths and number formatting into preparation.

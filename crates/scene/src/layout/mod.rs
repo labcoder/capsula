@@ -3,7 +3,7 @@ mod callout;
 mod chart;
 mod compound;
 mod diagram;
-mod heap;
+pub(crate) mod heap;
 mod nodes;
 mod path;
 mod prepare;
@@ -13,6 +13,7 @@ mod table;
 
 use crate::{
     Preparation, SceneState, StepError,
+    deferred::Deferred,
     display::DisplayList,
     geom::{Rect, Vec2},
     theme::Theme,
@@ -84,13 +85,18 @@ impl PrepareInput {
         surface: SurfaceGeometry,
         theme: Arc<Theme>,
     ) -> Result<Self, (PrepareError, Preparation)> {
-        if !Arc::ptr_eq(&ticket.owner, &before.owner)
-            || ticket.cut_revision != before.cut_revision
-            || before.revision.checked_add(1) != Some(ticket.revision)
-        {
-            return Err((PrepareError::Stale, ticket));
-        }
-        if let Err(error) = surface.viewport(ticket.canvas_size) {
+        let current = Arc::ptr_eq(&ticket.owner, &before.owner)
+            && ticket.cut_revision == before.cut_revision
+            && before.revision.checked_add(1) == Some(ticket.revision);
+        let checked = if current {
+            surface.viewport(ticket.canvas_size)
+        } else {
+            Err(PrepareError::Stale)
+        };
+        if let Err(error) = checked {
+            // The rejected layout may hold the last references to a prefix's geometry.
+            let bytes = before.index_bytes();
+            drop(Deferred::new(before, bytes));
             return Err((error, ticket));
         }
         Ok(Self {

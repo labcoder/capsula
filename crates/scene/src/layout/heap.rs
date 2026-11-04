@@ -1,12 +1,41 @@
-//! Heap bytes held by a layout's own copies of record sources.
+//! Requested heap bytes scene values hold, pinned to Rust 1.98's collection layouts.
 
 use super::state::Placed;
 use crate::{
-    Op, Step, Text,
-    record::{Anchor, Axis, Cell, Start},
+    Op, Step, Text, WireId,
+    mermaid::Extra,
+    record::{Anchor, Axis, Cell, Change, Start},
     state::object,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
+
+/// An `Arc` allocation's strong and weak counts, which precede its value.
+pub(crate) const ARC_HEADER: usize = 2 * size_of::<usize>();
+
+/// Upper bound on the requested bytes of a `BTreeMap<K, V>` or `BTreeSet<K>` (`V = ()`) with
+/// `len` entries, pinned to Rust 1.98's B-tree: a node holds 11 entries, every node but the
+/// root keeps at least 5, an internal node adds 12 edges, and up to 10 entries share one root
+/// leaf. A map that removals emptied keeps a root leaf this does not count.
+// shortcut: std's node layout is private; btree_node_allowance_bounds_requested_allocations
+// rechecks the bound on each toolchain bump.
+pub(crate) fn btree<K, V>(len: usize) -> usize {
+    const CAPACITY: usize = 11;
+    const MIN_LEN: usize = 5;
+    let align = align_of::<usize>()
+        .max(align_of::<K>())
+        .max(align_of::<V>());
+    let header = size_of::<usize>() + 2 * size_of::<u16>();
+    let leaf = (header + CAPACITY * (size_of::<K>() + size_of::<V>())).next_multiple_of(align);
+    let internal = (leaf + (CAPACITY + 1) * size_of::<usize>()).next_multiple_of(align);
+    match len {
+        0 => 0,
+        1..=10 => leaf,
+        _ => (1 + len / MIN_LEN) * internal,
+    }
+}
 
 /// Bytes of the distinct `Op` copies in `objects` that `shared` doesn't already hold.
 pub(super) fn source_bytes<'a>(
@@ -24,34 +53,65 @@ pub(super) fn source_bytes<'a>(
         .sum()
 }
 
+/// Estimated bytes a committed step owns: its records and the strings and sequences inside them,
+/// at their lengths rather than their capacities.
+pub(crate) fn step_bytes(step: &Step) -> usize {
+    let id = |id: &WireId| id.as_str().len();
+    size_of::<Step>()
+        + id(&step.id)
+        + optional(step.say.as_ref())
+        + step
+            .put
+            .iter()
+            .map(|op| size_of::<Op>() + op_bytes(op))
+            .sum::<usize>()
+        + step.set.iter().map(change_bytes).sum::<usize>()
+        + step
+            .remove
+            .iter()
+            .map(|removed| size_of::<WireId>() + id(removed))
+            .sum::<usize>()
+        + match &step.start {
+            Start::After { step, .. } => id(step),
+            Start::Speech | Start::Now => 0,
+        }
+}
+
+fn change_bytes(change: &Change) -> usize {
+    size_of::<Change>()
+        + change.target.as_str().len()
+        + optional(change.text.as_ref())
+        + optional(change.label.as_ref())
+        + change.cells.as_deref().map_or(0, cells)
+        + change.data.as_deref().map_or(0, elements)
+}
+
 /// The compiled record a prepared ticket owns, unless it shares the original log record.
-pub(super) fn compiled_bytes(original: &Arc<Step>, run: &Arc<Step>) -> usize {
+pub(crate) fn compiled_bytes(original: &Arc<Step>, run: &Arc<Step>) -> usize {
     if Arc::ptr_eq(original, run) {
         return 0;
     }
-    size_of::<Step>()
-        + run.id.as_str().len()
-        + optional(run.say.as_ref())
-        + elements(&run.put)
-        + run.put.iter().map(op_bytes).sum::<usize>()
-        + elements(&run.set)
-        + run
-            .set
-            .iter()
-            .map(|change| {
-                change.target.as_str().len()
-                    + optional(change.text.as_ref())
-                    + optional(change.label.as_ref())
-                    + change.cells.as_ref().map_or(0, |values| cells(values))
-                    + change.data.as_ref().map_or(0, |values| elements(values))
-            })
-            .sum::<usize>()
-        + elements(&run.remove)
-        + run.remove.iter().map(|id| id.as_str().len()).sum::<usize>()
-        + match &run.start {
-            Start::After { step, .. } => step.as_str().len(),
-            Start::Speech | Start::Now => 0,
-        }
+    step_bytes(run)
+}
+
+pub(crate) fn extras_bytes<'a>(
+    shared: impl IntoIterator<Item = &'a Arc<BTreeMap<usize, Extra>>>,
+    extras: impl IntoIterator<Item = &'a Arc<BTreeMap<usize, Extra>>>,
+) -> usize {
+    let mut seen: HashSet<_> = shared.into_iter().map(Arc::as_ptr).collect();
+    extras
+        .into_iter()
+        .filter(|extras| seen.insert(Arc::as_ptr(extras)))
+        .map(|extras| {
+            ARC_HEADER
+                + size_of::<BTreeMap<usize, Extra>>()
+                + btree::<usize, Extra>(extras.len())
+                + extras
+                    .values()
+                    .map(|extra| extra.bytes() - size_of::<(usize, Extra)>())
+                    .sum::<usize>()
+        })
+        .sum()
 }
 
 /// Heap bytes an operation owns: each string's bytes and each sequence's elements at their
@@ -132,12 +192,84 @@ fn anchor(value: &Anchor) -> usize {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/allocation.rs"]
+mod allocation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         Finite, Record, WireId, parse_record,
         record::{Change, Point},
+        state::{
+            object::{Kind, Object},
+            work::Work,
+        },
     };
+
+    #[derive(Debug, Clone, Copy)]
+    enum Construction {
+        Insert,
+        Collect,
+    }
+
+    fn check_nodes<K: Ord, V>(mut entries: Vec<(K, V)>, construction: Construction) {
+        let len = entries.len();
+        let (map, _, [allocated, released]) = allocation::usage(|| match construction {
+            Construction::Collect => entries.drain(..).collect::<BTreeMap<_, _>>(),
+            Construction::Insert => {
+                let mut map = BTreeMap::new();
+                for (key, value) in entries.drain(..) {
+                    map.insert(key, value);
+                }
+                map
+            }
+        });
+        assert_eq!(map.len(), len, "construction retains every fixture entry");
+        let held = allocated
+            .checked_sub(released)
+            .expect("only measured node storage remains");
+        let allowance = btree::<K, V>(len);
+        assert!(
+            held <= allowance,
+            "{len} entries, {construction:?}: {held} requested node bytes exceed {allowance}"
+        );
+        if len <= 10 {
+            assert_eq!(
+                held, allowance,
+                "an empty map or one root leaf has an exact charge"
+            );
+        }
+    }
+
+    #[test]
+    fn btree_node_allowance_bounds_requested_allocations() {
+        let (empty, allocations) = allocation::count(BTreeMap::<usize, usize>::new);
+        assert_eq!(
+            (empty.len(), allocations),
+            (0, 0),
+            "a fresh empty map allocates nothing"
+        );
+        for len in [0, 1, 10, 11, 12, 100, 256] {
+            for construction in [Construction::Insert, Construction::Collect] {
+                check_nodes((0..len).map(|i| (i, i)).collect(), construction);
+                let entries = (0..len)
+                    .map(|i| {
+                        let id: WireId = format!("r{i}").try_into().expect("bounded id");
+                        let object = Object {
+                            work: Work::default(),
+                            handle: crate::Handle::new(1, i).expect("bounded handle"),
+                            kind: Kind::Shape,
+                            parent: None,
+                            references: Vec::new(),
+                        };
+                        (id, object)
+                    })
+                    .collect();
+                check_nodes(entries, construction);
+            }
+        }
+    }
 
     fn op(json: &str) -> Op {
         let record = format!(r#"{{"step":{{"id":"s","put":[{json}]}}}}"#);
