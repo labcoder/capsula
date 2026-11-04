@@ -53,11 +53,18 @@ fn live_frames_apply_only_on_the_current_connection_while_the_dropper_runs() {
             let [begun, committed, removed]: [Vec<Effect>; 3] =
                 effects.try_into().expect("three frames");
             assert!(matches!(begun[..], [Effect::Credit(FRAME)]), "{case}");
+            assert!(removed.is_empty(), "the removal waits behind the admission");
+            let [Effect::Admit(admission)] = <[Effect; 1]>::try_from(committed).expect("one job")
+            else {
+                panic!("an admission");
+            };
+            let effects = presenter
+                .completed(admission.run(), now)
+                .expect("the admission");
             assert!(
-                matches!(committed[..], [Effect::Credit(FRAME), Effect::Prepare(_)]),
+                matches!(effects[..], [Effect::Credit(FRAME), Effect::Credit(FRAME)]),
                 "{case}"
             );
-            assert!(matches!(removed[..], [Effect::Credit(FRAME)]), "{case}");
             assert_eq!(
                 presenter.scenes.keys().copied().collect::<Vec<_>>(),
                 [OTHER],
@@ -70,7 +77,7 @@ fn live_frames_apply_only_on_the_current_connection_while_the_dropper_runs() {
                 [LIVE],
                 "{case}"
             );
-            assert_eq!(presenter.scenes[&LIVE].state.revision(), 0, "{case}");
+            assert_eq!(presenter.scenes[&LIVE].state.view().revision(), 0, "{case}");
             assert_eq!(presenter.workers(), 0, "{case}");
         }
         if generation == GENERATION {

@@ -1,0 +1,479 @@
+//! Bounded, resumable model downloads against the pinned voice manifest.
+
+#[cfg(test)]
+mod tests;
+
+use std::fs::{self, File, OpenOptions};
+use std::future::Future;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use kumochi_protocol::constants;
+use kumochi_protocol::voice::{ModelFile, VoicePart};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use rustls::pki_types::CertificateDer;
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
+use tokio::time::{self, Instant};
+use url::{Host, Url};
+
+const IDLE: Duration = Duration::from_secs(30);
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+pub(crate) struct Downloader {
+    client: reqwest::Client,
+    models: PathBuf,
+    rules: Rules,
+    #[cfg(test)]
+    base: Option<Url>,
+    #[cfg(test)]
+    space: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Progress {
+    pub done: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DownloadError {
+    #[error("insufficient model space")]
+    NoSpace { needed: u64 },
+    #[error("model request refused")]
+    Refused,
+    #[error("model size mismatch")]
+    Size,
+    #[error("model hash mismatch")]
+    Hash,
+    #[error("model download timed out")]
+    Timeout,
+    #[error("model transport failed")]
+    Transport,
+    #[error("model storage failed")]
+    Io,
+    #[error("model download cancelled")]
+    Cancelled,
+}
+
+#[derive(Clone, Default)]
+enum Rules {
+    #[default]
+    Production,
+    #[cfg(test)]
+    Fixture { port: u16, hosts: Vec<String> },
+}
+
+impl Rules {
+    fn accepts(&self, url: &Url) -> bool {
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return false;
+        }
+        match self {
+            Self::Production => {
+                url.port_or_known_default() == Some(443)
+                    && matches!(url.host(), Some(Host::Domain(host))
+                    if host == "huggingface.co" || host.ends_with(".hf.co"))
+            }
+            #[cfg(test)]
+            Self::Fixture { port, hosts } => {
+                url.port_or_known_default() == Some(*port)
+                    && url
+                        .host_str()
+                        .is_some_and(|host| hosts.iter().any(|h| h == host))
+            }
+        }
+    }
+}
+
+impl Downloader {
+    pub(crate) fn new(models: PathBuf) -> Result<Self, DownloadError> {
+        let roots = crate::platform::trust_roots().map_err(|_| DownloadError::Transport)?;
+        Self::from_roots(models, roots.certificates, Rules::default())
+    }
+
+    fn from_roots(
+        models: PathBuf,
+        roots: Vec<Vec<u8>>,
+        rules: Rules,
+    ) -> Result<Self, DownloadError> {
+        let mut store = rustls::RootCertStore::empty();
+        let (usable, _) =
+            store.add_parsable_certificates(roots.into_iter().map(CertificateDer::from));
+        if usable == 0 {
+            return Err(DownloadError::Transport);
+        }
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| DownloadError::Transport)?
+        .with_root_certificates(store)
+        .with_no_client_auth();
+        let redirects = rules.clone();
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(tls)
+            .https_only(true)
+            .no_proxy()
+            .referer(false)
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
+            .user_agent(format!(
+                "{}/{}",
+                constants::DISPLAY_NAME,
+                env!("CARGO_PKG_VERSION")
+            ))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() > 5 || !redirects.accepts(attempt.url()) {
+                    attempt.error("model redirect refused")
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .connect_timeout(IDLE)
+            .build()
+            .map_err(|_| DownloadError::Transport)?;
+        Ok(Self {
+            client,
+            models,
+            rules,
+            #[cfg(test)]
+            base: None,
+            #[cfg(test)]
+            space: None,
+        })
+    }
+
+    /// The caller supplies the models folder under `platform::data_dir`; no network value
+    /// contributes to any local path. PR 8 owns that caller and the single install task.
+    pub(crate) async fn fetch(
+        &self,
+        part: VoicePart,
+        progress: &watch::Sender<Progress>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), DownloadError> {
+        self.fetch_files(&part.files().collect::<Vec<_>>(), progress, cancel)
+            .await
+    }
+
+    async fn fetch_files(
+        &self,
+        files: &[&ModelFile],
+        progress: &watch::Sender<Progress>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), DownloadError> {
+        let mut pending = Vec::new();
+        let mut done = 0;
+        let mut missing = 0;
+        for &model in files {
+            check_cancel(cancel)?;
+            let dir = self.models.join(model.part.dir());
+            fs::create_dir_all(&dir).map_err(|_| DownloadError::Io)?;
+            let path = dir.join(model.name);
+            if let Some(mut file) = open_existing(&path)? {
+                if file.metadata().map_err(|_| DownloadError::Io)?.len() == model.bytes
+                    && hash_matches(hash_file(&mut file, cancel).await?.0, model.sha256)
+                {
+                    done += model.bytes;
+                    continue;
+                }
+                drop(file);
+                fs::remove_file(&path).map_err(|_| DownloadError::Io)?;
+            }
+            let partial = dir.join(format!("{}.part", model.name));
+            let existing = open_existing(&partial)?;
+            let length = if let Some(file) = &existing {
+                file.try_lock().map_err(|_| DownloadError::Io)?;
+                file.metadata().map_err(|_| DownloadError::Io)?.len()
+            } else {
+                0
+            };
+            missing += model.bytes - if length <= model.bytes { length } else { 0 };
+            pending.push((model, path, partial, existing));
+        }
+        let needed = missing + missing.div_ceil(10);
+        let available = {
+            #[cfg(test)]
+            if let Some(space) = self.space {
+                space
+            } else {
+                crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+            }
+            #[cfg(not(test))]
+            crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+        };
+        if available < needed {
+            return Err(DownloadError::NoSpace { needed });
+        }
+        let mut report = Reporter {
+            sender: progress,
+            last: Instant::now(),
+            value: Progress {
+                done,
+                total: files.iter().map(|f| f.bytes).sum(),
+            },
+        };
+        report.sender.send_replace(report.value);
+        for (model, path, partial, existing) in pending {
+            let result = self
+                .fetch_file(model, &partial, existing, &mut report, cancel)
+                .await;
+            if let Err(error) = result {
+                if matches!(error, DownloadError::Size | DownloadError::Hash) {
+                    fs::remove_file(&partial).map_err(|_| DownloadError::Io)?;
+                }
+                tracing::warn!(file = model.name, ?error, "voice download stopped");
+                return Err(error);
+            }
+            crate::platform::replace_file(&partial, &path).map_err(|_| DownloadError::Io)?;
+            done += model.bytes;
+            report.value.done = done;
+        }
+        report.finish().await;
+        Ok(())
+    }
+
+    async fn fetch_file(
+        &self,
+        model: &ModelFile,
+        partial: &Path,
+        existing: Option<File>,
+        report: &mut Reporter<'_>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), DownloadError> {
+        let mut file = if let Some(file) = existing {
+            file
+        } else {
+            locked_file(partial)?
+        };
+        if file.metadata().map_err(|_| DownloadError::Io)?.len() > model.bytes {
+            drop(file);
+            fs::remove_file(partial).map_err(|_| DownloadError::Io)?;
+            file = locked_file(partial)?;
+        }
+        let (mut hash, mut offset) = hash_file(&mut file, cancel).await?;
+        if offset == model.bytes {
+            if !hash_matches(hash, model.sha256) {
+                return Err(DownloadError::Hash);
+            }
+            return file.sync_all().map_err(|_| DownloadError::Io);
+        }
+        let mut restarted = false;
+        let base_done = report.value.done;
+        loop {
+            let url = Url::parse(model.url).map_err(|_| DownloadError::Refused)?;
+            #[cfg(test)]
+            let url = if let Some(base) = &self.base {
+                base.join(model.name).map_err(|_| DownloadError::Refused)?
+            } else {
+                url
+            };
+            if !self.rules.accepts(&url) {
+                return Err(DownloadError::Refused);
+            }
+            let mut request = self.client.get(url).header(ACCEPT_ENCODING, "identity");
+            if offset != 0 {
+                request = request.header(RANGE, format!("bytes={offset}-"));
+            }
+            let mut response = bounded(request.send(), cancel, Instant::now() + IDLE)
+                .await?
+                .map_err(|error| transport_error(&error))?;
+            let status = response.status().as_u16();
+            if status == 416
+                || (status == 206 && !valid_range(response.headers(), offset, model.bytes))
+            {
+                if restarted {
+                    return Err(DownloadError::Refused);
+                }
+                drop(file);
+                fs::remove_file(partial).map_err(|_| DownloadError::Io)?;
+                file = locked_file(partial)?;
+                offset = 0;
+                hash = Sha256::new();
+                restarted = true;
+                continue;
+            }
+            if status == 429 || (500..600).contains(&status) {
+                return Err(DownloadError::Transport);
+            }
+            if status != 200 && (status != 206 || offset == 0) {
+                return Err(DownloadError::Refused);
+            }
+            if status == 200 {
+                if !valid_length(response.headers(), model.bytes) {
+                    return Err(DownloadError::Size);
+                }
+                file.set_len(0).map_err(|_| DownloadError::Io)?;
+                file.rewind().map_err(|_| DownloadError::Io)?;
+                offset = 0;
+                hash = Sha256::new();
+            }
+            let mut deadline = Instant::now() + IDLE;
+            loop {
+                let chunk = bounded(response.chunk(), cancel, deadline)
+                    .await?
+                    .map_err(|error| transport_error(&error))?;
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                if chunk.is_empty() {
+                    continue;
+                }
+                deadline = Instant::now() + IDLE;
+                let count = u64::try_from(chunk.len()).map_err(|_| DownloadError::Size)?;
+                if count > model.bytes - offset {
+                    return Err(DownloadError::Size);
+                }
+                file.write_all(&chunk).map_err(|_| DownloadError::Io)?;
+                hash.update(&chunk);
+                offset += count;
+                report.update(base_done + offset);
+            }
+            if offset != model.bytes {
+                return Err(DownloadError::Transport);
+            }
+            if !hash_matches(hash, model.sha256) {
+                return Err(DownloadError::Hash);
+            }
+            file.flush().map_err(|_| DownloadError::Io)?;
+            return file.sync_all().map_err(|_| DownloadError::Io);
+        }
+    }
+}
+
+fn open_existing(path: &Path) -> Result<Option<File>, DownloadError> {
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(DownloadError::Io),
+    }
+}
+
+fn locked_file(path: &Path) -> Result<File, DownloadError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|_| DownloadError::Io)?;
+    file.try_lock().map_err(|_| DownloadError::Io)?;
+    Ok(file)
+}
+
+async fn hash_file(
+    file: &mut File,
+    cancel: &watch::Receiver<bool>,
+) -> Result<(Sha256, u64), DownloadError> {
+    file.rewind().map_err(|_| DownloadError::Io)?;
+    let mut hash = Sha256::new();
+    let mut length = 0;
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        check_cancel(cancel)?;
+        let count = file.read(&mut buffer).map_err(|_| DownloadError::Io)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        length += u64::try_from(count).map_err(|_| DownloadError::Io)?;
+        tokio::task::yield_now().await;
+    }
+    Ok((hash, length))
+}
+
+fn hash_matches(hash: Sha256, expected: &str) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    expected.len() == 64
+        && hash
+            .finalize()
+            .iter()
+            .zip(expected.as_bytes().as_chunks::<2>().0)
+            .all(|(&byte, pair)| {
+                *pair == [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]]
+            })
+}
+
+fn valid_range(headers: &reqwest::header::HeaderMap, offset: u64, size: u64) -> bool {
+    offset > 0
+        && size > offset
+        && headers.get_all(CONTENT_RANGE).iter().count() == 1
+        && headers.get(CONTENT_RANGE).is_some_and(|value| {
+            value.as_bytes() == format!("bytes {offset}-{}/{size}", size - 1).as_bytes()
+        })
+}
+
+fn valid_length(headers: &reqwest::header::HeaderMap, size: u64) -> bool {
+    let values = headers.get_all(CONTENT_LENGTH);
+    if values.iter().count() > 1 {
+        return false;
+    }
+    values.iter().next().is_none_or(|value| {
+        value.to_str().is_ok_and(|text| {
+            !text.is_empty()
+                && text.bytes().all(|b| b.is_ascii_digit())
+                && text.parse::<u64>() == Ok(size)
+        })
+    })
+}
+
+fn check_cancel(cancel: &watch::Receiver<bool>) -> Result<(), DownloadError> {
+    if *cancel.borrow() {
+        Err(DownloadError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+async fn bounded<T>(
+    future: impl Future<Output = T>,
+    cancel: &watch::Receiver<bool>,
+    deadline: Instant,
+) -> Result<T, DownloadError> {
+    let mut cancel = cancel.clone();
+    tokio::select! {
+        biased;
+        () = async {
+            if cancel.wait_for(|value| *value).await.is_err() { std::future::pending::<()>().await; }
+        } => Err(DownloadError::Cancelled),
+        () = time::sleep_until(deadline) => Err(DownloadError::Timeout),
+        value = future => Ok(value),
+    }
+}
+
+fn transport_error(error: &reqwest::Error) -> DownloadError {
+    if error.is_redirect() {
+        DownloadError::Refused
+    } else if error.is_timeout() {
+        DownloadError::Timeout
+    } else {
+        DownloadError::Transport
+    }
+}
+
+struct Reporter<'a> {
+    sender: &'a watch::Sender<Progress>,
+    last: Instant,
+    value: Progress,
+}
+
+impl Reporter<'_> {
+    fn update(&mut self, done: u64) {
+        self.value.done = done;
+        if self.last.elapsed() >= PROGRESS_INTERVAL {
+            self.sender.send_replace(self.value);
+            self.last = Instant::now();
+        }
+    }
+
+    async fn finish(&mut self) {
+        if *self.sender.borrow() != self.value {
+            time::sleep_until(self.last + PROGRESS_INTERVAL).await;
+            self.sender.send_replace(self.value);
+        }
+    }
+}

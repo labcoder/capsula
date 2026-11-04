@@ -13,9 +13,11 @@ const SETTLE: Duration = Duration::from_millis(300);
 #[test]
 fn a_run_job_ends_its_child_and_leaves_the_screen_worker() {
     let brain = Job::new().expect("brain job");
-    let screen = Job::spawn(Path::new(WORKER), SCREEN_WORKER, &[&brain]).expect("screen worker");
+    let (screen, _screen_pipes) =
+        Job::spawn_piped(Path::new(WORKER), SCREEN_WORKER, &[&brain]).expect("screen worker");
     let run = Job::new().expect("run job");
-    let child = Job::spawn(Path::new(WORKER), SCREEN_WORKER, &[&brain, &run]).expect("run child");
+    let (child, _child_pipes) =
+        Job::spawn_piped(Path::new(WORKER), SCREEN_WORKER, &[&brain, &run]).expect("run child");
     assert_eq!(
         brain.active_processes().expect("count"),
         2,

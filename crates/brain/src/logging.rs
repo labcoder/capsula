@@ -15,6 +15,11 @@ pub(crate) fn filter(level: Level) -> Targets {
     Targets::new()
         .with_default(level)
         .with_target("hyper_util", LevelFilter::OFF)
+        // Spoken replies' dependencies: their events, errors included, can carry paths or text.
+        .with_target("ptts", LevelFilter::OFF)
+        .with_target("xn", LevelFilter::OFF)
+        .with_target("xn_gemm", LevelFilter::OFF)
+        .with_target("tokenizers", LevelFilter::OFF)
 }
 
 /// Why logging couldn't start.
