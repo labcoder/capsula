@@ -18,11 +18,11 @@ use async_channel::{Receiver, Sender};
 use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
-use crate::platform::ROW_SPANS;
-
 use super::geometry::{PanelVisibility, Position};
 use super::line::LineFrame;
-use crate::platform::{self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote};
+use crate::platform::{
+    self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote, ROW_SPANS,
+};
 
 /// Rows one geometry record holds; the line's band at 200 % is under 50.
 pub(super) const ROW_CAP: usize = 512;

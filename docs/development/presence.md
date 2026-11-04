@@ -206,7 +206,8 @@ is one line:
   drip, then the body with its stub. Four is `ROW_SPANS`, what a hit-mask row holds: two shapes,
   each with a current and a previous snapshot. For the line, the first `drawn` is its `paint`
   and the first `owned` the band's `row_spans` the mask is given, not a copy; the rest are `-`,
-  and `trimmed` is always `true`. Version 2 is this row; version 1 had one drawn and two owned. The gate harness requires
+  and `trimmed` is always `true`. Version 2 is this row; version 1 had one drawn and two owned.
+  The gate harness requires
   each row to own what it draws, and a committed geometry to own exactly its `proxy` rectangle.
   Taller than 512 rows, it's `… overflow` with no rows, never truncated.
 - `commit seq= begin_qpc= qpc= result=shape|moved|unchanged|failed proposal=G epoch=E
