@@ -21,6 +21,8 @@
 
 mod measure;
 mod prepare;
+mod recovery;
+mod scene;
 mod snapshot;
 
 use std::{
@@ -37,11 +39,9 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    Admission, GlobalBudget, Preparation, SceneEvent, SceneState, Step, StopCut, StopOutcome,
+    Admission, GlobalBudget, SceneState, Step, StopCut, StopOutcome,
     deferred::{self, Deferred},
-    layout::{
-        LayoutState, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry,
-    },
+    layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
     limits::MAX_RESIDENT_BYTES,
     text::Bounded,
     theme::Theme,
@@ -49,7 +49,9 @@ use kumochi_scene::{
 
 pub(crate) use measure::Measure;
 pub(crate) use prepare::{Completion, PrepareJob, RecoveryJob};
-use snapshot::{Assembler, Source};
+use recovery::Phase;
+use scene::{Cut, Out, Running, Scene, Ticket};
+use snapshot::Assembler;
 
 /// The layout algorithm this shell prepares with; the brain stores it with each scene.
 const LAYOUT_VERSION: u32 = 1;
@@ -438,169 +440,6 @@ impl Presenter {
     }
 }
 
-struct Scene {
-    state: SceneState,
-    /// The layout at the activated bound: recovered at rest, or empty for a fresh scene.
-    rest: LayoutState,
-    retained: usize,
-    queue: VecDeque<Ticket>,
-    running: Option<Running>,
-    /// Prepared and not activated; nothing activates before B6.
-    ready: Vec<Deferred<PreparedStep>>,
-    cut: Cut,
-    /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
-    skipping: bool,
-}
-
-struct Ticket {
-    run: RunId,
-    index: u32,
-    /// When it could first start: its commit, or its predecessor's answer.
-    queued: Instant,
-    preparation: Deferred<Preparation>,
-}
-
-struct Running {
-    id: u64,
-    run: RunId,
-    index: u32,
-    started: Instant,
-    cancel: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Cut {
-    /// No cut since the last commit.
-    Open,
-    /// A cut was sent and the brain hasn't acknowledged it.
-    Outstanding,
-    /// A cut was applied, and no step has committed since.
-    Applied,
-}
-
-#[derive(Debug)]
-enum Phase {
-    Offline,
-    /// Waiting for `ScenesV1` and every chunk it names.
-    Assembling,
-    /// The batch is being recovered.
-    Recovering(Recovery),
-    Live,
-}
-
-#[derive(Debug)]
-struct Recovery {
-    id: u64,
-    started: Instant,
-    cancel: Arc<AtomicBool>,
-    /// Each scene with its descriptor's revision and retained count.
-    scenes: Vec<(SceneId, u32, u32)>,
-    /// The batch until a worker slot frees for it; none once its job is sent.
-    waiting: Option<Deferred<Vec<Source>>>,
-}
-
-/// Effects in order, with the clears gathered into as few `ClearDrawing`s as possible.
-#[derive(Default)]
-struct Out {
-    effects: Vec<Effect>,
-    clear: Vec<SceneId>,
-}
-
-impl Out {
-    fn credit(&mut self, bytes: u32) {
-        if bytes > 0 {
-            self.effects.push(Effect::Credit(bytes));
-        }
-    }
-
-    fn flush(&mut self) {
-        self.clear.sort_unstable();
-        self.clear.dedup();
-        for scene_ids in self.clear.chunks(MAX_VISIBLE_SCENES) {
-            let scene_ids = scene_ids.to_vec();
-            self.effects
-                .push(Effect::Control(ControlToBrain::ClearDrawing { scene_ids }));
-        }
-        self.clear.clear();
-    }
-
-    fn finish(mut self) -> Vec<Effect> {
-        self.flush();
-        self.effects
-    }
-}
-
-impl Scene {
-    fn new(state: SceneState, rest: LayoutState, retained: usize) -> Self {
-        let cut = if matches!(state.recovery_log().last(), Some(SceneEvent::Stop(_))) {
-            Cut::Applied
-        } else {
-            Cut::Open
-        };
-        Self {
-            retained,
-            state,
-            rest,
-            queue: VecDeque::new(),
-            running: None,
-            ready: Vec::new(),
-            cut,
-            skipping: false,
-        }
-    }
-
-    /// The step the watchdog times, and since when: the running one, or else the next queued one,
-    /// which only waits while every worker slot is taken.
-    fn due(&self) -> Option<(Instant, RunId, u32)> {
-        match (&self.running, self.queue.front()) {
-            (Some(running), _) => Some((running.started, running.run, running.index)),
-            (None, Some(ticket)) => Some((ticket.queued, ticket.run, ticket.index)),
-            (None, None) => None,
-        }
-    }
-
-    /// The layout the next step prepares on.
-    fn tip(&self) -> &LayoutState {
-        self.ready
-            .last()
-            .map_or(&self.rest, |prepared| &prepared.after)
-    }
-
-    fn residency(&self) -> usize {
-        self.ready.iter().fold(self.retained, |sum, prepared| {
-            sum.saturating_add(prepared.resident_bytes)
-        })
-    }
-
-    /// What the dropper is told this scene owns: its prepared layouts and its semantic state.
-    fn attributed(&self) -> usize {
-        self.residency()
-            .saturating_add(self.state.attributed_bytes())
-    }
-
-    /// Drops queued and prepared work, and asks a running job to stop.
-    fn halt(&mut self) {
-        if let Some(running) = self.running.take() {
-            running.cancel.store(true, Ordering::Relaxed);
-        }
-        drop(Deferred::new(
-            std::mem::take(&mut self.queue),
-            self.state.attributed_bytes(),
-        ));
-        let bytes = self.residency().saturating_sub(self.retained);
-        drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
-    }
-
-    /// The cut at the activated bound, keeping every object at rest there.
-    fn cut_now(&self) -> StopCut {
-        StopCut {
-            activated: self.state.activated(),
-            revealed: Bounded::new(self.rest.revealed_at_rest())
-                .expect("a scene holds at most its object cap"),
-        }
-    }
-}
-
 impl std::fmt::Debug for Presenter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Presenter")
@@ -613,219 +452,7 @@ impl std::fmt::Debug for Presenter {
     }
 }
 
-impl std::fmt::Debug for Scene {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Scene")
-            .field("revision", &self.state.revision())
-            .field("queued", &self.queue.len())
-            .field("ready", &self.ready.len())
-            .field("cut", &self.cut)
-            .finish_non_exhaustive()
-    }
-}
-
 impl Presenter {
-    fn assembled(
-        &mut self,
-        effect: snapshot::Effect,
-        now: Instant,
-        out: &mut Out,
-    ) -> Result<(), Broken> {
-        out.credit(effect.credit);
-        for scene in effect.clear {
-            out.clear.push(scene);
-            self.remember(scene);
-        }
-        match effect.batch {
-            Some(batch) if matches!(self.phase, Phase::Assembling) => self.recover(batch, now, out),
-            _ => Ok(()),
-        }
-    }
-
-    fn recover(
-        &mut self,
-        batch: Deferred<Vec<Source>>,
-        now: Instant,
-        out: &mut Out,
-    ) -> Result<(), Broken> {
-        let other: Vec<_> = batch
-            .iter()
-            .filter(|source| source.header.layout_version != LAYOUT_VERSION)
-            .map(|source| source.scene)
-            .collect();
-        for scene in other {
-            self.forget(scene, out);
-        }
-        let sources = batch.map(|batch| {
-            let (sources, other): (Vec<_>, Vec<_>) = batch
-                .into_iter()
-                .partition(|source| source.header.layout_version == LAYOUT_VERSION);
-            let bytes = other
-                .iter()
-                .map(|source| source.log.len() * size_of::<SceneEvent>())
-                .sum();
-            drop(Deferred::new(other, bytes));
-            sources
-        });
-        if sources.is_empty() {
-            self.global = GlobalBudget::default();
-            return self.go_live(now, out);
-        }
-        let id = self.job_id();
-        let scenes = sources
-            .iter()
-            .map(|source| (source.scene, source.revision, source.committed))
-            .collect();
-        self.phase = Phase::Recovering(Recovery {
-            id,
-            started: now,
-            cancel: Arc::new(AtomicBool::new(false)),
-            scenes,
-            waiting: Some(sources),
-        });
-        self.dispatch_recovery(now, out)
-    }
-
-    /// Sends a batch that waited for a worker slot, or abandons it once its deadline passed.
-    fn dispatch_recovery(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
-        let Phase::Recovering(recovery) = &self.phase else {
-            return Ok(());
-        };
-        if recovery.waiting.is_none() {
-            return Ok(());
-        }
-        if now >= recovery.started + RECOVERY_DEADLINE {
-            return self.abandon(now, out);
-        }
-        if self.workers() >= MAX_WORKERS || !self.dropper_running() {
-            return Ok(());
-        }
-        let Phase::Recovering(recovery) = &mut self.phase else {
-            return Ok(());
-        };
-        let Some(sources) = recovery.waiting.take() else {
-            return Ok(());
-        };
-        out.effects.push(Effect::Recover(RecoveryJob::new(
-            recovery.id,
-            sources,
-            self.surface,
-            Arc::clone(&self.theme),
-            Arc::clone(&recovery.cancel),
-            Arc::clone(&self.slots),
-        )));
-        Ok(())
-    }
-
-    fn recovered(
-        &mut self,
-        recovery: Recovery,
-        scenes: Deferred<Vec<(SceneId, SceneRecovery, usize)>>,
-        global: GlobalBudget,
-        now: Instant,
-        out: &mut Out,
-    ) -> Result<(), Broken> {
-        self.global = global;
-        let mut adopted = Vec::new();
-        let rejected = scenes.map(|scenes| {
-            let mut results: BTreeMap<_, _> = scenes
-                .into_iter()
-                .map(|(scene, result, retained)| (scene, (result, retained)))
-                .collect();
-            let mut rejected = Vec::new();
-            for &(scene, revision, committed) in &recovery.scenes {
-                // shortcut: a recovery failure clears the whole scene instead of cutting to its prepared prefix; add a scene-keyed RecoveryFailed cut if B9's recovery measurements show failures
-                match results.remove(&scene) {
-                    Some((Ok((state, rest)), retained))
-                        if !self.cleared.contains(&scene)
-                            && state.revision() == revision
-                            && usize::try_from(committed)
-                                .is_ok_and(|kept| kept == state.committed()) =>
-                    {
-                        adopted.push((scene, state, rest, retained));
-                    }
-                    Some((Ok((mut state, rest)), _)) => {
-                        state.clear(&mut self.global).expect(BOUND);
-                        rejected.push((state, rest));
-                    }
-                    Some((Err(_), _)) | None => {}
-                }
-            }
-            (results, rejected)
-        });
-        drop(rejected);
-        for (scene, state, rest, retained) in adopted {
-            self.scenes.insert(scene, Scene::new(state, rest, retained));
-        }
-        for (scene, ..) in recovery.scenes {
-            if !self.scenes.contains_key(&scene) {
-                self.forget(scene, out);
-            }
-        }
-        let mut total = 0_usize;
-        let over: Vec<_> = self
-            .scenes
-            .iter()
-            .filter_map(|(id, scene)| {
-                let next = total.saturating_add(scene.residency());
-                if next > MAX_RESIDENT_BYTES {
-                    return Some(*id);
-                }
-                total = next;
-                None
-            })
-            .collect();
-        for id in over {
-            self.release(id);
-            self.forget(id, out);
-        }
-        self.go_live(now, out)
-    }
-
-    /// Recovery that can't finish, or that a Stop or clear overtook: its scenes are cleared, and
-    /// the held live frames apply.
-    fn abandon(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
-        let effect = self.assembler.clear();
-        out.credit(effect.credit);
-        for scene in effect.clear {
-            self.forget(scene, out);
-        }
-        if let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Assembling) {
-            recovery.cancel.store(true, Ordering::Relaxed);
-            for (scene, ..) in recovery.scenes {
-                self.forget(scene, out);
-            }
-        }
-        self.global = GlobalBudget::default();
-        self.go_live(now, out)
-    }
-
-    /// Recovery is installed: the held live frames apply in arrival order.
-    fn go_live(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
-        self.phase = Phase::Live;
-        let mut held = Deferred::new(std::mem::take(&mut self.held), wire_bytes(self.held_bytes));
-        self.held_bytes = 0;
-        while let Some((frame, bytes)) = held.pop_front() {
-            self.live(&frame, bytes, now, out)?;
-        }
-        if std::mem::take(&mut self.clear_after_recovery) {
-            let ids: Vec<_> = self.scenes.keys().copied().collect();
-            for id in ids {
-                self.release(id);
-                self.forget(id, out);
-            }
-        }
-        Ok(())
-    }
-
-    fn recovery_incomplete(&self) -> bool {
-        match self.phase {
-            Phase::Recovering(_) => true,
-            Phase::Assembling => self.assembler.described(),
-            Phase::Offline | Phase::Live => false,
-        }
-    }
-
     /// The brain removed scenes: they go now, in any phase, and nothing of them installs later.
     fn removed(&mut self, scenes: &[SceneId], now: Instant, out: &mut Out) -> Result<(), Broken> {
         let effect = self.assembler.remove(scenes);
