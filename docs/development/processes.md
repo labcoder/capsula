@@ -33,8 +33,10 @@ flowchart LR
 - **Starting a helper with an explicit launch** (`platform::spawn`, for Claude Code) takes an
   argument vector, a working folder and the whole environment: nothing is inherited from the
   brain. Arguments are quoted by the rules `CommandLineToArgvW` reads, so an empty argument
-  survives. A command line over 32,767 UTF-16 units, or an environment name that's empty, holds
-  `=`, or repeats another without regard to case, is refused before anything starts. The block
+  survives. An executable or working folder that isn't absolute, a NUL in either or in an
+  argument (it would cut the string short), a command line over 32,767 UTF-16 units, or an
+  environment name that's empty, holds `=`, or repeats another without regard to case, is
+  refused before anything starts. The block
   is sorted by ordinal uppercase, and an empty environment is passed as an empty block, never a
   null pointer, which would inherit the brain's. A `Launch` prints counts, never argument or
   environment values. It holds `platform::spawn_lock()` from marking its handles inheritable
