@@ -165,13 +165,21 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
          and run this again:\n{}",
         conflicts.join("\n")
     );
-    let mut made = Vec::with_capacity(missing.len());
+    let mut made: Vec<&Path> = Vec::with_capacity(missing.len());
     for placement in missing {
         if let Err(error) = hard_link(&placement.source, &placement.dest) {
-            for dest in made {
-                let _ = fs::remove_file(dest);
+            let stranded: Vec<String> = made
+                .into_iter()
+                .filter(|dest| fs::remove_file(dest).is_err())
+                .map(|dest| dest.display().to_string())
+                .collect();
+            if stranded.is_empty() {
+                return Err(error);
             }
-            return Err(error);
+            return Err(error.context(format!(
+                "these links from this run couldn't be removed: {}",
+                stranded.join(", ")
+            )));
         }
         made.push(&placement.dest);
     }
