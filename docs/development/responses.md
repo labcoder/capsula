@@ -92,7 +92,9 @@ body's framing, handing out the data between framing bytes.
 
 Framing is one clear choice: `Content-Length`, `Transfer-Encoding: chunked`, or read to close
 with `Connection: close`. Both length and chunked, a repeated length, another transfer coding, or
-no framing at all is refused, and so is anything but HTTP/1.1. Header names and tokens match
+no framing at all is refused, and so is anything but HTTP/1.1. The request sends
+`Accept-Encoding: identity`, and a head with any other Content-Encoding is refused, so no
+compressed bytes reach the framer or a reader. Header names and tokens match
 case-insensitively, lengths parse with checked arithmetic, and no peer-supplied length sizes an
 allocation. A body that ends inside its framing is `Truncated`.
 
