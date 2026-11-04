@@ -166,7 +166,12 @@ impl KumoView {
                 }
                 Err(error) => tracing::error!(%error, "can't shade Kumo"),
             }
-            self.shading += started.elapsed();
+            let shaded = started.elapsed();
+            self.shading += shaded;
+            diagnostics::record(
+                cx,
+                format_args!("kumo frame shade_us={}", shaded.as_micros()),
+            );
         }
         self.wants_frame()
     }
