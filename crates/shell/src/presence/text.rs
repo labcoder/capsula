@@ -77,7 +77,7 @@ impl Presence {
         }
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
-        let bounds = self.layout.panel;
+        let bounds = self.typing_bounds;
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
@@ -130,6 +130,7 @@ impl Presence {
         let events = self.events.clone();
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
+        let notice = typing_notice(self.error.as_ref(), self.refusal, cx.global::<Strings>());
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
@@ -141,6 +142,7 @@ impl Presence {
                 input,
                 stop,
                 conversation: Conversation::default(),
+                notice,
                 owner,
                 events,
             })
@@ -284,11 +286,14 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let strings = cx.global::<Strings>();
-        if typing_notice(previous.0.as_ref(), previous.1, strings)
-            != typing_notice(self.error.as_ref(), self.refusal, strings)
+        let notice = typing_notice(self.error.as_ref(), self.refusal, strings);
+        if typing_notice(previous.0.as_ref(), previous.1, strings) != notice
             && let Some(text) = &self.text
         {
-            text.view.update(cx, |_, cx| cx.notify());
+            text.view.update(cx, |view, cx| {
+                view.notice = notice;
+                cx.notify();
+            });
         }
         if previous.0 != self.error {
             if let Some(panel) = &self.thread_panel {
@@ -392,6 +397,8 @@ pub(super) struct TextView {
     /// The Stop fallback, here too because this panel covers the status panel's.
     pub(super) stop: bool,
     conversation: Conversation,
+    /// Pushed by presence, never read from it: the first frame renders while presence is updating.
+    notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
 }
@@ -399,11 +406,7 @@ pub(super) struct TextView {
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
-        let owner = self.owner.upgrade();
-        let presence = owner.as_ref().map(|owner| owner.read(cx));
-        let notice = presence.and_then(|owner| {
-            typing_notice(owner.error.as_ref(), owner.refusal, cx.global::<Strings>())
-        });
+        let notice = self.notice.clone();
         let context = self.conversation.context.clone();
         let back_owner = self.owner.clone();
         let stop = self.stop.then(|| {

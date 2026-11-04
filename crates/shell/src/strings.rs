@@ -17,6 +17,7 @@ pub(crate) enum Text {
     Retry,
     Stop,
     Quit,
+    Chat,
     DockPosition,
     TopLeft,
     TopCenter,
@@ -86,7 +87,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 72] = [
+    const ALL: [Self; 73] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -94,6 +95,7 @@ impl Text {
         Self::Retry,
         Self::Stop,
         Self::Quit,
+        Self::Chat,
         Self::DockPosition,
         Self::TopLeft,
         Self::TopCenter,
@@ -182,6 +184,7 @@ impl Text {
             Self::Retry => "action-retry",
             Self::Stop => "action-stop",
             Self::Quit => "action-quit",
+            Self::Chat => "action-chat",
             Self::DockPosition => "dock-position",
             Self::TopLeft => "position-top-left",
             Self::TopCenter => "position-top-center",
