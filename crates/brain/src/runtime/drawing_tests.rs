@@ -21,6 +21,14 @@ fn typed_brain(
     scratch: &Scratch,
     fault: Option<&str>,
 ) -> (Brain, kumochi_protocol::message::SceneId) {
+    typed_brain_with_steps(scratch, fault, &[])
+}
+
+fn typed_brain_with_steps(
+    scratch: &Scratch,
+    fault: Option<&str>,
+    extra: &[Arc<kumochi_scene::Step>],
+) -> (Brain, kumochi_protocol::message::SceneId) {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main = store.main_thread().expect("main");
@@ -53,6 +61,18 @@ fn typed_brain(
             step: stored_step("b", "b"),
         })
         .expect("second step");
+    for (revision, step) in (3..).zip(extra) {
+        store
+            .drawing_write(&Write::Step {
+                thread,
+                run,
+                target: Target::Existing(scene),
+                revision,
+                layout_version: 1,
+                step: Arc::clone(step),
+            })
+            .expect("extra recovery step");
+    }
     store
         .end_run(thread, run, &[], RunEnd::Done)
         .expect("outcome");
@@ -97,9 +117,9 @@ fn cut(scene: kumochi_protocol::message::SceneId) -> crate::coordinator::Input {
     })
 }
 
-#[tokio::test]
-async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_the_brain() {
-    let scratch = Scratch::new("typed-recovery-bad-scene");
+fn four_typed_scenes(
+    scratch: &Scratch,
+) -> (Store, ThreadId, Vec<kumochi_protocol::message::SceneId>) {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main = store.main_thread().expect("main");
@@ -130,6 +150,13 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
             .end_run(thread, run, &[], RunEnd::Done)
             .expect("outcome");
     }
+    (store, main, scenes)
+}
+
+#[tokio::test]
+async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_the_brain() {
+    let scratch = Scratch::new("typed-recovery-bad-scene");
+    let (store, main, scenes) = four_typed_scenes(&scratch);
     store
         .conn_for_tests()
         .execute_batch("DROP TRIGGER events_append_only")
@@ -141,7 +168,17 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
             [],
         )
         .expect("corrupt one scene");
+    let rows: Vec<i64> = store
+        .conn_for_tests()
+        .prepare("SELECT id FROM events WHERE kind='scene_step' AND thread=2")
+        .expect("corrupt rows")
+        .query_map([], |row| row.get(0))
+        .expect("row ids")
+        .collect::<Result<_, _>>()
+        .expect("native ids");
     let high = store.high_water().expect("high water");
+    let captured = crate::test_support::Captured::default();
+    let guard = captured.install();
     let mut brain = Brain::new(
         store,
         main,
@@ -152,6 +189,13 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
         crate::test_support::accounts(&scratch),
     )
     .expect("drawing corruption must not stop the brain");
+    drop(guard);
+    let warnings = captured.text();
+    for row in rows {
+        assert!(warnings.contains(&format!("stored scene row {row} doesn't decode")));
+    }
+    assert!(warnings.contains(&format!("row={}", scenes[0].0)));
+    assert!(!warnings.contains("private drawing"));
     let reply = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
         .await
         .expect("durable recovery clear deadline")
@@ -195,6 +239,211 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
             .expect("retained scene history"),
         4
     );
+}
+
+#[tokio::test]
+async fn delivered_final_recovery_chunk_starts_the_crash_guard_clock() {
+    let scratch = Scratch::new("typed-crash-clock-wiring");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    brain.crashes.plan(std::time::Instant::now());
+    let ((control, data), mut shell) = super::duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        let Some(ControlToShell::ScenesV1 { scenes }) = shell.control().await else {
+            panic!("typed membership")
+        };
+        assert_eq!(
+            scenes.iter().map(|named| named.scene).collect::<Vec<_>>(),
+            [scene]
+        );
+        let DataToShell::SceneSnapshotV1 { chunk } = shell.data().await else {
+            panic!("typed recovery chunk")
+        };
+        assert_eq!(chunk.scene, scene);
+        assert!(chunk.last);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, super::super::Ended::Lost);
+    let late = std::time::Instant::now() + std::time::Duration::from_secs(11);
+    let plan = brain.crashes.plan(late);
+    assert_eq!(plan.delay, Some(std::time::Duration::from_secs(1)));
+    assert_eq!(plan.clear, []);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn delivered_membership_stays_armed_while_recovery_cannot_finish_queueing() {
+    let scratch = Scratch::new("typed-crash-queued-wiring");
+    let mut put = vec![serde_json::json!({"chart":{"id":"c","kind":"line","box":[0,0,100,100]}})];
+    let mut patches = Vec::new();
+    for series in 0..8 {
+        let data = vec![0; 500];
+        put.push(serde_json::json!({"series":{"id":format!("s{series}"),"in":"c","data":data}}));
+        patches.push(serde_json::json!({"target":format!("s{series}"),"data":data}));
+    }
+    let mut extra = vec![Arc::new(
+        serde_json::from_value(serde_json::json!({"id":"dense","put":put}))
+            .expect("dense recovery step"),
+    )];
+    for index in 1..40 {
+        extra.push(Arc::new(
+            serde_json::from_value(
+                serde_json::json!({"id":format!("update{index}"),"set":patches}),
+            )
+            .expect("dense recovery update"),
+        ));
+    }
+    let (mut brain, scene) = typed_brain_with_steps(&scratch, None, &extra);
+    let snapshot = brain
+        .coordinator
+        .drawing_snapshot()
+        .expect("valid large recovery");
+    let bytes: usize = snapshot
+        .chunks
+        .iter()
+        .map(|chunk| {
+            frame::encode(
+                &DataToShell::SceneSnapshotV1 {
+                    chunk: chunk.clone(),
+                },
+                Pipe::Data,
+            )
+            .expect("encoded recovery chunk")
+            .len()
+        })
+        .sum();
+    assert!(bytes > 2 * super::super::DATA_CAP);
+    brain.crashes.plan(std::time::Instant::now());
+    let ((control, data), mut shell) = super::duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        let Some(ControlToShell::ScenesV1 { scenes }) = shell.control().await else {
+            panic!("typed membership")
+        };
+        assert_eq!(
+            scenes.iter().map(|named| named.scene).collect::<Vec<_>>(),
+            [scene]
+        );
+        let DataToShell::SceneSnapshotV1 { chunk } = shell.data().await else {
+            panic!("first typed recovery chunk")
+        };
+        assert_eq!(chunk.scene, scene);
+        assert!(!chunk.last);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, super::super::Ended::Lost);
+    let late = std::time::Instant::now() + std::time::Duration::from_secs(11);
+    let plan = brain.crashes.plan(late);
+    assert_eq!(plan.delay, Some(std::time::Duration::from_secs(1)));
+    assert_eq!(plan.clear, [scene]);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn crash_clear_confirms_launch_only_after_commit_and_stays_clear_on_reopen() {
+    let scratch = Scratch::new("typed-crash-clear");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    let now = std::time::Instant::now();
+    brain.crashes.plan(now);
+    brain.crashes.described(vec![scene], now);
+    let plan = brain.crashes.plan(now);
+    assert_eq!(plan.delay, Some(std::time::Duration::from_secs(1)));
+    assert_eq!(plan.clear, [scene]);
+    let authorized = {
+        let mut observed = brain.observe();
+        let release =
+            brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::ClearScenes { .. }));
+        let clearing = brain.clear_before_relaunch(&plan.clear);
+        tokio::pin!(clearing);
+        loop {
+            tokio::select! {
+                result = &mut clearing => panic!("launch authorized before commit: {result}"),
+                seen = observed.recv() => {
+                    if matches!(seen.expect("store observation"), super::super::Seen::StoreOpStarted(crate::coordinator::StoreOp::ClearScenes { .. })) {
+                        break;
+                    }
+                }
+            }
+        }
+        release.send(()).expect("release clear");
+        clearing.await
+    };
+    assert!(authorized);
+    brain.close().await;
+    let store = Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(store.drawing_scenes().expect("durable clear").scenes, []);
+    let history: (u32, u32, u32) = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT sum(kind='scene_begin'),sum(kind='scene_step'),sum(kind='scene_cleared') FROM events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("typed history remains");
+    assert_eq!(history, (1, 2, 1));
+}
+
+#[tokio::test]
+async fn failed_crash_clear_cannot_authorize_launch_or_forget_its_debt() {
+    let scratch = Scratch::new("typed-crash-clear-failure");
+    let (mut brain, scene) = typed_brain(
+        &scratch,
+        Some(
+            "CREATE TRIGGER fail_clear BEFORE INSERT ON events WHEN new.kind='scene_cleared' BEGIN SELECT RAISE(FAIL,'private drawing'); END;",
+        ),
+    );
+    assert!(!brain.clear_before_relaunch(&[scene]).await);
+    assert!(!brain.coordinator.settled());
+    assert!(!brain.clear_before_relaunch(&[]).await);
+    brain.close().await;
+    let store = Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(
+        store
+            .drawing_scenes()
+            .expect("uncleared scene")
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [scene]
+    );
+}
+
+#[tokio::test]
+async fn timed_out_crash_clear_cannot_authorize_launch() {
+    let scratch = Scratch::new("typed-crash-clear-timeout");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    let release =
+        brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::ClearScenes { .. }));
+    assert!(!brain.clear_before_relaunch(&[scene]).await);
+    assert!(!brain.coordinator.settled());
+    release.send(()).expect("release timed out clear");
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), brain.inputs.recv())
+        .await
+        .expect("eventual commit deadline")
+        .expect("clear reply");
+    assert!(
+        matches!(&reply, crate::coordinator::Input::ScenesCleared { scenes, ok: true } if scenes == &[scene])
+    );
+    brain.offline(reply);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn missing_store_cannot_authorize_crash_relaunch() {
+    let scratch = Scratch::new("typed-crash-clear-store-gone");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    brain
+        .store
+        .take()
+        .expect("store thread")
+        .close()
+        .await
+        .expect("close");
+    assert!(!brain.clear_before_relaunch(&[scene]).await);
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -334,7 +583,7 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
         .conn_for_tests()
         .execute_batch("ALTER TABLE threads RENAME TO unreadable_threads")
         .expect("make drawing read fail");
-    let brain = Brain::new(
+    let mut brain = Brain::new(
         store,
         main,
         high,
@@ -345,6 +594,7 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
     )
     .expect("a failed drawing query must not stop the brain");
     assert!(!brain.coordinator.drawing_available());
+    assert!(!brain.clear_before_relaunch(&[]).await);
     let repair = rusqlite::Connection::open(scratch.db()).expect("repair connection");
     repair
         .execute_batch("ALTER TABLE unreadable_threads RENAME TO threads")
