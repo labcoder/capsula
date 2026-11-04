@@ -524,8 +524,10 @@ mod tests {
     }
 
     /// A squashed frame samples the bake between texels. Its soft edge must keep the colour the
-    /// unsquashed edge has at the same body point, not pull in the black of empty texels. The
-    /// pixels compared are the squashed frame's soft edge whose matching still pixel is covered.
+    /// unsquashed edge has at the same body point, not pull in the black of empty texels. Every
+    /// squashed soft-edge pixel is compared. Where the matching still pixel is clear, it carries
+    /// a covered neighbour's colour (`bleed_clear`), so the outermost fringe, where empty texels
+    /// weigh most, is checked too, a pixel's colour change looser.
     #[test]
     fn a_squashed_edge_keeps_its_colour() {
         let size = 84;
@@ -546,7 +548,8 @@ mod tests {
         renderer
             .render(&f, &mut squashed)
             .expect("the buffer is the renderer's size");
-        let (mut worst, mut compared) = (0, 0);
+        // Over covered still pixels, then over clear ones.
+        let (mut worst, mut compared) = ([0; 2], [0; 2]);
         for j in 0..size {
             for i in 0..size {
                 let px = &squashed[index(size, i, j) * 4..][..4];
@@ -558,20 +561,27 @@ mod tests {
                 let q = super::v2(p.x / f.body_scale.x, floor + (p.y - floor) / f.body_scale.y);
                 let at = FRAMING.to_pixel(size, q);
                 let still_px = &still[index(size, pixel(at.x), pixel(at.y)) * 4..][..4];
-                if still_px[3] == 0 {
-                    continue;
-                }
-                compared += 1;
+                assert_ne!(
+                    &still_px[..3],
+                    [0; 3],
+                    "{i},{j}: a clear still pixel takes a colour"
+                );
+                let k = usize::from(still_px[3] == 0);
+                compared[k] += 1;
                 for c in 0..3 {
-                    worst = worst.max(px[c].abs_diff(still_px[c]));
+                    worst[k] = worst[k].max(px[c].abs_diff(still_px[c]));
                 }
             }
         }
-        assert!(compared > 50, "only {compared} soft-edge pixels compared");
-        // Black from empty texels put it 108 off; neighbouring surface colours differ by about 5.
         assert!(
-            worst <= 8,
-            "a squashed edge pixel is {worst}/255 off the still edge's colour"
+            compared[0] > 50 && compared[1] > 50,
+            "only {compared:?} pixels compared"
+        );
+        // Black from empty texels put them 108 and 251 off; neighbouring surface colours differ
+        // by about 5, and a pixel apart by about 10.
+        assert!(
+            worst[0] <= 8 && worst[1] <= 12,
+            "squashed edge pixels are {worst:?}/255 off the still edge's colour"
         );
     }
 

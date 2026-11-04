@@ -63,7 +63,7 @@ Measured on Rez (release, best of 5 bakes and 20 frames, 2026-11-03):
 So a bake is too slow for GPUI's paint at high display scales: it runs before the image is
 first shown, or on a background executor. A frame is shaded only when the expression changes.
 
-A squashed, lifted or stretched frame samples the bake between texels. So at bake time, each empty texel beside the body takes the lit surface of its most covered neighbour, with coverage kept at 0. Its colour and rim then carry into the soft edge instead of black. A test squashes a frame and compares each soft-edge pixel whose matching still pixel is covered, and asserts it compared more than 50: the black pulled in used to put them 108/255 apart, and now they're at most 8 apart. Soft-edge pixels whose still match is clear aren't compared there. A 4 × 4 fixture covers them instead: an empty texel takes its most covered neighbour's surface with coverage kept at 0, a texel with no covered neighbour is left alone, and a sample halfway between a covered texel and a bled one keeps the covered colour at half coverage.
+A squashed, lifted or stretched frame samples the bake between texels. So at bake time, each empty texel beside the body takes the lit surface of its most covered neighbour, with coverage kept at 0. Its colour and rim then carry into the soft edge instead of black. A test squashes a frame and compares every soft-edge pixel against the matching still pixel, asserting that more than 50 of each kind were compared. Where the still pixel is covered, the black pulled in used to put them 108/255 apart, and now they're at most 8 apart. Where it's clear, it carries a covered neighbour's colour from `bleed_clear`. That's the outermost fringe, where empty texels weigh most: those pixels used to be up to 251 apart, and now they're at most 12. A 4 × 4 fixture checks the rule itself: an empty texel takes its most covered neighbour's surface with coverage kept at 0, a texel with no covered neighbour is left alone, and a sample halfway between a covered texel and a bled one keeps the covered colour at half coverage.
 
 ## Hit mask
 
@@ -95,9 +95,10 @@ placements, and a single texel.
 
 The reference compositor takes each source's width and height on their own, so the neck's
 rectangles are checked the same way: a neck pulled 60 and 140 px straight down, one curved
-mid-swing, and a short sideways pull whose region is wider than tall, each shaded at half and
-full resolution at 1.0 to 2.0 scale, with and without a fractional window offset, alone and
-over the body. Every visible pixel is owned. For the neck, `d` is the furthest any texel at 75
+mid-swing, and a short sideways pull whose region is wider than tall. Each is drawn at 1.0 to 2.0
+display scale and shaded at half that scale and at `MAX_SCALE`, 1.0, which is full resolution only
+at 1.0. Each runs with and without a fractional window offset, alone and over the body, with the
+body drawn from the same frame as the goo, so it's drawn out as the neck stretches. Every visible pixel is owned. For the neck, `d` is the furthest any texel at 75
 or more lies from one at 128 or more, as a chessboard distance in whole texels; it's at most 6.
 Each span end lies within the band of that `d`, and over the body within the larger of the
 neck's and the body's bands.
@@ -107,27 +108,45 @@ neck's and the body's bands.
 `neck.rs` shades the goo that joins a pulled Kumo to the dock line. `Neck` is the pull's state, in logical pixels of the pull surface, y down.
 - **The curve.** It runs from the dock to a point just under the crown, as a quadratic curve. Its control point follows the curve's middle on a damped spring, so a sideways drag bends it. The spring takes 24 fixed substeps per update, a step longer than 0.1 s counts as 0.1 s, and a negative or non-finite step counts as none.
 - **Its shape.** The neck is ten tapered capsules: narrow under the line, swelling into the cloud, and thinning as it stretches. A soft fillet grows it out of the line. While attached, the body is drawn out toward the dock by up to 7% in width and 14% in height.
-- **The break.** Once the dock-to-attachment distance passes `SNAP_LEN` (144), the neck breaks and nothing of it is drawn. The recoil, drip and stub come in C1b.
-- **Its bounds.** The region covers every capsule's ends and the root fillet's ellipse, each padded by a tenth of the body. The control point is held within `SNAP_LEN` of the dock, so the region never passes a fixed cap for a body size. The fillet's half-width, at most 0.217 of the body, is under the widest capsule's radius of 0.219, so it doesn't raise the cap. A test shades a short sideways pull into a wider image and checks that nothing lands outside the region.
+- **The break.** Once the dock-to-attachment distance passes `SNAP_LEN` (144), the neck breaks: still attached at exactly 144, broken past it. The curve is frozen as it was at the break. However far that one step jumped, the frozen end is pulled back along its direction onto the 144 circle, so no later move can stretch what's left.
+- **The recoil.** For 0.32 s after the break, two pieces are drawn, and nothing between them:
+  - **The drip** is the frozen curve from the dock to 0.16 along it. It hangs from the line, ends in a bulb, and retracts into the line. Its root fillet shrinks with it. It stays where it broke, whatever the body does, and doesn't join the body.
+  - **The stub** is the frozen curve from 0.21 to the attachment. It travels with the live body, keeps its frozen shape, and melts up into the cloud within 0.12 s.
+  - The body springs back to round with a damped wobble. After the recoil, nothing of the neck is drawn.
+- **Reduced motion.** The neck still breaks at the same point, so the snap and drop decisions don't change, but no goo is drawn, the body stays round, and there's no recoil. Turning it on mid-recoil ends the recoil.
+- **Pieces.** `Piece::Neck`, `Drip` and `Stub` are shaded separately, each into the image of its own `bounds`. A region covers the piece's capsule ends, padded, and its root fillet's ellipse, 2.2 times as wide as it is tall. The drip never meets the body and pads by a tenth of it. The shader blends the body in wherever the piece's field is within 1.5 fillets (0.135 of the body). The stub's field is its capsules, so it pads by that. The neck's is the capsules' smooth union with the root ellipse, which is never more than a quarter of the blend (0.05 of the body) below the nearer of the two. So the neck pads its capsules and its root ellipse, in the ellipse's own wide metric, by 0.1475 of the body, and the root's part is cut to the disc around the body's centre where the shader joins at all. For an 84 px body at 1.0, against capsule-only bounds at 1.5 fillets, the neck grows from 61 × 61 to 92 × 63 at the dock, 61 × 81 to 90 × 83 at 30 px down, 61 × 91 to 80 × 93 at 40, and by 2–3 px each way from 50 px down (61 × 189 to 63 × 191 at 140). A test shades every piece, over pull lengths, sideways offsets, the breaking step and recoil frames, into a region 40 px wider and finds nothing outside its own.
+- **Caps.** Each piece's curve lies in the hull of its own control points, so its region has a fixed cap for a body size:
+  - the neck within 144 of the dock;
+  - the drip within (2u − u²) × 144 = 42.39 of the dock at u = 0.16. With the control and the end perpendicular, the point at 0.16 is (38.7072, 3.6864), and 42.3936 is the collinear bound;
+  - the stub within (1 − 0.21²) × 288 = 275.3 of the attachment.
 
-`GooShader` shades the neck into a straight-alpha BGRA image of the region at a caller-chosen scale, half the display's for D1.
-- **Scratch.** Its tile table and distance rows are sized once, from the cap at `MAX_SCALE`, and reused, so shading allocates nothing.
-- **Skipping work.** Tiles that no capsule, fillet or body can reach are skipped and keep the clear colour.
-- **Colour.** Near the body the neck melts into the crown through a smooth minimum. It's lit with the body's surface and finish functions, so it's the same material. Clear pixels carry the theme's top colour, or the blended surface colour where they're shaded, and none is black.
+  Its widest capsule, fillet and pad go around that, rounded outward. Tests put each piece inside its cap after a 3,000 px jump on the crossing step, with extremal controls, and after far moves on the first recoil frame and mid-recoil. They also check that a short sideways pull, and every piece over the sweep above, loses nothing outside its region.
+
+`GooShader` shades a piece into a straight-alpha BGRA image of its region at a caller-chosen scale, half the display's for D1, up to `MAX_SCALE`, 1.0.
+- **Scratch.** `GooShader::neck` serves the attached neck and the drip, which never coexist. `GooShader::stub` serves the stub. Each one's tile table and distance rows are sized once, from its pieces' caps at `MAX_SCALE` (352 and 613 pixels a side for an 84 px body), and reused, so shading allocates nothing. Tests check the exact limit and one pixel over on each axis.
+- **Skipping work.** Tiles that no capsule, fillet or body can reach take the clear colour without shading. Every pixel is written once.
+- **Colour.** Near the body the neck and the stub melt into the crown through a smooth minimum. They're lit with the body's surface and finish functions, so they're the same material. Clear pixels carry the theme's top colour, or the blended surface colour where they're shaded, and none is black.
 - **Errors.** A wrong buffer, or a region or scale past the scratch, returns `GooMismatch`.
 
-`coverage::device_spans` takes a source width plus one row hull per source row, so the neck's rectangle maps to device spans as the body's square does.
+`coverage::device_spans` takes a source width plus one row hull per source row, so the goo's rectangles map to device spans as the body's square does.
 
-Measured on Rez, release build, under the measuring lock, best of 7 × 20 frames. The goo is an 84 px body's neck:
+Measured on Rez, release build, under the measuring lock (04:20:50–04:21:33Z), at this head. Each frame is timed on its own, 140 frames per case, two runs, with the output black-boxed and checksummed and the shape built outside the loop. The goo belongs to an 84 px body:
 
-| Goo, scale | Region, px | One frame, µs |
-|---|---|---|
-| attachment 60 px down, 0.5 | 28 × 53 | 344 |
-| 140 px down, 0.5 | 28 × 92 | 414 |
-| 60 px down, 1.0 | 55 × 105 | 1,272 |
-| 140 px down, 1.0 | 55 × 183 | 1,508 |
+| Piece, scale | Region, px | Median, µs | Slowest frame, µs |
+|---|---|---|---|
+| neck, attachment at the dock, 0.5 | 46 × 32 | 231 | 273 |
+| neck, 30 px down, 0.5 | 45 × 42 | 293 | 407 |
+| neck, 40 px down, 0.5 | 40 × 47 | 294 | 343 |
+| neck, 60 px down, 0.5 | 32 × 57 | 302 | 394 |
+| neck, 140 px down, 0.5 | 32 × 96 | 375 | 473 |
+| neck, at the dock, 1.0 | 92 × 63 | 855 | 1,085 |
+| neck, 40 px down, 1.0 | 80 × 93 | 1,050 | 1,373 |
+| neck, 60 px down, 1.0 | 63 × 113 | 1,064 | 1,400 |
+| neck, 140 px down, 1.0 | 63 × 191 | 1,317 | 1,441 |
+| drip at the break, 0.5 | 22 × 29 | 83 | 130 |
+| stub at the break, 0.5 | 31 × 79 | 305 | 340 |
 
-The cost per pixel is about 150 to 235 ns, highest in the smallest region, mostly the body's signed distance near the crown. C2a's 400 µs goo gate isn't met near the snap at half scale, so C2a tunes it before claiming that gate.
+The cost per pixel is about 110 to 160 ns, highest in the smallest regions, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). The join padding then gave back up to about 7%. At half scale the medians are under C2a's 400 µs goo gate, but single frames reach 473 µs here and 775 µs in an earlier session. The gate is a maximum, so C2a tunes the goo before claiming it.
 
 ## Expressions
 
