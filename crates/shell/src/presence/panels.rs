@@ -2,7 +2,7 @@
 
 use gpui_kit::App;
 
-use super::kumo_view::{PullChanged, WantsFrames};
+use super::kumo_view::{KumoView, PullChanged, WantsFrames};
 use super::{Activity, Context, OpenError, Presence, geometry::PanelVisibility};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -41,6 +41,15 @@ impl Presence {
             }
         })
         .detach();
+    }
+
+    /// Quit began: a live drag ends now and gives back Esc, before any shutdown work waits.
+    pub(super) fn end_pull(&mut self, cx: &mut Context<'_, Self>) {
+        self.kumo.update(cx, KumoView::close);
+        self.activity.pulling = false;
+        if let Err(error) = self.sync_escape(cx) {
+            tracing::warn!(%error, "can't give back Esc at Quit");
+        }
     }
 
     /// The drag began or ended: Esc is held only while it's live, and the peek's owner follows.

@@ -36,6 +36,12 @@ impl KumoView {
         self.site = site;
     }
 
+    /// The shell is quitting: a live drag ends now, and no grab starts again.
+    pub(in crate::presence) fn close(&mut self, cx: &mut Context<'_, Self>) {
+        self.closing = true;
+        self.pull_event(Event::SourceClosed, cx);
+    }
+
     pub(in crate::presence) fn pull_live(&self) -> bool {
         matches!(self.pulling.phase(), Phase::Live(_))
     }
@@ -80,6 +86,9 @@ impl KumoView {
         grab: Grab,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.closing {
+            return;
+        }
         if let Some(generation) = self.pulling.press(button, seq, origin, at, grab) {
             self.origin = origin;
             cx.emit(PullChanged::Grabbed(generation));
@@ -216,6 +225,24 @@ mod tests {
 
     const LEFT: MouseButton = MouseButton::Left;
 
+    fn grab(view: &Entity<KumoView>, cx: &mut TestAppContext) {
+        let space = PullSpace {
+            area: [0, 0, 1280, 1024],
+            scale: 1.0,
+        };
+        let grab = Grab::new(
+            space,
+            [612, 1000, 56, 3],
+            [608, 990, 64, 24],
+            v2(640.0, 920.0),
+            Motion::Reduced,
+        );
+        let seq = input(|input| input.press(|| input.pressed())).expect("a forwarded press");
+        view.update(cx, |view, cx| {
+            view.grab(LEFT, seq, [560, 860], point(px(80.0), px(60.0)), grab, cx);
+        });
+    }
+
     /// A peek with a live drag on the left button, the changes it emits, and the presence
     /// channel, drained through `bridge` as the presence drains it.
     fn grabbed(
@@ -244,21 +271,7 @@ mod tests {
             })
             .detach();
         });
-        let space = PullSpace {
-            area: [0, 0, 1280, 1024],
-            scale: 1.0,
-        };
-        let grab = Grab::new(
-            space,
-            [612, 1000, 56, 3],
-            [608, 990, 64, 24],
-            v2(640.0, 920.0),
-            Motion::Reduced,
-        );
-        let seq = input(|input| input.press(|| input.pressed())).expect("a forwarded press");
-        view.update(cx, |view, cx| {
-            view.grab(LEFT, seq, [560, 860], point(px(80.0), px(60.0)), grab, cx);
-        });
+        grab(&view, cx);
         assert_eq!(seen.borrow().len(), 1, "the press grabbed");
         (view, seen, events)
     }
@@ -330,6 +343,25 @@ mod tests {
             .try_send(PresenceEvent::Reconcile)
             .expect("the channel is open");
         cx.run_until_parked();
+        let PullChanged::Grabbed(generation) = seen.borrow()[0] else {
+            panic!("the first change is the grab");
+        };
+        assert_eq!(
+            *seen.borrow(),
+            [
+                PullChanged::Grabbed(generation),
+                PullChanged::Ended(generation, End::Lost),
+            ]
+        );
+        assert!(view.read_with(cx, |view, _| !view.pull_live()));
+    }
+
+    #[gpui::test]
+    fn quitting_loses_a_live_drag_once_and_refuses_the_next_grab(cx: &mut TestAppContext) {
+        let (view, seen, _) = grabbed(cx);
+        view.update(cx, KumoView::close);
+        view.update(cx, KumoView::close);
+        grab(&view, cx);
         let PullChanged::Grabbed(generation) = seen.borrow()[0] else {
             panic!("the first change is the grab");
         };

@@ -47,6 +47,8 @@ pub(super) struct KumoView {
     site: Option<PullSite>,
     /// The peek's client origin at the grab, physical screen pixels.
     origin: [i32; 2],
+    /// The shell is quitting: no new grab starts.
+    closing: bool,
 }
 
 impl EventEmitter<WantsFrames> for KumoView {}
@@ -68,6 +70,7 @@ impl KumoView {
             pulling: Pulling::default(),
             site: None,
             origin: [0, 0],
+            closing: false,
         }
     }
 

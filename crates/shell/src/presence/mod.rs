@@ -498,6 +498,7 @@ impl Presence {
         if !self.link.begin_quit() {
             return;
         }
+        self.end_pull(cx);
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
