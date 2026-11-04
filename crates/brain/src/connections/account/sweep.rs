@@ -53,7 +53,7 @@ impl AccountState {
     }
 
     fn ready_for_pass(&mut self) -> bool {
-        if self.busy || self.loaded.fenced {
+        if self.busy || self.leaving.is_some() {
             return false;
         }
         if self.pass != Pass::Idle {
@@ -65,8 +65,7 @@ impl AccountState {
 
     pub(super) fn revoked(&mut self, confirmed: Vec<Secret<Revocable>>) {
         if self.pass != Pass::Revoking {
-            debug_assert!(false, "a revocation run ended with no pass revoking");
-            return;
+            return self.revoked_for_sign_out(confirmed);
         }
         if confirmed.is_empty() {
             return self.end_pass();

@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::connections::clock::Clock;
 use crate::connections::error::VaultError;
 use crate::connections::marker::{MarkerUpdate, SignOutMarker};
-use crate::connections::records::{Account, Revocable, RevocationList};
+use crate::connections::records::{Account, Origin, Revocable, RevocationList};
 use crate::connections::vault::{DeleteResult, SaveResult, Vault};
 use crate::platform::credential::{CredentialStore, WindowsCredentialStore};
 
@@ -53,6 +53,13 @@ pub enum Job {
         /// Whether to drop entries past their age-out too.
         age_out: bool,
     },
+    /// Sign-out's Prepare: adopt a token still in `chatgpt` as the `Account` entry unless one is
+    /// listed, and persist uncertainty for a record that can't be read.
+    Prepare,
+    /// Sign-out's checkpoint: drop these confirmed entries, then decide the notice for good.
+    Checkpoint(Vec<Secret<Revocable>>),
+    /// Sign-out's Delete, then Finish.
+    Finish,
 }
 
 impl fmt::Debug for Job {
@@ -64,6 +71,9 @@ impl fmt::Debug for Job {
             Self::Commit(_) => "Commit",
             Self::List(_) => "List",
             Self::Relist { .. } => "Relist",
+            Self::Prepare => "Prepare",
+            Self::Checkpoint(_) => "Checkpoint",
+            Self::Finish => "Finish",
         })
     }
 }
@@ -93,6 +103,12 @@ pub enum Done {
     },
     /// The entries still listed after a [`Job::Relist`], or why it stopped.
     Relisted(Result<Vec<Secret<Revocable>>, VaultError>),
+    /// What a sign-out revokes, or why Prepare stopped.
+    Prepared(Result<Vec<Secret<Revocable>>, VaultError>),
+    /// The notice the checkpoint decided.
+    Checkpointed(Result<bool, VaultError>),
+    /// The notice a finished sign-out leaves.
+    SignedOut(Result<bool, VaultError>),
 }
 
 /// What the vault held when it was read. Each record fails on its own, so one damaged record
@@ -158,7 +174,14 @@ impl<S: CredentialStore> Worker<S> {
         let aged = matches!(job, Job::Relist { age_out: true, .. })
             .then(|| self.now_for_age_out())
             .flatten();
-        let ran = self.ran();
+        // Never before this process's own time, so a clock set back then corrected can't age an
+        // entry out early (CAPS-130). shortcut: with no wall time an entry never ages out; only a
+        // confirmed revocation or a sign-out removes it.
+        let added_at = self
+            .clock
+            .unix_seconds()
+            .max(self.started.0.map(|wall| wall.saturating_add(self.ran())))
+            .unwrap_or(u64::MAX);
         let Some(vault) = self.vault.as_mut() else {
             let refused = || SaveResult::NotCommitted(VaultError::Busy);
             return match job {
@@ -174,6 +197,9 @@ impl<S: CredentialStore> Worker<S> {
                     entries: Vec::new(),
                 },
                 Job::Relist { .. } => Done::Relisted(Err(VaultError::Busy)),
+                Job::Prepare => Done::Prepared(Err(VaultError::Busy)),
+                Job::Checkpoint(_) => Done::Checkpointed(Err(VaultError::Busy)),
+                Job::Finish => Done::SignedOut(Err(VaultError::Busy)),
             };
         };
         match job {
@@ -198,19 +224,11 @@ impl<S: CredentialStore> Worker<S> {
                 }
             }
             Job::List(entry) => {
-                // Never before this process's own time, so a clock set back then corrected
-                // can't age the entry out early (CAPS-130).
-                let added_at = self
-                    .clock
-                    .unix_seconds()
-                    .max(self.started.0.map(|wall| wall.saturating_add(ran)));
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
                         list.map_or_else(RevocationList::default, |list| list.expose().clone());
                     let mut entry = entry.expose().clone();
-                    // shortcut: with no wall time the entry never ages out; only a confirmed
-                    // revocation or a sign-out removes it.
-                    entry.added_at = added_at.unwrap_or(u64::MAX);
+                    entry.added_at = added_at;
                     list.entries.push(entry);
                     list
                 });
@@ -236,6 +254,14 @@ impl<S: CredentialStore> Worker<S> {
                 confirmed.iter().any(|done| done.expose() == entry)
                     || aged.is_some_and(|now| expired(entry, now))
             })),
+            Job::Prepare => Done::Prepared(prepare(vault, added_at)),
+            Job::Checkpoint(confirmed) => Done::Checkpointed(checkpoint(vault, &confirmed)),
+            Job::Finish => Done::SignedOut(match vault.delete_for_sign_out() {
+                DeleteResult::Gone => vault
+                    .update_marker(MarkerUpdate::FinishSignOut)
+                    .map(|marker| marker.notice),
+                DeleteResult::Refused(error) => Err(error),
+            }),
         }
     }
 
@@ -320,8 +346,81 @@ fn expired(entry: &Revocable, now: u64) -> bool {
     now >= entry.added_at.saturating_add(AGE_OUT_SECONDS)
 }
 
-/// Drops the entries `leaves` picks and saves the rest; an empty list's names are deleted and
-/// checked, then the sweep fact clears. Outside a sign-out only.
+/// `chatgpt` never changes before the checkpoint, so a listed `Account` entry, that token or
+/// its saved successor, is kept as it is; otherwise the account's token is adopted.
+fn prepare<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    added_at: u64,
+) -> Result<Vec<Secret<Revocable>>, VaultError> {
+    let list = vault.load_revocations().map(Ok).or_else(damaged)?;
+    let account = vault.load_for_sign_out().map(Ok).or_else(damaged)?;
+    if list.is_err() || account.is_err() {
+        vault.update_marker(MarkerUpdate::UnknownOutcome)?;
+    }
+    let readable = list.is_ok();
+    let mut entries = list
+        .ok()
+        .flatten()
+        .map_or_else(Vec::new, |list| list.expose().entries.clone());
+    let token = account.ok().flatten().and_then(|account| {
+        let account = account.expose();
+        let tokens = account.tokens.as_ref()?;
+        Some((account.client_id.clone(), tokens.refresh_token.clone()))
+    });
+    if let Some((client_id, refresh_token)) = token
+        && !entries.iter().any(|entry| entry.origin == Origin::Account)
+    {
+        entries.insert(
+            0,
+            Revocable {
+                client_id,
+                refresh_token,
+                added_at,
+                origin: Origin::Account,
+            },
+        );
+        // An unreadable list isn't overwritten: the token is still revoked, and the uncertainty
+        // just persisted keeps the notice.
+        if readable
+            && let SaveResult::NotCommitted(error) =
+                vault.save_revocations(&Secret::new(RevocationList {
+                    entries: entries.clone(),
+                }))
+        {
+            return Err(error);
+        }
+    }
+    Ok(entries.into_iter().map(Secret::new).collect())
+}
+
+/// Damaged data is given up on, as uncertainty; a refused read stays an error, so the step is
+/// refused and Retry reads again.
+fn damaged<T>(error: VaultError) -> Result<Result<T, VaultError>, VaultError> {
+    if error.is_damage() {
+        Ok(Err(error))
+    } else {
+        Err(error)
+    }
+}
+
+/// Drops the confirmed entries, then decides the notice. A refused rewrite leaves them listed,
+/// which only counts against confirmation.
+fn checkpoint<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    confirmed: &[Secret<Revocable>],
+) -> Result<bool, VaultError> {
+    let list_empty_on_disk = relist(vault, |entry| {
+        confirmed.iter().any(|done| done.expose() == entry)
+    })
+    .inspect_err(|error| tracing::warn!(%error, "confirmed revocations stay listed"))
+    .is_ok_and(|entries| entries.is_empty());
+    vault
+        .update_marker(MarkerUpdate::Checkpoint { list_empty_on_disk })
+        .map(|marker| marker.notice)
+}
+
+/// Drops the entries `leaves` picks and saves the rest. Outside a sign-out, whose Delete step
+/// removes them instead, an empty list's names are deleted and checked, then the sweep fact clears.
 fn relist<S: CredentialStore>(
     vault: &mut Vault<S>,
     leaves: impl Fn(&Revocable) -> bool,
@@ -339,8 +438,8 @@ fn relist<S: CredentialStore>(
             return Err(error);
         }
     }
-    // Only a saved empty list may be deleted outside a sign-out.
-    if entries.is_empty() && vault.marker()?.sweep {
+    let marker = vault.marker()?;
+    if entries.is_empty() && marker.sweep && marker.sign_out.is_none() {
         if let DeleteResult::Refused(error) = vault.delete_revocations() {
             return Err(error);
         }

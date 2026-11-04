@@ -35,11 +35,13 @@ pub enum ErrorKey {
     PlanNotEnabled,
     /// The app's registration or grant was refused; retrying won't help.
     AccountMisconfigured,
+    /// The sign-out couldn't be recorded, so a restart before Retry would sign in again.
+    SignOutNotDurable,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -52,6 +54,7 @@ impl ErrorKey {
         Self::TrustStoreUnavailable,
         Self::PlanNotEnabled,
         Self::AccountMisconfigured,
+        Self::SignOutNotDurable,
     ];
 }
 

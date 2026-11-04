@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
-use kumochi_protocol::message::{AccountRecovery, Action, ErrorKey, UserError};
+use kumochi_protocol::message::{AccountRecovery, Action, Cleanup, ErrorKey, UserError};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -23,6 +23,7 @@ use crate::platform::SessionLock;
 use crate::test_support::{Captured, Scratch};
 
 mod lane;
+mod sign_out;
 mod sweep;
 
 const NOW: u64 = 1_800_000_000;
@@ -1020,15 +1021,24 @@ fn a_pending_sign_out_fences_the_account_and_starts_nothing() {
     );
     let mut h = h.restart();
     let fenced = AccountView::SigningOut {
-        cleanup: Cleanup::Refused,
+        cleanup: Cleanup::Running,
         revocation_unconfirmed: true,
     };
     assert_eq!(h.view(), &fenced);
-    for op in [AccountOp::SignIn, AccountOp::EnablePlan, AccountOp::SignOut] {
+    let jobs = h.markers.len();
+    for op in [
+        AccountOp::SignIn,
+        AccountOp::EnablePlan,
+        AccountOp::CancelSignIn,
+        AccountOp::SignOut,
+        AccountOp::Retry,
+    ] {
         h.op(op);
         assert_eq!(h.view(), &fenced);
     }
     assert!(h.listening.is_empty());
+    assert_eq!(h.markers.len(), jobs, "no op started a credential job");
+    assert_eq!(h.revoking.len(), 1, "only the resumed sign-out's own run");
 }
 
 /// CAPS-117 M2: a patient load tries a busy session lock exactly five times in all.

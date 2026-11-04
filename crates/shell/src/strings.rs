@@ -358,6 +358,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
         ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
         ErrorKey::AccountMisconfigured => "error-account-misconfigured",
+        ErrorKey::SignOutNotDurable => "error-sign-out-not-durable",
     }
 }
 

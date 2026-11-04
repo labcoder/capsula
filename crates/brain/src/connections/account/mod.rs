@@ -10,6 +10,7 @@
 
 mod job;
 mod lane;
+mod sign_out;
 mod sweep;
 #[cfg(test)]
 mod tests;
@@ -19,13 +20,13 @@ use std::mem;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState,
-    UserError,
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, ErrorKey, PlanState, UserError,
 };
 use zeroize::Zeroizing;
 
 pub use job::{Done, Job, Snapshot, Worker};
 use lane::{Deferred, Flight, Lane, Queued, Save, listed};
+use sign_out::Leaving;
 use sweep::{Pass, Why};
 
 use super::http_client::HttpError;
@@ -121,8 +122,6 @@ pub enum Effect {
 /// The account's state as last read, and what the machine learned since.
 #[derive(Debug, Default)]
 struct Loaded {
-    /// A sign-out is pending: the account is fenced.
-    fenced: bool,
     /// The provider didn't confirm that the last sign-out ended the session.
     notice: bool,
     host: Option<Secret<Zeroizing<String>>>,
@@ -174,6 +173,8 @@ pub struct AccountState {
     again: bool,
     /// A sign-in that found the list full, waiting for its age-out check.
     admitting: Option<Intent>,
+    /// A pending sign-out: the account is fenced.
+    leaving: Option<Leaving>,
 }
 
 impl AccountState {
@@ -195,6 +196,7 @@ impl AccountState {
             pass: Pass::Idle,
             again: false,
             admitting: None,
+            leaving: None,
         };
         state.loading = true;
         state.jobs.push_back(Queued::Load { patient: true });
@@ -209,10 +211,9 @@ impl AccountState {
         if self.busy {
             return AccountView::Busy;
         }
-        if self.loaded.fenced {
-            // shortcut: nothing resumes a pending sign-out until slice 3 PR 9b part 2.
+        if let Some(cleanup) = self.cleanup() {
             return AccountView::SigningOut {
-                cleanup: Cleanup::Refused,
+                cleanup,
                 revocation_unconfirmed: self.loaded.notice,
             };
         }
@@ -277,16 +278,17 @@ impl AccountState {
             self.reload();
             return;
         }
-        if self.loaded.fenced {
+        if self.leaving.is_some() {
+            if op == AccountOp::Retry {
+                self.retry_sign_out();
+            }
             return;
         }
         match op {
             AccountOp::SignIn => self.sign_in(Intent::SignIn, effects),
             AccountOp::EnablePlan => self.sign_in(Intent::EnablePlan, effects),
             AccountOp::CancelSignIn => self.cancel(effects),
-            // shortcut: sign-out arrives with slice 3 PR 9b part 2; until then it's answered
-            // with the view, and nothing is fenced or deleted.
-            AccountOp::SignOut => {}
+            AccountOp::SignOut => self.sign_out(effects),
             AccountOp::Retry => self.retry(),
         }
     }
@@ -622,8 +624,10 @@ impl AccountState {
             .revocable
             .inspect_err(|failure| readable("revoke", failure))
             .unwrap_or_default();
+        if let Some(sign_out) = snapshot.marker.sign_out {
+            self.resume(sign_out);
+        }
         self.loaded = Loaded {
-            fenced: snapshot.marker.sign_out.is_some(),
             notice: snapshot.marker.notice,
             host,
             account,

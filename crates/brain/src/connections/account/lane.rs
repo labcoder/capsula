@@ -65,6 +65,8 @@ pub(super) enum Queued {
         confirmed: Vec<Secret<Revocable>>,
         why: Why,
     },
+    /// A sign-out step.
+    Leaving(Job),
 }
 
 /// The credential job in flight.
@@ -80,6 +82,7 @@ pub(super) enum Flight {
     Commit,
     List,
     Relist(Why),
+    Leaving,
 }
 
 /// An op that arrived while the current attempt's save was running (R2-4): it waits for that
@@ -88,6 +91,7 @@ pub(super) enum Flight {
 pub(super) enum Deferred {
     SignIn(Intent),
     Cancel,
+    SignOut,
 }
 
 impl AccountState {
@@ -160,6 +164,7 @@ impl AccountState {
                 match self.deferred.take() {
                     Some(Deferred::SignIn(intent)) => self.sign_in(intent, effects),
                     Some(Deferred::Cancel) => self.cancel(effects),
+                    Some(Deferred::SignOut) => self.sign_out(effects),
                     None => {}
                 }
             }
@@ -187,6 +192,7 @@ impl AccountState {
             (Some(Flight::Relist(why)), Done::Relisted(result)) => {
                 self.relisted(why, result, effects);
             }
+            (Some(Flight::Leaving), done) => self.left(done, effects),
             (flight, done) => {
                 debug_assert!(false, "{done:?} doesn't answer {flight:?}");
             }
@@ -304,6 +310,7 @@ impl AccountState {
             };
             self.jobs.push_back(Queued::Started);
         }
+        self.settle();
         self.dispatch(effects);
     }
 
@@ -354,6 +361,7 @@ impl AccountState {
                         age_out: why == Why::Admit,
                     },
                 ),
+                Queued::Leaving(job) => (Flight::Leaving, job),
             };
             self.flight = Some(flight);
             effects.push(Effect::Vault(job));
