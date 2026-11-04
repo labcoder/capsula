@@ -1,18 +1,23 @@
 //! Kumo in the peek: a retained view that bakes the body off the UI thread, shades frames from
 //! the animator while something engages it, and leaves its slot empty until the first bake
 //! lands. Nothing here runs at rest: a settled peek shades nothing and allocates nothing.
+//! Pulling Kumo out of the peek starts here too, in `pull`.
+
+mod pull;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
     App, Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
-    Task, Window, div, img, px,
+    Task, Window, canvas, div, img, px,
 };
 
 use super::kumo::{Animator, Look, Mood, Motion, Renderer, Silhouette};
 use super::line::on_next_frame;
+use super::pulling::{Phase, Pulling};
 use super::{Presence, diagnostics};
+pub(super) use pull::{PullChanged, PullSite, bridge};
 
 /// Kumo's size in the peek, in logical pixels.
 pub(super) const SIZE: f32 = 64.0;
@@ -37,6 +42,11 @@ pub(super) struct KumoView {
     unchanged: u64,
     /// Time spent shading and wrapping frames, for the Quit totals.
     shading: Duration,
+    pulling: Pulling,
+    /// Where a grab starts, from the line Windows last accepted.
+    site: Option<PullSite>,
+    /// The peek's client origin at the grab, physical screen pixels.
+    origin: [i32; 2],
 }
 
 impl EventEmitter<WantsFrames> for KumoView {}
@@ -55,6 +65,9 @@ impl KumoView {
             reshades: 0,
             unchanged: 0,
             shading: Duration::ZERO,
+            pulling: Pulling::default(),
+            site: None,
+            origin: [0, 0],
         }
     }
 
@@ -109,10 +122,12 @@ impl KumoView {
         }
     }
 
-    /// The peek closed: a blink under way is cut, and a late bake won't blink.
-    pub(super) fn hide(&mut self) {
+    /// The peek closed: a blink under way is cut, a late bake won't blink, and a live drag is
+    /// lost with the window holding it.
+    pub(super) fn hide(&mut self, cx: &mut Context<'_, Self>) {
         self.shown = false;
         self.animator.disengage();
+        self.pull_event(super::drag::Event::SourceClosed, cx);
     }
 
     /// Listening began or ended, under the motion policy read at that edge.
@@ -124,9 +139,10 @@ impl KumoView {
         }
     }
 
-    /// Whether the next frame has something to draw or to drop.
+    /// Whether the next frame has something to draw or to drop, or a pull to step.
     pub(super) fn wants_frame(&self) -> bool {
         self.retired.is_some()
+            || self.pulling.phase() != Phase::Idle
             || (self.shown
                 && self.renderer.is_some()
                 && (self.image.is_none() || self.animator.is_animating()))
@@ -140,6 +156,17 @@ impl KumoView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            reason = "a frame step is at most two intervals"
+        )]
+        let dt = dt as f32;
+        if self.pulling.step(dt).is_some() {
+            // shortcut: nothing draws the pull yet, so the peek's own body is its resting picture;
+            // the picture layer calls `rested` only once the dock accepts the resting mask.
+            self.pulling.rested();
+        }
         if let Some(retired) = self.retired.take()
             && let Err(error) = window.drop_image(retired)
         {
@@ -149,12 +176,7 @@ impl KumoView {
             && self.shown
             && (self.image.is_none() || self.animator.is_animating())
         {
-            #[expect(
-                clippy::as_conversions,
-                clippy::cast_possible_truncation,
-                reason = "a frame step is at most two intervals"
-            )]
-            let frame = self.animator.tick(dt as f32, 0.0);
+            let frame = self.animator.tick(dt, 0.0);
             self.reshades += 1;
             self.unchanged += u64::from(self.last == Some(frame));
             self.last = Some(frame);
@@ -191,11 +213,23 @@ impl KumoView {
 }
 
 impl Render for KumoView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let view = cx.weak_entity();
         div()
+            .relative()
             .size(px(SIZE))
             .flex_none()
             .children(self.image.clone().map(|image| img(image).size_full()))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        pull::listen(bounds, view, window);
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
     }
 }
 
@@ -391,7 +425,7 @@ mod tests {
         let (view, _) = baked(cx, 1.0);
         view.update(cx, |view, cx| view.show(Motion::Full, cx));
         assert_eq!(step_up_to(cx, &view, 3), 3);
-        view.update(cx, |view, _| view.hide());
+        view.update(cx, KumoView::hide);
         settle(cx, &view);
         assert_eq!(shaded(cx, &view), 3);
         assert!(!view.read_with(cx, |view, _| view.wants_frame()));
@@ -404,7 +438,7 @@ mod tests {
         let (view, _) = baked(cx, 1.0);
         view.update(cx, |view, cx| view.show(Motion::Full, cx));
         assert_eq!(settle(cx, &view), BLINK);
-        view.update(cx, |view, _| view.hide());
+        view.update(cx, KumoView::hide);
         settle(cx, &view);
         cx.update(|cx| cx.set_reduce_motion(true));
         let motion = cx.update(super::motion);

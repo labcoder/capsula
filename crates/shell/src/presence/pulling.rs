@@ -2,21 +2,18 @@
 //! keys on. Input arrives here in the peek's GPUI coordinates and becomes pull space at the
 //! boundary, so growing or moving the overlay never shifts the grip. How it fits:
 //! docs/development/kumo.md, "The pull".
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "C2a wires the pull to the peek's Kumo")
-)]
 
 use gpui_kit::{MouseButton, Pixels, Point};
 
 use super::drag::{DragOwner, Event, Generation, Outcome};
-use super::kumo::{Motion, Pull, Rect, Vec2, v2};
+use super::kumo::{CARRY_WIDTH, Motion, Pull, Rect, SNAP_LEN, Vec2, v2};
 
 /// Logical pixels from the work area's origin, at the work area and scale fixed at the grab.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PullSpace {
-    /// The work area's origin, physical screen pixels.
-    pub(crate) origin: [i32; 2],
+    /// The work area, `[x, y, width, height]` in physical screen pixels. All of it is compared:
+    /// a taskbar that moves an edge changes the clamp bounds even when the origin stays.
+    pub(crate) area: [i32; 4],
     /// Physical pixels per logical pixel.
     pub(crate) scale: f32,
 }
@@ -24,25 +21,35 @@ pub(crate) struct PullSpace {
 impl PullSpace {
     /// `at`, a GPUI point in a window whose client area starts at `window` in physical screen
     /// pixels.
+    pub(crate) fn point(self, window: [i32; 2], at: Point<Pixels>) -> Vec2 {
+        let x = f64::from(window[0] - self.area[0])
+            + f64::from(f32::from(at.x)) * f64::from(self.scale);
+        let y = f64::from(window[1] - self.area[1])
+            + f64::from(f32::from(at.y)) * f64::from(self.scale);
+        self.physical([x, y])
+    }
+
+    /// A physical screen rectangle in pull space.
+    fn rect(self, [x, y, width, height]: [i32; 4]) -> Rect {
+        let origin = self.physical([f64::from(x - self.area[0]), f64::from(y - self.area[1])]);
+        let size = self.physical([f64::from(width), f64::from(height)]);
+        Rect { origin, size }
+    }
+
+    /// Physical pixels from the work area's origin, in logical pixels.
     #[expect(
         clippy::as_conversions,
         clippy::cast_possible_truncation,
         reason = "a screen position fits an f32 exactly enough"
     )]
-    fn point(self, window: [i32; 2], at: Point<Pixels>) -> Vec2 {
+    fn physical(self, [x, y]: [f64; 2]) -> Vec2 {
         let scale = f64::from(self.scale);
-        let axis = |window: i32, origin: i32, at: Pixels| {
-            ((f64::from(window - origin) + f64::from(f32::from(at)) * scale) / scale) as f32
-        };
-        v2(
-            axis(window[0], self.origin[0], at.x),
-            axis(window[1], self.origin[1], at.y),
-        )
+        v2((x / scale) as f32, (y / scale) as f32)
     }
 }
 
 /// Where a grab happens, in pull space.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Grab {
     pub(crate) space: PullSpace,
     /// The line's centre.
@@ -52,6 +59,43 @@ pub(crate) struct Grab {
     /// The overlay the free body stays inside.
     pub(crate) bounds: Rect,
     pub(crate) motion: Motion,
+}
+
+impl Grab {
+    /// A grab under the line painted at `line`, from the dock `slot`, both physical screen
+    /// rectangles, of the body centred at `home` in pull space. The free body stays in the pull
+    /// area: the slot grown on every side by `SNAP_LEN` and the carry width, within the work
+    /// area.
+    pub(crate) fn new(
+        space: PullSpace,
+        line: [i32; 4],
+        slot: [i32; 4],
+        home: Vec2,
+        motion: Motion,
+    ) -> Self {
+        let line = space.rect(line);
+        let slot = space.rect(slot);
+        let reach = SNAP_LEN + CARRY_WIDTH;
+        let area = space.rect(space.area);
+        let lo = v2(
+            (slot.origin.x - reach).max(area.origin.x),
+            (slot.origin.y - reach).max(area.origin.y),
+        );
+        let hi = v2(
+            (slot.origin.x + slot.size.x + reach).min(area.origin.x + area.size.x),
+            (slot.origin.y + slot.size.y + reach).min(area.origin.y + area.size.y),
+        );
+        Self {
+            space,
+            dock: line.origin + v2(line.size.x * 0.5, line.size.y * 0.5),
+            home,
+            bounds: Rect {
+                origin: lo,
+                size: hi - lo,
+            },
+            motion,
+        }
+    }
 }
 
 /// Which lifetime is current.
@@ -118,8 +162,8 @@ impl Pulling {
         outcome
     }
 
-    /// The work area or the scale is now `space`. A change during the drag loses it, since its
-    /// points no longer mean what they did.
+    /// The work area or the scale is now `space`. Any change during the drag, an edge of the
+    /// work area included, loses it, since its points and clamp bounds no longer hold.
     pub(crate) fn rescale(&mut self, space: PullSpace) -> Outcome {
         match &self.pull {
             Some((_, grabbed)) if *grabbed != space => self.handle(Event::SourceClosed, [0, 0]),
@@ -169,7 +213,7 @@ mod tests {
     const FRAME: f32 = 1.0 / 72.0;
     /// A work area left of the primary monitor, at 125%.
     const SPACE: PullSpace = PullSpace {
-        origin: [-1280, 0],
+        area: [-1280, 0, 1280, 1024],
         scale: 1.25,
     };
     /// The peek's client origin, physical screen pixels.
@@ -347,11 +391,47 @@ mod tests {
         let (mut pulling, g) = pressed(1);
         assert_eq!(
             pulling.rescale(PullSpace {
-                origin: [0, 0],
+                area: [0, 0, 1280, 1024],
                 ..SPACE
             }),
             Outcome::Ended(g, End::Lost)
         );
         assert_eq!(pulling.phase(), Phase::Returning);
+        let (mut pulling, g) = pressed(1);
+        assert_eq!(
+            pulling.rescale(PullSpace {
+                area: [-1280, 0, 1280, 984],
+                ..SPACE
+            }),
+            Outcome::Ended(g, End::Lost),
+            "a taskbar moved its bottom edge: same origin and scale"
+        );
+    }
+
+    #[test]
+    fn a_grab_takes_the_line_centre_and_the_pull_area_inside_the_work_area() {
+        let home = v2(400.0, 60.0);
+        let grab = Grab::new(
+            SPACE,
+            [-760, 18, 80, 4],
+            [-800, 0, 160, 40],
+            home,
+            Motion::Full,
+        );
+        // The slot is (384, 0) 128 by 32 in pull space, grown by 144 + 84 on every side and
+        // cut at the work area's top, 0, and its right edge, 1024.
+        assert_eq!(
+            grab,
+            Grab {
+                space: SPACE,
+                dock: v2(448.0, 16.0),
+                home,
+                bounds: Rect {
+                    origin: v2(156.0, 0.0),
+                    size: v2(584.0, 260.0),
+                },
+                motion: Motion::Full,
+            }
+        );
     }
 }
