@@ -513,7 +513,9 @@ its maximum corner and 24 pixels downward, widening further when needed to keep
 the midpoint chip at least 12 local pixels right of the node. Thus even a wrapped
 label cannot cover its own node. Self-links on the same node use separate downward
 lanes in wire-id order, spacing their midpoint chips by the tallest chip's height
-plus 12 pixels.
+plus 12 pixels. Adding or removing a lower-id loop renumbers the lanes. Added lane
+displacement saturates before the local coordinate limit, reserving the tallest
+chip's height; loops sharing the final lane may use the midpoint fallback.
 This is not general routing around other nodes. The node-only fit can leave top-arc
 chips above the host margin and long self-loop labels past the inline host's right
 edge; check clipping with the native painter before expanding routing or the fit.
@@ -521,8 +523,9 @@ Every edge whose endpoints still exist is recomputed, even after its last labell
 partner is removed, so a formerly bowed singleton straightens. Its prepared flow
 axis is retained beside its endpoint anchors rather than read again from the host
 default. The Presenter currently holds one SurfaceGeometry for its lifetime, so a
-changed host default is not a shell-supported transition. Cut-detached edges keep
-their frozen curves, even when both endpoints survive.
+changed host default is not a shell-supported transition. Cut-detached edges with
+a nonidentity absorbed transform keep their frozen curves even when both endpoints
+survive; an identity-transform cut can still renumber surviving self-loop lanes.
 Arrowhead primitives are regenerated from the current head style and final tangent,
 without assuming the old head count. Unchanged curves and heads retain shared geometry.
 General routing around nodes or group title bands waits until after D1;

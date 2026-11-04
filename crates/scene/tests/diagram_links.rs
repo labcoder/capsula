@@ -482,6 +482,56 @@ fn a_cut_self_loop_keeps_its_primitives_when_its_node_survives() {
 }
 
 #[test]
+fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
+    use kumochi_scene::display::{MeasureError, TextMeasure, TextStyle};
+    struct Tall;
+    impl TextMeasure for Tall {
+        fn measure(
+            &mut self,
+            text: &str,
+            _: TextStyle,
+            _: Option<f32>,
+        ) -> Result<[f32; 2], MeasureError> {
+            Ok(match text {
+                "A" => [8.0, 10.0],
+                _ => [64.0, 3000.0],
+            })
+        }
+    }
+    for (count, expected) in [(3, 6115.0), (4, 8521.0), (8, 8521.0)] {
+        let mut scene = new_scene("tall_loops");
+        let before = LayoutState::new(&scene);
+        let mut put = vec![
+            json!({"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}}),
+            json!({"node":{"id":"a","in":"diagram","label":"A"}}),
+        ];
+        for index in 0..count {
+            put.push(json!({"edge":{"id":format!("e{index}"),"in":"diagram","from":"a","to":"a","label":"retrying"}}));
+        }
+        let picture = scene_support::prepared_with(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"tall","put":put}),
+            SurfaceGeometry::default(),
+            &mut Tall,
+        );
+        let handle = scene
+            .handle(&id(&format!("e{}", count - 1)))
+            .expect("last loop");
+        let items = picture.after.items();
+        let item = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("loop item");
+        let Prim::Line { points, .. } = &item.primitives[0] else {
+            panic!("loop curve");
+        };
+        assert_eq!(points[8], Vec2::new(268.0, expected), "{count} tall loops");
+    }
+}
+
+#[test]
 fn removing_the_last_label_restores_the_fresh_unlabelled_curve() {
     let mut scene = new_scene("remove_label");
     let mut budget = GlobalBudget::default();

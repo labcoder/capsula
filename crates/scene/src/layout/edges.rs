@@ -231,6 +231,10 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
             let points = if edge.from == edge.to {
                 // shortcut: the node-only fit can leave long loop labels past the host's right edge; include edge bounds or flip lanes when the native painter proves clipping.
                 let lane = f32::from(u16::try_from(index).expect("edge cap fits u16"));
+                let offset = (2.0 * lane * (lane_height + 12.0)).min(
+                    (crate::limits::MAX_COORD - lane_height - from.max().y - from.size.y - 24.0)
+                        .max(0.0),
+                );
                 quadratic(
                     [
                         Vec2::new(from.max().x, from.center().y),
@@ -241,7 +245,7 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
                             from.size.x.max(
                                 from.size.x * 0.25 + chip_size.map_or(0.0, |size| size.x) + 24.0,
                             ),
-                            from.size.y + 24.0 + 2.0 * lane * (lane_height + 12.0),
+                            from.size.y + 24.0 + offset,
                         ),
                 )
             } else {
