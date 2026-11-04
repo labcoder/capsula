@@ -406,7 +406,7 @@ mod tests {
         });
         let hertz_144 = Duration::from_secs(1) / 144;
         cx.simulate_display_refresh_interval_change(display, Some(hertz_144));
-        assert!(notified.get() > 0, "the view redraws its effective rate");
+        assert_eq!(notified.get(), 1, "the view redraws its effective rate");
         let refresh = cx
             .update_window(window, |_, window, cx| window.refresh_interval(cx))
             .expect("the window");
