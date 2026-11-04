@@ -32,7 +32,10 @@ fn late() -> Vec<TurnEvent> {
         draw_call(),
         delta("late"),
         ready("late\n"),
-        TurnEvent::OutputItem(Opaque::new(b"late".to_vec()).expect("small")),
+        TurnEvent::OutputItem {
+            index: 0,
+            item: Opaque::new(b"late".to_vec()).expect("small"),
+        },
         TurnEvent::Finished(Finish::Completed),
         TurnEvent::Finished(Finish::Truncated),
     ]

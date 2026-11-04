@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{CallId, Engine, EngineFailure, Finish, Round, RunRequest, ToolName, TurnEvent};
+use super::{
+    CallId, Engine, EngineFailure, Finish, Round, RunRequest, SendGate, ToolName, TurnEvent,
+};
 use crate::coordinator::MAX_TEXT;
 
 /// The script runs use unless a dev build names another in [`constants::FIXTURE_ENV`].
@@ -93,7 +95,12 @@ impl Fixture {
 }
 
 impl Engine for Fixture {
-    fn start(&self, _request: RunRequest, events: mpsc::Sender<TurnEvent>) -> Round {
+    fn start(
+        &self,
+        _request: RunRequest,
+        events: mpsc::Sender<TurnEvent>,
+        _gate: SendGate,
+    ) -> Round {
         let out = Outbox {
             events,
             late: self.late.clone(),
@@ -187,11 +194,17 @@ mod tests {
     use super::{DEFAULT, Fixture, Line, call, step};
     use crate::context::Built;
     use crate::coordinator::{BuildKey, ContextBuilt, Coordinator, Effect, Input, StoreOp};
-    use crate::engines::{Engine, EngineFailure, Finish, RunRequest, ToolName, TurnEvent, start};
+    use crate::engines::{
+        Engine, EngineFailure, Finish, RunRequest, SendGate, ToolName, TurnEvent, start,
+    };
     use crate::store::SceneTarget;
 
     fn request() -> RunRequest {
         RunRequest::for_tests(RunId(3), ThreadId(1), "go")
+    }
+
+    fn gate() -> SendGate {
+        SendGate::closed(request().key)
     }
 
     #[test]
@@ -225,7 +238,7 @@ mod tests {
     async fn a_cancelled_run_still_finishes_its_late_step_and_nothing_else() {
         let fixture = Fixture::parse("10 text a\n1000 step never\nlate closed").expect("parses");
         let (events_tx, mut events) = mpsc::channel(4);
-        let round = tokio::spawn(fixture.start(request(), events_tx));
+        let round = tokio::spawn(fixture.start(request(), events_tx, gate()));
         assert_eq!(
             events.recv().await,
             Some(TurnEvent::TextDelta("a".to_owned()))
@@ -239,7 +252,7 @@ mod tests {
     async fn a_script_ends_with_done() {
         let fixture = Fixture::parse("1 step s\n1 step t").expect("parses");
         let (events_tx, mut events) = mpsc::channel(8);
-        tokio::spawn(fixture.start(request(), events_tx));
+        tokio::spawn(fixture.start(request(), events_tx, gate()));
         let mut seen = Vec::new();
         while let Some(event) = events.recv().await {
             seen.push(event);
@@ -266,7 +279,7 @@ mod tests {
     async fn a_failing_script_fails_its_round_and_sends_no_late_step() {
         let fixture = Fixture::parse("0 text a\n0 fail\n0 text never\nlate z").expect("parses");
         let (events_tx, mut events) = mpsc::channel(8);
-        tokio::spawn(fixture.start(request(), events_tx));
+        tokio::spawn(fixture.start(request(), events_tx, gate()));
         let mut seen = Vec::new();
         while let Some(event) = events.recv().await {
             seen.push(event);
@@ -284,7 +297,7 @@ mod tests {
     async fn the_first_step_is_committed_before_the_call_is_ready() {
         let fixture = Fixture::parse("0 step first\n1000 step second").expect("parses");
         let (inputs, mut received) = mpsc::channel(16);
-        let _cancel = start(&fixture, request(), inputs);
+        let _cancel = start(&fixture, request(), inputs, gate());
         let mut core = Coordinator::new(ThreadId(1), ThreadId(1), RunId(2), Vec::new());
         core.handle(Input::Turn {
             thread: Some(ThreadId(1)),
