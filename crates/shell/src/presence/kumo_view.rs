@@ -3,7 +3,7 @@
 //! lands. Nothing here runs at rest: a settled peek shades nothing and allocates nothing.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{
     Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _, Task,
@@ -35,6 +35,8 @@ pub(super) struct KumoView {
     last: Option<super::kumo::FrameState>,
     reshades: u64,
     unchanged: u64,
+    /// Time spent shading and wrapping frames, for the Quit totals.
+    shading: Duration,
 }
 
 impl EventEmitter<WantsFrames> for KumoView {}
@@ -52,6 +54,7 @@ impl KumoView {
             last: None,
             reshades: 0,
             unchanged: 0,
+            shading: Duration::ZERO,
         }
     }
 
@@ -148,27 +151,30 @@ impl KumoView {
             self.reshades += 1;
             self.unchanged += u64::from(self.last == Some(frame));
             self.last = Some(frame);
-            // shortcut: one new image per animated frame (OSC-175's exception); pool the
-            // pixels if a profile ever shows the allocation.
+            let started = Instant::now();
+            // shortcut: two allocations per animated frame, the pixels and the image's Arc
+            // (OSC-175's exception); pool the images if a profile ever shows them.
             let mut pixels = vec![0; renderer.image_len()];
             match renderer.render(&frame, &mut pixels) {
                 Ok(()) => {
                     let side = u32::from(self.size);
                     if let Some(buffer) = image::RgbaImage::from_raw(side, side, pixels) {
-                        let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+                        let image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
                         self.retired = self.image.replace(image);
                         cx.notify();
                     }
                 }
                 Err(error) => tracing::error!(%error, "can't shade Kumo"),
             }
+            self.shading += started.elapsed();
         }
         self.wants_frame()
     }
 
-    /// At Quit: how many frames were shaded, and how many repeated the one before.
-    pub(super) fn totals(&self) -> [u64; 2] {
-        [self.reshades, self.unchanged]
+    /// At Quit: how many frames were shaded, how many repeated the one before, and the
+    /// time spent shading them.
+    pub(super) fn totals(&self) -> ([u64; 2], Duration) {
+        ([self.reshades, self.unchanged], self.shading)
     }
 }
 
@@ -292,11 +298,11 @@ mod tests {
         view.update(cx, |view, cx| view.show(Motion::Full, cx));
         assert_eq!(asked.get(), 1);
         let frames = settle(cx, &view);
-        let [reshades, unchanged] = view.read_with(cx, |view, _| view.totals());
+        let ([reshades, unchanged], _) = view.read_with(cx, |view, _| view.totals());
         assert!(frames > 2, "a blink takes several frames: {frames}");
         assert_eq!(unchanged, 0, "no frame repeated the one before");
         assert_eq!(settle(cx, &view), 0, "a settled peek wants no frames");
-        assert_eq!(view.read_with(cx, |view, _| view.totals())[0], reshades);
+        assert_eq!(view.read_with(cx, |view, _| view.totals()).0[0], reshades);
         assert!(view.read_with(cx, |view, _| view.image.is_some()));
     }
 
@@ -305,7 +311,7 @@ mod tests {
         let (view, _) = baked(cx, 1.0);
         view.update(cx, |view, cx| view.show(Motion::Reduced, cx));
         settle(cx, &view);
-        assert_eq!(view.read_with(cx, |view, _| view.totals()), [1, 0]);
+        assert_eq!(view.read_with(cx, |view, _| view.totals()).0, [1, 0]);
     }
 
     #[gpui::test]
@@ -342,6 +348,6 @@ mod tests {
             view.hide();
         });
         assert_eq!(settle(cx, &view), 0);
-        assert_eq!(view.read_with(cx, |view, _| view.totals()), [0, 0]);
+        assert_eq!(view.read_with(cx, |view, _| view.totals()).0, [0, 0]);
     }
 }

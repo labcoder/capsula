@@ -487,10 +487,13 @@ impl Presence {
         self.scene_deadline = None;
         let link = self.link.clone();
         diagnostics::settled_paints(cx);
-        let [reshades, unchanged] = self.kumo.read(cx).totals();
+        let ([reshades, unchanged], shading) = self.kumo.read(cx).totals();
         diagnostics::record(
             cx,
-            format_args!("kumo reshades={reshades} unchanged={unchanged}"),
+            format_args!(
+                "kumo reshades={reshades} unchanged={unchanged} shade_us={}",
+                shading.as_micros()
+            ),
         );
         let diagnostics = diagnostics::release(cx);
         let observer = observer::release(cx);
