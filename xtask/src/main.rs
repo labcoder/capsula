@@ -16,6 +16,8 @@ mod bench;
 #[cfg(windows)]
 mod gate;
 #[cfg(windows)]
+mod live;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod session;
@@ -52,6 +54,9 @@ tasks:
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
                     the current shell must paint no dock frame from the settle to Quit
+  live signin       sign the dev brain in to its account: the brain opens the browser,
+                    and only the account's state is printed; refuses while any
+                    product process runs; needs the owner at the desk
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
@@ -82,6 +87,8 @@ fn main() -> Result<()> {
         Some("gate-session") => gate::run(args),
         #[cfg(windows)]
         Some("hover-gate") => gate::hover(args),
+        #[cfg(windows)]
+        Some("live") => live::run(args),
         #[cfg(windows)]
         Some("slice2-gate") => slice2::run(args),
         #[cfg(windows)]
