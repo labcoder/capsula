@@ -1009,6 +1009,19 @@ async fn a_missing_type_needs_an_event_stream_in_its_first_128_bytes() {
 }
 
 #[tokio::test]
+async fn an_encoded_answer_is_refused_before_any_reader() {
+    for (status, body) in [(200, TEXT), (400, UNSUPPORTED)] {
+        let mut response = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        assert_eq!(answered(&response), Err(Failure::Protocol), "{status}");
+    }
+}
+
+#[tokio::test]
 async fn four_interim_heads_pass_and_a_fifth_is_refused() {
     for (count, expected) in [(4, Ok(())), (5, Err(Failure::Protocol))] {
         let mut response = b"HTTP/1.1 100 Continue\r\n\r\n".repeat(count);
