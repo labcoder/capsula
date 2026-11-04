@@ -209,7 +209,14 @@ impl AccountState {
             // An unusable answer that named a successor: the token sent was consumed.
             Err(ExchangeError::Unusable {
                 refresh_token: Some(token),
-            }) => return self.reject_successor(client.expose(), token.expose(), current, effects),
+            }) => {
+                let ended = if current {
+                    self.end_session(effects)
+                } else {
+                    None
+                };
+                return self.reject_successor(client.expose(), token.expose(), ended);
+            }
             Err(failure) => {
                 let (outcome_unknown, key) = classify(&failure);
                 self.jobs.push_back(Queued::Finished { outcome_unknown });
@@ -254,7 +261,8 @@ impl AccountState {
                 });
             }
             if let Some(token) = successor {
-                return self.reject_successor(client.expose(), token.expose(), true, effects);
+                let ended = self.end_session(effects);
+                return self.reject_successor(client.expose(), token.expose(), ended);
             }
             // The token sent wasn't replaced, so it may go again; the access token issued with
             // it has no owner.
@@ -512,15 +520,12 @@ impl AccountState {
         &mut self,
         client: &Zeroizing<String>,
         token: &Zeroizing<String>,
-        current: bool,
-        effects: &mut Vec<Effect>,
+        ended: Option<Queued>,
     ) {
         let mut then = vec![Queued::Finished {
             outcome_unknown: false,
         }];
-        if current {
-            then.extend(self.end_session(effects));
-        }
+        then.extend(ended);
         self.discard(client, token, then);
     }
 

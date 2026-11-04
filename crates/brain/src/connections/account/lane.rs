@@ -466,20 +466,14 @@ impl AccountState {
                             origin: Origin::Account,
                         }));
                     }
+                    let finish = matches!(save, Save::List(_));
                     match save {
                         Save::Account(account) => (Flight::Commit, Job::Commit(account.clone())),
-                        Save::List(entry) => (
+                        Save::List(entry) | Save::Discard(entry) => (
                             Flight::List,
                             Job::List {
                                 entry: entry.clone(),
-                                finish: true,
-                            },
-                        ),
-                        Save::Discard(entry) => (
-                            Flight::List,
-                            Job::List {
-                                entry: entry.clone(),
-                                finish: false,
+                                finish,
                             },
                         ),
                         Save::Rotated {
