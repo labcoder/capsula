@@ -443,7 +443,17 @@ fn a_lost_batch_moves_its_container_allocation_off_the_caller() {
                 .send_blocking(LinkEvent::Scenes(Vec::new()))
                 .expect("queued metadata");
         }
-        super::batch(LinkEvent::Scenes(Vec::new()), &receiver)
+        super::batch(
+            LinkEvent::SceneData {
+                generation: 1,
+                frame: kumochi_scene::deferred::Deferred::new(
+                    DataToShell::ScenesRemoved { scenes: Vec::new() },
+                    0,
+                ),
+                bytes: 0,
+            },
+            &receiver,
+        )
     };
     let guarded = batch();
     let ((), _, [_, released]) = crate::allocation::usage(|| drop(guarded));
@@ -458,6 +468,24 @@ fn a_lost_batch_moves_its_container_allocation_off_the_caller() {
         released, bytes,
         "the pre-wrapper control frees its vector on the caller"
     );
+    drop(release);
+}
+
+#[test]
+fn a_text_only_batch_frees_its_container_on_the_caller() {
+    let release = crate::presenter::tests::hold_dropper();
+    let (_sender, receiver) = async_channel::unbounded();
+    let batch = super::batch(
+        LinkEvent::Data {
+            generation: 1,
+            message: text(1, ""),
+            bytes: 40,
+        },
+        &receiver,
+    );
+    let bytes = batch.capacity() * size_of::<LinkEvent>();
+    let ((), _, [_, released]) = crate::allocation::usage(|| drop(batch));
+    assert_eq!(released, bytes, "text needs no dropper allocation or send");
     drop(release);
 }
 

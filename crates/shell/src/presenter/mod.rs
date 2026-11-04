@@ -127,6 +127,9 @@ pub(crate) struct Presenter {
     slots: Arc<()>,
     /// The dropper stopped and intake was refused; logged once.
     refused: bool,
+    /// This presenter's dropper liveness in tests; `None` asks the process-wide dropper.
+    #[cfg(test)]
+    dropper: Option<bool>,
 }
 
 impl Presenter {
@@ -147,6 +150,8 @@ impl Presenter {
             next_job: 0,
             slots: Arc::new(()),
             refused: false,
+            #[cfg(test)]
+            dropper: None,
         }
     }
 
@@ -1151,6 +1156,9 @@ impl Presenter {
 
     /// Whether discarded values still leave the UI thread; logs once when they stopped.
     fn dropper_running(&mut self) -> bool {
+        #[cfg(test)]
+        let running = self.dropper.unwrap_or_else(deferred::running);
+        #[cfg(not(test))]
         let running = deferred::running();
         if !running && !self.refused {
             self.refused = true;

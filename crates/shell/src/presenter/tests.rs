@@ -27,6 +27,12 @@ const FRAME: u32 = 40;
 #[path = "measure_tests.rs"]
 mod measurements;
 
+#[path = "retirement_tests.rs"]
+mod retirement;
+
+#[path = "dead_dropper_tests.rs"]
+mod dead_dropper;
+
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
 #[expect(

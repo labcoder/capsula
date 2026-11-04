@@ -675,8 +675,9 @@ flowchart LR
 ```
 
 The host must call `deferred::start()` once before intake, and refuse intake when it
-fails. Production startup is not wired yet; this foundation keeps v1 off and does not
-change when applications destroy values. Until startup, and on the dropper itself,
+fails. The brain starts the dropper before its runtime and intake; the shell starts it
+before the link. Startup fails closed if it cannot start. v1 remains off.
+Until startup, and on the dropper itself,
 values drop in place, so tests and nested
 values behave as before. `running()` turns false once the dropper thread has died,
 which only a panicking destructor in an unwinding build can cause; `start()` then
@@ -689,6 +690,16 @@ owners attributed; `take_peak()` returns the attributed high water since its las
 call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
+
+**Known limits before v1.** The legal maximal-content fixture, measured on Rez with
+real font shaping across four scenes and 256 prepared prefixes, charges 200,009,012 B
+against the unchanged 64 MiB presenter allowance. These are requested Rust allocation
+bytes, not RSS or a font-cache ceiling. The next layer adds an eight-prefix-per-scene
+window and partial-ready consumption instead of raising the cap. Inputs and outputs
+held by up to eight workers sit outside the presenter allowance, as does the dropper
+queue. v1 still needs bounded-admission and window/consumption tests, admission at
+most 1 ms, clear/cut/eviction/timeout tails at most 2 ms, and concurrent worker/dropper
+churn measurements with throttling if the backlog grows.
 
 Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map

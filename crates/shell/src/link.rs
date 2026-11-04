@@ -113,13 +113,53 @@ pub(crate) enum LinkEvent {
 /// rather than one UI update per frame.
 const EVENT_BATCH: usize = 256;
 
-/// Protects a UI batch of at most [`EVENT_BATCH`] events through lost delivery.
-pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Deferred<Vec<LinkEvent>> {
+#[derive(Debug)]
+pub(crate) enum Batch {
+    Plain(Vec<LinkEvent>),
+    Scene(Deferred<Vec<LinkEvent>>),
+}
+
+impl std::ops::Deref for Batch {
+    type Target = Vec<LinkEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(events) => events,
+            Self::Scene(events) => events,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Batch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Plain(events) => events,
+            Self::Scene(events) => events,
+        }
+    }
+}
+
+impl Batch {
+    pub(crate) fn attribute(&mut self, bytes: usize) {
+        if let Self::Scene(events) = self {
+            events.attribute(bytes);
+        }
+    }
+}
+
+/// Protects scene batches through lost delivery; ordinary batches free in place.
+pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
     let mut events = vec![first];
     while events.len() < EVENT_BATCH
         && let Ok(event) = rest.try_recv()
     {
         events.push(event);
+    }
+    if !events
+        .iter()
+        .any(|event| matches!(event, LinkEvent::SceneData { .. }))
+    {
+        return Batch::Plain(events);
     }
     let payload = events
         .iter()
@@ -131,7 +171,7 @@ pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Deferred<Ve
         })
         .fold(0, usize::saturating_add);
     let bytes = (events.capacity() * size_of::<LinkEvent>()).saturating_add(payload);
-    Deferred::new(events, bytes)
+    Batch::Scene(Deferred::new(events, bytes))
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the

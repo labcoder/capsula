@@ -2,7 +2,7 @@
 
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
-use crate::link::{LinkEvent, LinkState};
+use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
 use kumochi_scene::deferred::Deferred;
@@ -10,10 +10,10 @@ use std::time::Instant;
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once. Each event leaves
-    /// the protected batch only to be applied, and the emptied batch still drops off this thread.
+    /// the batch only to be applied; a scene batch's buffer still drops off this thread.
     pub(super) fn link_events(
         &mut self,
-        mut events: Deferred<Vec<LinkEvent>>,
+        mut events: Batch,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         for event in events.drain(..) {
