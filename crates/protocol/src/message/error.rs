@@ -49,6 +49,10 @@ pub enum ErrorKey {
     RequestRefused,
     /// The provider's answer couldn't be read.
     ResponseUnreadable,
+    /// No account is signed in and ready, so nothing can answer.
+    SignInNeeded,
+    /// The run's model isn't in the account's catalog.
+    ModelUnavailable,
     /// Anthropic refused the API key.
     AnthropicKeyRejected,
     /// The pasted text isn't shaped like an Anthropic API key.
@@ -79,7 +83,7 @@ pub enum ErrorKey {
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 34] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -99,6 +103,8 @@ impl ErrorKey {
         Self::AccountRefused,
         Self::RequestRefused,
         Self::ResponseUnreadable,
+        Self::SignInNeeded,
+        Self::ModelUnavailable,
         Self::AnthropicKeyRejected,
         Self::AnthropicKeyFormat,
         Self::AnthropicUnreachable,

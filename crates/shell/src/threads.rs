@@ -75,6 +75,10 @@ pub(crate) struct Threads {
     cached: HashMap<ThreadId, ThreadRow>,
     pages: HashMap<ThreadId, Option<ThreadCursor>>,
     reread: VecDeque<Option<ThreadCursor>>,
+    /// Renamed tasks whose new title no page has shown yet: the cursor of the page each was on,
+    /// and the title sent. Every committed-title notification rereads these pages, so a reread
+    /// that raced ahead of its rename's commit still reaches the row.
+    unconfirmed: HashMap<ThreadId, (Option<ThreadCursor>, String)>,
 }
 
 impl std::fmt::Debug for Threads {
@@ -107,10 +111,11 @@ impl Threads {
             .or_else(|| self.rows.iter().find(|row| row.id == thread))
     }
 
-    pub(crate) fn renamed(&mut self, thread: ThreadId) {
-        // shortcut: the re-read can race the rename across the two pipes and show the old title
-        // until the next refresh; upgrade when PR 16's ThreadsChanged is sent after every committed SetTitle.
+    /// A rename of `thread` to `title` was sent: its page is read again now, and again after each
+    /// committed-title notification until a page shows the new title.
+    pub(crate) fn renamed(&mut self, thread: ThreadId, title: &str) {
         let after = self.pages.get(&thread).copied().flatten();
+        self.unconfirmed.insert(thread, (after, title.to_owned()));
         if !self.reread.contains(&after) {
             self.reread.push_back(after);
         }
@@ -150,6 +155,7 @@ impl Threads {
     pub(crate) fn hide(&mut self) {
         self.shown = false;
         self.reread.clear();
+        self.unconfirmed.clear();
         self.select(None);
     }
 
@@ -161,6 +167,7 @@ impl Threads {
         self.event_needed = None;
         self.deferred_search = None;
         self.reread.clear();
+        self.unconfirmed.clear();
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -192,6 +199,7 @@ impl Threads {
         self.search = search;
         self.rows.clear();
         self.pages.clear();
+        self.unconfirmed.clear();
         self.next = None;
         self.listed = false;
         self.refresh();
@@ -223,6 +231,7 @@ impl Threads {
     pub(crate) fn deleted(&mut self, thread: ThreadId) {
         self.cached.remove(&thread);
         self.pages.remove(&thread);
+        self.unconfirmed.remove(&thread);
         self.rows.retain(|row| row.id != thread);
         if self.shown
             && let Some(Pending {
@@ -271,6 +280,27 @@ impl Threads {
             return;
         }
         if self.list_needed.is_none() && self.rows.first().is_none_or(|row| row.id != thread) {
+            self.list_needed = Some(Read::Repair);
+        }
+    }
+
+    /// The brain committed a thread's title: the list is read again, or the read in flight earns
+    /// one more, and so is the page of every rename no page has confirmed, since its earlier
+    /// reread may have beaten the commit.
+    pub(crate) fn changed(&mut self) {
+        if self.searching() {
+            return;
+        }
+        for (after, _) in self.unconfirmed.values() {
+            if !self.reread.contains(after) {
+                self.reread.push_back(*after);
+            }
+        }
+        if let Some(pending) = &mut self.list_pending {
+            pending.stale = true;
+            return;
+        }
+        if self.list_needed.is_none() {
             self.list_needed = Some(Read::Repair);
         }
     }
@@ -433,6 +463,13 @@ impl Threads {
             self.pages.clear();
         }
         for row in &threads {
+            if self
+                .unconfirmed
+                .get(&row.id)
+                .is_some_and(|(_, title)| *title == row.title)
+            {
+                self.unconfirmed.remove(&row.id);
+            }
             self.cached.insert(row.id, row.clone());
             self.pages.insert(row.id, pending.after);
         }

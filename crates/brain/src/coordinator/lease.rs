@@ -5,24 +5,35 @@
 //! records a lease with the build's sources; a delete of one of them is then held, with no
 //! writer op, until every lease carrying it settles. A lease that doesn't settle by its deadline
 //! fails closed: its held deletes are refused, its run fails, and nothing is granted again until
-//! the brain restarts. Leases belong to send attempts, not runs, so they outlive Stop.
+//! the brain restarts. Leases belong to send attempts, not runs, so they outlive Stop. A run's
+//! round and a background job (`job`) ask the same way, each under its own key.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use kumochi_protocol::message::{Deleted, ThreadId};
 
-use super::{BuildKey, Coordinator, Effect, Stale};
+use super::availability::sign_in_needed;
+use super::{BuildKey, Coordinator, Effect, JobKey, Stale};
 use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
 pub const SEND_DEADLINE: Duration = Duration::from_secs(15);
 
+/// What asks to send: a run's build, or a background job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendKey {
+    /// A round of a run.
+    Build(BuildKey),
+    /// A background job.
+    Job(JobKey),
+}
+
 /// One granted send attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaseId {
-    /// The build whose body it sends.
-    pub key: BuildKey,
+    /// What it sends.
+    pub key: SendKey,
     /// A serial across every grant, never reused.
     pub send: u64,
 }
@@ -66,11 +77,25 @@ impl Coordinator {
             .and_then(|run| run.build.as_ref())
             .filter(|build| build.key() == key && build.admitted());
         let Some(build) = current else {
-            effects.push(Effect::Rebuild(key));
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
             return;
         };
+        let refused = self
+            .current
+            .as_ref()
+            .and_then(|run| run.connection)
+            .map_or_else(
+                || Some(sign_in_needed()),
+                |connection| self.refusal(connection),
+            );
+        if let Some(reason) = refused {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.fail_with(key.run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+            return;
+        }
         if self.transport_failed {
-            effects.push(Effect::Rebuild(key));
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.fail(key.run, Failure::Engine, effects)
                 .expect("the run is current");
             return;
@@ -78,11 +103,21 @@ impl Coordinator {
         let voided = build.voided(build.sources());
         if !voided.is_empty() {
             effects.push(Effect::CancelEngine { run: key.run });
-            effects.push(Effect::Rebuild(key));
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.rebuild(key, &voided, &pending, effects);
             return;
         }
         let sources = build.sources().to_vec();
+        self.grant(SendKey::Build(key), sources, effects);
+    }
+
+    /// Records a lease for `key` carrying `sources`, grants it and arms its deadline.
+    pub(super) fn grant(
+        &mut self,
+        key: SendKey,
+        sources: Vec<ThreadId>,
+        effects: &mut Vec<Effect>,
+    ) {
         self.sends += 1;
         let id = LeaseId {
             key,
@@ -135,10 +170,12 @@ impl Coordinator {
         held.failed = true;
         let sources = held.sources.clone();
         self.transport_failed = true;
-        if self.current_run() == Some(lease.key.run) {
-            self.fail(lease.key.run, Failure::Engine, effects)?;
-        } else {
-            effects.push(Effect::CancelEngine { run: lease.key.run });
+        match lease.key {
+            SendKey::Build(key) if self.current_run() == Some(key.run) => {
+                self.fail(key.run, Failure::Engine, effects)?;
+            }
+            SendKey::Build(key) => effects.push(Effect::CancelEngine { run: key.run }),
+            SendKey::Job(key) => self.cancel_job_if(key, effects),
         }
         for thread in self.held_deletes() {
             if sources.contains(&thread) {

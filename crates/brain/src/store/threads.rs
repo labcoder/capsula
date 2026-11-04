@@ -46,9 +46,9 @@ impl Store {
             .ok_or(StoreError::NoThread)
     }
 
-    /// Retitles a live task. The main thread's stored title stays empty, and a title that can't
-    /// apply (a missing, hidden or main thread, or a model title the rules turn away) changes
-    /// nothing.
+    /// Retitles a live task, and says whether it did. The main thread's stored title stays
+    /// empty, and a title that can't apply (a missing, hidden or main thread, or a model title
+    /// the rules turn away) changes nothing.
     ///
     /// # Errors
     /// Fails when SQLite fails.
@@ -57,21 +57,21 @@ impl Store {
         thread: ThreadId,
         title: &ThreadTitle,
         source: TitleSource,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let Ok(thread) = sql_id(thread.0, StoreError::NoThread) else {
-            return Ok(());
+            return Ok(false);
         };
         let (source, generation) = match source {
             TitleSource::User => ("user", None),
             TitleSource::Model(Generation(generation)) => ("model", Some(generation)),
         };
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE threads SET title = ?2, title_source = ?3
              WHERE id = ?1 AND state = 'live' AND kind = 'thread'
              AND (?4 IS NULL OR (title_source = 'words' AND deletion_generation = ?4))",
             params![thread, title.as_str(), source, generation],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Stores a live thread's model and effort; a missing or hidden thread changes nothing.

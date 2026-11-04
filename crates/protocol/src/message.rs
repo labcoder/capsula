@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Secret;
+use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
 
 mod account;
 mod connections;
@@ -72,6 +73,70 @@ pub struct ThreadId(pub u64);
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 pub struct RunId(pub u64);
+
+/// A hold gesture, counted up by the shell on each connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GestureId(pub u32);
+
+/// An exclusion lease generation, counted up by the shell on each connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseGeneration(pub u32);
+
+/// The user's preferred focus within a captured display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FocusHint {
+    /// A selected region in physical desktop pixels.
+    Region(PhysicalRect),
+    /// The native window the user selected.
+    Window(WindowRef),
+}
+
+/// The input that requested a capture, scoped to one shell connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureFor {
+    /// A recognized hold.
+    Gesture(GestureId),
+    /// A typed submit.
+    Turn(u32),
+}
+
+/// A content-free reason a capture could not complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureFailure {
+    /// No live exclusion lease protects the capture.
+    ExclusionUnavailable,
+    /// The requesting gesture or turn was cancelled.
+    Cancelled,
+    /// The capture worker or platform failed.
+    Unavailable,
+}
+
+/// The input that admitted a run, present on its first state only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunOrigin {
+    /// A typed submit's connection-local number.
+    Typed {
+        /// The submit number.
+        turn: u32,
+    },
+    /// A recognized hold's connection-local identifier.
+    Hold {
+        /// The recognized gesture.
+        gesture: GestureId,
+    },
+}
+
+/// Whether a typed submit requests screen context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenChoice {
+    /// Text only.
+    None,
+    /// Include the screen under this exclusion lease.
+    Include {
+        /// The exclusion lease protecting capture.
+        lease: LeaseGeneration,
+    },
+}
 
 /// The shell's first frame on each pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +211,8 @@ pub enum Phase {
     Interrupted,
     /// Ended by an error.
     Failed,
+    /// A recognized hold is waiting for input.
+    Listening,
 }
 
 /// Shell to brain, on the control pipe.
@@ -219,6 +286,39 @@ pub enum ControlToBrain {
     },
     /// Something the user asked of the account; answered by one [`ControlToShell::Account`].
     AccountOp(AccountOp),
+    /// The shell recognized a hold while its exclusion lease was live.
+    HoldRecognized {
+        /// The connection-local gesture.
+        gesture: GestureId,
+        /// The display containing the pointer at recognition.
+        pointer_display: DisplayRef,
+        /// The thread to continue, or a new thread when absent.
+        thread: Option<ThreadId>,
+        /// The exclusion lease protecting capture.
+        lease: LeaseGeneration,
+    },
+    /// The hold key was released.
+    KeyUp {
+        /// The released gesture.
+        gesture: GestureId,
+    },
+    /// The shell cancelled the hold.
+    GestureCancel {
+        /// The cancelled gesture.
+        gesture: GestureId,
+    },
+    /// A region or window selected for this hold's context.
+    FocusHint {
+        /// The gesture whose context is being refined.
+        gesture: GestureId,
+        /// The selected region or window.
+        hint: FocusHint,
+    },
+    /// A capture exclusion lease stopped protecting the screen.
+    ExclusionLapsed {
+        /// The lease that stopped protecting capture.
+        lease: LeaseGeneration,
+    },
     /// Something the user asked of a Claude connection; answered by one
     /// [`ControlToShell::Connections`].
     Connection(ConnectionOp),
@@ -263,6 +363,11 @@ pub enum ControlToShell {
         thread: ThreadId,
         /// Its new phase.
         phase: Phase,
+        /// Why it failed, sent only with [`Phase::Failed`] and only when there's something to
+        /// tell. shortcut: it isn't stored, so a reloaded page shows the generic failure.
+        error: Option<UserError>,
+        /// The admitting input, on the first state only; later states carry `None`.
+        origin: Option<RunOrigin>,
     },
     /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
     Ping,
@@ -287,6 +392,8 @@ pub enum ControlToShell {
     /// deleted, or it was blank. It answers one submit, in order with the `Thinking` of
     /// admitted ones.
     TurnRefused {
+        /// The refused submit's connection-local number.
+        turn: u32,
         /// The thread the submit named.
         thread: Option<ThreadId>,
     },
@@ -317,6 +424,21 @@ pub enum ControlToShell {
     /// change, and once per [`ControlToBrain::AccountOp`]. It carries the display email, so
     /// the tap never records it.
     Account(AccountView),
+    /// The brain changed a listed thread on its own, such as a task's title, so the shell reads
+    /// its list again. It carries nothing.
+    ThreadsChanged,
+    /// Capture finished; the shell may release the input's exclusion lease.
+    CaptureDone {
+        /// The input whose capture completed.
+        capture_for: CaptureFor,
+    },
+    /// Capture failed; the shell may release the input's exclusion lease.
+    CaptureFailed {
+        /// The input whose capture failed.
+        capture_for: CaptureFor,
+        /// A content-free failure category.
+        reason: CaptureFailure,
+    },
     /// Both Claude connections: once per connection after `Settings` and `Account` and before
     /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
     Connections(ConnectionsView),
@@ -329,6 +451,10 @@ pub enum DataToBrain {
     Hello(Hello),
     /// Typed chat: a new turn in `thread`, or in a new thread when it's `None`.
     TextSubmit {
+        /// Counted up from one by the shell on each connection.
+        turn: u32,
+        /// Whether this turn requests screen context.
+        screen: ScreenChoice,
         /// The thread to continue.
         thread: Option<ThreadId>,
         /// What the user typed.
@@ -474,6 +600,10 @@ pub enum DataToShell {
 mod scene_frame_tests;
 
 #[cfg(test)]
+#[path = "message/hold_frame_tests.rs"]
+mod hold_frame_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
@@ -562,9 +692,10 @@ mod tests {
         };
         assert_eq!(payload(&deleted, Pipe::Control), 1 + 10 + 1 + 1 + 10);
         let refused = ControlToShell::TurnRefused {
+            turn: u32::MAX,
             thread: Some(thread),
         };
-        assert_eq!(payload(&refused, Pipe::Control), 1 + 1 + 10);
+        assert_eq!(payload(&refused, Pipe::Control), 1 + 5 + 1 + 10);
         let removed = DataToShell::ScenesRemoved {
             scenes: vec![SCENE; MAX_VISIBLE_SCENES],
         };

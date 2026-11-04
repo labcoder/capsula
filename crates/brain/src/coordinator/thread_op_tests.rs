@@ -17,6 +17,7 @@ const MAIN: ThreadId = ThreadId(1);
 fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(MAIN),
         text: "hi".to_owned(),
     })
@@ -40,6 +41,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
     // No fence: the turn the shell sent before the delete still reaches the thread.
     let next = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(MAIN),
             text: "again".to_owned(),
         })
@@ -91,6 +93,7 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
             thread: T,
             title: title.clone(),
             source: TitleSource::User,
+            job: None,
         })])
     );
     let choice = ModelChoice {

@@ -31,6 +31,8 @@ mod accounts;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "page_tests.rs"]
@@ -41,6 +43,34 @@ mod scenes;
 mod settings;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
+
+#[test]
+fn staged_hold_controls_do_not_admit_or_change_a_run() {
+    use kumochi_protocol::geometry::{DisplayRef, PhysicalRect, WindowRef};
+    use kumochi_protocol::message::{FocusHint, GestureId, LeaseGeneration};
+    let gesture = GestureId(9);
+    let lease = LeaseGeneration(4);
+    for message in [
+        ControlToBrain::HoldRecognized {
+            gesture,
+            pointer_display: DisplayRef(PhysicalRect {
+                origin: [-1, 2],
+                size: [3, 4],
+            }),
+            thread: Some(ThreadId(1)),
+            lease,
+        },
+        ControlToBrain::KeyUp { gesture },
+        ControlToBrain::GestureCancel { gesture },
+        ControlToBrain::FocusHint {
+            gesture,
+            hint: FocusHint::Window(WindowRef(17)),
+        },
+        ControlToBrain::ExclusionLapsed { lease },
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
 
 #[test]
 fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
@@ -149,6 +179,8 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
 
     async fn submit(&mut self, text: &str) {
         let message = DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
             text: text.to_owned(),
         };
@@ -228,7 +260,9 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         loop {
             let message = self.next_control().await.expect("readable").expect("open");
             match message {
-                ControlToShell::RunState { run, thread, phase } => {
+                ControlToShell::RunState {
+                    run, thread, phase, ..
+                } => {
                     self.thread = Some(thread);
                     return (run, phase);
                 }
@@ -364,7 +398,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
         main_thread,
         high_water,
         scenes,
-        engine,
+        crate::runtime::Selected::Fixture(engine),
         scratch.config(),
         crate::test_support::accounts(scratch),
     )
@@ -395,6 +429,64 @@ fn outcomes(scratch: &Scratch) -> Vec<(String, Option<String>)> {
 
 fn outcome(state: &str, reason: &str) -> (String, Option<String>) {
     (state.to_owned(), Some(reason.to_owned()))
+}
+
+#[tokio::test]
+async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_order() {
+    use kumochi_protocol::message::{RunOrigin, ScreenChoice};
+
+    let scratch = Scratch::new("submit-origins");
+    let mut brain = test_support::brain(&scratch, "5000 text late");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        for (turn, text) in [(73, " "), (91, "accepted")] {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::None,
+                thread: None,
+                text: text.to_owned(),
+            };
+            shell
+                .data_out
+                .write_all(&frame::encode(&message, Pipe::Data).expect("encodes"))
+                .await
+                .expect("sent");
+        }
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 73,
+                thread: None
+            })
+        );
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::RunState {
+                run: RunId(1),
+                thread: ThreadId(2),
+                phase: Phase::Thinking,
+                error: None,
+                origin: Some(RunOrigin::Typed { turn: 91 }),
+            })
+        );
+        shell.stop(RunId(1)).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::RunState {
+                run: RunId(1),
+                thread: ThreadId(2),
+                phase: Phase::Interrupted,
+                error: None,
+                origin: None,
+            })
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -643,6 +735,7 @@ async fn a_full_control_queue_still_applies_store_effects() {
     offline(
         &mut brain,
         Input::Turn {
+            turn: 1,
             thread: None,
             text: "go".to_owned(),
         },

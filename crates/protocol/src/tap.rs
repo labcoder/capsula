@@ -54,6 +54,11 @@ impl Tapped for ControlToBrain {
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
             Self::AccountOp(_) => "AccountOp",
+            Self::HoldRecognized { .. } => "HoldRecognized",
+            Self::KeyUp { .. } => "KeyUp",
+            Self::GestureCancel { .. } => "GestureCancel",
+            Self::FocusHint { .. } => "FocusHint",
+            Self::ExclusionLapsed { .. } => "ExclusionLapsed",
             Self::Connection(_) => "Connection",
             Self::Warm { .. } => "Warm",
         }
@@ -112,6 +117,9 @@ impl Tapped for ControlToShell {
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
+            Self::ThreadsChanged => "ThreadsChanged",
+            Self::CaptureDone { .. } => "CaptureDone",
+            Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
         }
     }
@@ -125,7 +133,9 @@ impl Tapped for ControlToShell {
                 | Self::RunState {
                     run: _,
                     thread: _,
-                    phase: _
+                    phase: _,
+                    error: _,
+                    origin: _
                 }
                 | Self::Ping
                 | Self::Scenes { scenes: _ }
@@ -134,8 +144,9 @@ impl Tapped for ControlToShell {
                     outcome: _,
                     last_run: _
                 }
-                | Self::TurnRefused { thread: _ }
+                | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
+                | Self::ThreadsChanged
                 // Versions, states and content-free reasons only.
                 | Self::Connections(ConnectionsView {
                     anthropic: _,

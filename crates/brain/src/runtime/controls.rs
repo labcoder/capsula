@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES};
-use kumochi_protocol::tap::Direction;
+use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -77,6 +77,15 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             index,
             cut,
         })),
+        // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.
+        message @ (ControlToBrain::HoldRecognized { .. }
+        | ControlToBrain::KeyUp { .. }
+        | ControlToBrain::GestureCancel { .. }
+        | ControlToBrain::FocusHint { .. }
+        | ControlToBrain::ExclusionLapsed { .. }) => {
+            tracing::debug!(op = message.op(), "hold control ignored");
+            None
+        }
         // shortcut: nothing answers Connection or Warm until A1, C2 and C5b build them.
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)

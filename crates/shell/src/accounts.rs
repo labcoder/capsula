@@ -47,6 +47,8 @@ impl Accounts {
             | ErrorKey::AccountRefused
             | ErrorKey::RequestRefused
             | ErrorKey::ResponseUnreadable
+            | ErrorKey::SignInNeeded
+            | ErrorKey::ModelUnavailable
             // shortcut: the Claude connections' errors have no Accounts row until C7a shows them.
             | ErrorKey::AnthropicKeyRejected
             | ErrorKey::AnthropicKeyFormat
