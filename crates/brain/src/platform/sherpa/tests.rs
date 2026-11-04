@@ -607,6 +607,35 @@ fn measure_planted_neighbor() {
     drop(sherpa);
 }
 
+/// Waits until every one-second sample of whole-machine CPU use stays under 30% for 10 seconds
+/// running, read with `typeperf`, and returns the highest sample of that window. With no build
+/// running, Rez idles at about 20%: the Capy app and Defender.
+fn wait_for_idle_cpu() -> f64 {
+    let started = std::time::Instant::now();
+    loop {
+        let samples = run(std::process::Command::new("typeperf").args([
+            r"\Processor(_Total)\% Processor Time",
+            "-sc",
+            "10",
+            "-si",
+            "1",
+        ]));
+        let busy: Vec<f64> = samples
+            .lines()
+            .filter_map(|line| line.rsplit(',').next())
+            .filter_map(|value| value.trim().trim_matches('"').parse().ok())
+            .collect();
+        let peak = busy.iter().copied().fold(0.0, f64::max);
+        if busy.len() >= 10 && peak < 30.0 {
+            return peak;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(600),
+            "the machine stayed busy for 10 minutes"
+        );
+    }
+}
+
 /// Mono 16-bit PCM and its rate from a WAV file.
 fn read_wav(path: &Path) -> (u32, Vec<i16>) {
     let bytes = std::fs::read(path).expect("clip readable");
@@ -731,6 +760,8 @@ fn measure_parakeet() {
     println!("owner ready after {:.0} ms", ms(ready.elapsed()));
 
     for clip in ["clip-3s", "clip-10s", "clip-30s"] {
+        let peak = wait_for_idle_cpu();
+        println!("{clip}: whole-machine CPU under {peak:.1}% for the 10 s before it");
         let reference = std::fs::read_to_string(clips.join(format!("{clip}.ref.txt")))
             .expect("reference transcript");
         let mut sixteen = None;
