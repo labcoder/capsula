@@ -179,7 +179,7 @@ pub(in crate::gate) fn summarize_hover(
     let (observation, validation) = load(path, pid);
     let frequency = observation.startup.map_or(0, |value| value.frequency);
     let mut report = String::from(
-        "pointer-entry dispatch QPC-to-present gate; excludes OS routing, includes UI-thread queue wait; SendInput-, state-entry- and display-to-present reported separately, not gated\n",
+        "pointer-entry dispatch QPC-to-present gate; excludes OS routing and the UI thread's message-queue wait before dispatch, includes the presence event channel to the handler; SendInput-, state-entry- and display-to-present reported separately, not gated\n",
     );
     seed_report(&mut report, rows, frequency)?;
     if let Err(error) = &validation {
