@@ -1,7 +1,8 @@
 //! Settings window lifetime and nonblocking edits over the current session.
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
-use kumochi_protocol::message::{AssistantName, ControlToBrain, MaxFrameRate};
+use kumochi_protocol::message::{AccountOp, AssistantName, ControlToBrain, MaxFrameRate};
 
 use super::settings_view::SettingsView;
 use super::{
@@ -21,6 +22,32 @@ pub(super) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(super) fn dismiss_account_confirmation(&self, cx: &mut Context<'_, Self>) -> bool {
+        self.settings_panel.as_ref().is_some_and(|panel| {
+            panel
+                .window
+                .update(cx, |_, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        window.close_dialog(cx);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false)
+        })
+    }
+    pub(super) fn account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            let _sent = state.accounts.send(op, |op| {
+                session.as_ref().is_some_and(|session| {
+                    link.send_control(session, ControlToBrain::AccountOp(op))
+                })
+            });
+            cx.notify();
+        });
+    }
     pub(super) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
         let previous = (self.error.clone(), self.refusal);
         self.error = self
