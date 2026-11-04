@@ -250,8 +250,6 @@ pub struct AccountState {
     /// The generation a session the provider ended left: the registration and email stay, shown
     /// as `SignInAgain` until the account moves again.
     ended: Option<u64>,
-    /// The jobs that wait for the lane's list save to commit.
-    after_list: Vec<Queued>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -287,7 +285,6 @@ impl AccountState {
             renewed: false,
             now: None,
             ended: None,
-            after_list: Vec::new(),
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
