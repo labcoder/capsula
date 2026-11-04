@@ -376,6 +376,32 @@ fn an_older_sign_out_leaves_a_newer_accounts_job_running() {
         core.handle(job_built(key(2), &[T])),
         Ok(vec![start_job(key(2), R)])
     );
+    assert_eq!(
+        core.handle(Input::SignedIn { generation: 3 }),
+        Ok(vec![Effect::CancelJob(key(2))]),
+        "another account's sign-in ends the job"
+    );
+}
+
+#[test]
+fn a_done_whose_write_failed_starts_no_job() {
+    let mut core = signed_in();
+    core.handle(Input::Turn {
+        thread: None,
+        text: "Plan a trip".to_owned(),
+    })
+    .expect("a turn is never stale");
+    admit(&mut core, R);
+    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("current");
+    core.handle(Input::StoreFailed { run: R }).expect("ending");
+    let stored = core.handle(Input::RunStored { run: R }).expect("ending");
+    assert!(
+        !stored
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::ReadTitle(_)))),
+        "{stored:?}"
+    );
 }
 
 #[test]

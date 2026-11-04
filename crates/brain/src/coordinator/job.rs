@@ -56,8 +56,6 @@ pub(super) struct Job {
     key: JobKey,
     /// The run whose end started it.
     run: RunId,
-    /// The signed-in account it runs under.
-    account: u64,
     /// Threads whose delete was pending when it began or was accepted since.
     exposed: BTreeSet<ThreadId>,
     stage: Stage,
@@ -84,10 +82,11 @@ impl Coordinator {
     /// account is signed in or sends failed closed. The read stops it when the title isn't
     /// first words, so a renamed or model-titled task never sends.
     pub(super) fn title_job(&mut self, thread: ThreadId, run: RunId, effects: &mut Vec<Effect>) {
-        let Some(account) = self.account else {
-            return;
-        };
-        if thread == self.main_thread || self.current.is_some() || self.transport_failed {
+        if self.account.is_none()
+            || thread == self.main_thread
+            || self.current.is_some()
+            || self.transport_failed
+        {
             return;
         }
         self.cancel_job(effects);
@@ -99,7 +98,6 @@ impl Coordinator {
         self.job = Some(Job {
             key,
             run,
-            account,
             exposed: self.pending_deletes(),
             stage: Stage::Reading,
         });
@@ -168,15 +166,14 @@ impl Coordinator {
         Ok(())
     }
 
-    /// The job's request is about to send. It's granted only for the job in the slot, under the
-    /// account it started with, with nothing it read touched by a delete; otherwise its body is
-    /// dropped unsent and the job ends.
+    /// The job's request is about to send. It's granted only for the job in the slot, with
+    /// nothing it read touched by a delete; otherwise its body is dropped unsent and the job ends.
+    /// A job in the slot always runs under the signed-in account: an account change empties it.
     pub(super) fn job_ready(&mut self, key: JobKey, effects: &mut Vec<Effect>) {
-        let account = self.account;
         let sources = self
             .job
             .as_ref()
-            .filter(|job| job.key == key && Some(job.account) == account)
+            .filter(|job| job.key == key)
             .and_then(|job| match &job.stage {
                 Stage::Sending { sources, .. } if !job.voided(sources) => Some(sources.clone()),
                 _ => None,
@@ -200,11 +197,10 @@ impl Coordinator {
         title: Option<ThreadTitle>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        let account = self.account;
         let job = self
             .job
             .as_mut()
-            .filter(|job| job.key == key && Some(job.account) == account)
+            .filter(|job| job.key == key)
             .ok_or(Stale)?;
         let Stage::Sending {
             generation,
@@ -240,10 +236,17 @@ impl Coordinator {
     }
 
     /// An account is signed in as `generation`; one at or under a sign-out already accepted
-    /// changes nothing.
-    pub(super) fn signed_in(&mut self, generation: u64) -> Result<(), Stale> {
+    /// changes nothing. Another account's job ends.
+    pub(super) fn signed_in(
+        &mut self,
+        generation: u64,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
         if self.signed_out.is_some_and(|out| generation <= out) {
             return Err(Stale);
+        }
+        if self.account != Some(generation) {
+            self.cancel_job(effects);
         }
         self.account = Some(generation);
         Ok(())

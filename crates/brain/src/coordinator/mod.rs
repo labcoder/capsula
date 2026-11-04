@@ -577,7 +577,7 @@ impl Coordinator {
                 }
                 self.title_written(job);
             }
-            Input::SignedIn { generation } => self.signed_in(generation)?,
+            Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,

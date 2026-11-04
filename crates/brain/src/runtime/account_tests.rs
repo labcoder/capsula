@@ -19,8 +19,6 @@ use tokio::time::{Instant, timeout};
 use zeroize::Zeroizing;
 
 use super::{Ended, PATIENCE, Shell, duplex};
-use crate::coordinator::StoreOp;
-use crate::runtime::Seen;
 use crate::connections::account::{Denied, Input, Listened, Worker};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
@@ -29,7 +27,9 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
+use crate::coordinator::StoreOp;
 use crate::platform::{SessionLock, SessionLockError};
+use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};

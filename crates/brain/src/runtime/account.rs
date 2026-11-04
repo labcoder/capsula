@@ -33,6 +33,7 @@ use crate::connections::records::{Account, Revocable};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link, settings};
+use crate::coordinator::Input as CoreInput;
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
 pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
@@ -415,11 +416,12 @@ impl Brain {
         // The coordinator hears it before anything else, so a job's write is fenced at once.
         let now = self.account.sendable();
         if now != sendable {
-            if let Some(generation) = sendable {
-                self.offline(crate::coordinator::Input::SignedOut { generation });
-            }
-            if let Some(generation) = now {
-                self.offline(crate::coordinator::Input::SignedIn { generation });
+            let out = sendable.map(|generation| CoreInput::SignedOut { generation });
+            let signed_in = now.map(|generation| CoreInput::SignedIn { generation });
+            for input in out.into_iter().chain(signed_in) {
+                if let Some(effects) = self.handle(input) {
+                    self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
+                }
             }
         }
         if read
