@@ -124,8 +124,7 @@ fn assemble(
         .collect();
     Ok(Built {
         request: ModelRequest {
-            model: run.choice.model.clone(),
-            effort: run.choice.effort,
+            choice: run.choice.clone(),
             instructions,
             input,
             tools,

@@ -3,6 +3,8 @@
 //! before it has been read, a turn naming the thread is refused before it gets a run. The answer
 //! retires the thread's runs and scenes, so nothing of them reaches the store or the shell again.
 
+use std::collections::BTreeSet;
+
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
@@ -21,6 +23,8 @@ pub(super) struct Deleting {
     /// How many submits this connection's shell sent before the delete; `None` until a
     /// connection after the one that sent it names it again.
     watermark: Option<u32>,
+    /// A lease still carries the thread, so its op isn't sent yet.
+    held: bool,
 }
 
 impl Coordinator {
@@ -28,13 +32,44 @@ impl Coordinator {
         self.deleting.iter().any(|entry| entry.thread == thread)
     }
 
+    /// Threads whose delete waits for a lease to settle.
+    pub(super) fn held_deletes(&self) -> Vec<ThreadId> {
+        self.deleting
+            .iter()
+            .filter(|entry| entry.held)
+            .map(|entry| entry.thread)
+            .collect()
+    }
+
+    /// Sends each held delete no lease carries any more, once, in the order they were accepted.
+    pub(super) fn release_deletes(
+        &mut self,
+        leased: &BTreeSet<ThreadId>,
+        effects: &mut Vec<Effect>,
+    ) {
+        for entry in &mut self.deleting {
+            if entry.held && !leased.contains(&entry.thread) {
+                entry.held = false;
+                effects.push(Effect::Store(StoreOp::Delete {
+                    thread: entry.thread,
+                }));
+            }
+        }
+    }
+
+    /// Threads with a delete accepted and not answered yet.
+    pub(super) fn pending_deletes(&self) -> BTreeSet<ThreadId> {
+        self.deleting.iter().map(|entry| entry.thread).collect()
+    }
+
     /// A delete is waiting on the store.
     pub fn deletes_pending(&self) -> bool {
         !self.deleting.is_empty()
     }
 
-    /// A delete on this connection was refused for capacity. Its answer may never reach a shell
-    /// that's quitting, so the quit counts it as a delete that didn't happen.
+    /// A delete on this connection was refused, for capacity or behind a send that failed
+    /// closed. Its answer may never reach a shell that's quitting, so the quit counts it as a
+    /// delete that didn't happen.
     pub fn refused_delete(&self) -> bool {
         self.refused_delete
     }
@@ -136,7 +171,7 @@ impl Coordinator {
             entry.watermark = Some(after_turns);
             return;
         }
-        if self.deleting.len() >= MAX_DELETING {
+        if self.deleting.len() >= MAX_DELETING || self.fenced_for_good().contains(&thread) {
             let refused = ControlToShell::ThreadDeleted {
                 thread,
                 outcome: Deleted::NotHidden,
@@ -150,16 +185,21 @@ impl Coordinator {
             let deleted = RunEnd::Interrupted(Interruption::Deleted);
             self.end(current, deleted, None, Notify::Shell, effects);
         }
+        let held = self.leased().contains(&thread);
         self.deleting.push(Deleting {
             thread,
             watermark: Some(after_turns),
+            held,
         });
-        effects.push(Effect::Store(StoreOp::Delete { thread }));
+        self.expose(thread);
+        if !held {
+            effects.push(Effect::Store(StoreOp::Delete { thread }));
+        }
     }
 
     /// The store answered a delete. Once the thread is hidden its runs and scenes retire: their
     /// later replies are stale, and the shell hears which scenes left.
-    fn deleted(
+    pub(super) fn deleted(
         &mut self,
         thread: ThreadId,
         outcome: Deleted,
@@ -171,10 +211,11 @@ impl Coordinator {
             .iter()
             .position(|entry| entry.thread == thread)
             .ok_or(Stale)?;
-        let Deleting { watermark, .. } = self.deleting.swap_remove(at);
+        let Deleting { watermark, .. } = self.deleting.remove(at);
         if watermark.is_none() {
             self.crossed.push(thread);
         }
+        self.unblock(effects);
         if outcome == Deleted::NotHidden {
             let answer = ControlToShell::ThreadDeleted {
                 thread,

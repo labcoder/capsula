@@ -59,7 +59,7 @@ async fn one_run<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(shell: &mut Sh
 }
 
 /// The threads a restarted store lists.
-fn listed(scratch: &Scratch) -> usize {
+pub(super) fn listed(scratch: &Scratch) -> usize {
     live_threads(scratch).len()
 }
 

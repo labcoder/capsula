@@ -45,7 +45,7 @@ impl Coordinator {
         let drawing_pending = self.drawing.pending_for(run);
         let current = self.current(run)?;
         // The engine hasn't started before its turn is stored, and has nothing more after Done.
-        if !current.turn_stored || current.finishing {
+        if !current.started() || current.finishing {
             return Err(Stale);
         }
         match event {
@@ -71,7 +71,7 @@ impl Coordinator {
                 self.draw_ready(run, &call, &args, effects)?;
             }
             // Native items have no reader until the tool loop stores them for replay.
-            TurnEvent::OutputItem(_) => {}
+            TurnEvent::OutputItem { .. } => {}
             // shortcut: a completed round ends the run, draw call and all, which only the fixture
             // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
             TurnEvent::Finished(Finish::Completed)
@@ -198,7 +198,7 @@ impl Coordinator {
         )
     }
 
-    fn fail(
+    pub(super) fn fail(
         &mut self,
         run: RunId,
         failure: Failure,

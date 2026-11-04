@@ -8,13 +8,15 @@ use tokio::time::Instant;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, ControlToShell, ErrorKey, Phase, SettingsOp, SettingsView,
-    UserName,
+    AssistantName, ControlToBrain, ControlToShell, ErrorKey, Phase, RunId, SettingsOp,
+    SettingsView, ThreadId, UserName,
 };
 use kumochi_protocol::tap;
 use tokio::io::AsyncRead;
 
 use super::{Ended, Shell, duplex};
+use crate::context::{Origin, RunSnapshot};
+use crate::coordinator::{BuildContext, BuildKey};
 use crate::ipc;
 use crate::runtime::CLOSE_WAIT;
 use crate::runtime::Seen;
@@ -506,4 +508,50 @@ async fn an_earlier_connections_refused_change_sends_the_next_one_nothing() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), second);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
+}
+
+/// Attempt `attempt` of run `run`'s first round in task 2, before or after its snapshot.
+fn build(run: u64, attempt: u64, snapshot: Option<RunSnapshot>) -> BuildContext {
+    BuildContext {
+        key: BuildKey {
+            run: RunId(run),
+            round: 1,
+            attempt,
+        },
+        thread: ThreadId(2),
+        origin: Origin::Task(ThreadId(2)),
+        first: snapshot.is_none(),
+        snapshot,
+    }
+}
+
+#[tokio::test]
+async fn a_rename_reaches_the_next_run_and_never_a_running_ones_rebuild() {
+    let scratch = Scratch::new("rename-snapshot");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut first = build(1, 1, None);
+    brain.seed(&mut first);
+    let started = first.snapshot.expect("the first build is seeded");
+    assert_eq!(started.assistant.as_str(), DEFAULT_ASSISTANT_NAME);
+    let renamed = brain
+        .config
+        .stage(SettingsOp::SetAssistantName(
+            AssistantName::new("Cirrus").expect("valid"),
+        ))
+        .expect("staged");
+    brain.config.commit(renamed);
+    let mut rebuild = build(1, 2, Some(started.clone()));
+    brain.seed(&mut rebuild);
+    assert_eq!(
+        rebuild.snapshot,
+        Some(started),
+        "the running run keeps its names"
+    );
+    let mut next = build(2, 3, None);
+    brain.seed(&mut next);
+    assert_eq!(
+        next.snapshot.expect("seeded").assistant.as_str(),
+        "Cirrus",
+        "the next run takes the rename"
+    );
 }

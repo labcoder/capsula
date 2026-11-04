@@ -493,8 +493,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     store
         .begin_turn(T, None, next, "continue")
         .expect("next turn stored");
-    core.handle(Input::TurnStored { run: next })
-        .expect("turn ack");
+    super::admit(&mut core, next);
     let call = CallId::new("continuing").expect("call");
     let record = |index, bytes: &[u8]| {
         Input::Drawing(drawing::Input::Record {

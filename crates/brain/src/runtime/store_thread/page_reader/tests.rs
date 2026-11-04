@@ -2,13 +2,16 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kumochi_protocol::message::{DataToShell, PageOf, RunId, ThreadId};
+use kumochi_protocol::message::{
+    AssistantName, DataToShell, Effort, ModelChoice, ModelSlug, PageOf, RunId, ThreadId,
+};
 use tokio::sync::mpsc;
 
 use super::super::tests::{PATIENCE, beside, next, owed, owing, purge_files};
 use super::super::{Attempt, Gate, Schedule, StoreThread};
 use super::{Barrier, Exit};
-use crate::coordinator::{Input, StoreOp};
+use crate::context::{Built, ConnectionTag, InputItem, Origin, Role, RunSnapshot};
+use crate::coordinator::{BuildContext, BuildKey, ContextBuilt, Input, StoreOp, Unbuilt};
 use crate::runtime::Seen;
 use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, Store, StoreError};
 use crate::test_support::Scratch;
@@ -156,6 +159,141 @@ fn a_read_sees_the_ops_queued_before_it() {
     release.send(()).expect("held");
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });
     assert_eq!(listed(running.ack()), [ThreadId(1)]);
+    running.thread.close().blocking_recv().expect("closed");
+}
+
+/// A run's first build in task `thread`, run `thread`.
+fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
+    StoreOp::BuildContext(BuildContext {
+        key: BuildKey {
+            run: RunId(thread),
+            round: 1,
+            attempt,
+        },
+        thread: ThreadId(thread),
+        origin: Origin::Task(ThreadId(thread)),
+        snapshot: Some(RunSnapshot {
+            origin: Origin::Task(ThreadId(thread)),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice,
+            connection: ConnectionTag(0),
+        }),
+        first: true,
+    })
+}
+
+fn choice(slug: &str) -> ModelChoice {
+    ModelChoice {
+        model: ModelSlug::new(slug).expect("slug"),
+        effort: Effort::Low,
+    }
+}
+
+/// A built request and the model its run read.
+fn made(reply: Input) -> (Built, Option<ModelChoice>) {
+    match reply {
+        Input::ContextBuilt(ContextBuilt {
+            snapshot: Some(snapshot),
+            result: Ok(built),
+            ..
+        }) => (built, snapshot.choice),
+        other => panic!("not a build: {other:?}"),
+    }
+}
+
+#[test]
+fn a_build_reads_after_the_ops_queued_before_it_and_takes_the_default_model() {
+    let scratch = Scratch::new("build-barrier");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    let running = run(store, None);
+    let release = gate(&running.gates, is_turn);
+    assert!(running.thread.send(turn(2)));
+    running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_turn(op)));
+    assert!(
+        running
+            .thread
+            .send(build(2, 1, Some(choice("default-model"))))
+    );
+    running.saw(|seen| *seen == Seen::ReadWaiting);
+    release.send(()).expect("held");
+    assert_eq!(running.ack(), Input::TurnStored { run: RunId(2) });
+    let (built, model) = made(running.ack());
+    assert_eq!(built.sources, [ThreadId(2)]);
+    let [
+        InputItem::Message {
+            role: Role::User,
+            text,
+        },
+    ] = built.request.input.as_slice()
+    else {
+        panic!("one user message: {:?}", built.request.input);
+    };
+    let time = text
+        .strip_prefix("words\n\nLocal time: ")
+        .expect("the turn, then the time");
+    assert!(
+        time.len() == 16
+            && time.chars().enumerate().all(|(at, c)| match at {
+                4 | 7 => c == '-',
+                10 => c == ' ',
+                13 => c == ':',
+                _ => c.is_ascii_digit(),
+            }),
+        "a local time to the minute, not {time:?}"
+    );
+    assert_eq!(
+        model,
+        Some(choice("default-model")),
+        "the thread chose none"
+    );
+    running.thread.close().blocking_recv().expect("closed");
+}
+
+#[test]
+fn a_first_build_takes_the_threads_model_and_a_delete_sent_before_a_build_fails_it() {
+    let scratch = Scratch::new("build-model");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    with_thread(&mut store, 2);
+    store
+        .begin_turn(ThreadId(2), None, RunId(3), "more words")
+        .expect("turn");
+    let running = run(store, None);
+    let picked = StoreOp::SetModel {
+        thread: ThreadId(2),
+        choice: choice("thread-model"),
+    };
+    assert!(running.thread.send(picked));
+    let mut first = build(2, 1, Some(choice("default-model")));
+    let mut later = build(2, 2, None);
+    for (op, is_first) in [(&mut first, true), (&mut later, false)] {
+        if let StoreOp::BuildContext(build) = op {
+            build.key.run = RunId(3);
+            build.first = is_first;
+        }
+    }
+    assert!(running.thread.send(first));
+    assert!(running.thread.send(later));
+    assert_eq!(made(running.ack()).1, Some(choice("thread-model")));
+    assert_eq!(
+        made(running.ack()).1,
+        None,
+        "a later build keeps what the run read"
+    );
+    assert!(running.thread.send(StoreOp::Delete {
+        thread: ThreadId(2)
+    }));
+    assert!(running.thread.send(build(2, 3, None)));
+    assert!(matches!(running.ack(), Input::Deleted { .. }));
+    assert!(matches!(
+        running.ack(),
+        Input::ContextBuilt(ContextBuilt {
+            result: Err(Unbuilt::Failed),
+            ..
+        })
+    ));
     running.thread.close().blocking_recv().expect("closed");
 }
 

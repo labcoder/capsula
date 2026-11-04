@@ -243,6 +243,10 @@ impl fmt::Display for FieldPath {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one schema whitelist sanitizes diagnostic paths"
+)]
 fn known_field(key: &str) -> bool {
     matches!(
         key,
@@ -339,6 +343,24 @@ fn known_field(key: &str) -> bool {
             | "rotate"
             | "draw"
             | "pos"
+            | "view3d"
+            | "solid"
+            | "camera"
+            | "light"
+            | "orbit"
+            | "spin"
+            | "yaw"
+            | "pitch"
+            | "dist"
+            | "fov"
+            | "ambient"
+            | "r2"
+            | "h"
+            | "depth"
+            | "rot"
+            | "segments"
+            | "attach"
+            | "info"
     )
 }
 

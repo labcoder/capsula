@@ -76,7 +76,7 @@ pub(crate) fn visual(op: &Op) -> Option<Visual<'_>> {
         Op::Row(r) => visual!(r, Row, "row"),
         Op::Chart(r) => visual!(r, Chart, "chart"),
         Op::Series(r) => visual!(r, Series, "series"),
-        Op::Anim(_) | Op::Mermaid(_) => None,
+        Op::Anim(_) | Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => None,
     }
 }
 
@@ -452,6 +452,7 @@ fn validate_anim(
         previous = Some(*time);
         let valid = match (anim.track, value) {
             (Track::Pos, KeyValue::V2(_))
+            | (Track::Pos3 | Track::Rot3, KeyValue::V3(_))
             | (Track::Color, KeyValue::Color(_))
             | (Track::X | Track::Y | Track::Rotate, KeyValue::Num(_)) => true,
             (Track::Opacity | Track::Draw, KeyValue::Num(v)) => (0.0..=1.0).contains(&v.get()),
@@ -558,4 +559,42 @@ pub(super) fn removals(
             )
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_dimensional_pairing_is_checked_behind_the_admission_gate() {
+        for track in ["pos3", "rot3"] {
+            for (key, valid) in [("[1,2,3]", true), ("[1,2]", false), ("1", false)] {
+                let source = format!(
+                    r#"{{"id":"s","put":[{{"anim":{{"target":"t","track":"{track}","keys":[[0,{key}]]}}}}]}}"#
+                );
+                let step: Step = serde_json::from_str(&source).expect("step");
+                let Op::Anim(anim) = &step.put[0] else {
+                    panic!("anim")
+                };
+                let objects = BTreeMap::from([(
+                    anim.target.clone(),
+                    Object {
+                        work: super::super::work::Work::default(),
+                        handle: Handle::new(1, 0).expect("handle"),
+                        kind: Kind::Text,
+                        parent: None,
+                        references: Box::default(),
+                    },
+                )]);
+                let result = validate_anim(anim, 0, &step, &objects, &HashSet::new());
+                if valid {
+                    assert_eq!(result, Ok(()));
+                } else {
+                    let error = result.expect_err("wrong pairing");
+                    assert_eq!(error.code, ErrorCode::OutOfRange);
+                    assert_eq!(error.path.as_str(), "put[0].anim.keys[0][1]");
+                }
+            }
+        }
+    }
 }

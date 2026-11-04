@@ -3,8 +3,8 @@
 //! A request is built from one read transaction: the run's thread, its newest summary and raw
 //! runs, and every source its history results name, re-read through references so a deleted
 //! task's text is never copied into another task. The run's origin decides what a reference may
-//! reach. Nothing here sends anything, and nothing calls it yet; PR 12b wires it into the
-//! coordinator.
+//! reach. Nothing here sends anything: the page reader runs each build the coordinator asks for
+//! (docs/development/engines.md).
 
 pub(crate) mod bound;
 pub(crate) mod build;
@@ -13,9 +13,7 @@ mod tests;
 
 use std::fmt;
 
-use kumochi_protocol::message::{
-    AssistantName, Effort, EventId, ModelChoice, ModelSlug, RunId, ThreadId, UserName,
-};
+use kumochi_protocol::message::{AssistantName, EventId, ModelChoice, RunId, ThreadId, UserName};
 
 use crate::engines::{CallId, Opaque};
 use crate::store::StoreError;
@@ -52,7 +50,9 @@ pub(crate) struct RunSnapshot {
     pub(crate) origin: Origin,
     pub(crate) assistant: AssistantName,
     pub(crate) user: Option<UserName>,
-    pub(crate) choice: ModelChoice,
+    /// The thread's model, else the default; `None` until a catalog has been read. The fixture
+    /// engine needs none, and a real engine (PR 13a) refuses a request without one.
+    pub(crate) choice: Option<ModelChoice>,
     pub(crate) connection: ConnectionTag,
 }
 
@@ -83,6 +83,13 @@ impl fmt::Debug for Summary {
 }
 
 /// One item of a run, ordered by its event id.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "PRs 13b and 14a store calls, results and reasoning"
+    )
+)]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Body {
     User(String),
@@ -198,7 +205,7 @@ pub(crate) struct ToolSchema {
 }
 
 /// The tools a run with `origin` is offered.
-/// shortcut: none yet; 13a adds the draw tool's schema and 14a the history tools for Kumo.
+/// shortcut: none yet; slice 4's B10 adds the draw tool's schema and 14a the history tools for Kumo.
 pub(crate) fn tools(origin: Origin) -> Vec<ToolSchema> {
     match origin {
         Origin::Kumo | Origin::Task(_) => Vec::new(),
@@ -208,8 +215,7 @@ pub(crate) fn tools(origin: Origin) -> Vec<ToolSchema> {
 /// A built request, as data: PR 13a serialises it, with `store:false` and `stream:true`.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ModelRequest {
-    pub(crate) model: ModelSlug,
-    pub(crate) effort: Effort,
+    pub(crate) choice: Option<ModelChoice>,
     pub(crate) instructions: String,
     pub(crate) input: Vec<InputItem>,
     pub(crate) tools: Vec<ToolSchema>,
@@ -218,8 +224,7 @@ pub(crate) struct ModelRequest {
 impl fmt::Debug for ModelRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelRequest")
-            .field("model", &self.model.as_str())
-            .field("effort", &self.effort)
+            .field("choice", &self.choice)
             .field("instructions_bytes", &self.instructions.len())
             .field("input", &self.input)
             .field("tools", &self.tools.len())
