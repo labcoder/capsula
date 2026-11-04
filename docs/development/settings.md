@@ -100,6 +100,8 @@ Debug builds accept `--accounts-fixture=<state> --quit-after-ms=<1..120000>` and
 after building the shell. Fixed states cover waiting/offline, signed-out/unconfirmed,
 signing-in/busy, enabled/no-email/declined/unavailable, retry/sign-in-again, signing-out,
 refused/refused-unconfirmed, not-durable/not-durable-unconfirmed, confirmation and backlog.
+`general-error` opens General with a locally rejected empty assistant name, for checking
+the semantic danger palette outside Accounts. The invalid draft never sends an operation.
 
 The fixture branches before normal startup: no instance lock, capability/credential read,
 brain/link, presence observer, Raw Input or global Escape registration. It opens the real

@@ -490,7 +490,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::BrowserUnavailable => "error-browser-unavailable",
         ErrorKey::AccountOffline => "error-account-offline",
         ErrorKey::CredentialsUnavailable => "error-credentials-unavailable",
-        ErrorKey::RevocationBacklog => "error-revocation-backlog",
+        ErrorKey::RevocationBacklog => Text::AccountBacklogLead.id(),
         ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
         ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
         ErrorKey::AccountMisconfigured => "error-account-misconfigured",
@@ -542,6 +542,14 @@ mod tests {
         assert_eq!(
             strings.error(&UserError::from(ErrorKey::SettingsRefused)),
             "Couldn't save that setting. Try again."
+        );
+    }
+
+    #[test]
+    fn backlog_notices_use_the_short_recovery_lead() {
+        assert_eq!(
+            Strings::english().error(&UserError::from(ErrorKey::RevocationBacklog)),
+            "Still ending earlier ChatGPT sessions. A new sign-in can't start yet."
         );
     }
 

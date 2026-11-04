@@ -13,7 +13,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{OpenError, settings_view::SettingsView};
-use crate::settings::{Settings, Update};
+use crate::settings::{Field, Settings, Update};
 use crate::strings::{Strings, Text};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub(crate) enum Appearance {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum State {
+    GeneralError,
     Waiting,
     Offline,
     SignedOut,
@@ -50,6 +51,7 @@ pub(crate) enum State {
 impl State {
     pub(super) fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "general-error" => Self::GeneralError,
             "waiting" => Self::Waiting,
             "offline" => Self::Offline,
             "signed-out" => Self::SignedOut,
@@ -96,6 +98,16 @@ impl State {
             None,
             "the fixture installs an unsolicited settings snapshot"
         );
+        if self == Self::GeneralError {
+            model.change(Field::Assistant, "");
+            assert!(
+                !model.save(Field::Assistant, |_| panic!(
+                    "the invalid fixture draft must not send"
+                )),
+                "the empty fixture draft is rejected locally"
+            );
+            return model;
+        }
         let view = match self {
             Self::Waiting | Self::Offline => return model,
             Self::SignedOut | Self::Unconfirmed | Self::Backlog => AccountView::SignedOut {
@@ -207,7 +219,11 @@ fn open(
         });
         cx.new(|cx| {
             let mut view = SettingsView::new(model, WeakEntity::new_invalid(), events, window, cx);
-            view.fixture_accounts();
+            if state == State::GeneralError {
+                view.fixture_general();
+            } else {
+                view.fixture_accounts();
+            }
             view
         })
     })
@@ -264,6 +280,7 @@ mod tests {
     #[test]
     fn fixed_states_parse_exactly() {
         for (name, state) in [
+            ("general-error", State::GeneralError),
             ("waiting", State::Waiting),
             ("offline", State::Offline),
             ("signed-out", State::SignedOut),
@@ -285,6 +302,21 @@ mod tests {
             ("backlog", State::Backlog),
         ] {
             assert_eq!(State::parse(name), Some(state));
+        }
+    }
+
+    #[test]
+    fn general_error_uses_the_real_field_validation_without_an_account() {
+        let model = State::GeneralError.model();
+        assert_eq!(
+            model.field(Field::Assistant).error,
+            Some(crate::settings::Error::Validation(
+                kumochi_protocol::message::NameError::Empty
+            ))
+        );
+        assert_eq!(model.accounts.view, None);
+        for value in ["General-error", "general-erro", "general-error "] {
+            assert_eq!(State::parse(value), None);
         }
     }
 
