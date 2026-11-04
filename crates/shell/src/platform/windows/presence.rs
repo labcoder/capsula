@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use gpui_kit::Window;
+use gpui_kit::{MouseButton, NavigationDirection, Window};
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -47,11 +47,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
+use crate::platform::input;
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -87,6 +92,15 @@ pub(crate) enum PresenceEvent {
     Quit,
     /// `--gate-observer` only: the harness asked for one dock repaint.
     Repaint,
+    /// A presence window lost mouse capture, stamped `seq` in the UI thread's input sequence.
+    /// `released` is the button whose forwarded release caused it; `None` is a cancel mode or a
+    /// capture taken from outside.
+    CaptureLost {
+        seq: u64,
+        released: Option<MouseButton>,
+    },
+    /// The outermost button release returned while a drained capture loss waited for it.
+    Reconcile,
 }
 
 /// The localized text of the tray icon and its menu.
@@ -512,6 +526,11 @@ pub(crate) fn configure_presence_window(
     if surface == PresenceSurface::Text {
         return Ok(());
     }
+    subclass_hover(hwnd, events)
+}
+
+/// Installs `hover_subclass` on `hwnd` once, sending to `events`.
+fn subclass_hover(hwnd: HWND, events: Sender<PresenceEvent>) -> Result<(), PresenceError> {
     // SAFETY: `hwnd` is live; this only asks whether our subclass is installed.
     if unsafe { GetWindowSubclass(hwnd, Some(hover_subclass), HOVER_SUBCLASS_ID, None) }.as_bool() {
         return Ok(());
@@ -934,8 +953,39 @@ unsafe extern "system" fn proxy_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+/// The button a press or release message is for, as GPUI names it.
+fn button(message: u32, wparam: WPARAM) -> Option<MouseButton> {
+    match message {
+        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(MouseButton::Left),
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(MouseButton::Right),
+        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(MouseButton::Middle),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => match u16::try_from((wparam.0 >> 16) & 0xFFFF) {
+            Ok(XBUTTON1) => Some(MouseButton::Navigate(NavigationDirection::Back)),
+            Ok(XBUTTON2) => Some(MouseButton::Navigate(NavigationDirection::Forward)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Forwards `released`'s release in its input scope. `events` is owned and taken before the
+/// forward, and nothing here can reach the subclass's `Hover`: the forward may destroy the
+/// window, which frees it.
+fn release(
+    released: MouseButton,
+    events: Option<Sender<PresenceEvent>>,
+    forward: impl FnOnce() -> LRESULT,
+) -> LRESULT {
+    let (result, due) = input::input(|input| input.release(released, forward));
+    if due && let Some(events) = events {
+        send(&events, PresenceEvent::Reconcile);
+    }
+    result
+}
+
 /// Reports pointer enter and leave on a presence window and refuses mouse activation, which
-/// GPUI grants.
+/// GPUI grants. Stamps button presses and capture losses in the input sequence, and forwards
+/// each release inside its scope, so a pull can tell its own release from a loss.
 unsafe extern "system" fn hover_subclass(
     hwnd: HWND,
     message: u32,
@@ -945,8 +995,39 @@ unsafe extern "system" fn hover_subclass(
     data: usize,
 ) -> LRESULT {
     let hover = std::ptr::with_exposed_provenance::<Hover>(data);
+    // SAFETY: forwards the unmodified message down the chain.
+    let forward = || unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    // SAFETY: `data` is the Hover boxed in `configure_presence_window`, freed only on
+    // WM_NCDESTROY. Called only before `forward`, which can destroy the window.
+    let events = || unsafe { hover.as_ref() }.map(|hover| &hover.events);
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX)),
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+            return input::input(|input| input.press(forward));
+        }
+        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
+            if let Some(released) = button(message, wparam) {
+                return release(released, events().cloned(), forward);
+            }
+        }
+        WM_CAPTURECHANGED => {
+            let (seq, released) = input::input(input::Input::capture_changed);
+            if let Some(events) = events() {
+                send(events, PresenceEvent::CaptureLost { seq, released });
+            }
+        }
+        WM_CANCELMODE => {
+            let seq = input::input(input::Input::cancelled);
+            if let Some(events) = events() {
+                send(
+                    events,
+                    PresenceEvent::CaptureLost {
+                        seq,
+                        released: None,
+                    },
+                );
+            }
+        }
         WM_MOUSEMOVE | WM_MOUSELEAVE => {
             // SAFETY: `data` is the Hover boxed in `configure_presence_window`, freed
             // only on WM_NCDESTROY below.
@@ -963,13 +1044,21 @@ unsafe extern "system" fn hover_subclass(
         }
         _ => {}
     }
-    // SAFETY: forwards the unmodified message down the chain.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    forward()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{focus_input, hide, proxy_proc, signed_words};
+    use async_channel::Receiver;
+    use gpui_kit::MouseButton;
+    use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindow, SendMessageW, WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_RBUTTONUP,
+    };
+
+    use super::{
+        PresenceEvent, focus_input, hide, input, proxy_proc, signed_words, subclass_hover,
+    };
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT_MOUSE, MOUSE_EVENT_FLAGS};
@@ -978,6 +1067,137 @@ mod tests {
         MA_NOACTIVATE, WM_MOUSEACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
+
+    /// Under `hover_subclass`: a release of the left button forwards a nested release of the
+    /// right one, then changes capture; the right one's release changes capture and drains
+    /// that loss. With `data` 1, the left release then destroys the window.
+    unsafe extern "system" fn nested_releases(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _: usize,
+        data: usize,
+    ) -> LRESULT {
+        let send = |message| {
+            // SAFETY: a synchronous message to this thread's live window.
+            unsafe { SendMessageW(hwnd, message, None, None) }
+        };
+        match message {
+            WM_LBUTTONUP => {
+                send(WM_RBUTTONUP);
+                send(WM_CAPTURECHANGED);
+                if data == 1 {
+                    // SAFETY: this thread's window; destroying it frees the subclass's Hover.
+                    let destroyed = unsafe { DestroyWindow(hwnd) };
+                    assert!(destroyed.is_ok(), "the test window is destroyed");
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                send(WM_CAPTURECHANGED);
+                input::input(input::Input::reconcile_after_release);
+                LRESULT(0)
+            }
+            // SAFETY: forwards the unmodified message down the chain.
+            _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    /// A hidden window with `nested_releases` under the presence subclass.
+    fn bridged(destroy: usize) -> (HWND, Receiver<PresenceEvent>) {
+        // SAFETY: STATIC is a built-in class; no borrowed data or parent, and no show style.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        // SAFETY: `hwnd` is live; the stub keeps no data that could dangle.
+        let stub = unsafe { SetWindowSubclass(hwnd, Some(nested_releases), 1, destroy) };
+        assert!(stub.as_bool());
+        let (events, received) = async_channel::unbounded();
+        subclass_hover(hwnd, events).unwrap();
+        (hwnd, received)
+    }
+
+    fn drained(received: &Receiver<PresenceEvent>) -> Vec<PresenceEvent> {
+        std::iter::from_fn(|| received.try_recv().ok()).collect()
+    }
+
+    const LOSSES_THEN_ONE_RECONCILE: [PresenceEvent; 3] = [
+        PresenceEvent::CaptureLost {
+            seq: 1,
+            released: Some(MouseButton::Right),
+        },
+        PresenceEvent::CaptureLost {
+            seq: 2,
+            released: Some(MouseButton::Left),
+        },
+        PresenceEvent::Reconcile,
+    ];
+
+    #[test]
+    fn a_loss_inside_nested_releases_reconciles_once_after_the_outer_one() {
+        let (hwnd, received) = bridged(0);
+        let window = TestWindow(hwnd);
+        // SAFETY: a synchronous message to this thread's live window.
+        unsafe { SendMessageW(window.0, WM_LBUTTONUP, None, None) };
+        assert_eq!(
+            drained(&received),
+            LOSSES_THEN_ONE_RECONCILE,
+            "each loss names the release it came in, the outer one restored after the inner"
+        );
+    }
+
+    #[test]
+    fn the_window_destroyed_during_a_release_still_gets_its_reconcile() {
+        let (hwnd, received) = bridged(1);
+        // SAFETY: a synchronous message to this thread's live window, which it destroys.
+        unsafe { SendMessageW(hwnd, WM_LBUTTONUP, None, None) };
+        // SAFETY: only asks whether the handle still names a window.
+        assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+        assert_eq!(drained(&received), LOSSES_THEN_ONE_RECONCILE);
+    }
+
+    #[test]
+    fn a_cancel_mode_is_an_involuntary_loss_even_during_a_release() {
+        let (hwnd, received) = bridged(0);
+        let window = TestWindow(hwnd);
+        // SAFETY: a synchronous message to this thread's live window.
+        unsafe { SendMessageW(window.0, WM_CANCELMODE, None, None) };
+        assert_eq!(
+            drained(&received),
+            [PresenceEvent::CaptureLost {
+                seq: 1,
+                released: None
+            }]
+        );
+        let ((), _) = input::input(|input| {
+            input.release(MouseButton::Left, || {
+                // SAFETY: as above.
+                unsafe { SendMessageW(window.0, WM_CANCELMODE, None, None) };
+            })
+        });
+        assert_eq!(
+            drained(&received),
+            [PresenceEvent::CaptureLost {
+                seq: 2,
+                released: None
+            }]
+        );
+    }
 
     struct TestWindow(HWND);
 
