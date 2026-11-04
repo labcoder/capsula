@@ -659,7 +659,7 @@ fn a_refused_promotion_is_not_durable_until_retry_writes_it() {
 
 /// CAPS-130 87-H1: a sign-out during the current attempt's dispatched save fences at once. No op
 /// before or after it can replace it, the save lands without a usable account being shown or the
-/// notice cleared, and Prepare adopts what it saved.
+/// notice cleared, and Prepare adopts what it saved; the token it replaced was listed first.
 #[test]
 fn a_sign_out_during_a_dispatched_save_fences_at_once_and_revokes_the_saved_set() {
     for (op, first) in [
@@ -692,7 +692,10 @@ fn a_sign_out_during_a_dispatched_save_fences_at_once_and_revokes_the_saved_set(
         assert_eq!(h.listening.len(), 1, "{context}: no replacement listener");
         assert_eq!(
             tokens(&h.revoking[0]),
-            [("refresh-new".to_owned(), Origin::Account)],
+            [
+                ("refresh-new".to_owned(), Origin::Account),
+                ("refresh-old".to_owned(), Origin::Exchange)
+            ],
             "{context}"
         );
         finish(&mut h, true, 0);

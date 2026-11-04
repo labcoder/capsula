@@ -255,8 +255,25 @@ lane; it is tried again once when the attempt moves (as a list entry, since its 
 or on Retry, never on every pass. A live attempt ends then with `CredentialsUnavailable` and
 Retry, since its code could only wait behind the held set.
 A pending flag a crash left behind becomes `outcome_unknown` as soon as the next start reads the
-vault, before any save could finish it as known, and a later success never clears it. A list
-save that no request owns (a rejected refresh set's) finishes no request.
+vault, before any save could finish it as known, and a later success never clears it.
+
+**Replacing a token.** A refresh token leaves `chatgpt` only once the provider spent it, the list
+holds the same client and token, or the marker records `outcome_unknown`. A sign-in's Commit
+checks this against the disk, in the same credential job, before it saves: it lists the token
+`chatgpt` holds (the old account's, a rejected or pending set, a spent one) as an exchange's
+entry, stamped with the job's monotonic-safe time, but only while two exchange slots are free, so
+the incoming set keeps the slot it was admitted on should its own save be refused. Otherwise, or
+when the token can't fit an entry, it writes `outcome_unknown` first. An equal entry already
+listed needs nothing, so a Retry never lists it twice. The job reports a list it saved even when
+the account save is then refused; the machine takes its count and starts a revocation pass for it
+before anything else runs. Once the account manifest commits, the sign-in is committed, whatever
+the marker writes after it do.
+
+Listing comes before replacing, so if the account save fails after the old account's token was
+listed, that token can be revoked before the new set is installed: the old session's next refresh
+gets `invalid_grant` and goes down the usual sign-in-again path. Retry can still commit the held
+set; Cancel doesn't bring the old session back. With three exchanges listed, the replaced token is
+recorded unknown instead, so the next sign-out's notice is unconfirmed.
 
 **Local policies:**
 - A grant without a refresh token is refused; nothing is saved for it.
@@ -362,24 +379,25 @@ sequenceDiagram
 - `verify_refreshed` binds the token to the subject this account already verified, with no
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
   Another subject or an invalid token, like a pending set with nothing to check, ends the session
-  and lists the set's refresh token as an exchange's would be (unknown when no slot is free).
+  and leaves the set in `chatgpt`, still pending so it's never used, with nothing written.
   Network, status, discovery, bounds and clock failures, and a key still missing after its
   refetch, leave the set pending, since a captive
-  portal's page can fail discovery's parse or a document's size bound. The registration-only save
-  waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
-  leaves `chatgpt` unowned. If that unknown outcome can't be written, the save still runs, so the
-  token can leave unrecorded (a known gap, OSC-204).
+  portal's page can fail discovery's parse or a document's size bound. The rejected set's token
+  leaves `chatgpt` only through the next sign-in's Commit or the sign-out's Prepare, which own it
+  first; a restart checks the set again and rejects it again, writing nothing.
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
-  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone
-  that lasts in this process only: after a restart it's `SignedOut`. A token kept because it may
-  be consumed keeps its mark, so `SignInAgain` outlasts a restart.
+  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. After a `SignInAgain`
+  code the tokens are gone, so that lasts in this process only: after a restart it's `SignedOut`.
+  A rejected set stays pending and is rejected again, and a token kept because it may be consumed
+  keeps its mark, so `SignInAgain` outlasts a restart.
 - A result that arrives under an old generation never becomes the account: during a sign-out its
   rotated token replaces the listed `Account` entry, so the successor is what gets revoked. One
   that didn't rotate leaves the old token in place, so nothing is unknown.
 - An unusable answer that names a refresh token lists it as an exchange's would be, when an
-  exchange slot is free and its entry fits; otherwise its outcome is unknown. Either way the
-  session ends, since the token it replaced was consumed.
+  exchange slot is free and its entry fits, and that list save ends its request; otherwise its
+  outcome is unknown. Either way the session ends, since the token it replaced was consumed, and
+  that token stays in `chatgpt`, marked as sent, so it's never sent again.
 - A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
   sign-out saves nothing.
 
@@ -412,9 +430,11 @@ or Retry enters at the first step of the persisted phase:
    save, an ambiguous ending sets `outcome_unknown`, and a refused save holds the set (`Refused`)
    until Retry; after a crash its `request_pending` keeps the warning.
 2. **Prepare.** `chatgpt`'s refresh token becomes the `Account` entry unless one is listed (that
-   token or its successor), so a replay never duplicates or overwrites it. A record whose data is
-   damaged persists `outcome_unknown` first; a damaged list isn't rewritten, but the account token
-   is still revoked. A refused read decides nothing: the step is `Refused` and Retry reruns it.
+   token or its successor) or the same client and token are, so a replay never duplicates or
+   overwrites it. A record whose data is damaged persists `outcome_unknown` first; a damaged list
+   isn't rewritten, but the account token is still revoked. So is a list the account token can
+   never fit (`Bounds`): `outcome_unknown` is persisted first, the list stays as it was, and the
+   token is revoked from memory; if that marker write is refused, the step is `Refused`. A refused read decides nothing: the step is `Refused` and Retry reruns it.
 3. **Revoke.** One run over the list, inside the usual 10 s budget.
 4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
    counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear

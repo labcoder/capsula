@@ -70,9 +70,11 @@ fn cancel_during_a_dispatched_save_lets_the_save_win() {
     assert_eq!(h.refresh_token().as_deref(), Some("refresh-a"));
 }
 
-/// Every mutation of a returning sign-in's commit refused in turn: before and at the manifest
-/// flip the set is held, still owning the lane and its pending flag, and Retry saves it with
-/// no second request; after the flip it's committed, with leftovers or a pending flag at worst.
+/// Every mutation of a returning sign-in's commit refused in turn. The token it replaces is listed
+/// first: refused up to that list's flip, nothing is listed; past it the token stays listed, and
+/// its revocation pass starts, whatever the account save does. Up to the account's flip the set is
+/// held and Retry saves it with no second request, entry or pass; after it, it's committed, with
+/// leftovers or a pending flag at worst.
 #[test]
 fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
     let seed = |vault: &mut Vault<FakeStore>| {
@@ -89,23 +91,41 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
     dry.store.arm(usize::MAX, Fault::Refuse);
     dry.release();
     let trace = dry.store.0.lock().expect("fake lock").mutations.clone();
-    let manifest = format!("{}/chatgpt", dry.service);
-    let flip = trace
-        .iter()
-        .position(|m| matches!(m, Mutation::Set(name) if *name == manifest))
-        .expect("the manifest flip");
+    let set = |record: &str| {
+        let name = format!("{}/{record}", dry.service);
+        trace
+            .iter()
+            .position(|m| matches!(m, Mutation::Set(set) if *set == name))
+            .expect(record)
+    };
+    let (sweep, listed, flip) = (set("signout"), set("revoke"), set("chatgpt"));
+    assert!(
+        sweep < listed && listed < flip,
+        "listed before the account changes"
+    );
     let signout = format!("{}/signout", dry.service);
-    let flag = trace
-        .iter()
-        .position(|m| matches!(m, Mutation::Set(name) | Mutation::Delete(name) if *name == signout))
-        .expect("the pending flag's release");
-    assert!(flag > flip, "the flag clears only after the commit");
+    let flag = flip
+        + trace[flip..]
+            .iter()
+            .position(
+                |m| matches!(m, Mutation::Set(name) | Mutation::Delete(name) if *name == signout),
+            )
+            .expect("the pending flag's release");
+    let old = [(
+        "client-saved".to_owned(),
+        "refresh-old".to_owned(),
+        NOW,
+        Origin::Exchange,
+    )];
     let mut leftovers = 0;
     for at in 0..trace.len() {
         let mut h = Harness::seeded("account-commit-fault", seed);
         until_commit(&mut h);
         h.store.arm(at, Fault::Refuse);
         h.release();
+        let owned: &[_] = if at > listed { &old } else { &[] };
+        assert_eq!(h.revocations(), owned, "at {at}");
+        assert_eq!(h.revoking.len(), usize::from(at > listed), "at {at}");
         if at <= flip {
             assert_eq!(h.refresh_token().as_deref(), Some("refresh-old"), "at {at}");
             assert_eq!(
@@ -119,16 +139,17 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
                 h.view(),
                 &signed_in(PlanState::Enabled, Some(AccountRecovery::Retry))
             );
-            assert_eq!(
-                h.marker(),
-                marker(&["request_pending"]),
-                "the lane stays held"
-            );
+            let flags: &[_] = if at > sweep {
+                &["sweep", "request_pending"]
+            } else {
+                &["request_pending"]
+            };
+            assert_eq!(h.marker(), marker(flags), "at {at}: the lane stays held");
             h.op(AccountOp::Retry);
         } else if at == flag {
             assert_eq!(
                 h.marker(),
-                marker(&["request_pending"]),
+                marker(&["sweep", "request_pending"]),
                 "conservative at worst"
             );
         } else {
@@ -137,8 +158,10 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
         assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"), "at {at}");
         assert_eq!(h.view(), &signed_in(PlanState::Enabled, None), "at {at}");
         assert_eq!(h.sent.len(), 1, "no second token request at {at}");
+        assert_eq!(h.revocations(), old, "listed once at {at}");
+        assert_eq!(h.revoking.len(), 1, "one pass at {at}");
         if at != flag {
-            assert_eq!(h.marker(), None, "at {at}");
+            assert_eq!(h.marker(), marker(&["sweep"]), "at {at}");
         }
     }
     assert!(

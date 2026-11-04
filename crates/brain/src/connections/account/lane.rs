@@ -120,12 +120,9 @@ pub(super) enum Waiting {
     Exchange(u64, Authorization),
     /// The refresh for a generation.
     Refresh(u64),
-    /// A refresh token for the list, none when no entry could hold it, and the jobs that run
-    /// only once it's listed or counted unknown.
-    Discard {
-        entry: Option<Secret<Revocable>>,
-        then: Vec<Queued>,
-    },
+    /// A refresh successor for the list, none when no entry could hold it; its request ends once
+    /// it's listed or counted unknown.
+    Discard(Option<Secret<Revocable>>),
 }
 
 impl AccountState {
@@ -186,8 +183,14 @@ impl AccountState {
                 Done::Committed {
                     result,
                     notice_cleared,
+                    listed,
                 },
             ) => {
+                // The replaced token was listed whatever the save did: admission counts it first.
+                if let Some(entries) = listed {
+                    self.loaded.exchanges = exchanges(&entries);
+                    self.revoke(entries, effects);
+                }
                 // A sign-out admitted during the save keeps its pessimistic notice.
                 if notice_cleared && self.leaving.is_none() {
                     self.loaded.notice = false;
@@ -215,7 +218,6 @@ impl AccountState {
                         }
                         self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
-                        self.jobs.extend(mem::take(&mut self.after_list));
                         // An entry was added: revoke it now (design §2).
                         self.revoke(entries, effects);
                     }
@@ -349,7 +351,7 @@ impl AccountState {
             let (attempt, authorization) = match self.waiting.pop_front() {
                 None => break,
                 Some(Waiting::Exchange(attempt, authorization)) => (attempt, authorization),
-                Some(Waiting::Discard { entry, then }) => {
+                Some(Waiting::Discard(entry)) => {
                     let Some(entry) = entry.filter(|_| self.loaded.exchanges < MAX_EXCHANGES)
                     else {
                         tracing::warn!(
@@ -358,12 +360,8 @@ impl AccountState {
                         self.jobs.push_back(Queued::Finished {
                             outcome_unknown: true,
                         });
-                        // shortcut: the save behind runs even if this write is refused, so the
-                        // token can leave unrecorded; give the write its own flight in 10b.
-                        self.jobs.extend(then);
                         continue;
                     };
-                    self.after_list = then;
                     self.lane = Lane::Owning {
                         attempt: self.attempt,
                         save: Save::Discard(entry),
@@ -470,7 +468,7 @@ impl AccountState {
                             origin: Origin::Account,
                         }));
                     }
-                    let finish = matches!(save, Save::List(_));
+                    let finish = matches!(save, Save::List(_) | Save::Discard(_));
                     match save {
                         Save::Account(account) => (Flight::Commit, Job::Commit(account.clone())),
                         Save::List(entry) | Save::Discard(entry) => (

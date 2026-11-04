@@ -11,7 +11,9 @@ use zeroize::Zeroizing;
 use crate::connections::clock::Clock;
 use crate::connections::error::VaultError;
 use crate::connections::marker::{MarkerUpdate, SignOutMarker};
-use crate::connections::records::{Account, Origin, Revocable, RevocationList};
+use crate::connections::records::{
+    Account, MAX_EXCHANGES, Origin, Revocable, RevocationList, entry_fits,
+};
 use crate::connections::vault::{DeleteResult, SaveResult, Vault};
 use crate::platform::credential::{CredentialStore, NativeCredentialStore};
 
@@ -40,7 +42,8 @@ pub enum Job {
     Register(Secret<Account>),
     /// Merge one lane fact into the marker.
     Marker(MarkerUpdate),
-    /// Save a verified sign-in; once committed, release its lane fact and an old notice.
+    /// Save a verified sign-in, once the token it replaces has a durable owner; once committed,
+    /// release its lane fact and an old notice.
     Commit(Secret<Account>),
     /// Add a refresh token to the revocation list. Its `added_at` is stamped when it's saved.
     List {
@@ -107,6 +110,8 @@ pub enum Done {
         result: SaveResult,
         /// The marker no longer carries the notice; only then is it cleared in memory.
         notice_cleared: bool,
+        /// The list's entries once the replaced token was listed, whatever the save did.
+        listed: Option<Vec<Secret<Revocable>>>,
     },
     /// The revocation list's save, and the entries it holds once committed.
     Listed {
@@ -207,6 +212,7 @@ impl<S: CredentialStore> Worker<S> {
                 Job::Commit(_) => Done::Committed {
                     result: refused(),
                     notice_cleared: false,
+                    listed: None,
                 },
                 Job::List { .. } => Done::Listed {
                     result: refused(),
@@ -223,23 +229,7 @@ impl<S: CredentialStore> Worker<S> {
             Job::Load { .. } => unreachable!("handled above"),
             Job::Register(account) => Done::Registered(vault.save_account(&account)),
             Job::Marker(update) => Done::Marked(vault.update_marker(update).map(drop)),
-            Job::Commit(account) => {
-                let result = vault.save_account(&account);
-                let mut notice_cleared = false;
-                if matches!(result, SaveResult::Committed { .. }) {
-                    finish_request(vault);
-                    match vault.update_marker(MarkerUpdate::SignInCommitted) {
-                        Ok(_) => notice_cleared = true,
-                        Err(error) => {
-                            tracing::warn!(%error, "an old sign-out notice stays until the next sign-in");
-                        }
-                    }
-                }
-                Done::Committed {
-                    result,
-                    notice_cleared,
-                }
-            }
+            Job::Commit(account) => commit(vault, &account, added_at),
             Job::Rotate { account, finish } => {
                 let result = rotate(vault, &account, finish);
                 // A bearer's expiry is judged when its save ends, which can be long after it began.
@@ -395,6 +385,106 @@ fn rotate<S: CredentialStore>(
     result
 }
 
+/// The sign-in's save, once the token it replaces has an owner. Past the account's commit it's
+/// `Committed`, whatever the marker writes after it do.
+fn commit<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    account: &Secret<Account>,
+    added_at: u64,
+) -> Done {
+    let listed = match own_replaced(vault, account, added_at) {
+        Ok(listed) => listed,
+        Err(error) => {
+            return Done::Committed {
+                result: SaveResult::NotCommitted(error),
+                notice_cleared: false,
+                listed: None,
+            };
+        }
+    };
+    let result = vault.save_account(account);
+    let mut notice_cleared = false;
+    if matches!(result, SaveResult::Committed { .. }) {
+        finish_request(vault);
+        match vault.update_marker(MarkerUpdate::SignInCommitted) {
+            Ok(_) => notice_cleared = true,
+            Err(error) => {
+                tracing::warn!(%error, "an old sign-out notice stays until the next sign-in");
+            }
+        }
+    }
+    Done::Committed {
+        result,
+        notice_cleared,
+        listed,
+    }
+}
+
+/// Hands the refresh token `chatgpt` holds to a durable owner before `account` replaces it: a
+/// list entry, keeping a slot for `account`'s own set should its save be refused, or else
+/// `outcome_unknown`. Returns the list once it saved one.
+fn own_replaced<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    account: &Secret<Account>,
+    added_at: u64,
+) -> Result<Option<Vec<Secret<Revocable>>>, VaultError> {
+    let replaced = match vault.load_account().map(Ok).or_else(damaged)? {
+        Ok(old) => {
+            let Some((client_id, refresh_token)) = old.and_then(|old| {
+                let old = old.expose();
+                Some((
+                    old.client_id.clone(),
+                    old.tokens.as_ref()?.refresh_token.clone(),
+                ))
+            }) else {
+                return Ok(None);
+            };
+            let incoming = account.expose().tokens.as_ref();
+            if incoming.is_some_and(|tokens| tokens.refresh_token == refresh_token) {
+                return Ok(None);
+            }
+            Some((client_id, refresh_token))
+        }
+        Err(_) => None,
+    };
+    if let Some((client_id, refresh_token)) = replaced
+        && let Ok(list) = vault.load_revocations().map(Ok).or_else(damaged)?
+    {
+        let mut entries = list.map_or_else(Vec::new, |list| list.expose().entries.clone());
+        if entries
+            .iter()
+            .any(|entry| entry.client_id == client_id && entry.refresh_token == refresh_token)
+        {
+            return Ok(None);
+        }
+        let exchanges = entries
+            .iter()
+            .filter(|entry| entry.origin == Origin::Exchange)
+            .count();
+        if entry_fits(&client_id, &refresh_token) && exchanges + 2 <= MAX_EXCHANGES {
+            entries.push(Revocable {
+                client_id,
+                refresh_token,
+                added_at,
+                origin: Origin::Exchange,
+            });
+            let list = Secret::new(RevocationList {
+                entries: entries.clone(),
+            });
+            match vault.save_revocations(&list) {
+                SaveResult::Committed { .. } => {
+                    return Ok(Some(entries.into_iter().map(Secret::new).collect()));
+                }
+                // Refused before anything was written, and every retry would be.
+                SaveResult::NotCommitted(VaultError::Bounds) => {}
+                SaveResult::NotCommitted(error) => return Err(error),
+            }
+        }
+    }
+    vault.update_marker(MarkerUpdate::UnknownOutcome)?;
+    Ok(None)
+}
+
 /// The saved result is owned now, so the lane's pending flag can go. A refused write leaves it
 /// set, which the next request or start counts as uncertainty: conservative, never false.
 fn finish_request<S: CredentialStore>(vault: &mut Vault<S>) {
@@ -410,7 +500,9 @@ fn expired(entry: &Revocable, now: u64) -> bool {
 }
 
 /// `chatgpt` never changes before the checkpoint, so a listed `Account` entry, that token or
-/// its saved successor, is kept as it is; otherwise the account's token is adopted.
+/// its saved successor, is kept as it is, and so is the token listed already; otherwise the
+/// account's token is adopted. A list that can never hold it isn't rewritten: the token is still
+/// revoked, and `outcome_unknown`, persisted first, keeps the notice.
 fn prepare<S: CredentialStore>(
     vault: &mut Vault<S>,
     added_at: u64,
@@ -431,7 +523,10 @@ fn prepare<S: CredentialStore>(
         Some((account.client_id.clone(), tokens.refresh_token.clone()))
     });
     if let Some((client_id, refresh_token)) = token
-        && !entries.iter().any(|entry| entry.origin == Origin::Account)
+        && !entries.iter().any(|entry| {
+            entry.origin == Origin::Account
+                || (entry.client_id == client_id && entry.refresh_token == refresh_token)
+        })
     {
         entries.insert(
             0,
@@ -444,13 +539,16 @@ fn prepare<S: CredentialStore>(
         );
         // An unreadable list isn't overwritten: the token is still revoked, and the uncertainty
         // just persisted keeps the notice.
-        if readable
-            && let SaveResult::NotCommitted(error) =
-                vault.save_revocations(&Secret::new(RevocationList {
-                    entries: entries.clone(),
-                }))
-        {
-            return Err(error);
+        if readable {
+            match vault.save_revocations(&Secret::new(RevocationList {
+                entries: entries.clone(),
+            })) {
+                SaveResult::Committed { .. } => {}
+                SaveResult::NotCommitted(VaultError::Bounds) => {
+                    vault.update_marker(MarkerUpdate::UnknownOutcome)?;
+                }
+                SaveResult::NotCommitted(error) => return Err(error),
+            }
         }
     }
     Ok(entries.into_iter().map(Secret::new).collect())
