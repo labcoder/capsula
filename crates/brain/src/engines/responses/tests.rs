@@ -1,6 +1,6 @@
 //! The Responses body as data, and recorded rounds mapped to turn events.
 
-use kumochi_protocol::message::{Effort, ModelSlug};
+use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug};
 use serde_json::{Value, json};
 
 use super::{BodyError, ROUND_BYTES, ROUND_ITEMS, Round, body};
@@ -19,8 +19,10 @@ fn call_id(id: &str) -> CallId {
 
 fn request(instructions: &str, input: Vec<InputItem>) -> ModelRequest {
     ModelRequest {
-        model: ModelSlug::new("gpt-fixture").expect("slug"),
-        effort: Effort::XHigh,
+        choice: Some(ModelChoice {
+            model: ModelSlug::new("gpt-fixture").expect("slug"),
+            effort: Effort::XHigh,
+        }),
         instructions: instructions.to_owned(),
         input,
         tools: vec![ToolSchema {
@@ -93,7 +95,9 @@ fn each_effort_has_its_wire_name() {
         (Effort::Max, "max"),
     ] {
         let mut request = request("", Vec::new());
-        request.effort = effort;
+        if let Some(choice) = request.choice.as_mut() {
+            choice.effort = effort;
+        }
         let sent = body(&request).expect("small");
         assert_eq!(sent["reasoning"], json!({ "effort": name }));
     }
@@ -112,6 +116,13 @@ fn a_body_at_the_bound_is_sent_and_one_byte_over_is_refused() {
     );
     let over = "a".repeat(BOUND - empty + 1);
     assert_eq!(body(&request(&over, Vec::new())), Err(BodyError::TooLarge));
+}
+
+#[test]
+fn a_request_with_no_model_is_refused() {
+    let mut request = request("", Vec::new());
+    request.choice = None;
+    assert_eq!(body(&request), Err(BodyError::NoModel));
 }
 
 #[test]

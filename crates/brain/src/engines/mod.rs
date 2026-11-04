@@ -728,8 +728,13 @@ mod tests {
         );
         assert_eq!(
             printed,
+<<<<<<< HEAD
             "RunRequest { key: Build(BuildKey { run: RunId(7), round: 1, attempt: 1 }), \
              run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
+=======
+            "RunRequest { key: BuildKey { run: RunId(7), round: 1, attempt: 1 }, run: RunId(7), \
+             thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
+>>>>>>> origin/slice3/13a-responses-adapter
              choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
              ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
         );

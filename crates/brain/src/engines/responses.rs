@@ -25,6 +25,9 @@ const ROUND_ITEMS: usize = 64;
 /// Why no body was built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum BodyError {
+    /// The request names no model, because no catalog had been read.
+    #[error("the request names no model")]
+    NoModel,
     /// A stored reasoning item isn't JSON.
     #[error("a stored reasoning item isn't JSON")]
     Reasoning,
@@ -36,6 +39,7 @@ pub(crate) enum BodyError {
 /// The Responses body for `request`: nothing is stored on the provider's side, the answer
 /// streams, and reasoning comes back encrypted so it can be replayed.
 pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
+    let choice = request.choice.as_ref().ok_or(BodyError::NoModel)?;
     let input = request
         .input
         .iter()
@@ -54,11 +58,11 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
         })
         .collect();
     let body = json!({
-        "model": request.model.as_str(),
+        "model": choice.model.as_str(),
         "instructions": request.instructions,
         "input": input,
         "tools": tools,
-        "reasoning": { "effort": effort(request.effort) },
+        "reasoning": { "effort": effort(choice.effort) },
         "include": ["reasoning.encrypted_content"],
         "store": false,
         "stream": true,
