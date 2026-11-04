@@ -10,9 +10,12 @@ use fixtures::{Fixture, four_views, gliding_scene, mixed_track};
 use scene_support::{Measure, id, new_scene, prepared};
 
 use kumochi_scene::{
-    Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut, Text,
+    Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
+    Text,
     geom::Affine,
-    layout::{LayoutState, PrepareError, SurfaceGeometry},
+    layout::{
+        LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
+    },
     motion::{at_word_offset_ms, synthetic_duration_ms},
     parse_record,
     text::Bounded,
@@ -25,6 +28,22 @@ fn fresh() -> (SceneState, GlobalBudget, SceneView) {
     let scene = new_scene("motion");
     let view = SceneView::new(&LayoutState::new(&scene), scene.activated());
     (scene, GlobalBudget::default(), view)
+}
+fn commit(
+    scene: &mut SceneState,
+    budget: &mut GlobalBudget,
+    value: Value,
+) -> kumochi_scene::Committed {
+    let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
+    let Record::Step(step) =
+        parse_record(&serde_json::to_vec(&envelope).expect("fixture JSON")).expect("typed fixture")
+    else {
+        panic!("step");
+    };
+    let Admission::New(candidate) = scene.admit(&step, budget).expect("admitted fixture") else {
+        panic!("new step");
+    };
+    scene.commit(candidate, budget).expect("fresh candidate")
 }
 /// Commits, prepares on the view's layout and activates one step at `now`.
 fn activate(
@@ -82,6 +101,80 @@ fn transform(view: &SceneView, now: u64, name: &str) -> Affine {
 }
 fn rect(name: &str) -> Value {
     json!({"shape":{"id":name,"kind":"rect","box":[0,0,10,10]}})
+}
+/// 256 rectangles, `r0` to `r255`.
+fn rects() -> Vec<Value> {
+    (0..256).map(|n| rect(&format!("r{n}"))).collect()
+}
+fn polygons(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|n| {
+            json!({"shape":{"id":format!("r{n}"),"kind":"polygon",
+            "points":[[0,0],[8,0],[8,8],[0,8]]}})
+        })
+        .collect()
+}
+/// One opacity track for each of [`rects`].
+fn tracks() -> Vec<Value> {
+    (0..256)
+        .map(
+            |n| json!({"anim":{"target":format!("r{n}"),"track":"opacity","keys":[[0,0],[100,1]]}}),
+        )
+        .collect()
+}
+/// Runs `run` on this thread and returns its value with the requested bytes it still holds.
+fn holding<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    let (value, _, [allocated, freed]) = allocation::usage(run);
+    let held = allocated
+        .checked_sub(freed)
+        .expect("the run frees only what it allocated");
+    (value, held)
+}
+/// Prepares B4's 64 retained steps over 256 rectangles: a quiet prefix, one opacity track per
+/// rectangle, then quiet prefixes, each with the requested bytes its preparation retained.
+fn track_heavy_history(
+    name: &str,
+    budget: &mut GlobalBudget,
+) -> (SceneState, Vec<(PreparedStep, usize)>) {
+    retained_history(name, budget, &rects())
+}
+
+fn retained_history(
+    name: &str,
+    budget: &mut GlobalBudget,
+    shapes: &[Value],
+) -> (SceneState, Vec<(PreparedStep, usize)>) {
+    let mut scene = new_scene(name);
+    let empty = LayoutState::new(&scene);
+    let theme = Arc::new(Theme::default());
+    let mut steps: Vec<_> = shapes
+        .chunks(256)
+        .enumerate()
+        .map(|(index, shapes)| json!({"id":format!("shapes{index}"),"put":shapes}))
+        .collect();
+    steps.extend([
+        json!({"id":"plain","put":[]}),
+        json!({"id":"tracks","put":tracks()}),
+    ]);
+    steps.extend((steps.len()..64).map(|n| json!({"id":format!("quiet{n}"),"put":[]})));
+    let mut history: Vec<(PreparedStep, usize)> = Vec::with_capacity(steps.len());
+    for value in steps {
+        let ticket = commit(&mut scene, budget, value).preparation;
+        let before = history.last().map_or(&empty, |(step, _)| &step.after);
+        let (step, held) = holding(|| {
+            let input = PrepareInput::new(
+                ticket,
+                before.clone(),
+                SurfaceGeometry::default(),
+                Arc::clone(&theme),
+            )
+            .expect("consecutive input");
+            prepare(input, &mut Measure, &AtomicBool::new(false)).expect("legal history step")
+        });
+        step.validate(&scene, before).expect("current result");
+        history.push((step, held));
+    }
+    (scene, history)
 }
 
 #[test]
@@ -1114,6 +1207,224 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
 }
 
 #[test]
+fn quiet_prefixes_after_tracks_charge_the_motion_maps_they_copy() {
+    let mut budget = GlobalBudget::default();
+    let (scene, history) = track_heavy_history("tracks", &mut budget);
+    assert_eq!(
+        (history.len(), scene.usage().objects, scene.usage().tracks),
+        (64, 256, 256),
+        "the history fills the step cap with one track per rectangle"
+    );
+    let (plain, plain_bytes) = &history[1];
+    let (tip, tip_bytes) = &history[63];
+    assert!(
+        tip_bytes + plain.resident_bytes <= plain_bytes + tip.resident_bytes,
+        "61 steps after its tracks the tip retains {tip_bytes} bytes and charges {}; the prefix \
+         before them retains {plain_bytes} and charges {}",
+        tip.resident_bytes,
+        plain.resident_bytes
+    );
+}
+
+#[test]
+fn track_heavy_prefixes_hold_no_more_than_their_charges() {
+    let mut budget = GlobalBudget::default();
+    let (_, history) = track_heavy_history("bounds", &mut budget);
+    for (index, (step, held)) in history.iter().enumerate() {
+        assert!(
+            *held <= step.resident_bytes,
+            "step {index} holds {held} bytes but charges {}",
+            step.resident_bytes
+        );
+    }
+    let ((plain, plain_held), (tracked, tracked_held)) = (&history[1], &history[2]);
+    assert_eq!(
+        tracked_held - plain_held,
+        tracked.resident_bytes - plain.resident_bytes,
+        "over the same index, the tracks step charges exactly the 256 motion maps it allocates"
+    );
+}
+
+#[test]
+fn full_object_caps_with_sixty_four_prefixes_fit_the_residency_budget() {
+    let rectangles: Vec<_> = (0..600).map(|n| rect(&format!("r{n}"))).collect();
+    for (name, scenes, shapes, objects, segments) in [
+        ("single", 1, rectangles, 600, 17_400),
+        ("global", 4, polygons(375), 1500, 6000),
+    ] {
+        let mut budget = GlobalBudget::default();
+        let histories: Vec<_> = (0..scenes)
+            .map(|index| retained_history(&format!("{name}{index}"), &mut budget, &shapes))
+            .collect();
+        assert_eq!(
+            (
+                budget.usage().scenes,
+                budget.usage().objects,
+                budget.usage().segments,
+                budget.usage().tracks
+            ),
+            (scenes, objects, segments, scenes * 256)
+        );
+        let (held, charged) = histories
+            .iter()
+            .flat_map(|(_, history)| history)
+            .fold((0, 0), |(held, charged), (step, bytes)| {
+                (held + bytes, charged + step.resident_bytes)
+            });
+        assert!(
+            held <= charged,
+            "{name}: {held} held bytes exceed {charged} charged"
+        );
+        assert!(
+            charged <= 64 * 1024 * 1024,
+            "{name}: {charged} requested bytes exceed the 64 MiB budget"
+        );
+        println!(
+            "workload={name} prefixes={} held_bytes={held} charged_bytes={charged}",
+            scenes * 64
+        );
+    }
+}
+
+#[test]
+fn removing_compiled_objects_releases_the_empty_private_fact_index() {
+    let mut budget = GlobalBudget::default();
+    let mut scene = new_scene("facts");
+    let empty = LayoutState::new(&scene);
+    let compiled = prepared(
+        &mut scene,
+        &mut budget,
+        &empty,
+        json!({"id":"compiled","put":[{"diagram":{"id":"d"}},
+            {"mermaid":{"in":"d","src":"flowchart RL\nA --> B\n"}}]}),
+    );
+    let ticket = commit(
+        &mut scene,
+        &mut budget,
+        json!({"id":"remove","remove":["d","--1.0","A","B","--1.1"]}),
+    )
+    .preparation;
+    let theme = Arc::new(Theme::default());
+    let (removed, held) = holding(|| {
+        let input = PrepareInput::new(
+            ticket,
+            compiled.after.clone(),
+            SurfaceGeometry::default(),
+            theme,
+        )
+        .expect("next input");
+        prepare(input, &mut Measure, &AtomicBool::new(false)).expect("removed diagram")
+    });
+    assert_eq!(removed.after.revealed_at_rest().len(), 0);
+    assert!(
+        held <= removed.resident_bytes,
+        "empty compiled layout holds {held} bytes but charges {}",
+        removed.resident_bytes
+    );
+}
+
+#[test]
+fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
+    let theme = Arc::new(Theme::default());
+    let mut budget = GlobalBudget::default();
+    let mut scene = new_scene("removals");
+    let empty = LayoutState::new(&scene);
+    let shapes = prepared(
+        &mut scene,
+        &mut budget,
+        &empty,
+        json!({"id":"shapes","put":rects()}),
+    );
+    let removals: Vec<_> = (0..200).map(|n| format!("r{n}")).collect();
+    let ticket = commit(
+        &mut scene,
+        &mut budget,
+        json!({"id":"remove","remove":removals}),
+    )
+    .preparation;
+    let (removal, held) = holding(|| {
+        let input = PrepareInput::new(
+            ticket,
+            shapes.after.clone(),
+            SurfaceGeometry::default(),
+            Arc::clone(&theme),
+        )
+        .expect("consecutive input");
+        prepare(input, &mut Measure, &AtomicBool::new(false)).expect("removal step")
+    });
+    assert!(
+        held <= removal.resident_bytes,
+        "removing 200 of 256 rectangles holds {held} bytes but charges {}",
+        removal.resident_bytes
+    );
+    let (recovered, held) = holding(|| {
+        let (_, layout) = recover(
+            scene.header().clone(),
+            scene.recovery_log(),
+            SurfaceGeometry::default(),
+            &theme,
+            &mut Measure,
+            &AtomicBool::new(false),
+        )
+        .expect("recovery");
+        layout
+    });
+    assert_eq!(
+        recovered.revealed_at_rest(),
+        removal.after.revealed_at_rest(),
+        "recovery keeps the 56 survivors"
+    );
+    assert!(
+        held <= recovered.resident_bytes(),
+        "the recovered prefix holds {held} bytes but charges {}",
+        recovered.resident_bytes()
+    );
+    let (kept, held) = holding(|| {
+        let mut budget = GlobalBudget::default();
+        let mut scene = new_scene("cut");
+        let empty = LayoutState::new(&scene);
+        let shapes = prepared(
+            &mut scene,
+            &mut budget,
+            &empty,
+            json!({"id":"shapes","put":rects()}),
+        );
+        let tracked = prepared(
+            &mut scene,
+            &mut budget,
+            &shapes.after,
+            json!({"id":"tracks","put":tracks()}),
+        );
+        let revealed = tracked
+            .after
+            .revealed_at_rest()
+            .into_iter()
+            .step_by(2)
+            .collect();
+        scene
+            .stop(
+                &StopCut {
+                    activated: 2,
+                    revealed: Bounded::new(revealed).expect("bounded cut"),
+                },
+                &mut budget,
+            )
+            .expect("valid cut");
+        tracked.after.cut(&scene).expect("kept prefix")
+    });
+    assert_eq!(
+        (kept.revealed_at_rest().len(), kept.revealed_at_rest()),
+        (128, SceneView::new(&kept, 2).stop(0)),
+        "every other rectangle survives, all of them revealed at rest"
+    );
+    assert!(
+        held <= kept.resident_bytes(),
+        "the kept prefix, as sole owner, holds {held} bytes but charges {}",
+        kept.resident_bytes()
+    );
+}
+
+#[test]
 #[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn frame_four_views_max() {
     use std::{hint::black_box, time::Instant};
@@ -1216,5 +1527,47 @@ fn activation_at_caps() {
     );
     for (index, (sample, allocations)) in samples.into_iter().zip(allocations).enumerate() {
         println!("sample {index} {sample:.3} allocations={allocations}");
+    }
+}
+
+#[test]
+#[ignore = "requested-byte report for B4's 64 retained prefixes; run alone with --nocapture"]
+fn measure_track_heavy_prefix_residency() {
+    let mut budget = GlobalBudget::default();
+    let shapes = polygons(256);
+    let histories: Vec<_> = (0..4)
+        .map(|index| retained_history(&format!("tracks{index}"), &mut budget, &shapes).1)
+        .collect();
+    assert_eq!(
+        (
+            budget.usage().scenes,
+            budget.usage().objects,
+            budget.usage().tracks
+        ),
+        (4, 1024, 1024),
+        "four histories share the legal global caps"
+    );
+    let sum = |steps: std::ops::Range<usize>| {
+        histories
+            .iter()
+            .flat_map(|history| &history[steps.clone()])
+            .fold([0, 0], |[retained, charged], (step, bytes)| {
+                [retained + bytes, charged + step.resident_bytes]
+            })
+    };
+    // "shapes" allocates the geometry and sources later prefixes share; each later step holds its
+    // own index copy.
+    for (phase, steps) in [
+        ("shapes", 0..1),
+        ("plain", 1..2),
+        ("tracks", 2..3),
+        ("quiet", 3..64),
+        ("total", 0..64),
+    ] {
+        let [retained, charged] = sum(steps.clone());
+        println!(
+            "phase={phase} steps={} retained_bytes={retained} charged_bytes={charged}",
+            4 * steps.len()
+        );
     }
 }

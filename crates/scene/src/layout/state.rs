@@ -1,4 +1,4 @@
-use super::{PrepareError, primitives};
+use super::{PrepareError, heap, primitives};
 use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
     deferred::Deferred,
@@ -63,6 +63,9 @@ impl Rest {
     }
 }
 
+/// Explicit motion envelopes by property, shared between prefixes until one changes them.
+pub(super) type Motions = BTreeMap<&'static str, crate::state::work::Motion>;
+
 #[derive(Debug, Clone)]
 pub(super) struct Placed {
     pub item: Item,
@@ -70,7 +73,7 @@ pub(super) struct Placed {
     pub anchors: [Vec2; 2],
     pub rest: Rest,
     pub rank: Option<usize>,
-    pub motion: BTreeMap<&'static str, crate::state::work::Motion>,
+    pub motion: Option<Arc<Motions>>,
     pub chart_basis: Option<Arc<super::chart::Basis>>,
     /// Resting opacity of ancestors a cut detached; `item.opacity` stays the object's own base.
     pub inherited_opacity: f32,
@@ -89,7 +92,7 @@ impl Placed {
             anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
             rest: cached.map_or_else(Rest::default, |old| old.rest),
             rank: cached.and_then(|old| old.rank),
-            motion: cached.map_or_else(BTreeMap::new, |old| old.motion.clone()),
+            motion: cached.and_then(|old| old.motion.as_ref().map(Arc::clone)),
             chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
             inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
             title: cached.and_then(|old| old.title),
@@ -145,6 +148,9 @@ impl LayoutState {
             .map(|handle| handle.revision())
             .collect();
         self.extras.retain(|revision, _| live.contains(revision));
+        if self.extras.is_empty() {
+            self.extras = BTreeMap::new();
+        }
     }
     /// Every placed item with its resting values and inherited opacity, for activation.
     pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32)> {
@@ -156,27 +162,27 @@ impl LayoutState {
     pub fn revision(&self) -> u32 {
         self.revision
     }
-    /// Bytes this prefix retains, counting each shared primitive array, vertex array, chart
-    /// basis, plot, source copy and private compiled facts once, plus the per-object index.
+    /// Requested bytes this prefix retains, an allowance pinned to Rust 1.98's layouts rather
+    /// than a heap bound: its own index, plus each shared primitive array, vertex array, chart
+    /// basis, plot, source copy, compiled facts and motion map once with its `Arc` header. It walks every
+    /// object, so compute it once per new rest, not per frame.
     pub fn resident_bytes(&self) -> usize {
         let items = self.objects.values().map(|object| &object.item);
         super::prepare::residency(std::iter::empty(), items)
             + super::chart::retained_bytes(self)
-            + super::heap::source_bytes(std::iter::empty(), self.objects.values())
-            + self
-                .extras
-                .values()
-                .flat_map(|extras| extras.values())
-                .map(Extra::bytes)
-                .sum::<usize>()
+            + heap::shared_bytes(std::iter::empty(), self.objects.values())
+            + heap::extras_bytes(std::iter::empty(), self.extras.values())
             + self.index_bytes()
     }
-    /// Index and placement records, which every prepared result holds its own copy of,
-    /// including the two heap copies of each object's id.
+    /// The index every prepared result holds its own copy of: both B-trees at their node bound,
+    /// the two heap copies of each object's id and the version allocation.
     pub(crate) fn index_bytes(&self) -> usize {
         let ids: usize = self.objects.keys().map(|id| id.as_str().len()).sum();
-        self.objects.len() * (size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3)
+        heap::btree::<WireId, Placed>(self.objects.len())
+            + heap::btree::<Handle, WireId>(self.handles.len())
+            + heap::btree::<u32, Arc<BTreeMap<usize, Extra>>>(self.extras.len())
             + 2 * ids
+            + heap::ARC_HEADER
     }
     /// Every placed handle in order: what a Stop at rest reveals, without building a view.
     pub fn revealed_at_rest(&self) -> Vec<Handle> {
@@ -249,6 +255,7 @@ impl LayoutState {
         if self.revision > self.cut_revision.max(scene.activated()) {
             return Err(primitives::layout_error(ErrorCode::OutOfRange));
         }
+        // The kept prefix is a subset of this one, so this index bounds the partial map's charge.
         let mut retained = Deferred::new(BTreeMap::new(), self.index_bytes());
         for (id, handle, parent) in scene.preparation_objects() {
             let mut object = self
@@ -456,7 +463,7 @@ mod tests {
                 &mut budget,
             )
             .expect("stop");
-        let live = second.after.cut(&scene).expect("cut");
+        let rest = second.after.cut(&scene).expect("cut");
         let (mut restored, replayed) = recover(
             header,
             scene.recovery_log(),
@@ -466,19 +473,38 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("recover");
-        assert_eq!(live.objects.len(), 4);
-        for (id, object) in &live.objects {
+        assert_eq!(rest.objects.len(), 4);
+        for (id, object) in &rest.objects {
             let replayed = &replayed.objects[id];
             assert_eq!(object.rest, replayed.rest);
             assert_eq!(object.rank, replayed.rank);
             assert_eq!(object.motion, replayed.motion);
         }
         let next = r#"{"step":{"id":"next","put":[{"node":{"id":"next","in":"d","label":"N"}}]}}"#;
-        let live = picture(&mut scene, &mut budget, &live, next);
+        let d: WireId = "d".to_owned().try_into().expect("id");
+        let kept = rest.objects[&d].motion.as_deref().cloned();
+        let live = picture(&mut scene, &mut budget, &rest, next);
         let replayed = picture(&mut restored, &mut GlobalBudget::default(), &replayed, next);
         assert_eq!(live.after.items(), replayed.after.items());
         assert_eq!(live.glides, replayed.glides);
         assert_eq!(live.glides.len(), 1);
+        let motion = |state: &LayoutState| {
+            Arc::clone(
+                state.objects[&d]
+                    .motion
+                    .as_ref()
+                    .expect("the diagram glided"),
+            )
+        };
+        assert!(
+            !Arc::ptr_eq(&motion(&rest), &motion(&live.after)),
+            "the next glide writes a copy of the shared map"
+        );
+        assert_eq!(
+            rest.objects[&d].motion.as_deref(),
+            kept.as_ref(),
+            "the kept prefix's envelope is unchanged"
+        );
     }
     #[test]
     fn edges_inside_child_clusters_do_not_count_toward_the_parents_edge_cap() {

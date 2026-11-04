@@ -1,11 +1,12 @@
 //! Incremental placement, preparation isolation and ordered-cut recovery.
 use kumochi_scene::{
-    Admission, Begin, Budget, ErrorCode, GlobalBudget, Record, SceneState, Step, StopCut, WireId,
-    display::{MeasureError, Prim, TextMeasure, TextStyle},
+    Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, SceneState, Step, StopCut,
+    WireId,
+    display::{Item, MeasureError, Prim, TextMeasure, TextStyle},
     geom::Vec2,
     layout::{
-        LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
-        recover_all,
+        Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare,
+        recover, recover_all,
     },
     parse_record,
     text::Bounded,
@@ -2697,13 +2698,26 @@ fn batch_recovery_keeps_input_order_and_charges_only_what_it_returns() {
     assert_eq!((global.usage().objects, global.usage().scenes), (4, 3));
 }
 
+/// The step's own vectors and empty private-fact allocation, which leave with its ticket.
+fn own(step: &PreparedStep) -> usize {
+    step.display.items.capacity() * size_of::<Item>()
+        + step.removed.capacity() * size_of::<Handle>()
+        + step.glides.capacity() * size_of::<Glide>()
+        + 2 * size_of::<usize>()
+        + size_of::<std::collections::BTreeMap<usize, usize>>()
+}
+
 #[test]
 fn retained_bytes_match_step_charges_and_recovery() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();
     let mut measure = Measure::default();
     let empty = LayoutState::new(&scene);
-    assert_eq!(empty.resident_bytes(), 0);
+    assert_eq!(
+        empty.resident_bytes(),
+        2 * size_of::<usize>(),
+        "an empty prefix holds only its version allocation"
+    );
     let commit = committed(
         &mut scene,
         &mut budget,
@@ -2717,7 +2731,7 @@ fn retained_bytes_match_step_charges_and_recovery() {
     );
     let first = picture(&scene, commit, &empty, &mut measure).expect("shared geometry");
     assert_eq!(
-        first.after.resident_bytes(),
+        first.after.resident_bytes() + own(&first),
         first.resident_bytes,
         "a first step charges everything it retains, with the plot and vertices once"
     );
@@ -2730,8 +2744,8 @@ fn retained_bytes_match_step_charges_and_recovery() {
     );
     let second = picture(&scene, commit, &unchanged.after, &mut measure).expect("added text");
     assert_eq!(
-        second.after.resident_bytes() + unchanged.resident_bytes,
-        unchanged.after.resident_bytes() + second.resident_bytes,
+        second.after.resident_bytes() + unchanged.resident_bytes + own(&second),
+        unchanged.after.resident_bytes() + second.resident_bytes + own(&unchanged),
         "a step adds its new geometry, source and index to the shared prefix"
     );
     let (_, recovered) = recover(

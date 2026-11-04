@@ -1,6 +1,6 @@
 //! Requested heap bytes scene values hold, pinned to Rust 1.98's collection layouts.
 
-use super::state::Placed;
+use super::state::{Motions, Placed};
 use crate::{
     Op, Step, Text, WireId,
     mermaid::Extra,
@@ -37,20 +37,33 @@ pub(crate) fn btree<K, V>(len: usize) -> usize {
     }
 }
 
-/// Bytes of the distinct `Op` copies in `objects` that `shared` doesn't already hold.
-pub(super) fn source_bytes<'a>(
+/// Bytes of source copies and motion maps that earlier prefixes don't already hold.
+pub(super) fn shared_bytes<'a>(
     shared: impl IntoIterator<Item = &'a Placed>,
     objects: impl IntoIterator<Item = &'a Placed>,
 ) -> usize {
-    let mut seen: HashSet<_> = shared
-        .into_iter()
-        .map(|object| Arc::as_ptr(&object.source))
-        .collect();
-    objects
-        .into_iter()
-        .filter(|object| seen.insert(Arc::as_ptr(&object.source)))
-        .map(|object| size_of::<Op>() + op_bytes(&object.source))
-        .sum()
+    let mut sources = HashSet::new();
+    let mut motions = HashSet::new();
+    for object in shared {
+        sources.insert(Arc::as_ptr(&object.source));
+        if let Some(motion) = &object.motion {
+            motions.insert(Arc::as_ptr(motion));
+        }
+    }
+    let mut bytes = 0;
+    for object in objects {
+        if sources.insert(Arc::as_ptr(&object.source)) {
+            bytes += ARC_HEADER + size_of::<Op>() + op_bytes(&object.source);
+        }
+        if let Some(motion) = &object.motion
+            && motions.insert(Arc::as_ptr(motion))
+        {
+            bytes += ARC_HEADER
+                + size_of::<Motions>()
+                + btree::<&'static str, crate::state::work::Motion>(motion.len());
+        }
+    }
+    bytes
 }
 
 /// Estimated bytes a committed step owns: its records and the strings and sequences inside them,
@@ -91,7 +104,7 @@ pub(crate) fn compiled_bytes(original: &Arc<Step>, run: &Arc<Step>) -> usize {
     if Arc::ptr_eq(original, run) {
         return 0;
     }
-    step_bytes(run)
+    ARC_HEADER + step_bytes(run)
 }
 
 pub(crate) fn extras_bytes<'a>(
@@ -312,16 +325,69 @@ mod tests {
         let Record::Step(record) = parse_record(br#"{"step":{"id":"s","say":"say","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}],"set":[{"target":"p","text":"tt","label":"lll","cells":["cc",1],"data":[1,2]}],"remove":["zz"],"start":{"after":"before","ms":0}}}"#).expect("typed record") else { panic!("step"); };
         let original = Arc::new(record);
         assert_eq!(compiled_bytes(&original, &original), 0);
-        let copied = Arc::new((*original).clone());
+        let (copied, _, [allocated, released]) =
+            allocation::usage(|| Arc::new((*original).clone()));
+        assert_eq!(compiled_bytes(&original, &copied), allocated - released);
         assert_eq!(
             compiled_bytes(&original, &copied),
-            size_of::<Step>()
+            ARC_HEADER
+                + size_of::<Step>()
                 + size_of::<Op>()
                 + size_of::<Change>()
                 + size_of::<WireId>()
                 + 2 * size_of::<Cell>()
                 + 2 * size_of::<Point>()
                 + 21
+        );
+    }
+
+    #[test]
+    fn private_facts_count_shared_allocations_once_with_their_headers() {
+        let (facts, _, [allocated, released]) = allocation::usage(|| {
+            Arc::new(BTreeMap::from([
+                (
+                    0,
+                    Extra::Group {
+                        title: Some("title".to_owned().try_into().expect("title")),
+                        reverse: true,
+                    },
+                ),
+                (
+                    1,
+                    Extra::Link {
+                        head: crate::record::Head::Both,
+                        thick: true,
+                    },
+                ),
+            ]))
+        });
+        let charge = extras_bytes(std::iter::empty(), [&facts, &facts]);
+        assert_eq!(charge, allocated - released);
+        assert_eq!(extras_bytes([&facts], [&facts, &facts]), 0);
+        let empty = Arc::new(BTreeMap::new());
+        assert_eq!(
+            extras_bytes(std::iter::empty(), [&empty, &empty]),
+            ARC_HEADER + size_of::<BTreeMap<usize, Extra>>()
+        );
+    }
+
+    #[test]
+    fn expanded_run_and_private_facts_bound_the_compilers_retained_allocations() {
+        let Record::Step(record) = parse_record(br#"{"step":{"id":"s","say":"words","put":[{"diagram":{"id":"d"}},{"mermaid":{"in":"d","src":"flowchart LR\nsubgraph g[Group]\ndirection BT\nA <==>|join| B\nend\n"}}],"start":{"after":"before","ms":0}}}"#).expect("typed record") else { panic!("step"); };
+        let original = Arc::new(record);
+        let ((run, facts), _, [allocated, released]) = allocation::usage(|| {
+            let expanded =
+                crate::mermaid::expand(&original, 1, &std::collections::BTreeSet::new(), 600)
+                    .expect("bounded flowchart");
+            (expanded.run, expanded.extras)
+        });
+        assert!(!Arc::ptr_eq(&original, &run));
+        assert_eq!(facts.len(), 2);
+        let charge = compiled_bytes(&original, &run) + extras_bytes(std::iter::empty(), [&facts]);
+        assert!(
+            allocated - released <= charge,
+            "compiled run and facts hold {} bytes but charge {charge}",
+            allocated - released
         );
     }
 }
