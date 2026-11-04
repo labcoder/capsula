@@ -26,7 +26,7 @@ use std::thread;
 use std::time::Duration;
 
 use kumochi_protocol::BUILD_ID;
-use kumochi_protocol::constants::{self, SHELL_EXE};
+use kumochi_protocol::constants::SHELL_EXE;
 use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -172,11 +172,19 @@ fn accounts() -> io::Result<runtime::account::Accounts> {
     runtime::account::Accounts::spawn(worker, net)
 }
 
-/// The engine runs use: in a dev build that names a script in [`constants::FIXTURE_ENV`], that
-/// script answers every run; otherwise the account's engine answers, once the account is ready.
+/// The engine runs use: in a dev build that names a script in
+/// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
+/// account's engine answers, once the account is ready.
+#[cfg_attr(
+    not(debug_assertions),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only a dev build reads a script, which can fail"
+    )
+)]
 fn engine() -> Result<Selected, BrainError> {
     #[cfg(debug_assertions)]
-    if let Some(path) = std::env::var_os(constants::FIXTURE_ENV) {
+    if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
         let fixture = Fixture::parse(&script).map_err(|error| {
             BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error))

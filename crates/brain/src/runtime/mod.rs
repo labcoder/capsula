@@ -35,8 +35,8 @@ use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, RunSnapshot};
 use crate::coordinator::LeaseId;
 #[cfg(debug_assertions)]
-use crate::coordinator::Ready;
-use crate::coordinator::{Availability, BuildContext, Coordinator, Effect, Input, StoreOp};
+use crate::coordinator::{Availability, Ready};
+use crate::coordinator::{BuildContext, Coordinator, Effect, Input, StoreOp};
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
