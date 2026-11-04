@@ -646,7 +646,7 @@ fn the_bound_is_exact_and_older_runs_go_first() {
     );
     let too_large = world.build(&run, (main, current), Supplied::default(), alone - 1);
     assert!(
-        matches!(too_large, Err(BuildError::TooLarge)),
+        matches!(too_large, Err(BuildError::TooLarge { room: None })),
         "{too_large:?}"
     );
 }
@@ -659,7 +659,10 @@ fn an_oversized_summary_or_turn_ends_with_too_large() {
     let (_, current) = world.run(Some(main), &huge, None);
     let run = snapshot(Origin::Kumo, None);
     let turn = world.build(&run, (main, current), Supplied::default(), BOUND);
-    assert!(matches!(turn, Err(BuildError::TooLarge)), "{turn:?}");
+    assert!(
+        matches!(turn, Err(BuildError::TooLarge { room: None })),
+        "{turn:?}"
+    );
     let (_, small) = world.run(Some(main), "small", None);
     let summary = Supplied {
         summary: Some(Summary {
@@ -671,7 +674,7 @@ fn an_oversized_summary_or_turn_ends_with_too_large() {
     };
     let summarised = world.build(&run, (main, small), summary, BOUND);
     assert!(
-        matches!(summarised, Err(BuildError::TooLarge)),
+        matches!(summarised, Err(BuildError::TooLarge { room: Some(_) })),
         "{summarised:?}"
     );
 }
@@ -1048,17 +1051,74 @@ fn a_summary_is_carried_forward_replaces_its_events_and_never_hides_them() {
 
 #[test]
 fn a_summary_is_trimmed_and_cut_on_a_character_boundary() {
-    assert_eq!(compact::clean_summary(""), None);
-    assert_eq!(compact::clean_summary(" \n\t "), None);
+    assert_eq!(compact::clean_summary("", compact::MAX_SUMMARY), None);
+    assert_eq!(compact::clean_summary(" \n\t ", compact::MAX_SUMMARY), None);
     let exact = "s".repeat(compact::MAX_SUMMARY);
     assert_eq!(
-        compact::clean_summary(&format!("  {exact}\n")),
+        compact::clean_summary(&format!("  {exact}\n"), compact::MAX_SUMMARY),
         Some(exact.clone())
     );
-    assert_eq!(compact::clean_summary(&format!("{exact}t")), Some(exact));
+    assert_eq!(
+        compact::clean_summary(&format!("{exact}t"), compact::MAX_SUMMARY),
+        Some(exact)
+    );
     let multibyte = format!("{}é", "s".repeat(compact::MAX_SUMMARY - 1));
     assert_eq!(
-        compact::clean_summary(&multibyte),
+        compact::clean_summary(&multibyte, compact::MAX_SUMMARY),
         Some("s".repeat(compact::MAX_SUMMARY - 1))
     );
+}
+
+#[test]
+fn inline_compaction_rewrites_the_summary_within_the_room_the_turn_leaves() {
+    let mut world = world("compact-rewrite");
+    let (task, _) = world.run(None, "ask", Some("reply"));
+    let run = snapshot(Origin::Task(task), None);
+    let rewrite = |world: &World, room: usize| {
+        let reader = Connection::open(world.scratch.db()).expect("reader");
+        let read = Snapshot::begin(&reader).expect("snapshot");
+        compact::rewrite(&read, &run, task, room).expect("read")
+    };
+    assert_eq!(rewrite(&world, 4096), None, "no summary to rewrite");
+    let events = world.events(task);
+    assert!(
+        world
+            .store
+            .store_summary(
+                task,
+                crate::store::Generation(0),
+                (events[0], events[1]),
+                "long",
+                None
+            )
+            .expect("stored")
+    );
+    let wrapper = item_bytes(&summary_item(events[0], events[1], ""));
+    assert_eq!(rewrite(&world, wrapper), None, "no room left");
+    let (found, limit) = rewrite(&world, wrapper + 100).expect("rewritten");
+    assert_eq!(limit, 100);
+    assert_eq!(
+        found.covers,
+        (events[0], events[1]),
+        "it covers what the summary did"
+    );
+    assert_eq!(found.built.sources, [task]);
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(
+                Role::Developer,
+                &format!(
+                    "Summary so far, of events {}–{}:\nlong",
+                    events[0].0, events[1].0
+                )
+            ),
+            message(
+                Role::Developer,
+                "Write the new summary now, in at most 100 bytes."
+            ),
+        ]
+    );
+    let (_, limit) = rewrite(&world, usize::MAX / 2).expect("rewritten");
+    assert_eq!(limit, compact::MAX_SUMMARY);
 }

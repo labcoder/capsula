@@ -12,6 +12,7 @@
 mod admission;
 mod delete;
 mod drawing;
+mod inline;
 mod job;
 mod lease;
 mod run;
@@ -32,6 +33,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
@@ -112,6 +114,8 @@ pub enum Input {
         /// The build or job.
         key: SendKey,
     },
+    /// An inline compaction's read finished.
+    CompactBuilt(CompactBuilt),
     /// A background job's read finished.
     JobBuilt(JobBuilt),
     /// A background job's request ended: the cleaned title or summary, or `None` when it failed.
@@ -347,6 +351,8 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
+    /// The round that compacted inline since the run's last admitted build.
+    compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
@@ -576,6 +582,7 @@ impl Coordinator {
             Input::SendReady {
                 key: SendKey::Job(key),
             } => self.job_ready(key, &mut effects),
+            Input::CompactBuilt(built) => self.compact_built(built, &mut effects)?,
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,
             Input::TitleSet { job, applied } => {
@@ -590,9 +597,9 @@ impl Coordinator {
                 ..
             } => self.job_written(Some(key), &mut effects),
             Input::SummaryStored {
-                owner: SendKey::Build(_),
+                owner: SendKey::Build(key),
                 ..
-            } => return Err(Stale),
+            } => self.inline_written(key, &mut effects)?,
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
@@ -740,6 +747,7 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: None,
             build: None,
+            compacted: None,
             draw: None,
             finishing: false,
             ending: None,

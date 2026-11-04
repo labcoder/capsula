@@ -24,12 +24,13 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
+| `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. Version 4 |
 
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
 `sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
 user turn (a new thread when there is one, the run, and the user's text) is one transaction.
 
-Later slices add assets, sends, the tool ledger, actions, summaries and cleanup jobs, each as a
+Later slices add assets, sends, the tool ledger, actions and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
 
@@ -233,8 +234,9 @@ sequenceDiagram
   H-->>S: removed: purge done
 ```
 
-The foreign keys have no cascade, so the second transaction names every table and fails if it
-misses one, rather than leaving rows behind. Deleting the rows isn't enough on its own, as the
+The foreign keys have no cascade, so the second transaction names every table (`events`, `runs`,
+the thread's own `summaries`, `threads`) and fails if it misses one, rather than leaving rows
+behind. Deleting the rows isn't enough on its own, as the
 CAPS-22 review found, because two kinds of copy survive secure-delete:
 
 - **Page gaps.** When SQLite rebuilds a b-tree page it repacks the cells but never zeroes the gap
