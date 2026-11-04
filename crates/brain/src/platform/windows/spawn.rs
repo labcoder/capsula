@@ -111,14 +111,16 @@ struct ChildEnds {
 /// brain: no environment variable, no working folder and no other handle.
 ///
 /// # Errors
-/// `InvalidInput` for no job, a command line over [`MAX_COMMAND_LINE`], an environment name that's
-/// empty, holds `=` or NUL, or repeats another without regard to case, or a value holding NUL;
-/// otherwise the OS's error creating the pipes or the process.
+/// `InvalidInput`, before any handle is made, for no job, an executable or folder that isn't an
+/// absolute path, a NUL in the executable, the folder or an argument, a command line over
+/// [`MAX_COMMAND_LINE`], an environment name that's empty, holds `=` or NUL, or repeats another
+/// without regard to case, or a value holding NUL; otherwise the OS's error creating the pipes or
+/// the process.
 pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
     let mut command_line = command_line(launch.exe, launch.args)?;
     let environment = environment_block(launch.env)?;
-    let application = wide(launch.exe.as_os_str());
-    let cwd = wide(launch.cwd.as_os_str());
+    let application = absolute(launch.exe)?;
+    let cwd = absolute(launch.cwd)?;
     if launch.jobs.is_empty() {
         return Err(invalid("a helper starts inside a job"));
     }
@@ -250,6 +252,15 @@ fn wide(text: &OsStr) -> Vec<u16> {
     text.encode_wide().chain(iter::once(NUL)).collect()
 }
 
+/// `path` NUL-terminated, refused unless it's absolute and holds no NUL, which would cut it short.
+fn absolute(path: &Path) -> io::Result<Vec<u16>> {
+    let units = wide(path.as_os_str());
+    if !path.is_absolute() || units[..units.len() - 1].contains(&NUL) {
+        return Err(invalid("not an absolute path"));
+    }
+    Ok(units)
+}
+
 fn invalid(what: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, what)
 }
@@ -259,13 +270,17 @@ pub(crate) fn command_line(exe: &Path, args: &[OsString]) -> io::Result<Vec<u16>
     let mut line = vec![QUOTE];
     for unit in exe.as_os_str().encode_wide() {
         // argv[0] is read up to the next quote with no escapes, so a quote can't be carried.
-        if unit == QUOTE {
-            return Err(invalid("executable path holds a quote"));
+        if unit == QUOTE || unit == NUL {
+            return Err(invalid("executable path holds a quote or NUL"));
         }
         line.push(unit);
     }
     line.push(QUOTE);
     for arg in args {
+        // A NUL would end the command line there, dropping the rest of it and every later argument.
+        if arg.encode_wide().any(|unit| unit == NUL) {
+            return Err(invalid("argument holds NUL"));
+        }
         line.push(SPACE);
         push_quoted(&mut line, arg);
     }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -693,14 +693,15 @@ fn proxy_probe_child() {
 #[test]
 #[expect(
     clippy::disallowed_methods,
-    reason = "no lib unit test makes handles inheritable, so this child can't inherit one"
+    reason = "created under spawn_lock; its output is read after the guard is released"
 )]
 fn production_client_ignores_proxy_environment_in_an_isolated_child() {
     let target = Server::start(reply("200 OK", b"{}", ""));
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port 0");
     let proxy_address = proxy.local_addr().expect("proxy address");
     drop(proxy);
-    let output = Command::new(std::env::current_exe().expect("test executable"))
+    let spawning = crate::platform::spawn_lock();
+    let child = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
             "connections::http_client::tests::proxy_probe_child",
@@ -712,8 +713,12 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
         .env_remove("NO_PROXY")
         .env_remove("no_proxy")
         .env("ACCOUNT_HTTP_TEST_CHILD", target.url())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("child test process");
+    drop(spawning);
+    let output = child.wait_with_output().expect("child test output");
     assert!(
         output.status.success(),
         "child reports a closed transport result"
