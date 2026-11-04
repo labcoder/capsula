@@ -12,10 +12,18 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::voice::NativeFile;
 use sha2::{Digest as _, Sha256};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    SetSecurityInfo,
+};
+use windows_sys::Win32::Security::{
+    ACL, GetSecurityDescriptorSacl, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, WRITE_DAC,
-    WRITE_OWNER,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL,
+    WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
@@ -446,14 +454,71 @@ fn icacls(path: &Path, args: &[&str]) {
     run(std::process::Command::new("icacls").arg(path).args(args));
 }
 
+/// Gives `path` the mandatory label in `sacl`, an SDDL SACL such as `S:(ML;;NR;;;ME)`. icacls
+/// always adds no-write-up, so it can't make the labels these tests need.
+fn set_label(path: &Path, sacl: &str) {
+    let folder = File::options()
+        .access_mode(WRITE_OWNER | READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .expect("opened to label");
+    let wide: Vec<u16> = sacl.encode_utf16().chain(Some(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated and `descriptor` is a writable local.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(converted, 0, "{sacl} parses");
+    let (mut present, mut defaulted) = (0, 0);
+    let mut label: *mut ACL = std::ptr::null_mut();
+    // SAFETY: the descriptor is valid and every output is a writable local.
+    let read = unsafe {
+        GetSecurityDescriptorSacl(
+            descriptor,
+            &raw mut present,
+            &raw mut label,
+            &raw mut defaulted,
+        )
+    };
+    // SAFETY: the handle has WRITE_OWNER and `label` lives inside `descriptor` for the call.
+    let set = unsafe {
+        SetSecurityInfo(
+            folder.as_raw_handle(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            label,
+        )
+    };
+    // SAFETY: allocated by the conversion above and freed once.
+    unsafe { LocalFree(descriptor) };
+    assert!(read != 0 && present != 0, "{sacl} has a SACL");
+    assert_eq!(set, ERROR_SUCCESS, "{sacl} set");
+}
+
 /// Makes the empty folder `dir` a junction to `target` in place: a mount-point reparse point set
 /// through a handle opened for write-data and write-attributes, the rights NTFS asks for.
 fn set_junction(dir: &Path, target: &Path) -> io::Result<()> {
-    let folder = File::options()
+    junction_through(&mutation_handle(dir)?, target)
+}
+
+fn mutation_handle(dir: &Path) -> io::Result<File> {
+    File::options()
         .access_mode(FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(dir)?;
+        .open(dir)
+}
+
+/// Turns the empty folder `folder` is open on into a junction to `target`.
+fn junction_through(folder: &File, target: &Path) -> io::Result<()> {
     let substitute: Vec<u16> = format!(r"\??\{}", target.display())
         .encode_utf16()
         .collect();
@@ -605,17 +670,63 @@ fn a_junction_on_the_root_path_is_refused_before_anything_loads() {
     assert!(!loaded_named(pin.name));
 }
 
+/// A handle opened while the empty staging folder was open to others keeps its rights whatever
+/// its DACL becomes, so the folder is refused as it is, before any pin is copied into it.
 #[test]
-fn an_existing_staging_folder_others_could_change_is_made_owner_only() {
-    let (_scratch, root) = stage_root("stage-harden");
+fn an_existing_staging_folder_others_could_change_is_refused_and_left_alone() {
+    let (_scratch, root) = stage_root("stage-adopt");
+    let dir = staged_dir(&root);
+    std::fs::create_dir_all(&dir).expect("staging folders");
+    icacls(&dir, &["/grant", "*S-1-1-0:(F)"]);
+    let retained = mutation_handle(&dir).expect("a handle kept from before staging");
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-adopt.dll");
+    let victim = root.join("victim");
+    std::fs::create_dir_all(&victim).expect("victim folder");
+    std::fs::write(victim.join(pin.name), b"victim").expect("victim file");
+    let before = dacl_sddl(&dir);
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Unsafe)
+    );
+    assert_eq!(dacl_sddl(&dir), before, "not re-secured in place");
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("listed").count(),
+        0,
+        "no pin copied"
+    );
+    junction_through(&retained, &victim).expect("the kept handle can still redirect it");
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Reparse)
+    );
+    assert_eq!(
+        std::fs::read(victim.join(pin.name)).ok(),
+        Some(b"victim".to_vec())
+    );
+    assert!(!loaded_named(pin.name));
+}
+
+/// An explicit medium label without no-write-up lets lower-integrity code under this user write;
+/// with no-write-up it doesn't.
+#[test]
+fn a_staging_folder_labelled_medium_without_no_write_up_is_refused() {
+    let (_scratch, root) = stage_root("stage-medium-label");
     let natives = root.join("natives");
     std::fs::create_dir_all(&natives).expect("natives folder");
-    icacls(&natives, &["/grant", "*S-1-1-0:(F)"]);
-    assert!(!owner_only(&natives));
+    set_label(&natives, "S:(ML;;NR;;;ME)");
     let source = root.join("source");
-    let pin = fake_pin(&source, "kumochi-test-harden.dll");
-    drop(stage(&source, &root, std::slice::from_ref(&pin)).expect("staged"));
-    assert!(owner_only(&natives));
+    let pin = fake_pin(&source, "kumochi-test-medium.dll");
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Unsafe)
+    );
+    assert!(
+        !staged_dir(&root).exists(),
+        "refused before anything below it"
+    );
+    set_label(&natives, "S:(ML;;NW;;;ME)");
+    drop(stage(&source, &root, std::slice::from_ref(&pin)).expect("staged under medium NW"));
 }
 
 #[test]

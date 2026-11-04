@@ -234,14 +234,17 @@ policy.
   - No allow entry gives anyone else delete, write-DAC, write-owner, write-data, write-attributes
     or delete-child. Setting a reparse point needs only write-data or write-attributes, so holding
     a handle without delete sharing isn't enough on its own.
-  - It isn't labelled below medium integrity.
+  - A mandatory label that applies to it is at least medium and has no-write-up. With no label,
+    Windows applies exactly that. A medium label without no-write-up lets lower-integrity code
+    running as this user write, so it's refused.
 
   A component that fails is refused (`Reparse` or `Unsafe`), and nothing loads. On Rez the temp
   folder grants other accounts write access, so it can't be a root.
 - **Staging folders.** `natives` and `sherpa-onnx-2.0.1` are created with a protected DACL that
-  has one entry: full access for this user, inherited by their files. An existing folder with a
-  trusted owner is reset to that DACL through the handle that stays held. One that's a reparse
-  point, owned by anyone else or labelled low is refused.
+  has one entry: full access for this user, inherited by their files. An existing folder must
+  pass the same checks as it stands; it's never re-secured in place, because a new DACL doesn't
+  take back rights already granted to open handles. One that fails is refused, so a tampered
+  staging folder has to be removed by hand.
 - **Files.** A staged DLL that matches its pin is kept. Otherwise it's replaced by a copy of the
   source, read through a handle that refuses writers, with its size and SHA-256 checked as it
   streams. A copy that fails or doesn't match is removed. Each staged DLL is then held against
@@ -252,8 +255,11 @@ The tests stage copies of a system DLL in scratch folders under the local applic
 They check that a rename or delete of the DLL is a sharing violation while it's held, and that
 renames of every held folder fail. A non-empty held folder can't be turned into a junction. A
 junction anywhere on the root path, or in the DLL's place, is `Reparse`, with nothing loaded. A
-root others can change is `Unsafe`, an existing staging folder others could change is reset to
-owner-only, a staging folder labelled low is `Unsafe`, and a bad source leaves nothing staged. A
+root others can change is `Unsafe`. An existing empty staging folder others could change is
+`Unsafe` and left as it is, with no pin copied into it; a handle opened on it beforehand can still
+turn it into a junction, and the next stage is `Reparse` with the outside file untouched. A
+staging folder labelled low, or medium without no-write-up, is `Unsafe`; medium with no-write-up
+stages. A bad source leaves nothing staged. A
 copy of the test binary labelled low runs at low integrity and can't open the root, either staging
 folder or the DLL for write-attributes, write-data, delete, write-DAC or write-owner.
 
