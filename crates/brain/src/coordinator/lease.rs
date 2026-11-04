@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{Deleted, ThreadId};
 
+use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, Stale};
 use crate::store::Failure;
 
@@ -69,6 +70,20 @@ impl Coordinator {
             effects.push(Effect::Rebuild(key));
             return;
         };
+        let refused = self
+            .current
+            .as_ref()
+            .and_then(|run| run.connection)
+            .map_or_else(
+                || Some(sign_in_needed()),
+                |connection| self.refusal(connection),
+            );
+        if let Some(reason) = refused {
+            effects.push(Effect::Rebuild(key));
+            self.fail_with(key.run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+            return;
+        }
         if self.transport_failed {
             effects.push(Effect::Rebuild(key));
             self.fail(key.run, Failure::Engine, effects)

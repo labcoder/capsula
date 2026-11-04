@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use async_channel::Receiver;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Incarnation, Phase, RunId,
-    ThreadId,
+    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
+    Phase, RunId, ThreadId, UserError,
 };
 
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
@@ -620,7 +620,8 @@ fn pings_are_answered_and_run_states_passed_on() {
     let state = ControlToShell::RunState {
         run: RunId(2),
         thread: ThreadId(3),
-        phase: Phase::Answering,
+        phase: Phase::Failed,
+        error: Some(UserError::from(ErrorKey::SignInNeeded)),
     };
     frame::write(&mut &link.control, &state, Pipe::Control).expect("state");
     assert!(matches!(
@@ -628,8 +629,9 @@ fn pings_are_answered_and_run_states_passed_on() {
         LinkEvent::RunState {
             run: RunId(2),
             thread: ThreadId(3),
-            phase: Phase::Answering
-        }
+            phase: Phase::Failed,
+            error: Some(error),
+        } if error.key() == ErrorKey::SignInNeeded
     ));
     drop(link.control);
     assert!(link.link.join().expect("joined"));
@@ -889,7 +891,9 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
 /// link too; the credit it earns.
 fn apply(runs: &mut Runs, handle: &LinkHandle, event: LinkEvent) -> u32 {
     match event {
-        LinkEvent::RunState { run, thread, phase } => runs.apply_state(run, thread, phase).credit,
+        LinkEvent::RunState {
+            run, thread, phase, ..
+        } => runs.apply_state(run, thread, phase).credit,
         LinkEvent::Data { message, bytes, .. } => runs.apply_data(message, bytes),
         LinkEvent::ThreadDeleted {
             thread,
@@ -1141,6 +1145,7 @@ fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
         run: RunId(run),
         thread,
         phase,
+        error: None,
     }
 }
 
@@ -1152,6 +1157,7 @@ fn answer_stops(server: &PipeClient) {
                 run,
                 thread: ThreadId(1),
                 phase: Phase::Interrupted,
+                error: None,
             };
             if frame::write(&mut &*server, &state, Pipe::Control).is_err() {
                 return;

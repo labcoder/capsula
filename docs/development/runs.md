@@ -202,6 +202,35 @@ while the run's last writes are still pending. The deadline and the text counter
 so they carry across rounds. Model rounds, tool calls and speech budgets arrive with the engines
 that use them.
 
+## Availability
+
+Whether a run can be answered comes from the account, as `Input::Engines(Availability)`. The
+runtime sends it at start and after every account input. It's `Ready`, with the connection and
+the catalog, or `Unavailable` with what the user can do (`coordinator/availability.rs`).
+
+- **The connection** names the sign-in that issued the account's token set. It's saved with the
+  set, kept through refreshes and restarts, and new on every sign-in (random per process, with
+  the top bit set, so a set saved before connections existed reads as 0).
+- **The account's reason is kept.** Signed out, signing in or with a sign-out accepted gives
+  `SignInNeeded`; a declined plan `PlanNotEnabled`; an ended session `SessionEnded`; a plan
+  the account can't use `PlanUnavailable`; a held credential lock `CredentialsUnavailable`.
+- **A turn while unavailable is stored**, so the text is kept, and its run fails
+  `failed(engine)` before any build, telling the shell the reason.
+- **A run is bound to the connection** that was ready when its first build began, and its
+  snapshot records it. A catalog-only change keeps the run. Any other change, a sign-out the
+  account accepted included, cancels the engine and fails the run with the reason. A held ask
+  for that run is answered `Rebuild`, and `send_ready` checks the binding again before every
+  `Grant`.
+- **S4: the model is checked once,** when the first build's result arrives: a model missing from
+  the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
+  Open settings, and nothing goes to another model. A run in flight keeps its check when the
+  catalog changes. shortcut: the catalog lists no efforts yet, so effort isn't checked.
+- **Draws come only from an offered tool** (D13-H2). A `draw` call opens the draw buffer only
+  when the admitted request offered `draw`, or when the dev fixture answers (`trusted_draw`,
+  which exists only in debug builds). Any other draw is an unknown call and draws nothing.
+- **The shell hears why** in `RunState.error`, sent only with `Failed`. shortcut: it isn't
+  stored, so a reloaded page shows the generic failure.
+
 ## Engines and rounds
 
 An engine (`crates/brain/src/engines/`) implements one trait: `Engine::start` takes a `RunRequest`
@@ -251,9 +280,12 @@ keyed by id (OSC-56) need no rework.
 
 ## The fixture engine
 
-Until slice 3 brings real engines, every run plays a fixture script
-(`crates/brain/fixtures/default.txt`, or in a dev build the file `KUMOCHI_FIXTURE` names) through
-`engines/fixture.rs`. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
+The runtime picks the engine once at start (`runtime::Selected`). A dev build with
+`KUMOCHI_FIXTURE` set plays that script for every run, ready with no account; a release build
+can't pick it. Otherwise the account's engine answers once the account is ready. shortcut: until
+13b-1b sends to the Responses engine, the account's engine is the built-in script
+(`crates/brain/fixtures/default.txt`), and its draws aren't trusted, so they fail the run. Both
+play through `engines/fixture.rs`. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
 and the store would refuse it too.

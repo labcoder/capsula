@@ -109,7 +109,8 @@ impl Tapped for ControlToShell {
                 | Self::RunState {
                     run: _,
                     thread: _,
-                    phase: _
+                    phase: _,
+                    error: _
                 }
                 | Self::Ping
                 | Self::Scenes { scenes: _ }

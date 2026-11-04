@@ -250,6 +250,9 @@ pub enum ControlToShell {
         thread: ThreadId,
         /// Its new phase.
         phase: Phase,
+        /// Why it failed, sent only with [`Phase::Failed`] and only when there's something to
+        /// tell. shortcut: it isn't stored, so a reloaded page shows the generic failure.
+        error: Option<UserError>,
     },
     /// The watchdog, sent only while a run is active; the shell answers [`ControlToBrain::Pong`].
     Ping,

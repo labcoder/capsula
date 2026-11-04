@@ -81,6 +81,7 @@ pub(crate) enum LinkEvent {
         run: RunId,
         thread: ThreadId,
         phase: Phase,
+        error: Option<UserError>,
     },
     /// A data frame, with its size on the pipe, header included, for the credit it earns once
     /// the UI has taken it, and the generation of the connection it came on.
@@ -835,9 +836,19 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
+            Ok(Some(ControlToShell::RunState {
+                run,
+                thread,
+                phase,
+                error,
+            })) => {
                 if events
-                    .send_blocking(LinkEvent::RunState { run, thread, phase })
+                    .send_blocking(LinkEvent::RunState {
+                        run,
+                        thread,
+                        phase,
+                        error,
+                    })
                     .is_err()
                 {
                     return;

@@ -10,6 +10,7 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod admission;
+mod availability;
 mod delete;
 mod drawing;
 mod lease;
@@ -25,12 +26,14 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
+    UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub use availability::{Availability, Ready};
 pub use lease::{LeaseId, SEND_DEADLINE};
 pub use store_op::StoreOp;
 
@@ -199,6 +202,8 @@ pub enum Input {
     },
     /// The shell renamed a task or set a thread's model.
     ThreadOp(ThreadOp),
+    /// Whether runs can be answered changed.
+    Engines(Availability),
 }
 
 /// Something for the systems around the coordinator to do, in order.
@@ -299,8 +304,12 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
+    /// The connection the run's first build bound it to.
+    connection: Option<crate::context::ConnectionTag>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
+    /// Why the run failed, for the shell.
+    error: Option<UserError>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
     finishing: bool,
     ending: Option<Ending>,
@@ -390,6 +399,8 @@ pub struct Coordinator {
     sends: u64,
     /// A lease failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
+    /// Whether runs can be answered, and on which connection.
+    availability: Availability,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -440,7 +451,21 @@ impl Coordinator {
             leases: Vec::new(),
             sends: 0,
             transport_failed: false,
+            availability: Availability::Unavailable(availability::sign_in_needed()),
         }
+    }
+
+    /// A coordinator the dev fixture answers for, as most tests need.
+    #[cfg(all(debug_assertions, any(test, feature = "test-support")))]
+    pub fn ready_for_tests(
+        main_thread: ThreadId,
+        last_thread: ThreadId,
+        last_run: RunId,
+        scenes: Vec<SceneState>,
+    ) -> Self {
+        let mut core = Self::new(main_thread, last_thread, last_run, scenes);
+        core.availability = Availability::Ready(Ready::fixture());
+        core
     }
 
     /// The run in flight, if any.
@@ -569,6 +594,7 @@ impl Coordinator {
                 self.deletion(&input, &mut effects)?;
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
+            Input::Engines(now) => self.available(now, &mut effects),
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
@@ -588,6 +614,12 @@ impl Coordinator {
             self.settle(run, effects);
             return Ok(());
         }
+        // The turn is kept, but nothing answers it.
+        if let Availability::Unavailable(reason) = &self.availability {
+            let reason = reason.clone();
+            return self.fail_with(run, Failure::Engine, reason, effects);
+        }
+        self.current(run)?.connection = self.connection();
         self.build(run, 1, effects);
         Ok(())
     }
@@ -650,7 +682,9 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: None,
             build: None,
+            connection: None,
             draw: None,
+            error: None,
             finishing: false,
             ending: None,
         });
@@ -659,6 +693,7 @@ impl Coordinator {
             run,
             thread,
             phase: Phase::Thinking,
+            error: None,
         }));
         effects.push(Effect::ArmDeadline {
             run,
@@ -711,6 +746,7 @@ impl Coordinator {
                 run: id,
                 thread,
                 phase: Phase::Failed,
+                error: None,
             }));
             // Every ending but Done was already told, with its data's end.
             if ending.outcome == RunEnd::Done {
@@ -881,6 +917,7 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         run: run.id,
         thread: run.thread,
         phase,
+        error: run.error.clone().filter(|_| phase == Phase::Failed),
     })
 }
 

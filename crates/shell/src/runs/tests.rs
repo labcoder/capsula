@@ -284,7 +284,9 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                         .expect("the turn is stored");
                 }
             }
-            BrainEffect::Control(ControlToShell::RunState { run, thread, phase }) => {
+            BrainEffect::Control(ControlToShell::RunState {
+                run, thread, phase, ..
+            }) => {
                 runs.apply_state(run, thread, phase);
             }
             BrainEffect::Data(message) => {
@@ -313,7 +315,7 @@ fn typed(runs: &mut Runs, typed: &str) -> Input {
 fn restarted(store: &Store) -> Coordinator {
     let (thread, run) = store.high_water().expect("ids");
     let main = store.main_thread().expect("recovered");
-    Coordinator::new(main, thread, run, store.scenes().expect("scenes"))
+    Coordinator::ready_for_tests(main, thread, run, store.scenes().expect("scenes"))
 }
 
 #[test]

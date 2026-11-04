@@ -46,7 +46,9 @@ impl Accounts {
             | ErrorKey::UsageLimit
             | ErrorKey::AccountRefused
             | ErrorKey::RequestRefused
-            | ErrorKey::ResponseUnreadable => {}
+            | ErrorKey::ResponseUnreadable
+            | ErrorKey::SignInNeeded
+            | ErrorKey::ModelUnavailable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount

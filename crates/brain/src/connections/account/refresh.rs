@@ -298,6 +298,7 @@ impl AccountState {
                 .map_or(old.refresh_token, |token| token.expose().clone()),
             pending_identity_validation: tokens.id_token.is_some(),
             refresh_sent: false,
+            connection: old.connection,
             id_token: tokens
                 .id_token
                 .map_or(old.id_token, |token| Some(token.expose().clone())),

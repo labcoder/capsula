@@ -65,6 +65,10 @@ pub struct Tokens {
     /// consumed it, so it's never sent again.
     #[serde(default)]
     pub refresh_sent: bool,
+    /// Names the sign-in that issued this set; a refresh keeps it, and a set saved before it
+    /// existed reads as 0.
+    #[serde(default)]
+    pub connection: u64,
 }
 
 /// Whether an entry belongs to the account's refresh lineage or to an independent exchange.

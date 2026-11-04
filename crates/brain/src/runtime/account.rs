@@ -10,8 +10,8 @@ use std::thread;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, ControlToShell, DataToShell, ErrorKey, ModelInfo,
-    PlanState, SettingsOp, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ControlToShell, DataToShell, ErrorKey,
+    ModelInfo, PlanState, SettingsOp, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -30,6 +30,8 @@ use crate::connections::oauth::refresh::refresh;
 use crate::connections::oauth::revoke::{BUDGET, revoke};
 use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
+use crate::context::ConnectionTag;
+use crate::coordinator::{Availability, Ready};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link, settings};
@@ -132,6 +134,8 @@ pub(crate) struct Accounts {
     catalog: Catalog,
     reads_tx: mpsc::UnboundedSender<Event>,
     reads: mpsc::UnboundedReceiver<Event>,
+    /// Random per process, so each sign-in's connection is one no earlier sign-in used.
+    salt: u64,
 }
 
 impl Accounts {
@@ -150,6 +154,7 @@ impl Accounts {
         let (loaded_tx, loaded) = std_mpsc::channel();
         let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone())?;
         let (reads_tx, reads) = mpsc::unbounded_channel();
+        let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
             state,
             jobs: Some(jobs),
@@ -163,6 +168,7 @@ impl Accounts {
             catalog: Catalog::default(),
             reads_tx,
             reads,
+            salt,
         };
         accounts.apply(started);
         let done = loaded
@@ -254,6 +260,48 @@ impl Accounts {
         }
     }
 
+    /// Whether runs can be answered: a usable account's connection and catalog, or what the
+    /// user can do. An accepted sign-out is already unavailable.
+    pub(super) fn availability(&self) -> Availability {
+        let error = |key, action| {
+            UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
+        };
+        let reason = match self.state.view() {
+            AccountView::SignedIn {
+                plan: PlanState::Enabled,
+                recovery: None | Some(AccountRecovery::Retry),
+                ..
+            } => match self.state.connection() {
+                Some(connection) => {
+                    return Availability::Ready(Ready {
+                        connection: ConnectionTag(connection),
+                        models: self.catalog.models.clone().unwrap_or_default(),
+                        #[cfg(debug_assertions)]
+                        trusted_draw: false,
+                    });
+                }
+                None => error(ErrorKey::SignInNeeded, Action::SignIn),
+            },
+            AccountView::SignedIn {
+                recovery: Some(AccountRecovery::SignInAgain),
+                ..
+            } => error(ErrorKey::SessionEnded, Action::SignIn),
+            AccountView::SignedIn {
+                plan: PlanState::Declined,
+                ..
+            } => error(ErrorKey::PlanNotEnabled, Action::Enable),
+            AccountView::SignedIn {
+                plan: PlanState::Unavailable,
+                ..
+            } => UserError::from(ErrorKey::PlanUnavailable),
+            AccountView::Busy => error(ErrorKey::CredentialsUnavailable, Action::Retry),
+            AccountView::SignedOut { .. }
+            | AccountView::SigningIn
+            | AccountView::SigningOut { .. } => error(ErrorKey::SignInNeeded, Action::SignIn),
+        };
+        Availability::Unavailable(reason)
+    }
+
     /// The last catalog read in this epoch, if one succeeded.
     pub(super) fn models(&self) -> Option<&[ModelInfo]> {
         self.catalog.models.as_deref()
@@ -312,6 +360,8 @@ impl Accounts {
                     authorization,
                 } => drop(tokio::spawn(exchange_task(
                     attempt,
+                    // The top bit keeps it apart from sets saved before connections, which read 0.
+                    self.salt.wrapping_add(attempt) | 1 << 63,
                     authorization,
                     self.net.clone(),
                     self.events_tx.clone(),
@@ -406,6 +456,8 @@ impl Brain {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
         let frames = self.account.handle(event);
+        self.availability_changed(link.as_deref_mut())
+            .map_err(|_| Full)?;
         if read
             && let Some(choice) = self
                 .account
@@ -616,6 +668,7 @@ async fn validate_task(
 
 pub(super) async fn exchange_task(
     attempt: u64,
+    connection: u64,
     authorization: Authorization,
     net: Net,
     events: mpsc::UnboundedSender<Input>,
@@ -646,6 +699,7 @@ pub(super) async fn exchange_task(
             tokens,
             identity,
             now,
+            connection,
         })
     }
     .await;

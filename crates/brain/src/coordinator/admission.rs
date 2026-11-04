@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
+use super::availability::sign_in_needed;
 use super::{Coordinator, Effect, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
-use crate::engines::RunRequest;
+use crate::engines::{DRAW, RunRequest};
 use crate::store::Failure;
 
 /// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
@@ -85,6 +86,8 @@ pub(super) struct Build {
     /// A voided build's rebuild waits until these deletes are answered.
     blocked: BTreeSet<ThreadId>,
     admitted: bool,
+    /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
+    offers_draw: bool,
     /// The admitted request's sources, checked again before each send.
     sources: Vec<ThreadId>,
 }
@@ -92,6 +95,10 @@ pub(super) struct Build {
 impl Build {
     pub(super) fn admitted(&self) -> bool {
         self.admitted
+    }
+
+    pub(super) fn offers_draw(&self) -> bool {
+        self.offers_draw
     }
 
     pub(super) fn key(&self) -> BuildKey {
@@ -132,6 +139,7 @@ impl Coordinator {
             exposed,
             blocked: BTreeSet::new(),
             admitted: false,
+            offers_draw: false,
             sources: Vec::new(),
         });
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
@@ -192,11 +200,28 @@ impl Coordinator {
             Err(Unbuilt::TooLarge) => return self.fail(key.run, Failure::Budget, effects),
             Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
         };
+        let first = current.snapshot.is_none();
         if let Some(snapshot) = snapshot {
             current.snapshot.get_or_insert(snapshot);
         }
+        let choice = current
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.clone());
+        let refused = match current.connection {
+            Some(connection) => self.refusal(connection),
+            None => Some(sign_in_needed()),
+        }
+        .or_else(|| first.then(|| self.unlisted(choice.as_ref())).flatten());
+        if let Some(reason) = refused {
+            return self.fail_with(key.run, Failure::Engine, reason, effects);
+        }
+        let offers_draw =
+            made.request.tools.iter().any(|tool| tool.name == DRAW) || self.trusted_draw();
+        let current = self.current(key.run)?;
         let thread = current.thread;
         let build = current.build.as_mut().expect("the build was just matched");
+        build.offers_draw = offers_draw;
         let voided = build.voided(&made.sources);
         if !voided.is_empty() {
             self.rebuild(key, &voided, &pending, effects);
