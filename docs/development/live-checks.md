@@ -12,7 +12,7 @@ flowchart LR
   X[cargo xtask live signin] -->|cargo build, 20 min bound| B[kumochid.exe, dev build]
   X -->|copies| F["target/live/&lt;time&gt;/bin"]
   X -->|runs, 8 min bound| C["kumochi.exe (a copy of xtask)"]
-  C -->|starts, KUMOCHI_LIVE_BUDGET=0, no console output| D[kumochid.exe]
+  C -->|starts in its kill-on-close job, KUMOCHI_LIVE_BUDGET=0, no console output| D[kumochid.exe]
   C <-->|control and data pipes| D
   D -->|opens| W[browser]
 ```
@@ -22,8 +22,13 @@ flowchart LR
   gate, the brain uses the developer's real `%LOCALAPPDATA%` and the dev credential service, since
   the point is a signed-in dev account that later checks and the dev shell use. Debug names keep it
   away from an installed Kumochi, and a release xtask refuses to run.
-- It refuses to start while any `kumochi.exe` or `kumochid.exe` runs: a dev brain holds the
-  session's pipes and the account's session lock.
+- Both sides refuse a release build, and the copied harness takes no folder: it runs only the
+  brain beside its own executable. It refuses to start while any `kumochi.exe` or `kumochid.exe`
+  runs, and the copy checks again, leaving out itself, right before it starts the brain, since a
+  dev brain holds the session's pipes and the account's session lock.
+- The copy puts itself in a kill-on-close Job Object (`platform::Job`) before it starts the brain,
+  so the brain and anything it starts end with the copy, however it ends: an error, Ctrl-C, Task
+  Manager or the watchdog's `taskkill`.
 - The harness reads no account credential and takes none as an argument. Its one Credential
   Manager read is the per-session instance capability the dev brain has just written, which
   authenticates the pipe exactly as the shell does. It never reads another service: no spike's,
@@ -62,7 +67,7 @@ failures, and check the exact output of every path.
 | Wait | Bound | Then |
 |---|---|---|
 | Building the brain | 20 min [guess] | cargo and its children are ended |
-| The copied harness | 8 min, the final bound on everything below | it and the brain it started are ended |
+| The copied harness | 8 min, the final bound on everything below while it runs | it's ended, and its job ends the brain with it |
 | The client connecting | the gate client's own retries and per-operation pipe timeouts | fails |
 | The first view, and each op's answer | 10 s | fails |
 | The sign-in settling | 330 s from the answer, one deadline however many views arrive: the brain ends its attempt at 5 min | sends `CancelSignIn`, waits 10 s for its answer, fails |
@@ -70,14 +75,15 @@ failures, and check the exact output of every path.
 | Each `taskkill /T /F` | 10 s, then 10 s for the process to go | names every process that may still run |
 
 Ending a process tree is the platform's job (`platform::kill_tree`): std can end one child, not
-what it started. A kill that fails is reported with the pid and the command to end it, beside the
-failure that caused it, and never hidden by it. A brain dropped on an early return is ended the
+what it started. A kill that fails or hangs is reported with the pid and the command to end it,
+and the hung `taskkill`'s own pid, beside the failure that caused it, and never hidden by it. That
+holds even if the root exits meanwhile, since its descendants may not have. A brain dropped on an early return is ended the
 same way, with any failure written to stderr.
 
 ## Known limits
 
-- Ctrl-C reaches every process on the console. The brain treats it as a crash; an exchange already
-  sent is the account machine's outcome-unknown case.
-- If the copied harness dies without `Quitting`, the brain relaunches `bin/kumochi.exe`, which prints
-  usage and exits, and the brain exits after 30 s with no shell. The 8-minute bound ends it sooner.
+- Ctrl-C reaches every process on the console, and the job ends the brain in any case. The brain
+  treats either as a crash; an exchange already sent is the account machine's outcome-unknown case.
+- The watchdog only runs while the copied harness does. Once the copy exits, however it exits, its
+  job has already ended the brain, so nothing is left to watch.
 - Run folders under `target/live/` stay, as the slice 2 gate's do; `cargo clean` removes them.

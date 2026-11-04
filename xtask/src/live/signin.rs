@@ -3,7 +3,6 @@
 //! never a frame, a client error or its tail, so names, titles and tokens have no way out.
 
 use std::io::{self, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail, ensure};
@@ -41,8 +40,8 @@ impl Wire for Client {
 }
 
 /// The copied harness: starts the brain with no model budget, signs in, and quits it.
-pub(super) fn inner(bin: &Path) -> Result<()> {
-    let brain = Brain::start(bin, 0)?;
+pub(super) fn inner() -> Result<()> {
+    let brain = Brain::start(0)?;
     let (signed_in, quit_sent) = session(Client::connect(), &mut io::stdout().lock());
     let cleanup = if quit_sent {
         brain.quit()
@@ -132,7 +131,8 @@ fn next(wire: &mut impl Wire, limit: Duration) -> Next {
         Frame::Closed => Some(Next::Closed),
         _ => None,
     });
-    // The client's only error is its deadline, and its text holds a Debug tail of frames.
+    // The client also fails when both pipes ended or a pipe ended unpicked, but Closed is picked
+    // first, so its errors mean the deadline here. Their text holds a Debug tail of frames.
     picked.unwrap_or(Next::TimedOut)
 }
 
@@ -222,13 +222,14 @@ mod tests {
     struct Fixture {
         frames: VecDeque<Result<Frame>>,
         sent: Vec<ControlToBrain>,
-        refuse_sends: bool,
+        /// A message whose send fails.
+        refuse: Option<ControlToBrain>,
         limits: Vec<Duration>,
     }
 
     impl Wire for &mut Fixture {
         fn send(&mut self, message: &ControlToBrain) -> Result<()> {
-            if self.refuse_sends {
+            if self.refuse.as_ref() == Some(message) {
                 bail!("WriteFile failed while holding {TOKEN}");
             }
             self.sent.push(message.clone());
@@ -329,17 +330,22 @@ mod tests {
         }
     }
 
-    /// Runs the production session over the fixture: stdout, what `main` would print on stderr,
-    /// and the ops sent. Nothing planted may appear in either output.
-    fn run(fixture: &mut Fixture) -> (String, Option<String>) {
+    /// Runs the production session over the fixture: stdout, the error's text, and whether
+    /// Quitting was sent. Nothing planted may appear in stdout or in the error, as `main` prints
+    /// it or otherwise.
+    fn run(fixture: &mut Fixture) -> (String, Option<String>, bool) {
         let mut out = Vec::new();
-        let (result, _quit_sent) = session(Ok(&mut *fixture), &mut out);
+        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out);
         let out = String::from_utf8(out).expect("utf-8");
-        let error = result.err().map(|error| format!("{error:?}"));
-        for text in [Some(&out), error.as_ref()].into_iter().flatten() {
+        let printed = result.as_ref().err().map(|error| format!("{error:?}"));
+        let error = result.err().map(|error| format!("{error:#}"));
+        for text in [Some(&out), printed.as_ref(), error.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
         }
-        (out, error)
+        (out, error, quit_sent)
     }
 
     fn ops(fixture: &Fixture) -> Vec<ControlToBrain> {
@@ -359,13 +365,14 @@ mod tests {
             Step::View(AccountView::SigningIn),
             Step::View(signed_in(None)),
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, quit_sent) = run(&mut brain);
         assert_eq!(
             out,
             format!("account: signed out\n{WAITING}account: signed in, plan enabled\n")
         );
         assert_eq!(error, None);
         assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+        assert!(quit_sent);
         let [first, answer, settle, again] = brain.limits[..] else {
             panic!("four waits: {:?}", brain.limits);
         };
@@ -379,13 +386,14 @@ mod tests {
     #[test]
     fn an_account_signed_in_is_left_alone() {
         let mut brain = fixture(vec![Step::View(signed_in(None))]);
-        let (out, error) = run(&mut brain);
+        let (out, error, quit_sent) = run(&mut brain);
         assert_eq!(
             out,
             "account: signed in, plan enabled\nalready signed in; nothing to do\n"
         );
         assert_eq!(error, None);
         assert_eq!(ops(&brain), [QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -400,7 +408,7 @@ mod tests {
             Step::View(AccountView::SigningIn),
             Step::View(declined),
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, _) = run(&mut brain);
         assert_eq!(
             out,
             format!("account: signed out\n{WAITING}account: signed in, plan declined\n")
@@ -416,7 +424,7 @@ mod tests {
             Step::View(AccountView::SigningIn),
             Step::View(again()),
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, quit_sent) = run(&mut brain);
         let words = "signed in, plan enabled, needs sign-in again";
         assert_eq!(
             out,
@@ -427,6 +435,7 @@ mod tests {
             Some(format!("sign-in ended with the account {words}").as_str())
         );
         assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -443,7 +452,7 @@ mod tests {
                 Step::View(AccountView::SigningIn),
                 Step::View(end),
             ]);
-            let (out, error) = run(&mut brain);
+            let (out, error, quit_sent) = run(&mut brain);
             assert_eq!(
                 out,
                 format!("account: signed out\n{WAITING}account: {words}\n")
@@ -453,6 +462,7 @@ mod tests {
                 Some(format!("sign-in ended with the account {words}").as_str())
             );
             assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+            assert!(quit_sent);
         }
     }
 
@@ -476,13 +486,14 @@ mod tests {
             ),
         ] {
             let mut brain = fixture(vec![Step::View(first)]);
-            let (out, error) = run(&mut brain);
+            let (out, error, quit_sent) = run(&mut brain);
             assert_eq!(out, format!("account: {words}\n"));
             assert_eq!(
                 error.as_deref(),
                 Some(format!("not signing in while the account is {words}").as_str())
             );
             assert_eq!(ops(&brain), [QUIT]);
+            assert!(quit_sent);
         }
     }
 
@@ -492,7 +503,7 @@ mod tests {
             Step::View(signed_out()),
             Step::View(AccountView::Busy),
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, _) = run(&mut brain);
         let words = "busy: another Windows session holds the account";
         assert_eq!(out, format!("account: signed out\naccount: {words}\n"));
         assert_eq!(
@@ -509,7 +520,7 @@ mod tests {
             Step::Late,
             Step::View(signed_out()),
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, quit_sent) = run(&mut brain);
         assert_eq!(
             out,
             format!("account: signed out\n{WAITING}account: signed out\n")
@@ -519,6 +530,7 @@ mod tests {
             Some("sign-in didn't settle in 330s; it was cancelled")
         );
         assert_eq!(ops(&brain), [SIGN_IN, CANCEL, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -529,7 +541,7 @@ mod tests {
             Step::Late,
             Step::Late,
         ]);
-        let (out, error) = run(&mut brain);
+        let (out, error, _) = run(&mut brain);
         assert_eq!(out, format!("account: signed out\n{WAITING}"));
         assert_eq!(error.as_deref(), Some("no answer to CancelSignIn in 10s"));
     }
@@ -541,21 +553,24 @@ mod tests {
             Step::View(AccountView::SigningIn),
             Step::Closed,
         ]);
-        let (_, error) = run(&mut closed);
+        let (out, error, quit_sent) = run(&mut closed);
+        assert_eq!(out, format!("account: signed out\n{WAITING}"));
         assert_eq!(
             error.as_deref(),
             Some("the brain closed the pipe while signing in")
         );
+        assert!(quit_sent, "the fixture still takes Quitting");
 
         let mut early = fixture(vec![Step::Closed]);
-        let (_, error) = run(&mut early);
+        let (out, error, _) = run(&mut early);
+        assert_eq!(out, "");
         assert_eq!(
             error.as_deref(),
             Some("the brain closed the pipe before the first account view")
         );
 
         let mut silent = fixture(vec![Step::Late]);
-        let (out, error) = run(&mut silent);
+        let (out, error, _) = run(&mut silent);
         assert_eq!(out, "");
         assert_eq!(error.as_deref(), Some("no first account view in 10s"));
     }
@@ -563,16 +578,11 @@ mod tests {
     #[test]
     fn a_failed_send_or_connect_hides_the_pipe_error() {
         let mut brain = fixture(vec![Step::View(signed_out())]);
-        brain.refuse_sends = true;
-        let (out, error) = run(&mut brain);
+        brain.refuse = Some(SIGN_IN);
+        let (out, error, quit_sent) = run(&mut brain);
         assert_eq!(out, "account: signed out\n");
-        assert_eq!(
-            error.as_deref(),
-            Some(
-                "couldn't send SignIn to the brain; cleanup also failed: couldn't send Quitting; \
-                 the brain was ended"
-            )
-        );
+        assert_eq!(error.as_deref(), Some("couldn't send SignIn to the brain"));
+        assert!(quit_sent);
 
         let mut out = Vec::new();
         let (result, quit_sent) = session(
@@ -582,9 +592,47 @@ mod tests {
         assert!(out.is_empty());
         assert!(!quit_sent);
         assert_eq!(
-            format!("{:?}", result.expect_err("fails")),
+            format!("{:#}", result.expect_err("fails")),
             "the brain didn't accept the client"
         );
+    }
+
+    #[test]
+    fn a_failed_quitting_after_a_sign_in_ends_the_brain() {
+        let mut brain = fixture(vec![
+            Step::View(signed_out()),
+            Step::View(AccountView::SigningIn),
+            Step::View(signed_in(None)),
+        ]);
+        brain.refuse = Some(QUIT);
+        let (out, error, quit_sent) = run(&mut brain);
+        assert_eq!(
+            out,
+            format!("account: signed out\n{WAITING}account: signed in, plan enabled\n")
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("couldn't send Quitting; the brain was ended")
+        );
+        assert!(!quit_sent, "the brain is stopped, not waited for");
+    }
+
+    #[test]
+    fn a_failed_cancel_is_reported_and_the_brain_still_quits() {
+        let mut brain = fixture(vec![
+            Step::View(signed_out()),
+            Step::View(AccountView::SigningIn),
+            Step::Late,
+        ]);
+        brain.refuse = Some(CANCEL);
+        let (out, error, quit_sent) = run(&mut brain);
+        assert_eq!(out, format!("account: signed out\n{WAITING}"));
+        assert_eq!(
+            error.as_deref(),
+            Some("couldn't send CancelSignIn to the brain")
+        );
+        assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]

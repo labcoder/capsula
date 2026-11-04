@@ -13,7 +13,7 @@ mod signin;
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -36,32 +36,64 @@ const KILL_LIMIT: Duration = Duration::from_secs(10);
 const EXIT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(50);
 
-pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
-    ensure!(
-        args.next().as_deref() == Some("signin"),
-        "usage: cargo xtask live signin"
-    );
-    match (args.next(), args.next(), args.next()) {
-        (None, _, _) => prepare(),
-        (Some(flag), Some(folder), None) if flag == INNER => {
-            signin::inner(&Path::new(&folder).join("bin"))
-        }
-        _ => bail!("live signin takes no arguments"),
+pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
+    let build = if cfg!(debug_assertions) {
+        Build::Debug
+    } else {
+        Build::Release
+    };
+    match entry(build, &args.collect::<Vec<_>>())? {
+        Entry::Prepare => prepare(),
+        Entry::Inner => signin::inner(),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Build {
+    Debug,
+    Release,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    Prepare,
+    /// The copied harness, which runs the brain beside its own executable.
+    Inner,
+}
+
+/// Which side of the harness the arguments after `live` ask for; both need a debug build.
+fn entry(build: Build, args: &[String]) -> Result<Entry> {
+    ensure!(
+        build == Build::Debug,
+        "run it from a debug xtask (`cargo xtask live signin`): a release one uses the installed \
+         product's pipe and credential names"
+    );
+    match args {
+        [check] if check == "signin" => Ok(Entry::Prepare),
+        [check, flag] if check == "signin" && flag == INNER => Ok(Entry::Inner),
+        _ => bail!("usage: cargo xtask live signin"),
+    }
+}
+
+/// Fails while a product process other than `me` runs: a dev brain holds the pipes the harness
+/// uses and the account's session lock.
+fn refuse_running(running: &[platform::Entry], me: u32) -> Result<()> {
+    let others: Vec<String> = running
+        .iter()
+        .filter(|entry| entry.pid != me)
+        .map(|entry| entry.pid.to_string())
+        .collect();
+    ensure!(
+        others.is_empty(),
+        "close every {SHELL_EXE} and {BRAIN_EXE} first (running: {})",
+        others.join(", ")
+    );
+    Ok(())
 }
 
 /// Builds the dev brain, copies it and this program into a fresh folder, and runs the check there.
 fn prepare() -> Result<()> {
-    ensure!(
-        cfg!(debug_assertions),
-        "run it from a debug xtask (`cargo xtask live signin`): a release one would copy a \
-         release brain, which uses the installed product's pipe and credential names"
-    );
-    ensure!(
-        platform::processes()?.is_empty(),
-        "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the harness \
-         uses and the account's session lock"
-    );
+    refuse_running(&platform::processes()?, std::process::id())?;
     println!("live signin: building the dev brain (at most {BUILD_LIMIT:?})");
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
@@ -81,7 +113,7 @@ fn prepare() -> Result<()> {
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     println!("live signin: running in {}", folder.display());
     let mut inner = Command::new(bin.join(SHELL_EXE));
-    inner.args(["live", "signin", INNER]).arg(&folder);
+    inner.args(["live", "signin", INNER]);
     let ran = run_bounded(inner, RUN_LIMIT, "the live run")?;
     ensure!(ran.success(), "live signin failed ({ran})");
     Ok(())
@@ -117,44 +149,53 @@ fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitSta
 
 /// Ends `child` and everything it started, and reaps it.
 fn end(child: &mut Child) -> Result<()> {
-    end_with(child, platform::kill_tree(child.id())?, KILL_LIMIT)
+    let pid = child.id();
+    let kill = platform::kill_tree(pid).map_err(|error| anyhow!("{error:#}; {}", survivor(pid)))?;
+    end_with(child, kill, KILL_LIMIT)
 }
 
-/// [`end`] with the kill command and its limit given. Never waits on a child the kill didn't end;
-/// an error names every process that may still run.
+fn survivor(pid: u32) -> String {
+    format!("process {pid} may still be running; end it with `taskkill /T /F /PID {pid}`")
+}
+
+/// [`end`] with the kill command and its limit given. Only a root already gone before the kill
+/// counts as ended: a failed or hung kill is an error even if the root exits meanwhile, since its
+/// descendants may not have. Never waits on a child the kill didn't end.
 fn end_with(child: &mut Child, mut kill: Command, limit: Duration) -> Result<()> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
     let pid = child.id();
-    let survivor =
-        || format!("process {pid} may still be running; end it with `taskkill /T /F /PID {pid}`");
+    let fail = |problem: String| anyhow!("{problem}; {}", survivor(pid));
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) => return Err(fail(format!("checking it failed ({error})"))),
+    }
     let mut killer = kill
         .spawn()
-        .with_context(|| format!("starting taskkill failed; {}", survivor()))?;
-    let problem = match wait_bounded(&mut killer, limit) {
-        Ok(Some(status)) if status.success() => {
-            if wait_bounded(child, limit)?.is_some() {
-                return Ok(());
-            }
-            format!("taskkill succeeded but the process didn't exit in {limit:?}")
-        }
-        Ok(Some(status)) => format!("taskkill failed ({status})"),
-        Ok(None) | Err(_) => match killer
-            .kill()
-            .and_then(|()| wait_bounded(&mut killer, limit))
-        {
-            Ok(Some(_)) => format!("taskkill didn't finish in {limit:?}"),
-            _ => format!(
-                "taskkill (process {}) didn't finish in {limit:?} and couldn't be ended",
-                killer.id()
-            ),
+        .map_err(|error| fail(format!("starting taskkill failed ({error})")))?;
+    let killer_pid = killer.id();
+    match wait_bounded(&mut killer, limit) {
+        Ok(Some(status)) if status.success() => match wait_bounded(child, limit) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(fail(format!(
+                "taskkill succeeded but the process didn't exit in {limit:?}"
+            ))),
+            Err(error) => Err(fail(format!("reaping it failed ({error})"))),
         },
-    };
-    if child.try_wait()?.is_some() {
-        return Ok(());
+        Ok(Some(status)) => Err(fail(format!("taskkill failed ({status})"))),
+        Ok(None) | Err(_) => {
+            let ended = killer
+                .kill()
+                .and_then(|()| wait_bounded(&mut killer, limit));
+            let killer_state = if matches!(ended, Ok(Some(_))) {
+                "was ended"
+            } else {
+                "may still be running"
+            };
+            Err(fail(format!(
+                "taskkill (process {killer_pid}) didn't finish in {limit:?} and {killer_state}"
+            )))
+        }
     }
-    bail!("{problem}; {}", survivor())
 }
 
 /// A failure, with a cleanup failure after it if there was one.
@@ -187,8 +228,16 @@ struct Brain {
 }
 
 impl Brain {
-    /// Starts the brain beside the harness, with its model-request budget and no console output.
-    fn start(bin: &Path, budget: u32) -> Result<Self> {
+    /// Starts the brain beside this executable, with its model-request budget and no console
+    /// output, inside a kill-on-close job this process holds, so the brain can't outlive it.
+    /// Refuses while another product process runs.
+    fn start(budget: u32) -> Result<Self> {
+        let me = std::env::current_exe()?;
+        let bin = me.parent().context("the harness has a folder")?;
+        platform::Job::kill_on_close()
+            .and_then(platform::Job::hold_self)
+            .context("putting the run in a job")?;
+        refuse_running(&platform::processes()?, std::process::id())?;
         let child = Command::new(bin.join(BRAIN_EXE))
             .env(LIVE_BUDGET_ENV, budget.to_string())
             .stdin(Stdio::null())
@@ -225,10 +274,15 @@ impl Drop for Brain {
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use super::{end, end_with, run_bounded, wait_bounded, warn_cleanup, with_cleanup};
+    use super::{
+        Build, Entry, end, end_with, entry, refuse_running, run_bounded, wait_bounded,
+        warn_cleanup, with_cleanup,
+    };
+    use crate::platform;
 
     const SHORT: Duration = Duration::from_millis(200);
 
@@ -277,7 +331,7 @@ mod tests {
     #[test]
     fn a_run_past_its_limit_is_ended_and_a_failed_one_returns_its_status() {
         let error = run_bounded(held(), SHORT, "the fixture").expect_err("times out");
-        assert_eq!(format!("{error:?}"), "the fixture didn't finish in 200ms");
+        assert_eq!(format!("{error:#}"), "the fixture didn't finish in 200ms");
         let status = run_bounded(exits(3), SHORT * 50, "the fixture").expect("finishes");
         assert_eq!(status.code(), Some(3));
     }
@@ -303,12 +357,19 @@ mod tests {
     fn a_hung_kill_is_ended_and_the_survivor_named() {
         let mut child = held().spawn().expect("cmd starts");
         let pid = child.id();
-        let error = end_with(&mut child, held(), SHORT).expect_err("the kill hangs");
+        let killer = held();
+        let error = end_with(&mut child, killer, SHORT).expect_err("the kill hangs");
+        let killer = error
+            .to_string()
+            .split_once("(process ")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(pid, _)| pid.to_owned())
+            .expect("the killer's pid is named");
         assert_eq!(
-            format!("{error:?}"),
+            format!("{error:#}"),
             format!(
-                "taskkill didn't finish in 200ms; process {pid} may still be running; end it \
-                 with `taskkill /T /F /PID {pid}`"
+                "taskkill (process {killer}) didn't finish in 200ms and was ended; process {pid} \
+                 may still be running; end it with `taskkill /T /F /PID {pid}`"
             )
         );
         reap(child);
@@ -320,16 +381,81 @@ mod tests {
         let cleanup = || Err(anyhow::anyhow!("process 7 may still be running"));
         assert!(with_cleanup(Ok(()), Ok(())).is_ok());
         let only_run = with_cleanup(failed(), Ok(())).expect_err("fails");
-        assert_eq!(format!("{only_run:?}"), "the run failed");
+        assert_eq!(format!("{only_run:#}"), "the run failed");
         let only_cleanup = with_cleanup(Ok(()), cleanup()).expect_err("fails");
         assert_eq!(
-            format!("{only_cleanup:?}"),
+            format!("{only_cleanup:#}"),
             "process 7 may still be running"
         );
         let both = with_cleanup(failed(), cleanup()).expect_err("fails");
         assert_eq!(
-            format!("{both:?}"),
+            format!("{both:#}"),
             "the run failed; cleanup also failed: process 7 may still be running"
+        );
+    }
+
+    #[test]
+    fn a_failed_kill_stays_an_error_after_the_root_exits() {
+        let mut child = held().spawn().expect("cmd starts");
+        let pid = child.id();
+        // Ends the root, as a partial tree kill would, then reports failure.
+        let mut kill = Command::new("cmd");
+        kill.arg("/C")
+            .raw_arg(format!("taskkill /F /PID {pid} >nul & exit 1"));
+        let error =
+            end_with(&mut child, kill, Duration::from_secs(10)).expect_err("the kill failed");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "taskkill failed (exit code: 1); process {pid} may still be running; end it with \
+                 `taskkill /T /F /PID {pid}`"
+            )
+        );
+        child.wait().expect("the root is reaped");
+    }
+
+    #[test]
+    fn both_sides_refuse_a_release_build_and_take_no_folder() {
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let release = "run it from a debug xtask (`cargo xtask live signin`): a release one uses \
+                       the installed product's pipe and credential names";
+        for list in [&["signin"][..], &["signin", "--inner"]] {
+            let error = entry(Build::Release, &args(list)).expect_err("release");
+            assert_eq!(format!("{error:#}"), release);
+        }
+        assert_eq!(
+            entry(Build::Debug, &args(&["signin"])).expect("debug"),
+            Entry::Prepare
+        );
+        assert_eq!(
+            entry(Build::Debug, &args(&["signin", "--inner"])).expect("debug"),
+            Entry::Inner
+        );
+        for list in [
+            &[][..],
+            &["signin", "--inner", "C:/elsewhere"],
+            &["signin", "C:/elsewhere"],
+            &["first-text"],
+        ] {
+            let error = entry(Build::Debug, &args(list)).expect_err("refused");
+            assert_eq!(format!("{error:#}"), "usage: cargo xtask live signin");
+        }
+    }
+
+    #[test]
+    fn only_the_harness_itself_may_run_at_launch() {
+        let entry = |pid, shell| platform::Entry {
+            pid,
+            parent: 1,
+            shell,
+        };
+        refuse_running(&[], 7).expect("nothing runs");
+        refuse_running(&[entry(7, true)], 7).expect("the copied harness is itself");
+        let error = refuse_running(&[entry(7, true), entry(9, false), entry(11, true)], 7)
+            .expect_err("a brain and a shell run");
+        assert_eq!(
+            format!("{error:#}"),
+            "close every kumochi.exe and kumochid.exe first (running: 9, 11)"
         );
     }
 }
