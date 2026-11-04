@@ -17,7 +17,8 @@ use super::kumo::{Animator, Look, Mood, Motion, Renderer, Silhouette};
 use super::line::on_next_frame;
 use super::pulling::{Phase, Pulling};
 use super::{Presence, diagnostics};
-pub(super) use pull::{PullChanged, PullSite, bridge};
+use crate::presenter::overlay_input::DragLease;
+pub(super) use pull::{LeaseReturned, PullChanged, PullSite, bridge};
 
 /// Kumo's size in the peek, in logical pixels.
 pub(super) const SIZE: f32 = 64.0;
@@ -43,6 +44,8 @@ pub(super) struct KumoView {
     /// Time spent shading and wrapping frames, for the Quit totals.
     shading: Duration,
     pulling: Pulling,
+    pub(super) owner: Option<gpui_kit::WeakEntity<Presence>>,
+    lease: Option<DragLease>,
     /// Where a grab starts, from the line Windows last accepted.
     site: Option<PullSite>,
     /// The peek's client origin at the grab, physical screen pixels.
@@ -68,6 +71,8 @@ impl KumoView {
             unchanged: 0,
             shading: Duration::ZERO,
             pulling: Pulling::default(),
+            owner: None,
+            lease: None,
             site: None,
             origin: [0, 0],
             closing: false,

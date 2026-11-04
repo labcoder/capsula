@@ -68,6 +68,10 @@ pub struct ThreadId(pub u64);
 )]
 pub struct RunId(pub u64);
 
+/// A hold gesture, counted up by the shell on each connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GestureId(pub u32);
+
 /// The shell's first frame on each pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
