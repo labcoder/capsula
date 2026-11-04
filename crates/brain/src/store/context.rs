@@ -7,7 +7,7 @@ use kumochi_protocol::message::{EventId, ModelChoice, RunId, ThreadId, ThreadKin
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::threads::{choice_of, kind_of};
-use super::{StoreError, row_id, sql_id};
+use super::{Generation, StoreError, row_id, sql_id};
 
 /// A thread as a reference finds it.
 #[derive(Clone, PartialEq, Eq)]
@@ -76,6 +76,22 @@ impl fmt::Debug for Excerpt {
             .field("shown", &self.shown)
             .field("cut", &self.cut)
             .field("more", &self.more)
+            .finish()
+    }
+}
+
+/// A task's first ask, for its title job, and the deletion generation it was read in.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct FirstAsk {
+    pub(crate) generation: Generation,
+    pub(crate) text: String,
+}
+
+impl fmt::Debug for FirstAsk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FirstAsk")
+            .field("generation", &self.generation)
+            .field("text_bytes", &self.text.len())
             .finish()
     }
 }
@@ -221,6 +237,35 @@ impl Snapshot<'_> {
             excerpt.shown = Some((start, id));
         }
         Ok(excerpt)
+    }
+
+    /// A live task's first ask, while its title is still its first words; `None` for the main
+    /// thread, a task being deleted or gone, or one the user or a model titled.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn first_ask(&self, thread: ThreadId) -> Result<Option<FirstAsk>, StoreError> {
+        let Ok(id) = sql_id(thread.0, StoreError::NoThread) else {
+            return Ok(None);
+        };
+        let found = self
+            .0
+            .query_row(
+                "SELECT threads.deletion_generation, coalesce(events.text, '')
+                 FROM threads JOIN events ON events.thread = threads.id
+                 WHERE threads.id = ?1 AND threads.state = 'live' AND threads.kind = 'thread'
+                 AND threads.title_source = 'words' AND events.kind = 'user'
+                 ORDER BY events.id LIMIT 1",
+                params![id],
+                |row| {
+                    Ok(FirstAsk {
+                        generation: Generation(row.get(0)?),
+                        text: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(found)
     }
 
     /// A live thread's stored model choice.

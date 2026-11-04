@@ -99,6 +99,13 @@ impl Presence {
                     self.runs.refused();
                     self.sync_deletes(cx);
                 }
+                LinkEvent::ThreadsChanged => {
+                    self.threads.update(cx, |state, cx| {
+                        state.changed();
+                        cx.notify();
+                    });
+                    self.request_pages(cx);
+                }
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }

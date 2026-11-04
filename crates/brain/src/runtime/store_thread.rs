@@ -482,7 +482,10 @@ impl StoreThread {
     /// Queues an operation, a page read or a context build with the page reader. False when the thread has gone,
     /// which only a panic there causes.
     pub(crate) fn send(&self, op: StoreOp) -> bool {
-        if matches!(op, StoreOp::ReadPage { .. } | StoreOp::BuildContext(_)) {
+        if matches!(
+            op,
+            StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadTitle(_)
+        ) {
             let stamp = self.accepted.load(Ordering::Relaxed);
             return self.reads.send(Read { stamp, op }).is_ok();
         }
@@ -517,7 +520,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::DrawingWritten { serial, reply });
             purger.op_arrived(store);
         }
-        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) => {
+        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadTitle(_) => {
             unreachable!("StoreThread::send hands reads to the reader")
         }
         StoreOp::ClearScenes { scenes } => {
@@ -549,9 +552,22 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             thread,
             title,
             source,
-        } => unanswered(store, purger, thread, "title", |store| {
-            store.set_title(thread, &title, source)
-        }),
+            job,
+        } => {
+            purger.op_arriving();
+            let applied = match store
+                .reconnect()
+                .and_then(|()| store.set_title(thread, &title, source))
+            {
+                Ok(applied) => applied,
+                Err(error) => {
+                    tracing::warn!(%error, thread = thread.0, "a title wasn't stored");
+                    false
+                }
+            };
+            answer(acks, Input::TitleSet { job, applied });
+            purger.op_arrived(store);
+        }
         StoreOp::SetModel { thread, choice } => {
             unanswered(store, purger, thread, "model choice", |store| {
                 store.set_model(thread, &choice)

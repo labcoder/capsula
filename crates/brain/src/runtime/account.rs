@@ -254,6 +254,11 @@ impl Accounts {
         }
     }
 
+    /// The account's catalog epoch while it can send model requests: its generation for jobs.
+    pub(super) fn sendable(&self) -> Option<u64> {
+        self.catalog.usable.then_some(self.catalog.epoch)
+    }
+
     /// The last catalog read in this epoch, if one succeeded.
     pub(super) fn models(&self) -> Option<&[ModelInfo]> {
         self.catalog.models.as_deref()
@@ -405,7 +410,18 @@ impl Brain {
     ) -> Result<(), Full> {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
+        let sendable = self.account.sendable();
         let frames = self.account.handle(event);
+        // The coordinator hears it before anything else, so a job's write is fenced at once.
+        let now = self.account.sendable();
+        if now != sendable {
+            if let Some(generation) = sendable {
+                self.offline(crate::coordinator::Input::SignedOut { generation });
+            }
+            if let Some(generation) = now {
+                self.offline(crate::coordinator::Input::SignedIn { generation });
+            }
+        }
         if read
             && let Some(choice) = self
                 .account

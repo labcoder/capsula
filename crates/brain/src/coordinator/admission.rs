@@ -145,6 +145,7 @@ impl Coordinator {
 
     /// A delete was accepted: the current build may have read its thread.
     pub(super) fn expose(&mut self, thread: ThreadId) {
+        self.expose_job(thread);
         if let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) {
             build.exposed.insert(thread);
         }

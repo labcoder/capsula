@@ -11,6 +11,7 @@ pub mod credential;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
+mod jobs;
 pub mod logging;
 pub mod platform;
 mod relaunch;

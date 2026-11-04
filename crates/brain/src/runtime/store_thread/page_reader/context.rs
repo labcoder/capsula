@@ -2,8 +2,8 @@
 //! before it, so a delete sent first is always seen.
 
 use crate::context::build::{Turn, build};
-use crate::context::{BOUND, BuildError, Supplied};
-use crate::coordinator::{BuildContext, ContextBuilt, Unbuilt};
+use crate::context::{BOUND, BuildError, Built, Supplied};
+use crate::coordinator::{BuildContext, ContextBuilt, JobBuilt, ReadTitle, TitleAsk, Unbuilt};
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
 
@@ -65,4 +65,47 @@ pub(super) fn read(
         snapshot: Some(snapshot),
         result,
     }
+}
+
+/// Reads a title job's request on `side`, or fails it when the store closed before its turn
+/// (`None`): the task's first ask and deletion generation, and its model choice into the job's
+/// snapshot, in one read transaction. Failures are logged by kind only.
+pub(super) fn read_title(
+    side: Option<&Side>,
+    job: ReadTitle,
+    #[cfg(test)] hold: impl FnOnce(),
+) -> JobBuilt {
+    let ReadTitle { key, snapshot } = job;
+    let Some(mut snapshot) = snapshot else {
+        tracing::error!("a title read reached the store without its snapshot");
+        return JobBuilt {
+            key,
+            result: Err(Unbuilt::Failed),
+        };
+    };
+    let read = side.map_or(Err(StoreError::Closed), |side| {
+        side.read(|conn| {
+            let read = Snapshot::begin(conn)?;
+            #[cfg(test)]
+            hold();
+            let ask = read.first_ask(key.thread)?;
+            snapshot.choice = read.choice(key.thread)?.or(snapshot.choice.take());
+            read.end()?;
+            Ok(ask)
+        })
+    });
+    let result = match read {
+        Ok(ask) => Ok(ask.map(|ask| TitleAsk {
+            generation: ask.generation,
+            built: Built {
+                request: crate::jobs::title_request(&snapshot, &ask.text),
+                sources: vec![key.thread],
+            },
+        })),
+        Err(error) => {
+            tracing::warn!(%error, thread = key.thread.0, "a title read failed");
+            Err(Unbuilt::Failed)
+        }
+    };
+    JobBuilt { key, result }
 }

@@ -275,6 +275,21 @@ impl Threads {
         }
     }
 
+    /// The brain changed a listed thread, such as its title: the list is read again, or the read
+    /// in flight earns one more.
+    pub(crate) fn changed(&mut self) {
+        if self.searching() {
+            return;
+        }
+        if let Some(pending) = &mut self.list_pending {
+            pending.stale = true;
+            return;
+        }
+        if self.list_needed.is_none() {
+            self.list_needed = Some(Read::Repair);
+        }
+    }
+
     /// Marks requests in flight before handing them to the nonblocking sender. A failed send
     /// disconnects this state; changing a query or selection never frees an unanswered slot.
     pub(crate) fn requests(&mut self) -> Vec<DataToBrain> {
