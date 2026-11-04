@@ -895,7 +895,7 @@ fn a_verified_set_that_is_due_is_renewed_once_before_it_is_handed_out() {
 fn a_bearer_that_expires_during_its_save_is_renewed() {
     let mut h = Harness::seeded("refresh-slow-save", account_at(NOW + 120, Some("id-old")));
     h.access(1, NOW);
-    h.store.0.lock().expect("fake lock").slow_write = Some((h.wall.unix.clone(), 180));
+    h.store.0.lock().expect("fake lock").slow_write = Some((Arc::clone(&h.wall.unix), 180));
     h.validated(identity("subject-1"));
     assert!(h.answers.is_empty(), "no bearer that expired in its save");
     assert_eq!(
