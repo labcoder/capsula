@@ -86,3 +86,61 @@ downloads. A destination that already matches the manifest is kept. Any other ex
 is a conflict: the task checks every destination before it links anything, and if one conflicts it
 links nothing, changes nothing and names the file, to be moved aside by hand. If a link fails
 partway, the links that run made are removed. Run it again after `cargo clean`.
+
+## Speech input
+
+`platform::sherpa` runs Parakeet through sherpa-onnx's C API, loaded at run time. Everything it
+makes lives on the thread that loaded it.
+
+- **Recognizer:** Parakeet's transducer files, 8 CPU threads and greedy search.
+- **Audio:** mono 16-bit PCM at its capture rate, converted to `f32` once and passed to sherpa-onnx's
+  `AcceptWaveformOffline`, which resamples it. Empty audio, a zero rate and lengths past `i32` are
+  refused before any native call.
+- **Text:** at most 16 KiB of UTF-8, copied out before the result is destroyed.
+- **Errors** are `NativeError` values, which carry no native text and no paths. sherpa-onnx itself
+  prints one line to stderr when it resamples (see [voice-natives.md](voice-natives.md)).
+
+### The FFI owner
+
+`platform::sherpa` is the only code that calls sherpa-onnx. Its ten C functions sit in a private
+table resolved once at load, and the `#[repr(C)]` structs are transcribed from v2.0.1's `c-api.h`.
+Compile-time assertions pin their sizes, alignments and the offsets Kumochi writes or reads, and
+`measure_sherpa_layout` checks the same values against the header with `cl` on Rez. Every native
+object becomes a guard as soon as it's created. The guards borrow from each other, so they're
+destroyed in order: result, stream, recognizer, sherpa-onnx, then ONNX Runtime. Nothing in the
+module is `Send`.
+
+### The loader policy
+
+`Sherpa::load` stops at the first failure:
+
+1. **Closure check.** If any module named like one the two DLLs import (the list in
+   `NATIVE_CLOSURE`, from [voice-natives.md](voice-natives.md)) is already loaded from anywhere but
+   its place, it refuses with `Conflict` and loads nothing. The pins must be exactly at the natives
+   folder, and everything else directly in the system folder. Windows binds an import to an
+   already-loaded module of that name, whatever folder it came from.
+2. **Pins.** Each DLL is opened against writers and deleters, and its size and SHA-256 are checked
+   through that handle, which stays open until the DLL is loaded.
+3. **Loads.** ONNX Runtime, then sherpa-onnx, by full path with `LOAD_LIBRARY_SEARCH_SYSTEM32`:
+   sherpa-onnx's `onnxruntime.dll` import binds to the one just loaded, and every other import
+   comes from the system folder, never from the DLL's folder, `PATH` or the current directory. A
+   missing system dependency, most likely the VC++ runtime, is `Dependency`.
+4. **Inventory.** The closure check runs again, and every module that appeared must be a pin or a
+   system module, or both DLLs unload and it's `Unexpected`.
+5. **Release check.** `SherpaOnnxGetVersionStr` must be `2.0.1` and `SherpaOnnxGetGitSha1`
+   `af2d8d81`, or it's `Abi`.
+
+The installer must not put a VC++ runtime beside `kumochid.exe`: the brain imports
+`VCRUNTIME140.dll` itself, so an app-local copy would load first and make speech input refuse with
+`Conflict`.
+
+### Checks on Rez
+
+These are ignored in CI and read the real DLLs (`SHERPA_NATIVES`, by default beside the test
+binary's profile folder), and the header (`SHERPA_INCLUDE`):
+
+- `measure_sherpa_layout` compiles a probe against `c-api.h` and compares every layout value.
+- `measure_native_imports` checks `NATIVE_CLOSURE` against `dumpbin /dependents` of both DLLs,
+  minus API sets and `KnownDLLs`.
+- `measure_planted_neighbor` plants an `MSVCP140.dll` beside copies of the pins and checks the
+  system one loads instead.
