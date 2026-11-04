@@ -75,6 +75,21 @@ const SCENES_WAIT: Duration = Duration::from_secs(2);
 /// in it is accepted [guess].
 const QUIT_GRACE: Duration = Duration::from_millis(250);
 
+/// [`CLOSE_WAIT`]; tests choose their own, so a slow runner never races it.
+#[cfg(not(test))]
+fn close_wait() -> Duration {
+    CLOSE_WAIT
+}
+
+/// [`SCENES_WAIT`]; tests choose their own, so a slow runner never races it.
+#[cfg(not(test))]
+fn scenes_wait() -> Duration {
+    SCENES_WAIT
+}
+
+#[cfg(test)]
+use tests::{close_wait, scenes_wait};
+
 /// How a shell connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
@@ -353,9 +368,9 @@ impl Brain {
     /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
-        let deadline = Instant::now() + CLOSE_WAIT;
+        let deadline = Instant::now() + close_wait();
         self.pump_settings_offline();
-        let settled = tokio::time::timeout(CLOSE_WAIT, async {
+        let settled = tokio::time::timeout(close_wait(), async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {
                     break;
@@ -369,7 +384,7 @@ impl Brain {
             tracing::warn!(ending, "closing before the store confirmed every run");
         }
         if let Some(store) = self.store.take() {
-            match tokio::time::timeout(CLOSE_WAIT, store.close()).await {
+            match tokio::time::timeout(close_wait(), store.close()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => tracing::error!("the store thread panicked"),
                 Err(_) => tracing::warn!("the store thread didn't finish in time"),
@@ -416,7 +431,7 @@ impl Brain {
         let effects = self.coordinator.retry_clears();
         self.apply(effects, None)
             .expect("offline effects cannot fill a shell queue");
-        tokio::time::timeout(SCENES_WAIT, async {
+        tokio::time::timeout(scenes_wait(), async {
             while !pending.is_empty() || !self.coordinator.settled() {
                 let Some(input) = self.inputs.recv().await else {
                     return false;
@@ -583,7 +598,7 @@ impl Brain {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
-        let barrier = Instant::now() + SCENES_WAIT;
+        let barrier = Instant::now() + scenes_wait();
         if let Err(ended) = self.open(&mut link) {
             return ended;
         }

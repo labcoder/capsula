@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"delta":"Partial"}
+
+event: response.failed
+data: {"type":"response.failed","sequence_number":3,"response":{"id":"resp_fixture","status":"failed","error":{"code":"subscription_sharing_usage_limit_exceeded","message":"PLANTED-PROSE usage limit"}}}
+

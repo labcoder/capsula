@@ -71,7 +71,10 @@ pub(crate) enum PresenceEvent {
         qpc: i64,
     },
     /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
-    PointerChanged,
+    /// `entered_qpc` is the counter when the entering move was dispatched, `None` on leave.
+    PointerChanged {
+        entered_qpc: Option<i64>,
+    },
     /// The user picked a dock position in the tray menu, an index into `positions`.
     Position(usize),
     /// The user picked Retry in the tray menu.
@@ -160,6 +163,7 @@ impl Hover {
         if inside == self.inside.get() {
             return;
         }
+        let entered_qpc = inside.then(performance_counter);
         if inside {
             let mut track = TRACKMOUSEEVENT {
                 cbSize: struct_size::<TRACKMOUSEEVENT>(),
@@ -174,7 +178,7 @@ impl Hover {
             }
         }
         self.inside.set(inside);
-        send(&self.events, PresenceEvent::PointerChanged);
+        send(&self.events, PresenceEvent::PointerChanged { entered_qpc });
     }
 }
 
@@ -296,14 +300,15 @@ impl PresenceNative {
     }
 
     /// Gives the proxy its owned pixels, where `spans` names a screen row's owned columns as
-    /// up to two `[left, right)` spans, and moves it to `window` when that changed.
+    /// up to [`ROW_SPANS`](crate::platform::ROW_SPANS) `[left, right)` spans, and moves it to
+    /// `window` when that changed.
     ///
     /// # Errors
     /// Fails when `window` outgrows the mask or Windows refuses the update.
     pub(crate) fn reshape(
         &mut self,
         window: [i32; 4],
-        spans: impl Fn(i32) -> [Option<[i32; 2]>; 2],
+        spans: impl Fn(i32) -> crate::platform::RowSpans,
     ) -> Result<MaskUpdate, PresenceError> {
         self.mask.update(self.hwnd, window, spans)
     }

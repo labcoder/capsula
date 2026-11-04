@@ -33,6 +33,9 @@ mod retirement;
 #[path = "dead_dropper_tests.rs"]
 mod dead_dropper;
 
+#[path = "window_tests.rs"]
+mod consumption;
+
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
 #[expect(
@@ -802,7 +805,7 @@ fn a_freed_worker_slot_starts_the_waiting_step() {
         .completed(zombie.run(&mut Shaper), ms(now, 100))
         .expect("a stale answer");
     assert_eq!(only_job(effects).scene(), LIVE);
-    assert_eq!(presenter.deadline(), Some(ms(now, 350)));
+    assert_eq!(presenter.deadline(), Some(ms(now, 250)));
 }
 
 #[test]

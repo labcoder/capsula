@@ -490,6 +490,77 @@ fn a_text_only_batch_frees_its_container_on_the_caller() {
     drop(release);
 }
 
+#[test]
+fn a_mixed_batch_retires_its_buffer_when_scene_data_arrives_last() {
+    let release = crate::presenter::tests::hold_dropper();
+    let (sender, receiver) = async_channel::unbounded();
+    sender
+        .send_blocking(LinkEvent::Data {
+            generation: 1,
+            message: text(2, ""),
+            bytes: 40,
+        })
+        .expect("second text event");
+    sender
+        .send_blocking(LinkEvent::SceneData {
+            generation: 1,
+            frame: kumochi_scene::deferred::Deferred::new(
+                DataToShell::ScenesRemoved { scenes: Vec::new() },
+                0,
+            ),
+            bytes: 40,
+        })
+        .expect("scene event last");
+    let batch = super::batch(
+        LinkEvent::Data {
+            generation: 1,
+            message: text(1, ""),
+            bytes: 40,
+        },
+        &receiver,
+    );
+    assert_eq!(batch.len(), 3);
+    assert_eq!(receiver.len(), 0);
+    assert!(matches!(&batch, super::Batch::Scene(_)));
+    let ((), _, [_, released]) = crate::allocation::usage(|| drop(batch));
+    assert_eq!(released, 0, "the mixed batch's buffer leaves the caller");
+    drop(release);
+}
+
+#[test]
+fn a_full_batch_leaves_the_next_event_queued() {
+    let (sender, receiver) = async_channel::unbounded();
+    for index in 1..=256 {
+        sender
+            .send_blocking(LinkEvent::Data {
+                generation: 1,
+                message: text(index, ""),
+                bytes: 40,
+            })
+            .expect("queued text event");
+    }
+    let batch = super::batch(
+        LinkEvent::Data {
+            generation: 1,
+            message: text(0, ""),
+            bytes: 40,
+        },
+        &receiver,
+    );
+    assert_eq!(batch.len(), 256);
+    assert_eq!(receiver.len(), 1);
+    let LinkEvent::Data {
+        message: DataToShell::AssistantText { run, delta },
+        ..
+    } = receiver.try_recv().expect("the 257th event stays queued")
+    else {
+        panic!("the next text event");
+    };
+    assert_eq!(run, RunId(256));
+    assert_eq!(delta, "");
+    assert_eq!(receiver.len(), 0);
+}
+
 /// The link's events with a timeout on each.
 fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
     let (sender, receiver) = mpsc::channel();

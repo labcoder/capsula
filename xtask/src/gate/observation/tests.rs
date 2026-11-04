@@ -4,10 +4,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) const STARTUP: &str = "startup version=1 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n";
+pub(super) const STARTUP: &str = "startup version=2 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n";
 pub(super) const GEOMETRY: &str =
-    "geometry id=1 origin_y=-1 rows=2 trimmed=true spans=0:4,0:4,-;-,-,-\n";
-pub(super) const COMMIT: &str = "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=-2,-3,10,10\n";
+    "geometry id=1 origin_y=-1 rows=2 trimmed=true spans=0:4,-,0:4,-,-,-;-,-,0:4,-,-,-\n";
+pub(super) const COMMIT: &str =
+    "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-1,4,2\n";
 
 pub(super) fn directory() -> std::path::PathBuf {
     let stamp = SystemTime::now()
@@ -105,7 +106,10 @@ fn incremental_reader_buffers_partial_lines_and_retains_bootstrap_frames() {
     let geometry = &observation.geometries[&1];
     assert!(geometry.contains_drawn([0, -1]), "left edge is drawn");
     assert!(!geometry.contains_owned([4, -1]), "right edge is excluded");
-    assert!(!geometry.contains_owned([0, 0]), "empty row owns nothing");
+    assert!(
+        geometry.contains_owned([0, 0]) && !geometry.contains_drawn([0, 0]),
+        "the band owns a row the line doesn't draw"
+    );
     reader.complete().unwrap();
     assert_eq!(
         reader.update().unwrap().frames.len(),
@@ -134,7 +138,7 @@ fn rejects_unknown_fields_refs_losses_and_invalid_span_unions() {
         valid.replace("seq=1", "seq=2"),
         valid.replace("begin_qpc=10", "begin_qpc=12"),
         valid.replace("geometry=1", "geometry=2"),
-        valid.replace("spans=0:4,0:4,-", "spans=0:4,0:3,-"),
+        valid.replace("spans=0:4,-,0:4,-,-,-", "spans=0:4,-,0:3,-,-,-"),
         valid.replace("rows=2", "rows=513"),
         valid.replace("trimmed=true", "trimmed=false"),
         valid.replace("dropped=0", "dropped=1"),
@@ -150,7 +154,9 @@ fn rejects_unknown_fields_refs_losses_and_invalid_span_unions() {
     observation.closed = false;
     observation.ended = false;
     observation
-        .line("geometry id=2 origin_y=-1 rows=2 trimmed=false spans=8:10,8:10,0:4;-,-,-")
+        .line(
+            "geometry id=2 origin_y=-1 rows=2 trimmed=false spans=8:10,-,8:10,0:4,-,-;-,-,-,-,-,-",
+        )
         .unwrap();
     assert!(
         observation.geometries[&2].contains_owned([1, -1]),
@@ -162,10 +168,88 @@ fn rejects_unknown_fields_refs_losses_and_invalid_span_unions() {
     );
     assert!(
         observation
-            .line("geometry id=3 origin_y=-1 rows=2 trimmed=false spans=0:2,0:2,8:10;-,-,-")
+            .line("geometry id=3 origin_y=-1 rows=2 trimmed=false spans=0:2,-,0:2,8:10,-,-;-,-,-,-,-,-")
             .is_ok(),
         "disjoint ownership keeps current/previous order, not coordinate order"
     );
+}
+
+#[test]
+fn accepts_current_main_band_geometry_only_when_it_owns_exactly_the_proxy() {
+    let band = "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,-,10:14,-,-,-;10:14,-,10:14,-,-,-;-,-,10:14,-,-,-\n";
+    let commit = "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=10,5,4,3\n";
+    let valid = finish(format!("{band}{commit}{STARTUP}"), 0, 0);
+    let observation = parsed(&valid).unwrap();
+    assert_eq!(observation.commits[0].proxy, [10, 5, 4, 3]);
+    let geometry = &observation.geometries[&1];
+    assert!(geometry.contains_owned([10, 5]) && !geometry.contains_drawn([10, 5]));
+    assert!(geometry.contains_drawn([13, 6]));
+    for text in [
+        valid.replace("proxy=10,5,4,3", "proxy=10,5,4,4"),
+        valid.replace("proxy=10,5,4,3", "proxy=10,6,4,3"),
+        valid.replace("proxy=10,5,4,3", "proxy=9,5,5,3"),
+        valid.replace(";10:14,-,10:14,-,-,-;", ";9:14,-,10:14,-,-,-;"),
+        valid.replace(";10:14,-,10:14,-,-,-;", ";10:15,-,10:14,-,-,-;"),
+        valid.replace(";10:14,-,10:14,-,-,-;", ";10:14,15:16,10:14,-,-,-;"),
+        valid.replace("-,-,10:14,-,-,-;10:14", "-,-,10:13,-,-,-;10:14"),
+        valid.replace("-,-,10:14,-,-,-;10:14", "-,-,10:14,0:2,-,-;10:14"),
+        valid.replace("-,-,10:14,-,-,-;10:14", "-,-,10:14,-,-,0:2;10:14"),
+    ] {
+        assert!(parsed(&text).is_err(), "must reject {text:?}");
+    }
+}
+
+#[test]
+fn geometry_rows_carry_two_drawn_and_four_owned_spans() {
+    let mut observation = parsed(&finish(format!("{GEOMETRY}{COMMIT}{STARTUP}"), 0, 0)).unwrap();
+    observation.closed = false;
+    observation.ended = false;
+    observation
+        .line("geometry id=2 origin_y=0 rows=1 trimmed=true spans=1:2,7:8,1:2,4:5,7:8,10:11")
+        .unwrap();
+    let four = &observation.geometries[&2];
+    for x in [1, 4, 7, 10] {
+        assert!(four.contains_owned([x, 0]), "span at {x} is owned");
+    }
+    for x in [0, 2, 6, 9, 11] {
+        assert!(!four.contains_owned([x, 0]), "gap at {x} is not owned");
+    }
+    assert!(four.contains_drawn([1, 0]) && four.contains_drawn([7, 0]));
+    assert!(!four.contains_drawn([4, 0]), "owned but not drawn");
+    assert!(
+        observation
+            .line("geometry id=3 origin_y=0 rows=1 trimmed=false spans=1:2,-,1:2,-,-,-")
+            .is_err(),
+        "the previous body's drawn span must stay owned"
+    );
+    observation
+        .line("geometry id=3 origin_y=0 rows=1 trimmed=false spans=1:2,-,1:2,7:8,-,-")
+        .unwrap();
+    for (row, why) in [
+        (
+            "spans=1:2,8:9,1:2,4:5,7:8,10:11",
+            "geometry draws outside the band it owns",
+        ),
+        ("spans=-,-,1:2,4:5,7:8", "invalid geometry row"),
+        ("spans=-,-,1:2,4:5,7:8,10:11,13:14", "invalid geometry row"),
+    ] {
+        let error = observation
+            .line(&format!(
+                "geometry id=4 origin_y=0 rows=1 trimmed=true {row}"
+            ))
+            .expect_err(row);
+        assert!(format!("{error:#}").contains(why), "{row}: {error:#}");
+    }
+    let version_1 = finish(
+        format!(
+            "{GEOMETRY}{COMMIT}{}",
+            STARTUP.replace("version=2", "version=1")
+        ),
+        0,
+        0,
+    );
+    let error = parsed(&version_1).expect_err("version 1 is refused");
+    assert!(format!("{error:#}").contains("wrong version"), "{error:#}");
 }
 
 #[test]

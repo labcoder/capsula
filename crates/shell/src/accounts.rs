@@ -41,7 +41,12 @@ impl Accounts {
 
     pub(crate) fn error(&mut self, error: &UserError) {
         match error.key() {
-            ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable => {}
+            ErrorKey::SettingsRefused
+            | ErrorKey::ConfigUnreadable
+            | ErrorKey::UsageLimit
+            | ErrorKey::AccountRefused
+            | ErrorKey::RequestRefused
+            | ErrorKey::ResponseUnreadable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount
