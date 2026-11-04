@@ -514,9 +514,11 @@ the midpoint chip at least 12 local pixels right of the node. Thus even a wrappe
 label cannot cover its own node. Self-links on the same node use separate downward
 lanes in wire-id order, spacing their midpoint chips by the tallest chip's height
 plus 12 pixels. Adding or removing a lower-id loop renumbers the lanes. Added lane
-displacement saturates before the local coordinate limit, reserving the tallest
-chip's height, and before its chip/control envelope reaches a world coordinate
-limit. Loops sharing the final lane may use the midpoint fallback.
+displacement caps the lane index at eight and saturates before the local coordinate
+limit, reserving the tallest chip's height; loops sharing the final lane may use
+the midpoint fallback. Stacked loops near the canvas edge can still fail with
+OutOfRange under peak scale, rotation, translation or motion; upgrade to the
+validator's peak envelope if a real scene hits this limit.
 This is not general routing around other nodes. The node-only fit can leave top-arc
 chips above the host margin and long self-loop labels past the inline host's right
 edge; check clipping with the native painter before expanding routing or the fit.

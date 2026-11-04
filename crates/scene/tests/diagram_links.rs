@@ -498,12 +498,7 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
             })
         }
     }
-    for (count, scale, expected) in [
-        (3, 1, 6115.0),
-        (4, 1, 8521.0),
-        (8, 1, 8521.0),
-        (8, 3, 2605.3333),
-    ] {
+    for (count, expected) in [(3, 6115.0), (4, 8521.0), (8, 8521.0)] {
         let mut scene = new_scene("tall_loops");
         let before = LayoutState::new(&scene);
         let mut put = vec![
@@ -513,7 +508,6 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
         for index in 0..count {
             put.push(json!({"edge":{"id":format!("e{index}"),"in":"diagram","from":"a","to":"a","label":"retrying"}}));
         }
-        put.push(json!({"anim":{"target":"diagram","track":"scale","keys":[[0,scale]]}}));
         let picture = scene_support::prepared_with(
             &mut scene,
             &mut GlobalBudget::default(),
@@ -534,6 +528,47 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
             panic!("loop curve");
         };
         assert_eq!(points[8], Vec2::new(268.0, expected), "{count} tall loops");
+    }
+}
+
+#[test]
+fn self_loop_lanes_stop_at_lane_eight() {
+    let mut scene = new_scene("capped_lanes");
+    let before = LayoutState::new(&scene);
+    let mut put = vec![
+        json!({"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}}),
+        json!({"node":{"id":"a","in":"diagram","label":"A"}}),
+    ];
+    for index in 0..11 {
+        put.push(json!({"edge":{"id":format!("e{index:02}"),"in":"diagram","from":"a","to":"a","label":"retrying"}}));
+    }
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"cap","put":put}),
+    );
+    let items = picture.after.items();
+    let line = |name| {
+        let handle = scene.handle(&id(name)).expect("loop");
+        let item = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("loop item");
+        let Prim::Line { points, .. } = &item.primitives[0] else {
+            panic!("loop curve");
+        };
+        points
+    };
+    assert_eq!(
+        line("e07")[8],
+        Vec2::new(268.0, 265.0),
+        "last uncapped lane"
+    );
+    let capped = line("e08");
+    assert_eq!(capped[8], Vec2::new(268.0, 291.0), "lane eight midpoint");
+    for name in ["e09", "e10"] {
+        assert_eq!(line(name), capped, "{name} shares the complete last lane");
     }
 }
 
