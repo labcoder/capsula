@@ -141,7 +141,7 @@ Measured on Rez, release build, under the measuring lock. Each frame is timed on
 | drip at the break, 0.5 | 22 × 29 | 84 | 99 |
 | stub at the break, 0.5 | 28 × 76 | 291 | 435 |
 
-The cost per pixel is about 125 to 190 ns, highest in the smallest region, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, which cut about a fifth with byte-identical output. At half scale the medians are under C2a's 400 µs goo gate, but single frames near the snap reach 502 µs. The gate is a maximum, so C2a tunes the goo before claiming it.
+The cost per pixel is about 125 to 190 ns, highest in the smallest region, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). At half scale the medians are under C2a's 400 µs goo gate, but single frames near the snap reach 502 µs. The gate is a maximum, so C2a tunes the goo before claiming it.
 
 ## Expressions
 
