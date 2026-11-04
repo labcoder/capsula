@@ -15,7 +15,9 @@ use windows_sys::Win32::System::Threading::{
 ///
 /// # Errors
 /// Fails when the process can't be created.
+#[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
 pub fn launch_detached(exe: &Path) -> io::Result<Child> {
+    let _spawning = crate::platform::spawn_lock();
     let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     let spawn = |flags: u32| {
         Command::new(exe)

@@ -152,6 +152,19 @@ impl Drop for Worker {
     }
 }
 
+/// Why a worker generation ended; content-free, for the log only.
+#[derive(Clone, Copy, Debug)]
+enum LossReason {
+    /// A request passed its deadline.
+    Deadline,
+    /// A reply broke the wire contract.
+    Malformed,
+    /// The worker's stdout ended or failed.
+    Ended,
+    /// A request couldn't reach the writer thread.
+    Unwritable,
+}
+
 struct Pending {
     until: Instant,
     answer: Answer,
@@ -213,12 +226,12 @@ async fn run(
             .map(|p| p.until)
             .min()
             .unwrap_or_else(|| Instant::now() + WINDOW);
-        let broken = tokio::select! {
+        let lost = tokio::select! {
             biased;
-            () = tokio::time::sleep_until(until), if !pending.is_empty() => true,
+            () = tokio::time::sleep_until(until), if !pending.is_empty() => Some(LossReason::Deadline),
             reply = worker.reads.recv() => match reply.flatten() {
-                Some(reply) => accept(&mut pending, reply).is_err(),
-                None => true,
+                Some(reply) => accept(&mut pending, reply).err().map(|_| LossReason::Malformed),
+                None => Some(LossReason::Ended),
             },
             command = commands.recv() => {
                 let Some(command) = command else { return; };
@@ -227,12 +240,11 @@ async fn run(
                 let Some(next) = id.checked_add(1) else { return; };
                 id = next;
                 pending.insert(id, Pending { until: command.until, answer: command.answer, assembly: Assembly::default() });
-                worker.writes.try_send(Request { id, body: command.body }).is_err()
+                worker.writes.try_send(Request { id, body: command.body }).err().map(|_| LossReason::Unwritable)
             }
         };
-        if !broken {
-            continue;
-        }
+        let Some(reason) = lost else { continue };
+        tracing::warn!(?reason, "screen worker lost");
         drop(worker);
         for (_, item) in std::mem::take(&mut pending) {
             complete(item.answer, Err(ScreenError::WorkerLost));
@@ -260,6 +272,7 @@ async fn run(
             let job = Arc::clone(&jobs);
             match tokio::task::spawn_blocking(move || Worker::spawn(&path, &job)).await {
                 Ok(Ok(next)) => {
+                    tracing::warn!(delay_ms = delay.as_millis(), "screen worker respawned");
                     worker = next;
                     break;
                 }

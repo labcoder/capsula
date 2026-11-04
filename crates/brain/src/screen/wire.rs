@@ -45,12 +45,21 @@ impl std::fmt::Debug for RequestBody {
 }
 
 /// The result of one complete worker reply.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplyBody {
     /// The worker is responsive.
     Pong,
     /// A content-free failure code.
     Fault(i32),
+}
+
+impl std::fmt::Debug for ReplyBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pong => f.write_str("Pong"),
+            Self::Fault(code) => write!(f, "Fault({code})"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
