@@ -24,6 +24,8 @@ mod session;
 #[cfg(windows)]
 mod slice2;
 mod vendor;
+#[cfg(windows)]
+mod voice_assets;
 
 fn usage() -> String {
     format!(
@@ -62,6 +64,10 @@ tasks:
                     any product process runs
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
+  voice-assets link <models-dir> <natives-dir>
+                    verify the voice models and native runtime already on this machine
+                    against the manifest, then hardlink them into the dev models folder
+                    and beside target\\{{debug,release}}\\kumochid.exe; never copies or downloads
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
@@ -93,6 +99,8 @@ fn main() -> Result<()> {
         Some("slice2-gate") => slice2::run(args),
         #[cfg(windows)]
         Some("cold-start") => gate::cold(args),
+        #[cfg(windows)]
+        Some("voice-assets") => voice_assets::run(args),
         #[cfg(windows)]
         Some("input-fixture") => platform::input_session::fixture(),
         #[cfg(windows)]

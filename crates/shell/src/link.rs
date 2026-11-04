@@ -19,9 +19,9 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello, Incarnation,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor, SceneDescriptorV1,
-    SettingsView, ThreadId, UserError,
+    AccountView, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello,
+    Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor,
+    SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -72,6 +72,10 @@ pub(crate) enum LinkEvent {
         view: SettingsView,
         answer: bool,
     },
+    Account {
+        generation: u64,
+        view: AccountView,
+    },
     /// A run's phase changed, from the control pipe.
     RunState {
         run: RunId,
@@ -106,7 +110,10 @@ pub(crate) enum LinkEvent {
     /// The brain refused the oldest unanswered turn, from the control pipe.
     TurnRefused,
     /// Something the user should be told, from the control pipe.
-    Error(UserError),
+    Error {
+        generation: u64,
+        error: UserError,
+    },
 }
 
 /// Link events applied in one update at most [guess]: a fast stream is applied in batches
@@ -869,12 +876,21 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Error(error))) => {
-                if events.send_blocking(LinkEvent::Error(error)).is_err() {
+                if events
+                    .send_blocking(LinkEvent::Error { generation, error })
+                    .is_err()
+                {
                     return;
                 }
             }
-            // shortcut: the account view has no consumer until Settings → Accounts (slice 3 PR 19).
-            Ok(Some(ControlToShell::Account(_))) => {}
+            Ok(Some(ControlToShell::Account(view))) => {
+                if events
+                    .send_blocking(LinkEvent::Account { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");

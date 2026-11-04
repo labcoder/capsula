@@ -8,7 +8,7 @@ beside the field. Change the field to clear that error and try again.
 Names use one line and 1–24 characters, with surrounding whitespace removed. Leave **Your
 name** blank to unset it. Settings are stored locally; changing a name doesn't switch tasks
 or discard your message draft. If the background process is disconnected, reconnect before
-editing. **Accounts** is empty for now.
+editing. **Accounts** manages your [ChatGPT sign-in](accounts.md).
 
 **Max frame rate** caps how fast the dock animates. **Automatic** picks 60 or 72, whichever
 suits your display; a higher cap is smoother and uses more power. Kumochi draws at a rate your

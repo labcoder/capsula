@@ -41,3 +41,8 @@ deleting a task you were only reading doesn't change the target. The copy on dis
 scrubbed shortly after. Kumochi can't remove issues you already filed on GitHub, or what your
 model provider keeps under its own terms. If deleting fails, the task stays and you can try
 again; input doesn't automatically switch back to it.
+
+The confirmation starts with **Cancel** focused. Enter on Cancel or Escape closes it
+without deleting. To confirm with the keyboard, Tab to **Delete**, then press Enter or
+Space; clicking Delete also confirms. Holding Enter as the confirmation opens does not
+delete the task.

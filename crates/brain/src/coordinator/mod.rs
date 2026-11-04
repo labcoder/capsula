@@ -9,8 +9,10 @@
 //! store until its outcome is written, so a failed write is still reported. The streaming half,
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
+mod admission;
 mod delete;
 mod drawing;
+mod lease;
 mod run;
 mod scenes;
 mod store_op;
@@ -28,6 +30,8 @@ use kumochi_protocol::message::{
 use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
+pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub use lease::{LeaseId, SEND_DEADLINE};
 pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -96,6 +100,23 @@ pub enum Input {
         run: RunId,
         /// What it produced.
         event: TurnEvent,
+    },
+    /// A round's context was built, or failed to be.
+    ContextBuilt(ContextBuilt),
+    /// The transport is about to send this build's body and waits for `Grant` or `Rebuild`.
+    SendReady {
+        /// The build.
+        key: BuildKey,
+    },
+    /// A granted send stopped: it finished, failed, or was dropped.
+    SendSettled {
+        /// Its lease.
+        lease: LeaseId,
+    },
+    /// A granted send's deadline passed.
+    SendDeadline {
+        /// Its lease.
+        lease: LeaseId,
     },
     /// The store committed a turn.
     TurnStored {
@@ -189,10 +210,21 @@ pub enum Effect {
     Control(ControlToShell),
     /// Send on the data pipe.
     Data(DataToShell),
-    /// Start the engine's round for a stored turn.
+    /// Start the engine's round with an admitted build.
     StartEngine {
         /// What the engine answers.
         request: RunRequest,
+    },
+    /// Let the transport send this lease's body; its guard reports `SendSettled` when dropped.
+    Grant(LeaseId),
+    /// Tell the transport to drop this build's body unsent.
+    Rebuild(BuildKey),
+    /// Report `SendDeadline` for `lease` after `after`.
+    ArmSendDeadline {
+        /// The lease.
+        lease: LeaseId,
+        /// How long from now.
+        after: Duration,
     },
     /// Stop the engine for `run` and drop whatever it still produces.
     CancelEngine {
@@ -244,8 +276,6 @@ enum Notify {
 struct Run {
     id: RunId,
     thread: ThreadId,
-    /// What the user typed, kept for the run's life.
-    turn: String,
     turn_stored: bool,
     /// The turn's write, held until every older run's outcome is queued.
     begin: Option<StoreOp>,
@@ -265,6 +295,10 @@ struct Run {
     /// One entry per pending step: the frames the engine produced after it, sent once it's
     /// acknowledged, so the shell sees the engine's order.
     held: VecDeque<Vec<DataToShell>>,
+    /// What the run read when its first build began, reused by every later build.
+    snapshot: Option<crate::context::RunSnapshot>,
+    /// The round's current build; the engine starts once it's admitted.
+    build: Option<admission::Build>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
@@ -298,6 +332,11 @@ impl Run {
     /// Steps sent to the store; the ones waiting for the scene's id aren't.
     fn sent(&self) -> u32 {
         self.steps - u32::try_from(self.waiting.len()).expect("at most MAX_STEPS wait")
+    }
+
+    /// The engine started: the round's build was admitted.
+    fn started(&self) -> bool {
+        self.build.as_ref().is_some_and(admission::Build::admitted)
     }
 
     fn outstanding(&self) -> bool {
@@ -341,8 +380,16 @@ pub struct Coordinator {
     crossed: Vec<ThreadId>,
     /// The turns taken on this connection.
     turns_read: u32,
-    /// A delete on this connection was refused for capacity, so its thread wasn't hidden.
+    /// A delete on this connection was refused, so its thread wasn't hidden.
     refused_delete: bool,
+    /// Build attempts started, so each has its own serial.
+    attempts: u64,
+    /// Granted sends that haven't settled, and failed ones, which fence their sources for good.
+    leases: Vec<lease::Lease>,
+    /// Grants made, so each lease has its own serial.
+    sends: u64,
+    /// A lease failed closed: nothing is granted again until the brain restarts.
+    transport_failed: bool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -389,6 +436,10 @@ impl Coordinator {
             crossed: Vec::new(),
             turns_read: 0,
             refused_delete: false,
+            attempts: 0,
+            leases: Vec::new(),
+            sends: 0,
+            transport_failed: false,
         }
     }
 
@@ -461,6 +512,10 @@ impl Coordinator {
                 );
             }
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
+            Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
+            Input::SendReady { key } => self.send_ready(key, &mut effects),
+            Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
+            Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
             Input::StepStored {
                 run,
@@ -522,8 +577,7 @@ impl Coordinator {
         Ok(effects)
     }
 
-    /// A run's turn is stored: its engine starts, unless it already ended. The run keeps its
-    /// request; the engine gets a copy.
+    /// A run's turn is stored: its first round's context is built, unless it already ended.
     fn turn_stored(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
         let found = self.find(run)?;
         if found.begin.is_some() || found.turn_stored {
@@ -534,12 +588,7 @@ impl Coordinator {
             self.settle(run, effects);
             return Ok(());
         }
-        let request = RunRequest {
-            run,
-            thread: found.thread,
-            turn: found.turn.clone(),
-        };
-        effects.push(Effect::StartEngine { request });
+        self.build(run, 1, effects);
         Ok(())
     }
 
@@ -583,12 +632,11 @@ impl Coordinator {
             thread,
             title,
             run,
-            text: text.clone(),
+            text,
         };
         self.current = Some(Run {
             id: run,
             thread,
-            turn: text,
             turn_stored: false,
             begin: Some(begin),
             answering: false,
@@ -600,6 +648,8 @@ impl Coordinator {
             evict: None,
             waiting: VecDeque::new(),
             held: VecDeque::new(),
+            snapshot: None,
+            build: None,
             draw: None,
             finishing: false,
             ending: None,

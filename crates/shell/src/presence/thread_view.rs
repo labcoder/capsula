@@ -533,7 +533,7 @@ impl ThreadsView {
                 let body = strings.get(Text::DeleteThreadBody).into();
                 let cancel = strings.get(Text::DeleteThreadCancel).into();
                 let confirm = strings.get(Text::DeleteThread).into();
-                crate::confirmation::open(
+                let _focus = crate::confirmation::open(
                     window,
                     cx,
                     title,
