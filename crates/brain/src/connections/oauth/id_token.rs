@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::connections::clock::Clock;
 use crate::connections::http_client::{
-    Endpoint, Http, HttpError, ISSUER, JwksUrl, MAX_BODY_BYTES, Request, Response,
+    Endpoint, Http, HttpError, ISSUER, IssuerUrl, MAX_BODY_BYTES, Request, Response,
 };
 use crate::connections::records::{MAX_EMAIL_BYTES, MAX_ID_BYTES, MAX_TOKEN_BYTES};
 
@@ -116,7 +116,7 @@ pub async fn verify(
     if discovery.issuer.as_str() != ISSUER {
         return Err(IdentityError::Discovery);
     }
-    let url = JwksUrl::parse(&discovery.jwks_uri).map_err(|_| IdentityError::Discovery)?;
+    let url = IssuerUrl::parse(&discovery.jwks_uri).map_err(|_| IdentityError::Discovery)?;
     let keys: KeySet = document(
         &http
             .execute(Request {

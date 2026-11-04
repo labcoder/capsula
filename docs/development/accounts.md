@@ -11,6 +11,7 @@ id from the vault.
 
 `open_browser` hands a `LaunchTarget` to an injectable `Launcher`. Production uses
 `SystemBrowser` and `webbrowser`; tests record the URL without opening a browser.
+The runtime opens it on tokio's blocking pool, because an OS launch can block the core loop.
 `webbrowser` owns discovery of the OS browser
 executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
 even when a saved record has ID, access and refresh tokens. Returning sign-in uses the
@@ -245,7 +246,12 @@ a later success never clears it.
 **Local policies:**
 - A grant without a refresh token is refused; nothing is saved for it.
 - An unusable 200 response that named a refresh token lists that token, when it's non-empty and
-  within 8 KiB; otherwise its outcome is unknown.
+  its list entry fits; otherwise its outcome is unknown.
+- A list entry may take at most 9,817 serialized bytes (`MAX_ENTRY_BYTES`), so the account entry and
+  four exchanges always fit one 48 KiB record. A received set whose refresh token escapes past
+  that, or whose account record escapes past 48 KiB, is refused where it arrives, so no save that
+  can never land is offered for Retry; the token's outcome is unknown, or it's listed when only
+  the account record was too big.
 - A 4xx without an OAuth error object (a proxy page, say) leaves issuance unknown.
 - Sign-in is refused with `RevocationBacklog` when the list's four exchange slots, counting one
   reserved for the request in flight, are full. Nothing is dropped to make room.
@@ -257,9 +263,30 @@ a later success never clears it.
 - A list entry stamped on a clock before 1970 gets `added_at = u64::MAX`, so age-out never
   evicts it early.
 
-Sign-out, revocation and age-out land in slice 3 PR 9b part 2. Until then `SignOut` and a
-backlog `Retry` are answered with the view, and a pending sign-out found at startup keeps the
-account fenced (`SigningOut`, `Cleanup::Refused`).
+**Revocation outside a sign-out.** A pass revokes every listed entry, the account's first, then
+rewrites the list without the ones an empty 200 confirmed. Passes run at startup, when an entry
+is added and on `Retry`, never on a timer, one at a time: a request during a pass becomes one more
+pass after it. None runs while the lock is Busy or a sign-out is pending. When the list empties,
+the empty list is saved, its names are deleted and checked, and `sweep` clears. The manifest is
+deleted before its chunks, so a crash or refusal at any step leaves either the readable empty
+list or chunks with no manifest, and the next start or Retry finishes the job.
+
+`oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
+passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
+`client_id`. Only an empty 200 confirms. A transport failure or a `5xx` is tried three times in
+all, 0.5 s then 1 s apart, and the whole pass has one 10 s budget [local policy]. A discovery
+document that fails a check sends no token anywhere.
+
+**Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
+30-day refresh-token lifetime plus a 2-day margin [local policy]. It's checked at startup, and
+when a full list would refuse a sign-in, so a full list frees what expired since, except entries
+stamped `u64::MAX`, which never age out. While the brain runs, wall time moving more than an hour
+[local policy] further than monotonic time is a clock jump: age-out waits for the next start. An
+entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
+set back while it's listed only delays its age-out.
+
+Sign-out lands in the next PR. Until then `SignOut` is answered with the view, and a pending
+sign-out found at startup keeps the account fenced (`SigningOut`, `Cleanup::Refused`).
 
 ## Credential storage
 
@@ -270,9 +297,12 @@ also left an entry, so tests verify cleanup by exact name. Production reads and 
 account system's one credentials thread, through the vault's one store handle, which takes
 neither failure at its word: "not found" for a name the handle wrote and hasn't deleted since
 is tried 4 times, 25 ms apart [guess], then fails as `Unsettled` instead of reading as absent,
-and every delete is read back and retried the same way until the name is gone. Whether a
-concurrent write from another process (the shell, another app) causes the same misses is
-untested. `Worker::system` is the only way outside tests to
+and every delete is read back and retried the same way until the name is gone. A delete counts
+as gone only when 4 reads in a row say so, since one "not found" can hide a delete that didn't
+stick. Whether a concurrent write from another process (the shell, another app) causes the same
+misses is untested. The shell's `keyring` read of the instance capability needs no retry of its
+own: a failed read fails that handshake, and the link tries the whole handshake again every
+50 ms for 10 s. `Worker::system` is the only way outside tests to
 reach the real store: `Vault::open` is private to `connections`, and `WindowsCredentialStore`
 to the crate.
 

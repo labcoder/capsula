@@ -503,6 +503,30 @@ fn a_delete_that_does_not_stick_is_retried_and_never_reported_gone() {
     assert_record_absent(&store, &service, "revoke");
 }
 
+/// CAPS-116: a delete that didn't stick, read back once as "not found", isn't confirmed.
+#[test]
+fn a_sticky_delete_hidden_by_a_missed_read_is_never_reported_gone() {
+    let store = FakeStore::default();
+    let lane = lane_store::LaneStore::new(store.clone());
+    let value = Secret::new(Zeroizing::new(b"value".to_vec()));
+    let faults = |sticky_deletes| {
+        let mut state = store.0.lock().expect("fake lock");
+        state.sticky_deletes = sticky_deletes;
+        state.missed_reads = 1;
+    };
+    lane.set("name", &value).expect("set");
+    faults(1);
+    lane.delete("name").expect("a retried delete");
+    assert!(store.names().is_empty(), "confirmed only once it's gone");
+    lane.set("name", &value).expect("set");
+    faults(lane_store::TRIES);
+    assert!(
+        matches!(lane.delete("name"), Err(CredentialStoreError::Unsettled)),
+        "a name that outlives every delete is reported"
+    );
+    assert_eq!(store.names(), ["name"]);
+}
+
 #[test]
 fn sign_out_reader_exposes_the_fenced_record_only_while_a_sign_out_is_pending() {
     let (_scratch, path, service, store) = setup("sign-out-reader");

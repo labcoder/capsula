@@ -19,8 +19,9 @@ use crate::connections::clock::Clock;
 use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
 use crate::connections::oauth::id_token::verify;
-use crate::connections::oauth::{Authorization, Intent, Launcher, SignIn};
-use crate::connections::records::Account;
+use crate::connections::oauth::revoke::{BUDGET, revoke};
+use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
+use crate::connections::records::{Account, Revocable};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link};
@@ -152,6 +153,11 @@ impl Accounts {
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
+                Effect::Revoke(entries) => drop(tokio::spawn(revoke_task(
+                    entries,
+                    Arc::clone(&self.net.http),
+                    self.events_tx.clone(),
+                ))),
             }
         }
         frames
@@ -237,9 +243,14 @@ async fn listen(
         let sign_in = SignIn::bind(host.expose(), saved.as_ref().map(Secret::expose), intent)
             .await
             .map_err(Listened::Bind)?;
-        sign_in
-            .open_browser(launcher.as_ref())
-            .map_err(Listened::Launch)?;
+        // Opening the browser is OS work that can block, so it runs off the core loop.
+        let (sign_in, opened) = tokio::task::spawn_blocking(move || {
+            let opened = sign_in.open_browser(launcher.as_ref());
+            (sign_in, opened)
+        })
+        .await
+        .map_err(|_| Listened::Launch(LaunchError::Launch))?;
+        opened.map_err(Listened::Launch)?;
         sign_in
             .receive()
             .await
@@ -250,6 +261,19 @@ async fn listen(
     let result = result.unwrap_or_else(|failed| failed);
     // The account system outlives its tasks, so a closed channel means the brain is exiting.
     events.send(Input::Listened { attempt, result }).ok();
+}
+
+async fn revoke_task(
+    entries: Vec<Secret<Revocable>>,
+    http: HttpFactory,
+    events: mpsc::UnboundedSender<Input>,
+) {
+    let deadline = Instant::now() + BUDGET;
+    let confirmed = match tokio::task::spawn_blocking(move || http()).await {
+        Ok(Ok(http)) => revoke(&http, entries, deadline).await,
+        _ => Vec::new(),
+    };
+    events.send(Input::Revoked(confirmed)).ok();
 }
 
 pub(super) async fn exchange_task(

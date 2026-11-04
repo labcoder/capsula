@@ -8,7 +8,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey};
 use zeroize::Zeroizing;
 
-use super::{AccountState, Done, Effect, Job, Live, Step, error};
+use super::{AccountState, Done, Effect, Job, Live, Step, Why, error, exchanges};
 use crate::connections::error::VaultError;
 use crate::connections::marker::MarkerUpdate;
 use crate::connections::oauth::{Authorization, Intent};
@@ -61,6 +61,10 @@ pub(super) enum Queued {
     },
     /// The lane's save, built at dispatch so it goes to the owner current then.
     Save,
+    Relist {
+        confirmed: Vec<Secret<Revocable>>,
+        why: Why,
+    },
 }
 
 /// The credential job in flight.
@@ -75,6 +79,7 @@ pub(super) enum Flight {
     Finished,
     Commit,
     List,
+    Relist(Why),
 }
 
 /// An op that arrived while the current attempt's save was running (R2-4): it waits for that
@@ -98,7 +103,7 @@ impl AccountState {
         match (flight, done) {
             (Some(Flight::Load), Done::Loaded(result)) => {
                 self.loading = false;
-                self.loaded(result);
+                self.loaded(result, effects);
             }
             (Some(Flight::Register { attempt, account }), Done::Registered(result)) => {
                 let registering = attempt == self.attempt
@@ -158,7 +163,7 @@ impl AccountState {
                     None => {}
                 }
             }
-            (Some(Flight::List), Done::Listed { result, exchanges }) => {
+            (Some(Flight::List), Done::Listed { result, entries }) => {
                 if !matches!(self.lane, Lane::Owning { .. }) {
                     debug_assert!(false, "a list save ended with no set owned");
                     return;
@@ -168,14 +173,19 @@ impl AccountState {
                         if leftovers {
                             tracing::warn!("old revocation chunks remain until the next sweep");
                         }
-                        self.loaded.exchanges = exchanges;
+                        self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
+                        // An entry was added: revoke it now (design §2).
+                        self.revoke(entries, effects);
                     }
                     SaveResult::NotCommitted(failure) => {
                         tracing::warn!(%failure, "a received token set is held for another save");
                         self.hold(effects);
                     }
                 }
+            }
+            (Some(Flight::Relist(why)), Done::Relisted(result)) => {
+                self.relisted(why, result, effects);
             }
             (flight, done) => {
                 debug_assert!(false, "{done:?} doesn't answer {flight:?}");
@@ -337,6 +347,13 @@ impl AccountState {
                         Save::List(entry) => (Flight::List, Job::List(entry.clone())),
                     }
                 }
+                Queued::Relist { confirmed, why } => (
+                    Flight::Relist(why),
+                    Job::Relist {
+                        confirmed,
+                        age_out: why == Why::Admit,
+                    },
+                ),
             };
             self.flight = Some(flight);
             effects.push(Effect::Vault(job));

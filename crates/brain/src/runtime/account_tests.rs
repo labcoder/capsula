@@ -18,8 +18,8 @@ use super::{Ended, PATIENCE, Shell, duplex};
 use crate::connections::account::{Input, Listened, Worker};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
-use crate::connections::oauth::Authorization;
 use crate::connections::oauth::id_token::IdentityError;
+use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launcher};
 use crate::connections::records::Account;
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
@@ -236,6 +236,70 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
     drop(held);
 }
 
+/// CAPS-116: a browser launch that blocks runs off the core loop, which keeps running.
+#[tokio::test]
+async fn a_blocking_browser_launch_never_stalls_the_core_loop() {
+    struct Stuck {
+        entered: std_mpsc::Sender<()>,
+        gate: Mutex<std_mpsc::Receiver<()>>,
+    }
+    impl Launcher for Stuck {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            self.entered.send(()).ok();
+            self.gate.lock().expect("gate").recv().ok();
+            Err(LaunchError::Launch)
+        }
+    }
+    let scratch = Scratch::new("account-launch");
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(FakeStore::default(), "test-accounts-launch", &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let (entered, launching) = std_mpsc::channel();
+    let (release, gate) = std_mpsc::channel();
+    let net = Net {
+        launcher: Arc::new(Stuck {
+            entered,
+            gate: Mutex::new(gate),
+        }),
+        ..test_support::net()
+    };
+    let mut accounts = Accounts::spawn(worker, net).expect("accounts");
+    // Only a stalled loop lets this fire: it frees the launch so the test can end and fail.
+    let (reached, watching) = std_mpsc::channel::<()>();
+    let stalled = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let stalled = Arc::clone(&stalled);
+        std::thread::spawn(move || {
+            if watching.recv_timeout(PATIENCE).is_err() {
+                stalled.store(true, Ordering::SeqCst);
+            }
+            release.send(()).ok();
+        })
+    };
+    accounts.handle(Input::Op(AccountOp::SignIn));
+    while launching.try_recv().is_err() {
+        tokio::task::yield_now().await;
+    }
+    tokio::task::yield_now().await;
+    reached.send(()).ok();
+    watchdog.join().expect("watchdog");
+    assert!(
+        !stalled.load(Ordering::SeqCst),
+        "the loop stood still while the browser opened"
+    );
+    let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+    assert!(matches!(
+        input,
+        Input::Listened {
+            result: Listened::Launch(LaunchError::Launch),
+            ..
+        }
+    ));
+    accounts.close(Instant::now()).await;
+}
+
 /// CAPS-116: the startup load runs on the credentials thread, and has ended once `spawn` returns.
 #[tokio::test]
 async fn the_startup_load_runs_on_the_credentials_thread() {
@@ -278,7 +342,7 @@ impl Http for SlowCheck {
                 let tokens = json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600});
                 (200, serde_json::to_vec(&tokens).expect("fixture"))
             }
-            Endpoint::Discovery | Endpoint::Jwks(_) => {
+            Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
             }

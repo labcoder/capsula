@@ -14,7 +14,7 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, JwksUrl, MAX_BODY_BYTES, Request, body_buffer, from_roots,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, body_buffer, from_roots,
     read_response,
 };
 use crate::platform::{TrustRoots, TrustRootsError};
@@ -476,7 +476,7 @@ async fn token_posts_are_form_encoded_and_public_gets_have_no_body() {
     );
     for endpoint in [
         Endpoint::Discovery,
-        Endpoint::Jwks(JwksUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+        Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
     ] {
         let server = Server::start(reply("200 OK", b"{}", ""));
         server
@@ -495,7 +495,7 @@ async fn token_posts_are_form_encoded_and_public_gets_have_no_body() {
 async fn public_endpoints_refuse_fields_before_connecting() {
     for endpoint in [
         Endpoint::Discovery,
-        Endpoint::Jwks(JwksUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+        Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
     ] {
         let server = Server::start(reply("200 OK", b"{}", ""));
         let client = server.client();
