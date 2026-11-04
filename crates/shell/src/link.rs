@@ -24,6 +24,8 @@ use kumochi_protocol::message::{
     SettingsView, ThreadId, UserError,
 };
 
+use kumochi_scene::deferred::Deferred;
+
 use crate::credential::{self, CredentialError};
 use crate::platform::{self, PipeClient};
 
@@ -83,6 +85,12 @@ pub(crate) enum LinkEvent {
         message: DataToShell,
         bytes: u32,
     },
+    /// A scene/removal frame protected from intake through final disposal.
+    SceneData {
+        generation: u64,
+        frame: Deferred<DataToShell>,
+        bytes: u32,
+    },
     /// The connection's visible scenes, from the control pipe.
     Scenes(Vec<SceneDescriptor>),
     ScenesV1 {
@@ -99,6 +107,71 @@ pub(crate) enum LinkEvent {
     TurnRefused,
     /// Something the user should be told, from the control pipe.
     Error(UserError),
+}
+
+/// Link events applied in one update at most [guess]: a fast stream is applied in batches
+/// rather than one UI update per frame.
+const EVENT_BATCH: usize = 256;
+
+#[derive(Debug)]
+pub(crate) enum Batch {
+    Plain(Vec<LinkEvent>),
+    Scene(Deferred<Vec<LinkEvent>>),
+}
+
+impl std::ops::Deref for Batch {
+    type Target = Vec<LinkEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(events) => events,
+            Self::Scene(events) => events,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Batch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Plain(events) => events,
+            Self::Scene(events) => events,
+        }
+    }
+}
+
+impl Batch {
+    pub(crate) fn attribute(&mut self, bytes: usize) {
+        if let Self::Scene(events) = self {
+            events.attribute(bytes);
+        }
+    }
+}
+
+/// Protects scene batches through lost delivery; ordinary batches free in place.
+pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
+    let mut events = vec![first];
+    while events.len() < EVENT_BATCH
+        && let Ok(event) = rest.try_recv()
+    {
+        events.push(event);
+    }
+    if !events
+        .iter()
+        .any(|event| matches!(event, LinkEvent::SceneData { .. }))
+    {
+        return Batch::Plain(events);
+    }
+    let payload = events
+        .iter()
+        .map(|event| match event {
+            LinkEvent::Data { bytes, .. } | LinkEvent::SceneData { bytes, .. } => {
+                usize::try_from(*bytes).unwrap_or(usize::MAX)
+            }
+            _ => 0,
+        })
+        .fold(0, usize::saturating_add);
+    let bytes = (events.capacity() * size_of::<LinkEvent>()).saturating_add(payload);
+    Batch::Scene(Deferred::new(events, bytes))
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -847,14 +920,28 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);
-                if events
-                    .send_blocking(LinkEvent::Data {
+                let event = if matches!(
+                    &message,
+                    DataToShell::SceneSnapshotV1 { .. }
+                        | DataToShell::SceneBegin { .. }
+                        | DataToShell::SceneStepCommit { .. }
+                        | DataToShell::SceneCutApplied { .. }
+                        | DataToShell::SceneEnd { .. }
+                        | DataToShell::ScenesRemoved { .. }
+                ) {
+                    LinkEvent::SceneData {
+                        generation,
+                        frame: Deferred::new(message, reader.bytes),
+                        bytes,
+                    }
+                } else {
+                    LinkEvent::Data {
                         generation,
                         message,
                         bytes,
-                    })
-                    .is_err()
-                {
+                    }
+                };
+                if events.send_blocking(event).is_err() {
                     break;
                 }
             }
@@ -915,3 +1002,7 @@ mod tests;
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
 mod delete_tests;
+
+#[cfg(all(test, windows))]
+#[path = "link_measure_tests.rs"]
+mod measure_tests;

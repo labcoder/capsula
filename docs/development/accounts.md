@@ -155,7 +155,10 @@ is unusable. Empty or oversized inputs are refused before anything is sent.
 
 `oauth::id_token::verify` checks discovery's exact issuer and allows JWKS only on
 `https://auth.openai.com:443`, without userinfo or a fragment. It selects the declared `kid`
-from that key set, skips unparseable keys and rejects duplicate key identifiers. A selected key
+from that key set, skips unparseable keys and rejects duplicate key identifiers. A `kid` the set
+lacks gets the set fetched once more, since one fetched while the provider rotates its keys can
+lack the new key; still missing, it's `UnknownKey`. The clock is read again after that refetch,
+so a token that expires while it runs is refused. A selected key
 must permit signatures and RS256 when those metadata fields are present. It verifies the
 signature before trusting claims.
 Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
@@ -304,7 +307,10 @@ less left [local policy], or with no wall time, is refreshed first; there's no t
 is one flight on the token lane, from the request until the rotated set is committed and its
 identity token verified. Callers that arrive meanwhile join it, and all of them get the same
 answer. The request and the identity check run as tokio tasks the brain never aborts, so a caller
-that drops its receiver ends only its own wait.
+that drops its receiver ends only its own wait. Each is supervised: one that ends without
+reporting, as a panic does in a debug build (a release build aborts on panic), reports a
+content-free failure instead. A refresh's outcome is then unknown, so the session ends and its
+token stays marked; a check's set stays pending for the next use.
 
 ```mermaid
 sequenceDiagram
@@ -357,10 +363,12 @@ sequenceDiagram
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
   Another subject or an invalid token, like a pending set with nothing to check, ends the session
   and lists the set's refresh token as an exchange's would be (unknown when no slot is free).
-  Network, status, discovery, bounds and clock failures leave the set pending, since a captive
+  Network, status, discovery, bounds and clock failures, and a key still missing after its
+  refetch, leave the set pending, since a captive
   portal's page can fail discovery's parse or a document's size bound. The registration-only save
   waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
-  leaves `chatgpt` unowned.
+  leaves `chatgpt` unowned. If that unknown outcome can't be written, the save still runs, so the
+  token can leave unrecorded (a known gap, OSC-204).
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
   `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone

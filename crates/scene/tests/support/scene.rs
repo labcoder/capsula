@@ -54,6 +54,17 @@ pub(super) fn prepared_on(
     value: Value,
     surface: SurfaceGeometry,
 ) -> PreparedStep {
+    prepared_with(scene, budget, before, value, surface, &mut Measure)
+}
+
+pub(super) fn prepared_with(
+    scene: &mut SceneState,
+    budget: &mut GlobalBudget,
+    before: &LayoutState,
+    value: Value,
+    surface: SurfaceGeometry,
+    measure: &mut dyn TextMeasure,
+) -> PreparedStep {
     let envelope = serde_json::Map::from_iter([("step".to_owned(), value)]);
     let bytes = serde_json::to_vec(&envelope).expect("step JSON");
     let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
@@ -70,7 +81,7 @@ pub(super) fn prepared_on(
         Arc::new(Theme::default()),
     )
     .expect("consecutive preparation");
-    let prepared = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture");
+    let prepared = prepare(input, measure, &AtomicBool::new(false)).expect("picture");
     prepared.validate(scene, before).expect("current picture");
     prepared
 }

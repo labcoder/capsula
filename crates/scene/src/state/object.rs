@@ -33,7 +33,8 @@ pub(crate) struct Object {
     pub handle: Handle,
     pub kind: Kind,
     pub parent: Option<WireId>,
-    pub references: Vec<WireId>,
+    /// Exact-size, so clones keep the capacity attribution counts.
+    pub references: Box<[WireId]>,
 }
 
 pub(crate) struct Visual<'a> {
@@ -161,7 +162,7 @@ pub(super) fn object(
         handle,
         kind: v.kind,
         parent: v.parent.cloned(),
-        references: reference_ids(op),
+        references: reference_ids(op).into_boxed_slice(),
     })
 }
 

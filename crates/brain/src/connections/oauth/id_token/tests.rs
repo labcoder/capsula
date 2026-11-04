@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -12,7 +13,8 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::{
-    IdentityError, KeySet, VerifiedIdentity, check_subject, permits_plan, verify, verify_signed,
+    IdentityError, KeySet, VerifiedIdentity, check_subject, permits_plan, verify, verify_refreshed,
+    verify_signed,
 };
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{
@@ -427,7 +429,7 @@ fn token_and_key_rejections_have_exact_kinds() {
         (
             "unknown kid",
             signed(&header(Algorithm::RS256, Some("gone")), &claims(), &SIGNER),
-            Token,
+            IdentityError::UnknownKey,
         ),
         (
             "kid of a secret key",
@@ -608,6 +610,90 @@ async fn verify_reads_discovery_then_its_jwks_without_credentials() {
         !logged.contains(&token) && !logged.contains("jwks.json"),
         "requests print redacted"
     );
+}
+
+/// A `kid` the key set lacks gets the set fetched once more, as after a key rotation; still
+/// missing, it's `UnknownKey`, never `Token`, and nothing is fetched a third time.
+#[tokio::test]
+async fn a_key_missing_from_the_jwks_is_fetched_once_more() {
+    let valid = token(&claims());
+    let stale = json!({ "keys": [jwk("old-key", &SIGNER)] }).to_string();
+    let http = Scripted::new([
+        discovery(ISSUER, JWKS_URI),
+        response(200, stale.clone()),
+        response(200, jwks().to_string()),
+    ]);
+    let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
+        .await
+        .expect("verified with the refetched set");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(http.requests().len(), 3);
+    let http = Scripted::new([
+        discovery(ISSUER, JWKS_URI),
+        response(200, stale),
+        response(200, json!({ "keys": [] }).to_string()),
+    ]);
+    let result = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW)).await;
+    assert_eq!(result.map(|_| ()), Err(IdentityError::UnknownKey));
+    assert_eq!(http.requests().len(), 3);
+}
+
+/// Scripted responses, and a wall clock the second key-set response moves past the token's
+/// expiry plus the leeway.
+struct SlowRefetch {
+    http: Scripted,
+    served: AtomicUsize,
+    unix: AtomicU64,
+}
+
+impl SlowRefetch {
+    fn new() -> Self {
+        let stale = json!({ "keys": [jwk("old-key", &SIGNER)] }).to_string();
+        Self {
+            http: Scripted::new([
+                discovery(ISSUER, JWKS_URI),
+                response(200, stale),
+                response(200, jwks().to_string()),
+            ]),
+            served: AtomicUsize::new(0),
+            unix: AtomicU64::new(NOW),
+        }
+    }
+}
+
+impl Http for SlowRefetch {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        if self.served.fetch_add(1, Ordering::SeqCst) == 2 {
+            self.unix.store(NOW + 600 + 31, Ordering::SeqCst);
+        }
+        self.http.execute(request)
+    }
+}
+
+impl Clock for SlowRefetch {
+    fn unix_seconds(&self) -> Option<u64> {
+        Some(self.unix.load(Ordering::SeqCst))
+    }
+}
+
+/// #103 M1: a sign-in token that expires while its key set is fetched again is judged when the
+/// refetch ends, so it's refused; a refreshed set's check, which ignores expiry, still passes.
+#[tokio::test]
+async fn a_token_that_expires_during_the_refetch_is_refused() {
+    let valid = token(&claims());
+    let late = SlowRefetch::new();
+    let result = verify(&late, &secret(&valid), CLIENT, NONCE, &late).await;
+    assert_eq!(result.map(|_| ()), Err(IdentityError::Token));
+    assert_eq!(late.http.requests().len(), 3);
+    let late = SlowRefetch::new();
+    let identity = verify_refreshed(&late, &secret(&valid), CLIENT, SUBJECT, &late)
+        .await
+        .expect("a refreshed set's expiry isn't checked");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(late.http.requests().len(), 3);
 }
 
 #[tokio::test]
@@ -858,7 +944,7 @@ async fn verify_counts_raw_keys_before_ignoring_unusable_entries() {
 
 #[tokio::test]
 async fn verify_refuses_a_bad_key_set() {
-    use IdentityError::{Bounds, Discovery, Status, Token};
+    use IdentityError::{Bounds, Discovery, Status};
     let valid = token(&claims());
     let cases = [
         ("missing", response(404, "{}"), Status { status: 404 }),
@@ -867,11 +953,6 @@ async fn verify_refuses_a_bad_key_set() {
             "keys not a list",
             response(200, json!({ "keys": "none" }).to_string()),
             Discovery,
-        ),
-        (
-            "no matching key",
-            response(200, json!({ "keys": [] }).to_string()),
-            Token,
         ),
         (
             "oversized body",

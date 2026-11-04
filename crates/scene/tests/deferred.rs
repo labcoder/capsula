@@ -7,8 +7,8 @@ mod allocation;
 mod scene_support;
 
 use kumochi_scene::{
-    Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, Step, StopCut,
-    StopOutcome,
+    Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, Step, StepError,
+    StopCut, StopOutcome,
     deferred::{self, Deferred, Pending},
     layout::{LayoutState, PreparedStep},
     parse_record,
@@ -47,6 +47,15 @@ impl Drop for Blocking {
         self.release
             .recv()
             .expect("the test releases the destructor");
+    }
+}
+
+/// Holds the dropper inside its destructor until the test releases it, so queued values and
+/// their attributions stay pending.
+struct Gate(Receiver<()>);
+impl Drop for Gate {
+    fn drop(&mut self) {
+        self.0.recv().expect("the test releases the dropper");
     }
 }
 
@@ -94,6 +103,9 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     stale_candidate_retires_its_original_source();
     stop_retires_dropped_removals_and_cell_changes();
     rejected_tracks_retire_the_partial_predecessor_map();
+    rejected_inserts_and_motion_growth_stay_attributed();
+    frozen_series_data_stays_attributed();
+    activation_retires_settled_recolored_and_superseded_tracks();
 }
 
 fn drain() {
@@ -275,8 +287,7 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
         })
         .collect();
     let step = typed_step(&json!({"id":"invalid-last-track","put":tracks}));
-    let (result, _, [_, released]) = allocation::usage(|| scene.admit(&step, &budget));
-    let error = result.expect_err("the last repeat exceeds the motion deadline");
+    let (error, queued, _, released) = gated_rejection(&scene, &budget, &step);
     assert_eq!(
         error.code,
         ErrorCode::OutOfRange,
@@ -292,14 +303,195 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
         "the rejected predecessor map leaves the caller, retaining only bounded scratch destruction: {released}"
     );
     assert_eq!(
+        queued.values, 5,
+        "the gate, source copy, expansion, object map copy and partial predecessor map are queued"
+    );
+    assert_eq!(
         (scene.object_count(), scene.revision(), scene.usage().tracks),
         (256, 1, 0),
         "rejection leaves the authoritative scene unchanged"
     );
+}
+
+/// Rejects `step` while a gate holds the dropper, so everything the rejection queued stays
+/// pending. Checks that the attributions cover what the caller allocated and still holds, short
+/// only of payload boxes, channel blocks and the error. Returns the error, the pending values
+/// with their attributions, and the caller's held and freed bytes.
+fn gated_rejection(
+    scene: &SceneState,
+    budget: &GlobalBudget,
+    step: &Step,
+) -> (StepError, Pending, usize, usize) {
+    let (release, gate) = mpsc::channel();
+    drop(Deferred::new(Gate(gate), 0));
+    let (result, _, [allocated, released]) = allocation::usage(|| scene.admit(step, budget));
+    let queued = deferred::pending();
+    release.send(()).expect("the gate waits");
+    let error = result.expect_err("the fixture is rejected");
+    let held = allocated - released;
+    assert!(
+        queued.bytes + 4096 >= held,
+        "{}: {} bytes attributed, {held} held",
+        error.path.as_str(),
+        queued.bytes
+    );
+    drain();
+    (error, queued, held, released)
+}
+
+fn rejected_inserts_and_motion_growth_stay_attributed() {
+    let (scene, budget, _) = populated();
+    let shape = |id: String| json!({"shape":{"id":id,"kind":"rect","box":[0,0,1,1]}});
+    let mut put: Vec<_> = (0..299).map(|i| shape(format!("n{i}"))).collect();
+    put.push(shape("s5".to_owned()));
+    let reused = typed_step(&json!({"id":"reused","put":put}));
+    let (error, queued, _, _) = gated_rejection(&scene, &budget, &reused);
+    assert_eq!(
+        (error.code, error.path.as_str(), queued.values),
+        (ErrorCode::IdReused, "put[299].shape.id", 4),
+        "299 objects join the map copy before the reused id; the gate, source copy, expansion and map copy are queued"
+    );
+    let missing = |tracked: bool| {
+        let mut put: Vec<_> = (0..200).map(|i| shape(format!("n{i}"))).collect();
+        if tracked {
+            put.extend((0..200).map(|i| {
+                json!({"anim":{"target":format!("n{i}"),"track":"opacity","keys":[[0,0],[100,1]]}})
+            }));
+        }
+        let step = typed_step(&json!({"id":"missing","put":put,"remove":["missing"]}));
+        let (error, queued, held, _) = gated_rejection(&scene, &budget, &step);
+        assert_eq!(
+            (error.code, error.path.as_str(), queued.values),
+            (ErrorCode::UnknownRef, "remove[0]", 5),
+            "new objects have no predecessors: the gate, source copy, expansion, map copy and an empty predecessor map are queued"
+        );
+        (queued.bytes, held)
+    };
+    let (plain, plain_held) = missing(false);
+    let (tracked, tracked_held) = missing(true);
+    assert!(
+        tracked - plain >= tracked_held - plain_held,
+        "the map copy's attribution grows with the 200 motion maps admission built before the unknown removal: {} more attributed, {} more held",
+        tracked - plain,
+        tracked_held - plain_held
+    );
+}
+
+fn frozen_series_data_stays_attributed() {
+    let mut scene = new_scene("series");
+    let mut budget = GlobalBudget::default();
+    let mut put = vec![json!({"chart":{"id":"c","kind":"line"}})];
+    put.extend(
+        (0..8).map(|i| json!({"series":{"id":format!("p{i}"),"in":"c","data":vec![1; 500]}})),
+    );
+    let step = typed_step(&json!({"id":"series","put":put}));
+    let (release, gate) = mpsc::channel();
+    drop(Deferred::new(Gate(gate), 0));
+    let ((), _, [allocated, released]) = allocation::usage(|| {
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted") else {
+            panic!("new step");
+        };
+        drop(
+            scene
+                .commit(candidate, &mut budget)
+                .expect("fresh admission"),
+        );
+        scene.clear(&mut budget).expect("clear");
+    });
+    let queued = deferred::pending();
+    release.send(()).expect("the gate waits");
+    let held = allocated - released;
+    assert!(
+        queued.bytes + scene.attributed_bytes() + 4096 >= held,
+        "the cleared map's frozen series data and the kept history stay attributed: {} queued, {} kept, {held} held",
+        queued.bytes,
+        scene.attributed_bytes()
+    );
     drain();
 }
 
-fn stop_retires_dropped_removals_and_cell_changes() {
+/// UI-thread bytes freed when, at 1,000 ms, a step recolors and re-tracks 16 shapes whose
+/// earlier opacity tracks settled at 93 ms and whose color and x tracks run to 4,960 ms.
+fn retrack_frees(keys: u32) -> usize {
+    let mut scene = new_scene("tracks");
+    let mut budget = GlobalBudget::default();
+    let shapes: Vec<_> = (0..16)
+        .map(|i| json!({"shape":{"id":format!("s{i}"),"kind":"rect","box":[0,0,1,1]}}))
+        .collect();
+    let empty = LayoutState::new(&scene);
+    let first = prepared(
+        &mut scene,
+        &mut budget,
+        &empty,
+        json!({"id":"shapes","put":shapes}),
+    );
+    let mut view = SceneView::new(&first.after, 1);
+    drop(first);
+    let track = |i: u32, track: &str, end: u32| {
+        let values: Vec<_> = (0..keys)
+            .map(|k| match track {
+                "color" => json!([
+                    end * k / (keys - 1),
+                    if k % 2 == 0 { "red" } else { "blue" }
+                ]),
+                _ => json!([end * k / (keys - 1), k % 2]),
+            })
+            .collect();
+        json!({"anim":{"target":format!("s{i}"),"track":track,"keys":values}})
+    };
+    let tracks: Vec<_> = (0..16)
+        .flat_map(|i| {
+            [
+                track(i, "opacity", 93),
+                track(i, "color", 4960),
+                track(i, "x", 4960),
+            ]
+        })
+        .collect();
+    let running = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"tracks","put":tracks}),
+    );
+    let mut frame = Frame::new();
+    view.activate(running, 0, 0, &mut frame)
+        .expect("tracks activate");
+    let recolor: Vec<_> = (0..16)
+        .map(|i| json!({"target":format!("s{i}"),"color":"green"}))
+        .collect();
+    let retrack: Vec<_> = (0..16)
+        .map(|i| json!({"anim":{"target":format!("s{i}"),"track":"x","keys":[[0,0],[300,1]]}}))
+        .collect();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"retrack","set":recolor,"put":retrack}),
+    );
+    drain();
+    let ((), _, [_, released]) = allocation::usage(|| {
+        view.activate(next, 1000, 0, &mut frame)
+            .expect("retrack activates");
+    });
+    assert_eq!(
+        (view.next_wake(1000), view.next_wake(1300)),
+        (Some(1300), None),
+        "only the 16 new x tracks run; no settled, recolored or superseded track survives"
+    );
+    drain();
+    released
+}
+
+fn activation_retires_settled_recolored_and_superseded_tracks() {
+    assert_eq!(
+        retrack_frees(32),
+        retrack_frees(2),
+        "the UI thread frees only activation scratch, never the 48 rejected key boxes, which differ by 600 bytes each"
+    );
+}
+
+fn dropped_rows() -> (SceneState, GlobalBudget, StopCut) {
     let mut scene = new_scene("dropped-undo");
     let mut budget = GlobalBudget::default();
     let mut put: Vec<_> = (0..8)
@@ -338,6 +530,11 @@ fn stop_retires_dropped_removals_and_cell_changes() {
         activated: 1,
         revealed: Bounded::new(revealed).expect("kept rows"),
     };
+    (scene, budget, cut)
+}
+
+fn stop_retires_dropped_removals_and_cell_changes() {
+    let (mut scene, mut budget, cut) = dropped_rows();
     let (outcome, _, [_, released]) = allocation::usage(|| scene.stop(&cut, &mut budget));
     assert_eq!(
         outcome.expect("valid cut"),
@@ -364,4 +561,65 @@ fn stop_retires_dropped_removals_and_cell_changes() {
         "the dropped-step fixture frees bounded scratch, not its large maps and undo records: {released}"
     );
     drain();
+}
+
+#[test]
+#[ignore = "run with --exact --ignored alone, normal priority under the Rez quiet lock"]
+fn measure_stop_with_drops_before_start() {
+    assert!(!deferred::running());
+    measure_stop_with_drops();
+}
+
+#[test]
+#[ignore = "normal-priority release measurement under the Rez quiet lock"]
+fn measure_stop_with_drops_started() {
+    deferred::start().expect("dropper starts before intake");
+    measure_stop_with_drops();
+}
+
+#[expect(clippy::print_stdout, reason = "manual Rez measurement output")]
+fn measure_stop_with_drops() {
+    let mut times = Vec::with_capacity(32);
+    let mut released_bytes = Vec::with_capacity(32);
+    for sample in 0..37 {
+        if deferred::running() {
+            drain();
+        }
+        let (mut scene, mut budget, cut) = dropped_rows();
+        let start = Instant::now();
+        let (outcome, _, [allocated, released]) =
+            allocation::usage(|| scene.stop(&cut, &mut budget));
+        let elapsed = start.elapsed().as_nanos();
+        assert_eq!(
+            outcome.expect("valid cut"),
+            StopOutcome::Kept,
+            "the first step survives the cut"
+        );
+        assert_eq!(
+            (scene.object_count(), scene.committed(), scene.revision()),
+            (264, 1, 2),
+            "the cut drops the second step without rewinding the lifetime revision"
+        );
+        if sample >= 5 {
+            times.push(elapsed);
+            released_bytes.push(released);
+            println!(
+                "stop_dropped_undo sample={} elapsed_ns={elapsed} allocated_bytes={allocated} caller_freed_bytes={released}",
+                sample - 5
+            );
+        }
+    }
+    if deferred::running() {
+        drain();
+    }
+    times.sort_unstable();
+    released_bytes.sort_unstable();
+    println!(
+        "stop_dropped_undo dropper={} samples=32 warmups=5 p50_ns={} max_ns={} caller_freed_p50_bytes={} caller_freed_max_bytes={}",
+        deferred::running(),
+        times[15],
+        times[31],
+        released_bytes[15],
+        released_bytes[31]
+    );
 }

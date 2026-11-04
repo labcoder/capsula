@@ -1,8 +1,12 @@
-use super::object::{Object, path as op_path};
+use super::{
+    object::{Object, path as op_path},
+    retire,
+};
 use crate::{
     ErrorCode, FieldPath, Finite, Step, StepError, WireId,
     budget::Usage,
     deferred::Deferred,
+    layout::heap,
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
     record::{Anchor, Anim, Axis, AxisScale, ChartKind, Ease, Enter, KeyValue, Op, Point, Track},
@@ -385,11 +389,31 @@ fn key_vector(value: &KeyValue) -> [f32; 2] {
     }
 }
 
+/// Copies a pre-step object once, keeping the partial map's attribution current at every
+/// early return or unwind; `held` caches the copies' owned bytes.
+fn keep(
+    original: &mut Deferred<BTreeMap<WireId, Object>>,
+    held: &mut usize,
+    id: &WireId,
+    object: &Object,
+) {
+    if !original.contains_key(id) {
+        let copy = object.clone();
+        *held += retire::owned((id, &copy));
+        original.insert(id.clone(), copy);
+        retire::attribute(original, *held);
+    }
+}
+
+/// Applies tracks and data changes to `objects`, whose cached `owned` bytes follow their
+/// motion maps and series data, and returns the pre-step copies of earlier objects they touched. Both maps stay
+/// attributed as `retire::map_bytes` would.
 pub(super) fn changes(
     step: &Step,
-    objects: &mut BTreeMap<WireId, Object>,
+    objects: &mut Deferred<BTreeMap<WireId, Object>>,
+    owned: &mut usize,
     revision: u32,
-) -> Result<BTreeMap<WireId, Object>, StepError> {
+) -> Result<Deferred<BTreeMap<WireId, Object>>, StepError> {
     if step
         .put
         .iter()
@@ -404,6 +428,7 @@ pub(super) fn changes(
         ));
     }
     let mut original = Deferred::new(BTreeMap::new(), 0);
+    let mut held = 0;
     let mut owners = BTreeMap::<(WireId, &'static str), Motion>::new();
     for (index, op) in step.put.iter().enumerate() {
         if let Op::Anim(anim) = op {
@@ -411,9 +436,7 @@ pub(super) fn changes(
                 .get_mut(&anim.target)
                 .expect("track targets were validated");
             if object.handle.revision() != revision {
-                original
-                    .entry(anim.target.clone())
-                    .or_insert_with(|| object.clone());
+                keep(&mut original, &mut held, &anim.target, object);
             }
             let value = motion(anim, index, step)?;
             if owners
@@ -429,12 +452,14 @@ pub(super) fn changes(
         }
     }
     for ((target, property), value) in owners {
-        objects
+        let motions = &mut objects
             .get_mut(&target)
             .expect("track targets remain present")
             .work
-            .motion
-            .insert(property, value);
+            .motion;
+        let before = heap::btree::<&str, Motion>(motions.len());
+        motions.insert(property, value);
+        *owned += heap::btree::<&str, Motion>(motions.len()) - before;
     }
     for (index, change) in step.set.iter().enumerate() {
         let object = objects
@@ -442,19 +467,20 @@ pub(super) fn changes(
             .expect("change targets were validated");
         if object.handle.revision() != revision && (change.cells.is_some() || change.data.is_some())
         {
-            original
-                .entry(change.target.clone())
-                .or_insert_with(|| object.clone());
+            keep(&mut original, &mut held, &change.target, object);
         }
         if let Some(cells) = &change.cells {
             object.work.cells = cells.len();
         }
         if let Some(data) = &change.data {
+            *owned -= retire::owned((&change.target, &*object));
             object.work.data = Some(Data::Set(index));
             object.work.usage.marks = data.len();
+            *owned += retire::owned((&change.target, &*object));
         }
     }
-    Ok(original.into_inner())
+    retire::attribute(objects, *owned);
+    Ok(original)
 }
 
 #[cfg(test)]

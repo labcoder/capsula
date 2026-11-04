@@ -193,15 +193,25 @@ impl SceneSnapshotChunk {
     /// # Errors
     /// Returns `Chunk` for invalid header placement, counts or revisions.
     pub fn checked(self) -> Result<Self, SceneDataError> {
-        ChunkWire {
-            scene: self.scene,
-            revision: self.revision,
-            ordinal: self.ordinal,
-            header: self.header,
-            events: self.events,
-            last: self.last,
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Checks chunk shape without taking ownership of its event payload.
+    /// # Errors
+    /// Returns `Chunk` for invalid header placement, counts or revisions.
+    pub fn validate(&self) -> Result<(), SceneDataError> {
+        if !valid_revision(self.revision)
+            || usize::from(self.ordinal) >= MAX_SCENE_LOG_ENTRIES
+            || self.events.is_empty()
+            || self.header.is_some() != (self.ordinal == 0)
+            || self.events.iter().any(|event| {
+                matches!(event, SceneEvent::Step { revision, .. } if !valid_revision(*revision) || *revision > self.revision)
+            })
+        {
+            return Err(SceneDataError::Chunk);
         }
-        .try_into()
+        Ok(())
     }
 }
 
@@ -209,24 +219,15 @@ impl TryFrom<ChunkWire> for SceneSnapshotChunk {
     type Error = SceneDataError;
 
     fn try_from(value: ChunkWire) -> Result<Self, Self::Error> {
-        if !valid_revision(value.revision)
-            || usize::from(value.ordinal) >= MAX_SCENE_LOG_ENTRIES
-            || value.events.is_empty()
-            || value.header.is_some() != (value.ordinal == 0)
-            || value.events.iter().any(|event| {
-                matches!(event, SceneEvent::Step { revision, .. } if !valid_revision(*revision) || *revision > value.revision)
-            })
-        {
-            return Err(SceneDataError::Chunk);
-        }
-        Ok(Self {
+        Self {
             scene: value.scene,
             revision: value.revision,
             ordinal: value.ordinal,
             header: value.header,
             events: value.events,
             last: value.last,
-        })
+        }
+        .checked()
     }
 }
 
