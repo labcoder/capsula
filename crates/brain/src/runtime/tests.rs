@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -89,8 +89,28 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
     }
 }
 
-/// How long a test waits for something that should happen at once before failing.
-const PATIENCE: Duration = Duration::from_secs(10);
+/// How long a test waits for something that should happen at once before failing: far above a
+/// slow CI runner's worst case, so only a hang runs it out.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+thread_local! {
+    /// The brain's close and `Scenes` waits in this test, `PATIENCE` unless it checks one expires.
+    static WAITS: Cell<(Duration, Duration)> = const { Cell::new((PATIENCE, PATIENCE)) };
+}
+
+pub(super) fn close_wait() -> Duration {
+    WAITS.get().0
+}
+
+pub(super) fn scenes_wait() -> Duration {
+    WAITS.get().1
+}
+
+/// Gives this test the product's close and `Scenes` waits, for a test that checks one expires.
+fn product_waits() {
+    WAITS.set((super::CLOSE_WAIT, super::SCENES_WAIT));
+}
+
 /// What a duplex pipe holds before its writer blocks.
 const DUPLEX_BUFFER: usize = 4096;
 
@@ -323,7 +343,7 @@ fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection
     (brain, hold(scratch))
 }
 
-/// A brain whose store waits up to 10 s on a lock.
+/// A brain whose store waits on a lock as long as a test waits.
 fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
     patient_brain_with(scratch, Box::new(Fixture::parse(script).expect("script")))
 }
@@ -336,7 +356,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
     let high_water = store.high_water().expect("high water");
     store
         .conn_for_tests()
-        .busy_timeout(Duration::from_secs(10))
+        .busy_timeout(PATIENCE)
         .expect("busy timeout");
     let scenes = store.scenes().expect("scenes");
     Brain::new(
@@ -354,8 +374,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
 /// A connection holding the store's write lock, so the brain's writes wait until it ends.
 fn hold(scratch: &Scratch) -> rusqlite::Connection {
     let lock = rusqlite::Connection::open(scratch.db()).expect("lock");
-    lock.busy_timeout(Duration::from_secs(10))
-        .expect("busy timeout");
+    lock.busy_timeout(PATIENCE).expect("busy timeout");
     lock.execute_batch("BEGIN IMMEDIATE").expect("locked");
     lock
 }

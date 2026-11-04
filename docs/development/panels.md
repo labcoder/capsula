@@ -49,6 +49,16 @@ deletes [guess] are unanswered, or waiting on turns sent before them, Delete say
 hid nothing leaves the task and says so, without restoring its old input target. The protocol is
 in [ipc](ipc.md#deleting-a-thread).
 
+Consequential confirmations use `shell/confirmation.rs`: Cancel owns the initial keyboard
+focus and participates in Tab traversal. Enter never confirms an unfocused default action,
+so a held Enter that opened Delete can't commit it. Enter on Cancel and Escape dismiss without
+deleting; Tab to the danger button, then Enter or Space, or click it to confirm. Enter is
+routed only to the focused Cancel or danger button, never an unfocused default action.
+The one-shot callback is consumed before it runs, and Kit restores the previous focus on
+dismissal. `open` returns the Cancel focus handle, or `None` when another dialog is active
+or a previous confirmation is still exiting. A weak per-window lifetime guard follows the
+Kit builder through unmount, because Kit's `has_active_dialog` excludes exiting dialogs.
+
 ## Labels and inline rename
 
 The plain list pins Kumo first using `ThreadRow.kind == Main`; continuations omit it. Search

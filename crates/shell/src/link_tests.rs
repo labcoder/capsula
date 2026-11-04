@@ -490,6 +490,77 @@ fn a_text_only_batch_frees_its_container_on_the_caller() {
     drop(release);
 }
 
+#[test]
+fn a_mixed_batch_retires_its_buffer_when_scene_data_arrives_last() {
+    let release = crate::presenter::tests::hold_dropper();
+    let (sender, receiver) = async_channel::unbounded();
+    sender
+        .send_blocking(LinkEvent::Data {
+            generation: 1,
+            message: text(2, ""),
+            bytes: 40,
+        })
+        .expect("second text event");
+    sender
+        .send_blocking(LinkEvent::SceneData {
+            generation: 1,
+            frame: kumochi_scene::deferred::Deferred::new(
+                DataToShell::ScenesRemoved { scenes: Vec::new() },
+                0,
+            ),
+            bytes: 40,
+        })
+        .expect("scene event last");
+    let batch = super::batch(
+        LinkEvent::Data {
+            generation: 1,
+            message: text(1, ""),
+            bytes: 40,
+        },
+        &receiver,
+    );
+    assert_eq!(batch.len(), 3);
+    assert_eq!(receiver.len(), 0);
+    assert!(matches!(&batch, super::Batch::Scene(_)));
+    let ((), _, [_, released]) = crate::allocation::usage(|| drop(batch));
+    assert_eq!(released, 0, "the mixed batch's buffer leaves the caller");
+    drop(release);
+}
+
+#[test]
+fn a_full_batch_leaves_the_next_event_queued() {
+    let (sender, receiver) = async_channel::unbounded();
+    for index in 1..=256 {
+        sender
+            .send_blocking(LinkEvent::Data {
+                generation: 1,
+                message: text(index, ""),
+                bytes: 40,
+            })
+            .expect("queued text event");
+    }
+    let batch = super::batch(
+        LinkEvent::Data {
+            generation: 1,
+            message: text(0, ""),
+            bytes: 40,
+        },
+        &receiver,
+    );
+    assert_eq!(batch.len(), 256);
+    assert_eq!(receiver.len(), 1);
+    let LinkEvent::Data {
+        message: DataToShell::AssistantText { run, delta },
+        ..
+    } = receiver.try_recv().expect("the 257th event stays queued")
+    else {
+        panic!("the next text event");
+    };
+    assert_eq!(run, RunId(256));
+    assert_eq!(delta, "");
+    assert_eq!(receiver.len(), 0);
+}
+
 /// The link's events with a timeout on each.
 fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
     let (sender, receiver) = mpsc::channel();
@@ -685,7 +756,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     };
     let link = thread::spawn(move || start.link.attend(connection, &start.events));
     let events = patient(events);
-    let _session = connected(next(&events));
+    let session = connected(next(&events));
     let LinkEvent::Settings {
         view: shown,
         answer: false,
@@ -695,10 +766,38 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         panic!("settings first");
     };
     assert_eq!(shown, view);
+    let LinkEvent::Account { generation, view } = next(&events) else {
+        panic!("account follows settings");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(
+        view,
+        AccountView::SignedOut {
+            revocation_unconfirmed: false
+        }
+    );
     let LinkEvent::Scenes(scenes) = next(&events) else {
         panic!("scenes after the account view");
     };
     assert!(scenes.is_empty());
+    let error = kumochi_protocol::message::UserError::from(
+        kumochi_protocol::message::ErrorKey::SignInTimedOut,
+    );
+    frame::write(
+        &mut &control,
+        &ControlToShell::Error(error.clone()),
+        Pipe::Control,
+    )
+    .expect("error written");
+    let LinkEvent::Error {
+        generation,
+        error: shown,
+    } = next(&events)
+    else {
+        panic!("account error is delivered");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(shown, error);
     frame::write(&mut &control, &ControlToShell::Ping, Pipe::Control).expect("ping");
     let pong = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
     assert_eq!(pong.expect("still connected"), Some(ControlToBrain::Pong));

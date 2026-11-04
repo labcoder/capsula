@@ -120,6 +120,12 @@ pub(crate) enum Gate {
     Aborted,
 }
 
+/// Whether `GetLastInputInfo`'s tick `last_input` is at least `away` before `now`, across the
+/// 49.7-day tick wrap.
+pub(crate) fn away(last_input: u32, now: u32, away: Duration) -> bool {
+    u128::from(now.wrapping_sub(last_input)) >= away.as_millis()
+}
+
 /// One look at the desktop during the quiet second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Quiet {
@@ -210,6 +216,16 @@ mod tests {
         last_input: 7,
         settled: true,
     };
+
+    #[test]
+    fn away_starts_at_exactly_ten_minutes_and_survives_the_tick_wrap() {
+        let ten = Duration::from_secs(600);
+        assert!(away(1_000, 601_000, ten));
+        assert!(!away(1_000, 600_999, ten));
+        assert!(away(u32::MAX - 9, 599_990, ten));
+        assert!(!away(u32::MAX - 9, 599_989, ten));
+        assert!(!away(5, 5, ten));
+    }
 
     fn opened() -> (Lease, Instant) {
         let start = Instant::now();

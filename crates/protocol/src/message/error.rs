@@ -41,11 +41,19 @@ pub enum ErrorKey {
     SessionEnded,
     /// This account can't use its plan here.
     PlanUnavailable,
+    /// The plan's usage limit for this app was reached; the usage page says more.
+    UsageLimit,
+    /// The provider didn't accept the account for this request; signing in again may help.
+    AccountRefused,
+    /// The provider refused this request as made; retrying it won't help.
+    RequestRefused,
+    /// The provider's answer couldn't be read.
+    ResponseUnreadable,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 19] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -61,6 +69,10 @@ impl ErrorKey {
         Self::SignOutNotDurable,
         Self::SessionEnded,
         Self::PlanUnavailable,
+        Self::UsageLimit,
+        Self::AccountRefused,
+        Self::RequestRefused,
+        Self::ResponseUnreadable,
     ];
 }
 

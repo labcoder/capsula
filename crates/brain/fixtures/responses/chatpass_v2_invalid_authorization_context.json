@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "PLANTED-PROSE chatpass_v2_invalid_authorization_context",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "chatpass_v2_invalid_authorization_context"
+  }
+}

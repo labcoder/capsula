@@ -21,5 +21,8 @@ mod shape;
 pub(crate) use expression::{Animator, Mood, Motion};
 pub(crate) use frame::FrameState;
 pub(crate) use look::Look;
+pub(crate) use math::{Vec2, v2};
+pub(crate) use neck::Rect;
+pub(crate) use pull::Pull;
 pub(crate) use raster::Renderer;
 pub(crate) use shape::Silhouette;

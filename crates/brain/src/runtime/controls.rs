@@ -7,7 +7,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{Brain, CLOSE_WAIT, Ended, Full, Link, settings};
+use super::{Brain, Ended, Full, Link, close_wait, settings};
 use crate::connections::account::Input as AccountInput;
 use crate::coordinator::Input;
 use crate::ipc;
@@ -22,7 +22,7 @@ pub(super) async fn read_control(
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
             Ok(Some((ControlToBrain::Hello(_), _))) => return Ended::Broken("Hello sent twice"),
             Ok(Some((ControlToBrain::Quitting, _))) => {
-                let deadline = Instant::now() + CLOSE_WAIT;
+                let deadline = Instant::now() + close_wait();
                 quit.set(Some(deadline));
                 return Ended::Quit { deadline };
             }

@@ -2,7 +2,6 @@
 //! and a held write that never holds up Stop.
 
 use std::fs::File;
-use std::time::Duration;
 
 use tokio::time::Instant;
 
@@ -233,7 +232,7 @@ async fn a_change_drained_at_quit_is_written() {
     let mut brain = test_support::brain(&scratch, "");
     let mut tap = Tap::from_env();
     brain.control_offline(rename("Nimbus"), 0, &mut tap);
-    brain.quit(Instant::now() + CLOSE_WAIT).await;
+    brain.quit(Instant::now() + super::PATIENCE).await;
     assert_eq!(saved_name(&scratch), "Nimbus");
 }
 
@@ -303,7 +302,7 @@ async fn a_user_name_drained_after_a_disconnect_never_reaches_the_tap() {
         .len()
         - frame::HEADER_LEN;
     brain.control_offline(change, len, &mut tap);
-    brain.quit(Instant::now() + CLOSE_WAIT).await;
+    brain.quit(Instant::now() + super::PATIENCE).await;
     drop(tap);
     assert_eq!(
         scratch.config().view().user_name,
@@ -467,7 +466,7 @@ fn a_held_write_never_holds_up_shutdown() {
         // The write stays held until the test process exits.
         std::mem::forget(release);
     });
-    done.recv_timeout(CLOSE_WAIT + Duration::from_secs(5))
+    done.recv_timeout(CLOSE_WAIT + super::PATIENCE)
         .expect("shutting down didn't wait for the held write");
 }
 

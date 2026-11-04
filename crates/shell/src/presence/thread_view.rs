@@ -2,8 +2,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent, InputState};
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::scroll::Scrollbar;
@@ -529,26 +528,26 @@ impl ThreadsView {
             .label(strings.get(Text::DeleteThread))
             .on_click(move |_, window, cx| {
                 let owner = owner.clone();
-                window.open_alert_dialog(cx, move |alert, _, cx| {
-                    let strings = cx.global::<Strings>();
-                    let owner = owner.clone();
-                    alert
-                        .title(strings.get(Text::DeleteThreadTitle))
-                        .description(strings.get(Text::DeleteThreadBody))
-                        .show_cancel(true)
-                        .ok_text(strings.get(Text::DeleteThread))
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text(strings.get(Text::DeleteThreadCancel))
-                        .on_ok(move |_, _, cx| {
-                            let owner = owner.clone();
-                            cx.defer(move |cx| {
-                                let _gone = owner.update(cx, |owner, cx| {
-                                    owner.delete_thread(thread, cx);
-                                });
+                let strings = cx.global::<Strings>();
+                let title = strings.get(Text::DeleteThreadTitle).into();
+                let body = strings.get(Text::DeleteThreadBody).into();
+                let cancel = strings.get(Text::DeleteThreadCancel).into();
+                let confirm = strings.get(Text::DeleteThread).into();
+                let _focus = crate::confirmation::open(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    cancel,
+                    confirm,
+                    move |_, cx| {
+                        cx.defer(move |cx| {
+                            let _gone = owner.update(cx, |owner, cx| {
+                                owner.delete_thread(thread, cx);
                             });
-                            true
-                        })
-                });
+                        });
+                    },
+                );
             });
         Some(
             div()

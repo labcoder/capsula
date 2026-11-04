@@ -9,6 +9,8 @@
 )]
 mod allocation;
 
+mod accounts;
+mod confirmation;
 mod credential;
 mod drawing;
 mod escape;
