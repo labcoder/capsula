@@ -46,6 +46,7 @@ fn account(label: &str) -> Secret<Account> {
             scope: Zeroizing::new("model.request".to_owned()),
             expires_at: 1_900_000_000,
             pending_identity_validation: true,
+            refresh_sent: false,
         }),
     })
 }

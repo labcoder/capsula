@@ -1,7 +1,9 @@
 //! Refresh (design §3 rule 3). A caller asks for the bearer; a set within a minute of expiry is
-//! refreshed first, on the token lane. The rotated set is saved before anything else goes out,
-//! then its identity token is checked against the saved subject. Callers join that one flight
-//! until the set is verified. A result for a replaced account never becomes the account.
+//! refreshed first, on the token lane. The refresh token is marked as sent before it goes out,
+//! and one whose answer was never saved is never sent again. The rotated set is saved before
+//! anything else goes out, then its identity token is checked against the saved subject. Callers
+//! join that one flight until the set is verified. A result for a replaced account never becomes
+//! the account.
 
 use std::mem;
 
@@ -29,19 +31,22 @@ pub(super) enum Rotation {
     Verified(u64),
     /// The registration a session that ended leaves, for the generation after it.
     Ended(u64),
+    /// The account with its refresh token marked as sent, saved before the refresh goes out.
+    Marked(u64),
+    /// That mark cleared, once nothing was issued for the token.
+    Unmarked(u64),
 }
 
 impl AccountState {
     pub(super) fn access(&mut self, ticket: u64, now: Option<u64>, effects: &mut Vec<Effect>) {
+        self.now = now;
         let tokens = match &self.loaded.account {
-            Some(account) if !self.busy && self.leaving.is_none() => {
+            Some(account) if !self.busy && self.leaving.is_none() && !self.session_ended() => {
                 account.expose().tokens.as_ref()
             }
             _ => None,
         };
-        let Some((pending, expires_at)) =
-            tokens.map(|tokens| (tokens.pending_identity_validation, tokens.expires_at))
-        else {
+        let Some(pending) = tokens.map(|tokens| tokens.pending_identity_validation) else {
             return effects.push(Effect::Access {
                 ticket,
                 result: Err(Denied::Unusable),
@@ -52,30 +57,47 @@ impl AccountState {
             return;
         }
         self.refreshing = Some(self.generation);
-        // A held save goes again first; a held rotated set is never requested again, and its
-        // commit answers.
-        if let Lane::Owning {
-            save,
-            held: held @ Some(_),
-            ..
-        } = &mut self.lane
-        {
-            *held = None;
-            self.jobs.push_back(Queued::Save);
-            if matches!(save, Save::Rotated { .. }) {
+        // A held save goes again first. A rotated set owned for this account, held or being
+        // saved, is never requested again: its commit answers.
+        if let Lane::Owning { save, held, .. } = &mut self.lane {
+            if held.take().is_some() {
+                self.jobs.push_back(Queued::Save);
+            }
+            if matches!(save, Save::Rotated { generation, .. } if *generation == self.generation) {
                 return;
             }
         }
+        // A set already being checked answers when its check does.
         if pending {
-            return self.validate(effects);
+            if self.validating.is_none() {
+                self.validate(effects);
+            }
+            return;
         }
-        if now.is_none_or(|now| expires_at <= now.saturating_add(EARLY_SECONDS)) {
+        self.fresh(effects);
+    }
+
+    /// Hands out the bearer, renewing it first when it's due, at most once a flight: a set that
+    /// came back already due is handed out, not renewed in a loop.
+    fn fresh(&mut self, effects: &mut Vec<Effect>) {
+        let expires_at = self
+            .loaded
+            .account
+            .as_ref()
+            .and_then(|account| account.expose().tokens.as_ref())
+            .map(|tokens| tokens.expires_at);
+        let due = expires_at.is_some_and(|expires_at| {
+            self.now
+                .is_none_or(|now| expires_at <= now.saturating_add(EARLY_SECONDS))
+        });
+        if due && !self.renewed && !self.tickets.is_empty() {
             return self.waiting.push_back(Waiting::Refresh(self.generation));
         }
         self.granted(effects);
     }
 
-    /// The pending-flag write for a refresh ended: send it, unless its account was replaced.
+    /// The pending-flag write for a refresh ended: mark the token as sent, unless its account
+    /// was replaced.
     pub(super) fn refresh_started(
         &mut self,
         generation: u64,
@@ -83,15 +105,7 @@ impl AccountState {
         effects: &mut Vec<Effect>,
     ) {
         self.lane = Lane::Free;
-        let account = self
-            .loaded
-            .account
-            .as_ref()
-            .filter(|_| generation == self.generation)
-            .map(Secret::expose);
-        let Some((client, tokens)) =
-            account.and_then(|account| Some((&account.client_id, account.tokens.as_ref()?)))
-        else {
+        let Some(marked) = self.marked(generation) else {
             // Nothing was sent.
             return self.jobs.push_back(Queued::Finished {
                 outcome_unknown: false,
@@ -104,11 +118,54 @@ impl AccountState {
                 effects,
             );
         }
-        let client = Secret::new(client.clone());
+        // Once sent, the token may be consumed, so the mark is durable before it goes out.
+        self.lane = Lane::Refreshing {
+            generation,
+            client: None,
+        };
+        self.jobs.push_back(Queued::Rotate(
+            Secret::new(marked),
+            Rotation::Marked(generation),
+        ));
+    }
+
+    /// The account for `generation` with its refresh token marked as sent, unless it was
+    /// replaced.
+    fn marked(&self, generation: u64) -> Option<Account> {
+        let account = self
+            .loaded
+            .account
+            .as_ref()
+            .filter(|_| generation == self.generation)?;
+        let mut account = account.expose().clone();
+        account.tokens.as_mut()?.refresh_sent = true;
+        Some(account)
+    }
+
+    /// The token's mark is saved: the refresh goes out, unless its account was replaced.
+    fn send(&mut self, generation: u64, effects: &mut Vec<Effect>) {
+        self.lane = Lane::Free;
+        let Some(account) = self.marked(generation) else {
+            // Nothing was sent.
+            return self.jobs.push_back(Queued::Finished {
+                outcome_unknown: false,
+            });
+        };
+        let client = Secret::new(account.client_id.clone());
+        let refresh_token = Secret::new(
+            account
+                .tokens
+                .as_ref()
+                .expect("a marked account has tokens")
+                .refresh_token
+                .clone(),
+        );
+        self.loaded.account = Some(Secret::new(account));
+        self.renewed = true;
         effects.push(Effect::Refresh {
             generation,
             client: client.clone(),
-            refresh_token: Secret::new(tokens.refresh_token.clone()),
+            refresh_token,
         });
         self.lane = Lane::Refreshing {
             generation,
@@ -136,6 +193,7 @@ impl AccountState {
             return;
         };
         let current = generation == self.generation;
+        self.now = now;
         let tokens = match result {
             Ok(tokens) => tokens,
             // A typed refusal issued nothing.
@@ -148,28 +206,26 @@ impl AccountState {
                 }
                 return;
             }
-            // An unusable answer that named a successor: the list owns it, as an exchange's.
+            // An unusable answer that named a successor: the token sent was consumed.
             Err(ExchangeError::Unusable {
                 refresh_token: Some(token),
-            }) => {
-                if current {
-                    self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
-                }
-                return self.discard(client.expose(), token.expose());
-            }
+            }) => return self.reject_successor(client.expose(), token.expose(), current, effects),
             Err(failure) => {
                 let (outcome_unknown, key) = classify(&failure);
-                if outcome_unknown {
-                    tracing::warn!(%failure, "a refresh's outcome is unknown");
-                }
                 self.jobs.push_back(Queued::Finished { outcome_unknown });
-                if current {
-                    self.fail(error_of(key, Action::Retry), effects);
+                if !current {
+                    return;
                 }
-                return;
+                // The request may have reached the provider, so the token may be consumed.
+                if outcome_unknown {
+                    tracing::warn!(%failure, "a refresh's outcome is unknown; the session ends");
+                    return self.session_lost(effects);
+                }
+                self.unmark();
+                return self.fail(error_of(key, Action::Retry), effects);
             }
         };
-        let rotated = tokens.refresh_token.is_some();
+        let successor = tokens.refresh_token.clone();
         let save = if current {
             self.rotated_set(tokens, now).map(|account| Save::Rotated {
                 generation,
@@ -191,14 +247,22 @@ impl AccountState {
         };
         let Some(save) = save else {
             tracing::warn!("a refreshed set can't be saved");
-            // A stale refresh that didn't rotate left the old token in place.
-            self.jobs.push_back(Queued::Finished {
-                outcome_unknown: current || rotated,
-            });
-            if current {
-                self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
+            if !current {
+                // A stale refresh that didn't rotate left the old token in place.
+                return self.jobs.push_back(Queued::Finished {
+                    outcome_unknown: successor.is_some(),
+                });
             }
-            return;
+            if let Some(token) = successor {
+                return self.reject_successor(client.expose(), token.expose(), true, effects);
+            }
+            // The token sent wasn't replaced, so it may go again; the access token issued with
+            // it has no owner.
+            self.jobs.push_back(Queued::Finished {
+                outcome_unknown: true,
+            });
+            self.unmark();
+            return self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
         };
         self.lane = Lane::Owning {
             attempt: self.attempt,
@@ -208,7 +272,7 @@ impl AccountState {
         self.jobs.push_back(Queued::Save);
     }
 
-    /// The account with \`tokens\` in place of its own, held for the identity check when an
+    /// The account with `tokens` in place of its own, held for the identity check when an
     /// identity token came back; a refresh that leaves a token out keeps the old one.
     fn rotated_set(&self, tokens: TokenSet, now: Option<u64>) -> Option<Secret<Account>> {
         let mut account = self.loaded.account.as_ref()?.expose().clone();
@@ -221,6 +285,7 @@ impl AccountState {
                 .refresh_token
                 .map_or(old.refresh_token, |token| token.expose().clone()),
             pending_identity_validation: tokens.id_token.is_some(),
+            refresh_sent: false,
             id_token: tokens
                 .id_token
                 .map_or(old.id_token, |token| Some(token.expose().clone())),
@@ -235,6 +300,20 @@ impl AccountState {
 
     pub(super) fn rotated(&mut self, why: Rotation, result: SaveResult, effects: &mut Vec<Effect>) {
         match (why, result) {
+            (Rotation::Marked(generation), SaveResult::Committed { .. }) => {
+                self.send(generation, effects);
+            }
+            (Rotation::Marked(_), SaveResult::NotCommitted(failure)) => {
+                tracing::warn!(%failure, "a refresh token wasn't marked as sent, so it wasn't sent");
+                self.lane = Lane::Free;
+                self.jobs.push_back(Queued::Finished {
+                    outcome_unknown: false,
+                });
+                self.fail(
+                    error_of(ErrorKey::CredentialsUnavailable, Action::Retry),
+                    effects,
+                );
+            }
             (Rotation::Rotated(generation), SaveResult::Committed { .. }) => {
                 let Lane::Owning {
                     save: Save::Rotated { account, .. },
@@ -247,6 +326,9 @@ impl AccountState {
                 if generation != self.generation || self.leaving.is_some() {
                     return;
                 }
+                // A new set is a new generation: a check or refresh still meant for the set it
+                // replaced is stale.
+                self.generation += 1;
                 let pending = account
                     .expose()
                     .tokens
@@ -256,7 +338,7 @@ impl AccountState {
                 if pending {
                     self.validate(effects);
                 } else {
-                    self.granted(effects);
+                    self.fresh(effects);
                 }
             }
             (Rotation::Rotated(_), SaveResult::NotCommitted(failure)) => {
@@ -274,7 +356,7 @@ impl AccountState {
                     }
                     self.loaded.account = Some(Secret::new(account));
                 }
-                self.granted(effects);
+                self.fresh(effects);
             }
             (Rotation::Verified(_), SaveResult::NotCommitted(failure)) => {
                 tracing::warn!(%failure, "a verified set stays pending until it's saved");
@@ -286,7 +368,10 @@ impl AccountState {
             (Rotation::Ended(_), SaveResult::NotCommitted(failure)) => {
                 tracing::warn!(%failure, "an ended session's tokens stay on disk until the next refresh");
             }
-            (Rotation::Ended(_), SaveResult::Committed { .. }) => {}
+            (Rotation::Unmarked(_), SaveResult::NotCommitted(failure)) => {
+                tracing::warn!(%failure, "a refresh token stays marked as sent on disk; the next start ends the session");
+            }
+            (Rotation::Ended(_) | Rotation::Unmarked(_), SaveResult::Committed { .. }) => {}
         }
     }
 
@@ -294,12 +379,14 @@ impl AccountState {
         &mut self,
         generation: u64,
         result: Result<(), IdentityError>,
+        now: Option<u64>,
         effects: &mut Vec<Effect>,
     ) {
         if self.validating != Some(generation) {
             return;
         }
         self.validating = None;
+        self.now = now;
         match result {
             Ok(()) => {
                 let Some(mut account) = self.loaded.account.as_ref().map(|a| a.expose().clone())
@@ -348,33 +435,56 @@ impl AccountState {
 
     fn refused(&mut self, recovery: Recovery, effects: &mut Vec<Effect>) {
         let failed = match recovery {
-            Recovery::SignInAgain => return self.end_session(effects),
+            Recovery::SignInAgain => {
+                let ended = self.end_session(effects);
+                return self.jobs.extend(ended);
+            }
             Recovery::RetryLater => error_of(ErrorKey::AccountOffline, Action::Retry),
             Recovery::FixRequest => no_action(ErrorKey::AccountMisconfigured),
             Recovery::Unavailable => no_action(ErrorKey::PlanUnavailable),
         };
+        // A refusal issued nothing, so the token may go again.
+        self.unmark();
         self.fail(failed, effects);
     }
 
-    /// The session ended: the tokens go, the registration stays, and the account is replaced.
-    fn end_session(&mut self, effects: &mut Vec<Effect>) {
-        self.fail(error_of(ErrorKey::SessionEnded, Action::SignIn), effects);
-        self.moved(effects);
-        let Some(account) = &self.loaded.account else {
+    /// Nothing was issued for the token sent: its mark is cleared, so it may go again.
+    fn unmark(&mut self) {
+        let Some(mut account) = self.loaded.account.as_ref().map(|a| a.expose().clone()) else {
             return;
         };
-        let account = account.expose();
+        let Some(tokens) = account.tokens.as_mut() else {
+            return;
+        };
+        tokens.refresh_sent = false;
+        let account = Secret::new(account);
+        self.loaded.account = Some(account.clone());
+        self.jobs
+            .push_back(Queued::Rotate(account, Rotation::Unmarked(self.generation)));
+    }
+
+    /// The session ended: the tokens go, the registration stays, and the account is replaced.
+    /// Returns the registration's save, for the caller to queue.
+    fn end_session(&mut self, effects: &mut Vec<Effect>) -> Option<Queued> {
+        self.session_lost(effects);
         let registration = Secret::new(Account {
             plan_enabled: false,
             tokens: None,
-            ..account.clone()
+            ..self.loaded.account.as_ref()?.expose().clone()
         });
         self.loaded.account = Some(registration.clone());
-        self.ended = Some(self.generation);
-        self.jobs.push_back(Queued::Rotate(
+        Some(Queued::Rotate(
             registration,
             Rotation::Ended(self.generation),
-        ));
+        ))
+    }
+
+    /// The session can't go on: callers are told to sign in again and the account moves. Tokens
+    /// left in place stay for sign-out to revoke.
+    fn session_lost(&mut self, effects: &mut Vec<Effect>) {
+        self.fail(error_of(ErrorKey::SessionEnded, Action::SignIn), effects);
+        self.moved(effects);
+        self.ended = Some(self.generation);
     }
 
     pub(super) fn session_ended(&self) -> bool {
@@ -384,17 +494,44 @@ impl AccountState {
     /// A rotated set that can't be verified: its token goes to the list, and the session ends.
     fn reject_set(&mut self, effects: &mut Vec<Effect>) {
         let account = self.loaded.account.as_ref().map(Secret::expose);
-        if let Some((client, token)) = account.and_then(|account| {
+        let rejected = account.and_then(|account| {
             let tokens = account.tokens.as_ref()?;
             Some((account.client_id.clone(), tokens.refresh_token.clone()))
-        }) {
-            self.discard(&client, &token);
+        });
+        let ended = self.end_session(effects);
+        match rejected {
+            // The token leaves `chatgpt` only once it's listed or counted unknown.
+            Some((client, token)) => self.discard(&client, &token, ended.into_iter().collect()),
+            None => self.jobs.extend(ended),
         }
-        self.end_session(effects);
     }
 
-    /// Hands a refresh token to the revocation list once the lane is free, as an exchange's set.
-    fn discard(&mut self, client: &Zeroizing<String>, token: &Zeroizing<String>) {
+    /// A successor Kumochi can't keep: the list owns it and its request ends once it's listed.
+    /// The token it replaced is never sent again, so the session ends.
+    fn reject_successor(
+        &mut self,
+        client: &Zeroizing<String>,
+        token: &Zeroizing<String>,
+        current: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        let mut then = vec![Queued::Finished {
+            outcome_unknown: false,
+        }];
+        if current {
+            then.extend(self.end_session(effects));
+        }
+        self.discard(client, token, then);
+    }
+
+    /// Hands a refresh token to the revocation list once the lane is free, as an exchange's set;
+    /// `then` runs once it's listed or counted unknown.
+    fn discard(
+        &mut self,
+        client: &Zeroizing<String>,
+        token: &Zeroizing<String>,
+        then: Vec<Queued>,
+    ) {
         let entry = entry_fits(client, token).then(|| {
             Secret::new(Revocable {
                 client_id: client.clone(),
@@ -403,7 +540,7 @@ impl AccountState {
                 origin: Origin::Exchange,
             })
         });
-        self.waiting.push_front(Waiting::Discard(entry));
+        self.waiting.push_front(Waiting::Discard { entry, then });
     }
 
     /// The account's token set is replaced or removed: anything for the old one is stale, and
@@ -440,6 +577,7 @@ impl AccountState {
         effects: &mut Vec<Effect>,
     ) {
         self.refreshing = None;
+        self.renewed = false;
         for ticket in self.tickets.drain(..) {
             effects.push(Effect::Access {
                 ticket,

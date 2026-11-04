@@ -178,8 +178,7 @@ impl Presence {
                 if let Some(previous) = previous {
                     platform::restore_foreground(window, previous);
                 }
-                platform::place_hidden_presence_window(window, panel.bounds)?;
-                window.bounds_changed(cx);
+                platform::hide_presence_window(window)?;
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;

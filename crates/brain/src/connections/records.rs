@@ -61,6 +61,10 @@ pub struct Tokens {
     pub expires_at: u64,
     /// A rotated set whose identity verification still needs to finish.
     pub pending_identity_validation: bool,
+    /// The refresh token went out and no answer to it was saved: the provider may have
+    /// consumed it, so it's never sent again.
+    #[serde(default)]
+    pub refresh_sent: bool,
 }
 
 /// Whether an entry belongs to the account's refresh lineage or to an independent exchange.

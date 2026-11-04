@@ -448,6 +448,7 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
             scope: Zeroizing::new("openid offline_access chatgpt.tokens.use.direct".to_owned()),
             expires_at: 1_800_000_000,
             pending_identity_validation: false,
+            refresh_sent: false,
         }),
     }));
     assert!(matches!(saved, SaveResult::Committed { .. }));
@@ -470,8 +471,8 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
         account
             .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
     };
-    // The pending flag, the refresh and the rotated set's save.
-    for _ in 0..3 {
+    // The pending flag, the sent mark, the refresh and the rotated set's save.
+    for _ in 0..4 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         accounts.handle(input);
     }

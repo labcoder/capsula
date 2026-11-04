@@ -103,7 +103,7 @@ async fn revoke_one(
         match timeout_at(deadline, http.execute(request)).await {
             Ok(Ok(response)) if response.status >= 500 => {}
             Ok(Ok(response)) => return response.status == 200 && response.body.expose().is_empty(),
-            Ok(Err(HttpError::Timeout | HttpError::Transport)) => {}
+            Ok(Err(HttpError::Timeout | HttpError::Transport | HttpError::Connect)) => {}
             Ok(Err(_)) | Err(_) => return false,
         }
     }

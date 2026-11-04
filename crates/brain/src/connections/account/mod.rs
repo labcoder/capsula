@@ -83,6 +83,8 @@ pub enum Input {
         generation: u64,
         /// The verified identity, or why it isn't.
         result: Result<VerifiedIdentity, IdentityError>,
+        /// Wall time when it ended, for the bearer's expiry.
+        now: Option<u64>,
     },
 }
 
@@ -234,9 +236,16 @@ pub struct AccountState {
     validating: Option<u64>,
     /// Callers waiting for the refresh flight.
     tickets: Vec<u64>,
+    /// The flight already sent a refresh, so it hands out what that brought rather than
+    /// renewing again.
+    renewed: bool,
+    /// The wall time the latest timed input carried, for the expiry of a set saved since.
+    now: Option<u64>,
     /// The generation a session the provider ended left: the registration and email stay, shown
     /// as `SignInAgain` until the account moves again.
     ended: Option<u64>,
+    /// The jobs that wait for the lane's list save to commit.
+    after_list: Vec<Queued>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -266,7 +275,10 @@ impl AccountState {
             refreshing: None,
             validating: None,
             tickets: Vec::new(),
+            renewed: false,
+            now: None,
             ended: None,
+            after_list: Vec::new(),
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
@@ -344,9 +356,11 @@ impl AccountState {
                 result,
                 now,
             } => self.refreshed(generation, result, now, &mut effects),
-            Input::Validated { generation, result } => {
-                self.validated(generation, result.map(drop), &mut effects);
-            }
+            Input::Validated {
+                generation,
+                result,
+                now,
+            } => self.validated(generation, result.map(drop), now, &mut effects),
         }
         self.pump(&mut effects);
         if answer {
@@ -611,6 +625,7 @@ impl AccountState {
                         scope: tokens.scope.expose().clone(),
                         expires_at,
                         pending_identity_validation: false,
+                        refresh_sent: false,
                     }),
                 };
                 if account.validate().is_ok() {
@@ -731,6 +746,16 @@ impl AccountState {
         if let Some(sign_out) = marker.sign_out {
             self.resume(sign_out);
         }
+        // A refresh whose answer was never saved may have consumed its token: the token stays
+        // for sign-out to revoke and is never sent again, so the session needs a new sign-in.
+        if account
+            .as_ref()
+            .and_then(|account| account.expose().tokens.as_ref())
+            .is_some_and(|tokens| tokens.refresh_sent)
+        {
+            tracing::warn!("a refresh's answer was never saved; the session needs a new sign-in");
+            self.ended = Some(self.generation);
+        }
         self.loaded = Loaded {
             notice: marker.notice,
             host,
@@ -776,6 +801,7 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
             code: OAuthCode::InvalidClient,
             ..
         } => (false, ErrorKey::AccountMisconfigured),
+        ExchangeError::Http(HttpError::Connect) => (false, ErrorKey::AccountOffline),
         ExchangeError::Http(HttpError::TrustStoreUnavailable) => {
             (false, ErrorKey::TrustStoreUnavailable)
         }
@@ -792,7 +818,9 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
 
 fn identity_key(failure: IdentityError) -> ErrorKey {
     match failure {
-        IdentityError::Http(HttpError::Timeout | HttpError::Transport) => ErrorKey::AccountOffline,
+        IdentityError::Http(HttpError::Timeout | HttpError::Transport | HttpError::Connect) => {
+            ErrorKey::AccountOffline
+        }
         IdentityError::Status { status } if status >= 500 => ErrorKey::AccountOffline,
         IdentityError::OtherAccount => ErrorKey::SignInOtherAccount,
         _ => ErrorKey::SignInFailed,

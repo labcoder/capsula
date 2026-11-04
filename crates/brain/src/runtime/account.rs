@@ -380,7 +380,14 @@ async fn validate_task(
         .await
     }
     .await;
-    events.send(Input::Validated { generation, result }).ok();
+    let now = net.clock.unix_seconds();
+    events
+        .send(Input::Validated {
+            generation,
+            result,
+            now,
+        })
+        .ok();
 }
 
 pub(super) async fn exchange_task(

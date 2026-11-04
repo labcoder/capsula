@@ -197,7 +197,7 @@ mod tests {
         let early = start + ms(13.0);
         let mut unknown = Pacer::default();
         unknown.start(start);
-        assert!(unknown.frame(start, cap(72), None).is_some());
+        assert_eq!(unknown.frame(start, cap(72), None), Some(0.0));
         assert_eq!(
             unknown.frame(early, cap(72), None),
             None,
@@ -205,16 +205,16 @@ mod tests {
         );
         let mut known = Pacer::default();
         known.start(start);
-        assert!(known.frame(start, cap(72), Some(hz(144.0))).is_some());
-        assert!(
-            known.frame(early, cap(72), None).is_some(),
+        assert_eq!(known.frame(start, cap(72), Some(hz(144.0))), Some(0.0));
+        assert_eq!(
+            known.frame(early, cap(72), None),
+            Some(0.013),
             "144 Hz's slack"
         );
         assert_eq!(known.frame(early + ms(6.0), cap(72), None), None);
-        assert!(
-            known
-                .frame(early + ms(13.0), cap(72), Some(hz(144.0)))
-                .is_some()
+        assert_eq!(
+            known.frame(early + ms(13.0), cap(72), Some(hz(144.0))),
+            Some(0.013)
         );
     }
 
@@ -228,7 +228,7 @@ mod tests {
         let mut pacer = Pacer::default();
         pacer.start(start);
         let refresh = Some(hz(61.0));
-        assert!(pacer.frame(start, cap(30), refresh).is_some());
+        assert_eq!(pacer.frame(start, cap(30), refresh), Some(0.0));
         let interval = 3.0 / 61.0;
         let next = start + Duration::from_secs_f64(interval);
         let step = pacer.frame(next, cap(30), refresh).expect("draws");

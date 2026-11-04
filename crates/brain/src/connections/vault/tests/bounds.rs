@@ -103,7 +103,7 @@ fn serialized_escaping_cannot_grow_a_record_past_48_kib() {
 }
 
 /// The 48 KiB serialized bound on an account, at exactly 49,152 bytes and one over. The JSON
-/// around the 32,768 escaped access-token bytes and the ID token is 143 bytes, counted by hand.
+/// around the 32,768 escaped access-token bytes and the ID token is 164 bytes, counted by hand.
 #[test]
 fn an_account_of_exactly_48_kib_serialized_is_saved_and_one_byte_more_is_refused() {
     let sized = |id_token: usize| Account {
@@ -118,9 +118,10 @@ fn an_account_of_exactly_48_kib_serialized_is_saved_and_one_byte_more_is_refused
             scope: Zeroizing::new("s".to_owned()),
             expires_at: 0,
             pending_identity_validation: false,
+            refresh_sent: false,
         }),
     };
-    let (exact, over) = (sized(16_241), sized(16_242));
+    let (exact, over) = (sized(16_220), sized(16_221));
     assert_eq!(serde_json::to_vec(&exact).expect("JSON").len(), 49_152);
     assert_eq!(serde_json::to_vec(&over).expect("JSON").len(), 49_153);
     assert!(matches!(exact.validate(), Ok(())), "exactly the bound");

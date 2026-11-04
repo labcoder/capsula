@@ -42,9 +42,13 @@ pub enum Job {
     Marker(MarkerUpdate),
     /// Save a verified sign-in; once committed, release its lane fact and an old notice.
     Commit(Secret<Account>),
-    /// Add a received refresh token to the revocation list; once committed, release its lane
-    /// fact. Its `added_at` is stamped when it's saved.
-    List(Secret<Revocable>),
+    /// Add a refresh token to the revocation list. Its `added_at` is stamped when it's saved.
+    List {
+        /// The entry.
+        entry: Secret<Revocable>,
+        /// Whether this save ends the lane's request, releasing its fact once committed.
+        finish: bool,
+    },
     /// Drop these confirmed entries, and with `age_out` the expired ones, from the revocation
     /// list. A list left empty has its names deleted and checked, then its sweep fact cleared.
     Relist {
@@ -78,7 +82,7 @@ impl fmt::Debug for Job {
             Self::Register(_) => "Register",
             Self::Marker(_) => "Marker",
             Self::Commit(_) => "Commit",
-            Self::List(_) => "List",
+            Self::List { .. } => "List",
             Self::Relist { .. } => "Relist",
             Self::Prepare => "Prepare",
             Self::Checkpoint(_) => "Checkpoint",
@@ -205,7 +209,7 @@ impl<S: CredentialStore> Worker<S> {
                     result: refused(),
                     notice_cleared: false,
                 },
-                Job::List(_) => Done::Listed {
+                Job::List { .. } => Done::Listed {
                     result: refused(),
                     entries: Vec::new(),
                 },
@@ -238,7 +242,7 @@ impl<S: CredentialStore> Worker<S> {
                 }
             }
             Job::Rotate { account, finish } => Done::Rotated(rotate(vault, &account, finish)),
-            Job::List(entry) => {
+            Job::List { entry, finish } => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
                         list.map_or_else(RevocationList::default, |list| list.expose().clone());
@@ -262,7 +266,7 @@ impl<S: CredentialStore> Worker<S> {
                     }
                 };
                 let result = vault.save_revocations(&Secret::new(list.clone()));
-                if matches!(result, SaveResult::Committed { .. }) {
+                if finish && matches!(result, SaveResult::Committed { .. }) {
                     finish_request(vault);
                 }
                 Done::Listed {
@@ -310,7 +314,8 @@ impl<S: CredentialStore> Worker<S> {
     }
 
     fn load(&mut self, mut tries: u32) -> Result<Snapshot, VaultError> {
-        if self.vault.is_none() {
+        let opening = self.vault.is_none();
+        if opening {
             let vault = loop {
                 tries -= 1;
                 match (self.open)() {
@@ -332,6 +337,20 @@ impl<S: CredentialStore> Worker<S> {
                     revocable: Err(VaultError::Fenced),
                 });
             }
+        };
+        // A request the last run left pending may have issued a token nobody owns: that's
+        // uncertainty now, before any later save can finish the flag as if it were known.
+        let marker = if opening && marker.request_pending {
+            vault
+                .update_marker(MarkerUpdate::RequestFinished {
+                    outcome_unknown: true,
+                })
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the last run's pending flag stays as it is");
+                    marker
+                })
+        } else {
+            marker
         };
         // Nothing leaves the list but a confirmed revocation while a sign-out is pending.
         let revocable = if marker.sign_out.is_some() {
