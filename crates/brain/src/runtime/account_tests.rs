@@ -605,10 +605,7 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
         }
     }
     assert!(
-        matches!(
-            SessionLock::try_acquire(&lock),
-            Err(SessionLockError::Busy)
-        ),
+        matches!(SessionLock::try_acquire(&lock), Err(SessionLockError::Busy)),
         "the lock is held while the refresh is out"
     );
     release.send(()).expect("the refresh waits for its release");
