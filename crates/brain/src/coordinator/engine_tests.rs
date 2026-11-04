@@ -1,12 +1,15 @@
 //! A round's events in the core loop: how its ending ends the run, the draw call's arguments,
 //! and events for a run that already ended.
 
-use kumochi_protocol::message::{MAX_STEP_LABEL, Phase};
+use kumochi_protocol::message::{
+    Action, ControlToShell, ErrorKey, MAX_STEP_LABEL, Phase, UserError,
+};
 
 use super::{
     R, T, ack, call, commit_in_scene, committed, delta, draw_call, draw_step, end_run, ends_failed,
     engine, run_end, started, state,
 };
+use crate::connections::model::error::Failure as Stream;
 use crate::coordinator::{Effect, Input, Stale};
 use crate::engines::{EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd};
@@ -41,17 +44,44 @@ fn late() -> Vec<TurnEvent> {
     ]
 }
 
+/// The shell hears run 10 failed, with `error`.
+fn failed(key: ErrorKey, action: Action) -> Effect {
+    Effect::Control(ControlToShell::RunState {
+        run: R,
+        thread: T,
+        phase: Phase::Failed,
+        error: Some(UserError::new(key, Vec::new(), vec![action]).expect("one action")),
+    })
+}
+
+/// Each ending fails the run, and the shell hears the stream's or the account's reason; the
+/// fixture's provider failure and an interruption carry none.
 #[test]
 fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
-    for finish in [
-        Finish::Truncated,
-        Finish::Failed(EngineFailure::Provider),
-        Finish::Interrupted,
+    for (finish, reason) in [
+        (
+            Finish::Truncated,
+            Some(failed(ErrorKey::AccountOffline, Action::Retry)),
+        ),
+        (
+            Finish::Failed(EngineFailure::Stream(Stream::Protocol)),
+            Some(failed(ErrorKey::ResponseUnreadable, Action::Retry)),
+        ),
+        (
+            Finish::Failed(EngineFailure::Access),
+            Some(failed(ErrorKey::SignInNeeded, Action::SignIn)),
+        ),
+        (Finish::Failed(EngineFailure::Provider), None),
+        (Finish::Interrupted, None),
     ] {
         let mut core = started();
+        let mut ends = ends_failed(Failure::Engine);
+        if let Some(reason) = reason {
+            ends[1] = reason;
+        }
         assert_eq!(
             core.handle(engine(R, TurnEvent::Finished(finish))),
-            Ok(ends_failed(Failure::Engine)),
+            Ok(ends),
             "{finish:?}"
         );
         assert_eq!(core.current_run(), None, "{finish:?}");
@@ -68,7 +98,7 @@ fn text_then_a_truncated_round_is_never_done() {
             .expect("current"),
         vec![
             Effect::CancelEngine { run: R },
-            state(R, T, Phase::Failed),
+            failed(ErrorKey::AccountOffline, Action::Retry),
             run_end(R),
             end_run(Some("half"), None, RunEnd::Failed(Failure::Engine)),
         ]
