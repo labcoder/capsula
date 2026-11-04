@@ -295,6 +295,61 @@ stamped `u64::MAX`, which never age out. While the brain runs, wall time moving 
 entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
 set back while it's listed only delays its age-out.
 
+**Refresh** (`account::refresh`, design §3 rule 3). A caller asks for the bearer with
+`Input::Access`, answered by `Effect::Access`. Each call checks the wall clock: a set with 60 s or
+less left [local policy], or with no wall time, is refreshed first; there's no timer. The refresh
+is one flight on the token lane, from the request until the rotated set is committed and its
+identity token verified. Callers that arrive meanwhile join it, and all of them get the same
+answer.
+
+```mermaid
+sequenceDiagram
+    participant C as caller
+    participant M as account machine
+    participant V as credentials thread
+    participant P as provider
+    C->>M: access()
+    M->>V: write request_pending
+    M->>P: refresh_token grant (30 s deadline)
+    P-->>M: rotated set
+    M->>V: save it, pending_identity_validation set, flag cleared
+    M->>P: discovery and JWKS, verify against the saved subject
+    P-->>M: verified
+    M->>V: save it, pending flag cleared
+    M-->>C: bearer
+```
+
+- The rotated set is saved before any further network work. A refused save holds it in memory
+  with the lane; the next `access` saves it again and never asks for another token.
+- `pending_identity_validation` is durable, so a set left pending by a crash is checked before
+  its first use after the restart. A failed check leaves it pending and blocks access; the next
+  `access` checks again without a second refresh. A refresh that leaves out the identity
+  token or the refresh token keeps the saved one and isn't pending.
+- `verify_refreshed` binds the token to the subject this account already verified, with no
+  nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
+  Another subject ends the session.
+- Ending a session (a `SignInAgain` code, another subject, or a pending set with nothing to
+  check) saves the registration alone, answers `SessionEnded` with Sign in, and moves the
+  generation.
+- A result that arrives under an old generation never becomes the account: during a sign-out its
+  rotated token replaces the listed `Account` entry, so the successor is what gets revoked.
+- An unusable answer that names a refresh token lists it as an exchange's would be, when an
+  exchange slot is free and its entry fits; otherwise its outcome is unknown.
+- A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
+  sign-out saves nothing.
+
+| Provider answer | Recovery | Shown |
+| --- | --- | --- |
+| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused` | sign in again | `SessionEnded`, Sign in |
+| `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable`, other codes with 429 or 5xx | retry later | `AccountOffline`, Retry |
+| `subscription_sharing_user_not_eligible` | unavailable | `PlanUnavailable` |
+| `invalid_client`, `chatpass_v2_*`, other codes | fix the request | `AccountMisconfigured` |
+| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `AccountOffline`, Retry |
+| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `SignInFailed`, Retry |
+
+Every row but the first keeps the credentials. A typed refusal issued nothing, so it clears the
+pending flag without setting `outcome_unknown`.
+
 **Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
 at once: the attempt moves, the listener closes, the account leaves memory, and the view is
 `SigningOut { cleanup: Running, revocation_unconfirmed: true }`. A save the current attempt already

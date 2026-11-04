@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::{CredentialStore, WindowsCredentialStore};
+use super::{CredentialStore, NativeCredentialStore};
 
 /// Serial native fixture access; `docs/development/accounts.md` says why the store needs it.
 static STORE: Mutex<()> = Mutex::new(());
@@ -22,7 +22,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let store = WindowsCredentialStore;
+        let store = NativeCredentialStore;
         let mut failed = false;
         for target in &self.targets {
             if let Err(error) = store.delete(target) {

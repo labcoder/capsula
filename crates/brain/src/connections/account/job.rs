@@ -13,7 +13,7 @@ use crate::connections::error::VaultError;
 use crate::connections::marker::{MarkerUpdate, SignOutMarker};
 use crate::connections::records::{Account, Origin, Revocable, RevocationList};
 use crate::connections::vault::{DeleteResult, SaveResult, Vault};
-use crate::platform::credential::{CredentialStore, WindowsCredentialStore};
+use crate::platform::credential::{CredentialStore, NativeCredentialStore};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
 /// lock a little after the process ends.
@@ -60,6 +60,9 @@ pub enum Job {
     Checkpoint(Vec<Secret<Revocable>>),
     /// Sign-out's Delete, then Finish.
     Finish,
+    /// Save a refresh flight's account: its rotated set, the set once verified, or the
+    /// registration left when the session ended; once committed, release its lane fact.
+    Rotate(Secret<Account>),
 }
 
 impl fmt::Debug for Job {
@@ -74,6 +77,7 @@ impl fmt::Debug for Job {
             Self::Prepare => "Prepare",
             Self::Checkpoint(_) => "Checkpoint",
             Self::Finish => "Finish",
+            Self::Rotate(_) => "Rotate",
         })
     }
 }
@@ -109,6 +113,8 @@ pub enum Done {
     Checkpointed(Result<bool, VaultError>),
     /// Delete and Finish ended.
     SignedOut(Result<(), VaultError>),
+    /// A refresh flight's save.
+    Rotated(SaveResult),
 }
 
 /// What the vault held when it was read. Each record fails on its own, so one damaged record
@@ -144,10 +150,10 @@ impl<S: CredentialStore> fmt::Debug for Worker<S> {
     }
 }
 
-impl Worker<WindowsCredentialStore> {
+impl Worker<NativeCredentialStore> {
     /// The worker on the real credential store: the only way the brain reaches it outside tests.
     pub fn system(clock: Arc<dyn Clock>) -> Self {
-        Self::new(Box::new(|| Vault::open(WindowsCredentialStore)), clock)
+        Self::new(Box::new(|| Vault::open(NativeCredentialStore)), clock)
     }
 }
 
@@ -201,6 +207,7 @@ impl<S: CredentialStore> Worker<S> {
                 Job::Prepare => Done::Prepared(Err(VaultError::Busy)),
                 Job::Checkpoint(_) => Done::Checkpointed(Err(VaultError::Busy)),
                 Job::Finish => Done::SignedOut(Err(VaultError::Busy)),
+                Job::Rotate(_) => Done::Rotated(refused()),
             };
         };
         match job {
@@ -224,11 +231,17 @@ impl<S: CredentialStore> Worker<S> {
                     notice_cleared,
                 }
             }
+            Job::Rotate(account) => Done::Rotated(rotate(vault, &account)),
             Job::List(entry) => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
                         list.map_or_else(RevocationList::default, |list| list.expose().clone());
                     let mut entry = entry.expose().clone();
+                    // A refresh's successor replaces the account entry it rotated.
+                    if entry.origin == Origin::Account {
+                        list.entries
+                            .retain(|listed| listed.origin != Origin::Account);
+                    }
                     entry.added_at = added_at;
                     list.entries.push(entry);
                     list
@@ -346,6 +359,14 @@ fn finish_request<S: CredentialStore>(vault: &mut Vault<S>) {
     }) {
         tracing::warn!(%error, "the token lane's pending flag stays set");
     }
+}
+
+fn rotate<S: CredentialStore>(vault: &mut Vault<S>, account: &Secret<Account>) -> SaveResult {
+    let result = vault.save_account(account);
+    if matches!(result, SaveResult::Committed { .. }) {
+        finish_request(vault);
+    }
+    result
 }
 
 fn expired(entry: &Revocable, now: u64) -> bool {

@@ -10,6 +10,7 @@
 
 mod job;
 mod lane;
+mod refresh;
 mod sign_out;
 mod sweep;
 #[cfg(test)]
@@ -25,7 +26,7 @@ use kumochi_protocol::message::{
 use zeroize::Zeroizing;
 
 pub use job::{Done, Job, Snapshot, Worker};
-use lane::{Deferred, Flight, Lane, Queued, Save, listed};
+use lane::{Deferred, Flight, Lane, Queued, Save, Waiting, listed};
 use sign_out::Leaving;
 use sweep::{Pass, Why};
 
@@ -60,6 +61,39 @@ pub enum Input {
     },
     /// A revocation run ended with these entries confirmed.
     Revoked(Vec<Secret<Revocable>>),
+    /// A caller wants the bearer, refreshed first if it's due.
+    Access {
+        /// Names the caller's answer.
+        ticket: u64,
+        /// Wall time, for the expiry check.
+        now: Option<u64>,
+    },
+    /// The refresh for `generation` ended.
+    Refreshed {
+        /// The account generation it was sent for.
+        generation: u64,
+        /// The rotated set, or why there's none.
+        result: Result<TokenSet, ExchangeError>,
+        /// Wall time when it arrived, for its expiry.
+        now: Option<u64>,
+    },
+    /// The identity check of `generation`'s rotated set ended.
+    Validated {
+        /// The account generation it checked.
+        generation: u64,
+        /// The verified identity, or why it isn't.
+        result: Result<VerifiedIdentity, IdentityError>,
+    },
+}
+
+/// Why [`Input::Access`] gave no bearer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Denied {
+    /// No usable account: signed out, signing out or busy, or the account the caller asked
+    /// about was replaced while it waited.
+    Unusable,
+    /// The provider or the store refused; this is what to tell the user.
+    Failed(UserError),
 }
 
 /// How a listener ended.
@@ -117,6 +151,33 @@ pub enum Effect {
     },
     /// Revoke these listed entries within one network budget, then report [`Input::Revoked`].
     Revoke(Vec<Secret<Revocable>>),
+    /// Send the refresh, then report [`Input::Refreshed`]. Never aborted once started.
+    Refresh {
+        /// The account generation it's for.
+        generation: u64,
+        /// The issued client.
+        client: Secret<Zeroizing<String>>,
+        /// The account's current refresh token.
+        refresh_token: Secret<Zeroizing<String>>,
+    },
+    /// Verify a rotated set's identity token, then report [`Input::Validated`].
+    Validate {
+        /// The account generation it's for.
+        generation: u64,
+        /// The issued client.
+        client: Secret<Zeroizing<String>>,
+        /// The subject this account already verified.
+        subject: Secret<Zeroizing<String>>,
+        /// The rotated identity token.
+        id_token: Secret<Zeroizing<String>>,
+    },
+    /// Answer an [`Input::Access`].
+    Access {
+        /// The caller's ticket.
+        ticket: u64,
+        /// The bearer, or why there's none.
+        result: Result<Secret<Zeroizing<String>>, Denied>,
+    },
 }
 
 /// The account's state as last read, and what the machine learned since.
@@ -160,11 +221,19 @@ pub struct AccountState {
     busy: bool,
     loading: bool,
     loaded: Loaded,
+    /// Names the account's token set; it moves when that set is replaced or removed.
+    generation: u64,
     attempt: u64,
     live: Option<Live>,
     deferred: Option<Deferred>,
     lane: Lane,
-    waiting: VecDeque<(u64, Authorization)>,
+    waiting: VecDeque<Waiting>,
+    /// The generation a refresh flight serves, from its request until its set is verified.
+    refreshing: Option<u64>,
+    /// The generation whose rotated set is being verified.
+    validating: Option<u64>,
+    /// Callers waiting for the refresh flight.
+    tickets: Vec<u64>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -185,11 +254,15 @@ impl AccountState {
             busy: true,
             loading: false,
             loaded: Loaded::default(),
+            generation: 0,
             attempt: 0,
             live: None,
             deferred: None,
             lane: Lane::Free,
             waiting: VecDeque::new(),
+            refreshing: None,
+            validating: None,
+            tickets: Vec::new(),
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
@@ -255,6 +328,15 @@ impl AccountState {
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
             Input::Revoked(confirmed) => self.revoked(confirmed),
+            Input::Access { ticket, now } => self.access(ticket, now, &mut effects),
+            Input::Refreshed {
+                generation,
+                result,
+                now,
+            } => self.refreshed(generation, result, now, &mut effects),
+            Input::Validated { generation, result } => {
+                self.validated(generation, result.map(drop), &mut effects);
+            }
         }
         self.pump(&mut effects);
         if answer {

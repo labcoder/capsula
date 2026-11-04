@@ -619,7 +619,7 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
 #[cfg(windows)]
 #[test]
 fn windows_vault_persists_only_under_its_random_test_service() {
-    use crate::platform::credential::WindowsCredentialStore;
+    use crate::platform::credential::NativeCredentialStore;
     use crate::platform::credential::fixture::Fixture;
 
     let (_scratch, path, service, _) = setup("windows-vault");
@@ -636,13 +636,13 @@ fn windows_vault_persists_only_under_its_random_test_service() {
     }
     let _fixture = Fixture::new(targets);
     let mut vault =
-        Vault::with_service(WindowsCredentialStore, &service, &path).expect("test vault");
+        Vault::with_service(NativeCredentialStore, &service, &path).expect("test vault");
     let host = vault.host_id().expect("host");
     committed(vault.save_account(&account("old")));
     committed(vault.save_revocations(&list("one")));
     drop(vault);
     let mut vault =
-        Vault::with_service(WindowsCredentialStore, &service, &path).expect("reopen vault");
+        Vault::with_service(NativeCredentialStore, &service, &path).expect("reopen vault");
     assert!(
         vault.host_id().expect("persisted host").expose() == host.expose(),
         "same host"

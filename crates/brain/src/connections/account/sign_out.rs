@@ -54,6 +54,7 @@ impl AccountState {
         self.attempt += 1;
         self.admitting = None;
         self.deferred = None;
+        self.moved(effects);
         if self.live.take().is_some() {
             effects.push(Effect::Close);
         }
