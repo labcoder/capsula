@@ -31,8 +31,8 @@ settings error (`SettingsRefused` or `ConfigUnreadable`) belongs to that head; a
 `UserError` is a general brain notice and never fails a pending save. `answer: false` updates
 saved values but never completes an operation. Errors remain after the refused answer. An answer to another field cannot erase
 them. A successful retry of the field that produced the dock notice clears that notice and
-its full typing-panel explanation; an unsolicited view or reconnect does not. The dock shows
-only **Check settings**, not recovery prose inside its small pill. The full explanation remains
+its full typing-panel explanation; an unsolicited view or reconnect does not. The status panel shows
+only **Check settings**, not recovery prose, until the dock's peek returns. The full explanation remains
 beside the field and in the typing panel. A new turn also clears the retained typing/dock notice.
 Transport errors clear on a view from the current connection, never on a stale view. An inline
 rename refuses with saving, offline or retry feedback without adding an error to a Settings

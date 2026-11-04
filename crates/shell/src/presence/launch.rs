@@ -11,8 +11,6 @@ use super::geometry::Position;
 pub(crate) struct Launch {
     pub(super) quit_delay: Option<Duration>,
     pub(super) escape_fixture: bool,
-    /// `--stretch-fixture`: stretch out and back on a clock, with no input, until Quit.
-    pub(super) stretch_fixture: bool,
     /// `--gate-observer=<file>`: where the gate harness's records go.
     pub(super) observer: Option<PathBuf>,
     /// `--receipt-fixture`: start the dock middle-left for the gate's click-receipt phases.
@@ -32,8 +30,6 @@ impl Launch {
                 launch.quit_delay = Some(Duration::from_secs(10));
             } else if arg == "--esc-fixture" {
                 launch.escape_fixture = true;
-            } else if arg == "--stretch-fixture" {
-                launch.stretch_fixture = true;
             } else if let Some(path) = arg.strip_prefix("--gate-observer=") {
                 launch.observer = Some(PathBuf::from(path));
             } else if arg == "--receipt-fixture" {
@@ -52,9 +48,6 @@ impl Launch {
         if launch.quit_delay.is_none() {
             if launch.escape_fixture {
                 return Err(OpenError::EscFixtureDeadline);
-            }
-            if launch.stretch_fixture {
-                return Err(OpenError::StretchFixtureDeadline);
             }
             if launch.observer.is_some() || launch.receipt_fixture {
                 return Err(OpenError::ObserverDeadline);
@@ -135,28 +128,6 @@ mod tests {
                 .escape_fixture
         );
         assert!(!launch(args(&[])).unwrap().escape_fixture);
-    }
-
-    #[test]
-    fn the_stretch_fixture_only_runs_with_a_quit_deadline() {
-        assert!(matches!(
-            launch(args(&["--stretch-fixture"])),
-            Err(OpenError::StretchFixtureDeadline)
-        ));
-        assert_eq!(
-            launch(args(&["--stretch-fixture", "--quit-after-ms=70000"])).unwrap(),
-            Launch {
-                quit_delay: Some(Duration::from_secs(70)),
-                stretch_fixture: true,
-                ..Launch::default()
-            }
-        );
-        assert!(
-            launch(args(&["--smoke", "--stretch-fixture"]))
-                .unwrap()
-                .stretch_fixture
-        );
-        assert!(!launch(args(&[])).unwrap().stretch_fixture);
     }
 
     #[test]

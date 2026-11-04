@@ -727,9 +727,9 @@ impl Session {
     }
 
     /// Covers the presence with the fixture (borderless, its EDIT filling it, without activation or
-    /// a Z-order change) and returns the hover's enter point, the resting pill's center, and its
-    /// leave point, beside the dock at the same height and beyond the whole stretch overlay, so
-    /// the bulb can't chase it and the panel can't reopen. `dock` and `overlay` are the
+    /// a Z-order change) and returns the hover's enter point, the dock slot's center, and its
+    /// leave point, beside the dock at the same height and beyond the whole overlay, so the panel
+    /// can't reopen. `dock` and `overlay` are the
     /// observer's startup physical rects. Moves no pointer; the caller uncovers afterwards.
     pub(crate) fn hover_points(&mut self, dock: RECT, overlay: RECT) -> Result<[POINT; 2]> {
         self.guard()?;

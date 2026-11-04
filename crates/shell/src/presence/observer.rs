@@ -2,7 +2,7 @@
 //! hit-mask commit logs the exact rows it drew and owned, each dock paint its frame, each frame's
 //! completion its dispatch on the proxy, and each tagged click its receipt, all stamped with the
 //! performance counter. The UI thread only moves fixed-size records into a preallocated bounded
-//! queue; a writer thread formats and flushes them. A dropped record, an outline taller than
+//! queue; a writer thread formats and flushes them. A dropped record, a shape taller than
 //! [`ROW_CAP`] or a failed post is counted in the close record, and any of them makes the run
 //! invalid for the gate. Records carry geometry and times, never text or another app's content.
 
@@ -19,10 +19,10 @@ use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
 use super::geometry::{PanelVisibility, Position};
-use super::outline::Ownership;
+use super::line::LineFrame;
 use crate::platform::{self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote};
 
-/// Rows one geometry record holds; a stretched outline at 100 % is under 200.
+/// Rows one geometry record holds; the line's band at 200 % is under 50.
 pub(super) const ROW_CAP: usize = 512;
 /// Records the writer may fall behind by; one more is dropped and the run is invalid.
 const QUEUE: usize = 256;
@@ -33,8 +33,7 @@ const PENDING: usize = 8;
 /// has `left == right`; real spans never do.
 type Row = [i32; 6];
 
-/// One commit's exact rows, from the same `row_span` and `row_spans` the dock paints and the
-/// mask is given.
+/// One commit's exact rows: the line's painted pixels and the band the mask is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Geometry {
     origin_y: i32,
@@ -72,12 +71,14 @@ impl fmt::Display for Geometry {
 }
 
 impl Geometry {
-    pub(super) fn of(ownership: &Ownership) -> Self {
-        let [_, top, _, height] = ownership.bounds();
+    pub(super) fn of(frame: &LineFrame) -> Self {
+        let [_, top, _, height] = frame.hit;
+        let [paint_left, paint_top, paint_width, paint_height] = frame.paint;
+        // The line never carries a previous placement, so its mask is always trimmed.
         let mut geometry = Self {
             origin_y: top,
             rows: usize::try_from(height).unwrap_or(0),
-            trimmed: ownership.trimmed(),
+            trimmed: true,
             spans: [[0; 6]; ROW_CAP],
         };
         if geometry.overflowed() {
@@ -85,8 +86,12 @@ impl Geometry {
         }
         let span = |span: Option<[i32; 2]>| span.unwrap_or([0; 2]);
         for (y, row) in (top..top + height).zip(&mut geometry.spans) {
-            let [drawn_left, drawn_right] = span(ownership.current.row_span(y));
-            let [first, second] = ownership.row_spans(y).map(span);
+            let [drawn_left, drawn_right] = span(
+                (paint_top..paint_top + paint_height)
+                    .contains(&y)
+                    .then_some([paint_left, paint_left + paint_width]),
+            );
+            let [first, second] = frame.row_spans(y).map(span);
             *row = [
                 drawn_left,
                 drawn_right,
@@ -97,6 +102,15 @@ impl Geometry {
             ];
         }
         geometry
+    }
+
+    fn empty() -> Self {
+        Self {
+            origin_y: 0,
+            rows: 0,
+            trimmed: true,
+            spans: [[0; 6]; ROW_CAP],
+        }
     }
 
     fn overflowed(&self) -> bool {
@@ -121,9 +135,9 @@ struct Ledger {
 }
 
 impl Ledger {
-    fn new(empty: &Ownership) -> Self {
+    fn new() -> Self {
         Self {
-            last: Box::new(Geometry::of(empty)),
+            last: Box::new(Geometry::empty()),
             last_id: 0,
             accepted: Drawn::default(),
         }
@@ -344,7 +358,7 @@ impl Observer {
             shared: Rc::new(Shared::new(sender)),
             writer: Some(writer),
             proxy: None,
-            ledger: Ledger::new(&Ownership::default()),
+            ledger: Ledger::new(),
             totals: Totals::default(),
             hover: 0,
             pending: [None; PENDING],
@@ -401,13 +415,13 @@ pub(super) fn begin(cx: &App) -> i64 {
     platform::performance_counter()
 }
 
-/// Records one mask upload of `proposal` into the proxy at `proxy`, begun at `begin_qpc` from
+/// Records one mask upload of `proposal`, or of an empty mask when it's `None`, into the proxy at `proxy`, begun at `begin_qpc` from
 /// [`begin`], right after it returned. Returns the accepted state the dock should name when it
 /// draws.
 pub(super) fn commit(
     cx: &mut App,
     begin_qpc: i64,
-    proposal: &Ownership,
+    proposal: Option<&LineFrame>,
     proxy: [i32; 4],
     update: &Result<MaskUpdate, PresenceError>,
 ) -> Drawn {
@@ -417,7 +431,7 @@ pub(super) fn commit(
     let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
     let result = Commit::of(update);
-    let geometry = Geometry::of(proposal);
+    let geometry = proposal.map_or_else(Geometry::empty, Geometry::of);
     let (new, id, drawn) = observer.ledger.commit(&geometry, result);
     if new {
         if geometry.overflowed() {
@@ -761,15 +775,11 @@ mod tests {
     use super::{
         Commit, Drawn, Geometry, Ledger, Observer, ROW_CAP, Record, Shared, Surface, Totals, line,
     };
-    use crate::presence::outline::{Outline, Ownership};
+    use crate::presence::line::LineFrame;
 
-    /// A 104 x 40 pill at the origin, with its bulb at `bulb`.
-    fn outline(bulb: [f64; 2]) -> Outline {
-        Outline {
-            pill: [0.0, 0.0, 104.0, 40.0],
-            bulb,
-            bulb_radius: 14.0,
-        }
+    /// A line painted at `paint`, owning `hit`.
+    fn frame(paint: [i32; 4], hit: [i32; 4]) -> LineFrame {
+        LineFrame { paint, hit }
     }
 
     fn text(record: &Record) -> String {
@@ -780,36 +790,31 @@ mod tests {
 
     #[test]
     fn geometry_holds_the_exact_drawn_and_owned_rows() {
-        let resting = Geometry::of(&Ownership::only(outline([52.0, 20.0])));
+        let geometry = Geometry::of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
         assert_eq!(
-            (resting.origin_y, resting.rows, resting.trimmed),
-            (0, 41, true)
+            (geometry.origin_y, geometry.rows, geometry.trimmed),
+            (10, 24, true)
         );
-        assert_eq!(resting.spans[0], [16, 88, 16, 88, 0, 0]);
-        assert_eq!(resting.spans[20], [0, 104, 0, 104, 0, 0]);
+        assert_eq!(geometry.spans[0], [0, 0, 10, 80, 0, 0], "band, not drawn");
+        assert_eq!(geometry.spans[9], [0, 0, 10, 80, 0, 0]);
         assert_eq!(
-            resting.spans[40], [0; 6],
-            "the bounds' last row holds no pixel"
+            geometry.spans[10],
+            [10, 80, 10, 80, 0, 0],
+            "the line's first row"
         );
-        let retracting = Ownership::only(outline([52.0, 120.0])).then(outline([52.0, 20.0]));
-        let geometry = Geometry::of(&retracting);
-        assert!(!geometry.trimmed);
-        assert_eq!(geometry.rows, 135);
+        assert_eq!(geometry.spans[13], [10, 80, 10, 80, 0, 0], "its last row");
+        assert_eq!(geometry.spans[14], [0, 0, 10, 80, 0, 0]);
         assert_eq!(
-            geometry.spans[120],
-            [0, 0, 0, 0, 38, 66],
-            "drawn nothing, still owns the old bulb"
+            geometry.spans[23],
+            [0, 0, 10, 80, 0, 0],
+            "the band's last row"
         );
+        assert_eq!(geometry.spans[24], [0; 6], "past the band");
     }
 
     #[test]
-    fn an_outline_taller_than_the_row_cap_overflows_instead_of_truncating() {
-        let tall = Outline {
-            pill: [0.0, 0.0, 600.0, 600.0],
-            bulb: [300.0, 300.0],
-            bulb_radius: 14.0,
-        };
-        let geometry = Geometry::of(&Ownership::only(tall));
+    fn a_band_taller_than_the_row_cap_overflows_instead_of_truncating() {
+        let geometry = Geometry::of(&frame([0, 290, 600, 20], [0, 0, 600, 601]));
         assert!(geometry.rows > ROW_CAP);
         assert!(geometry.overflowed());
         assert_eq!(geometry.spans, [[0; 6]; ROW_CAP], "no partial rows");
@@ -821,9 +826,9 @@ mod tests {
 
     #[test]
     fn only_an_accepted_change_advances_the_epoch() {
-        let resting = Geometry::of(&Ownership::only(outline([52.0, 20.0])));
-        let stretched = Geometry::of(&Ownership::only(outline([52.0, 120.0])));
-        let mut ledger = Ledger::new(&Ownership::default());
+        let resting = Geometry::of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
+        let moved = Geometry::of(&frame([300, 20, 70, 4], [300, 10, 70, 24]));
+        let mut ledger = Ledger::new();
         let first = Drawn {
             epoch: 1,
             geometry: 1,
@@ -839,7 +844,7 @@ mod tests {
             "unchanged"
         );
         assert_eq!(
-            ledger.commit(&stretched, Commit::Failed),
+            ledger.commit(&moved, Commit::Failed),
             (true, 2, first),
             "a failed upload is logged but owns nothing"
         );
@@ -848,7 +853,7 @@ mod tests {
             geometry: 2,
         };
         assert_eq!(
-            ledger.commit(&stretched, Commit::Shape),
+            ledger.commit(&moved, Commit::Shape),
             (false, 2, second),
             "retried"
         );
@@ -862,20 +867,16 @@ mod tests {
                     geometry: 3
                 }
             ),
-            "back to rest is a new state"
+            "back is a new state"
         );
     }
 
     #[test]
     fn records_are_one_line_each() {
-        let geometry = Geometry::of(&Ownership::only(Outline {
-            pill: [10.0, 5.0, 4.0, 2.0],
-            bulb: [12.0, 6.0],
-            bulb_radius: 0.5,
-        }));
+        let geometry = Geometry::of(&frame([10, 6, 4, 1], [10, 5, 4, 3]));
         assert_eq!(
             text(&Record::Geometry { id: 1, geometry }),
-            "geometry id=1 origin_y=5 rows=3 trimmed=true spans=10:14,10:14,-;10:14,10:14,-;-,-,-\n"
+            "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,10:14,-;10:14,10:14,-;-,10:14,-\n"
         );
         let drawn = Drawn {
             epoch: 7,

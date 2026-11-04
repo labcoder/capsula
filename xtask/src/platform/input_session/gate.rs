@@ -78,12 +78,11 @@ impl Verdict {
 pub(crate) struct Feel {
     pub(crate) hold: Verdict,
     pub(crate) double_tap: Verdict,
-    pub(crate) stretch: Verdict,
 }
 
 impl Feel {
-    /// Packs the three selection indices, four bits each, as the fixture stores them.
-    pub(crate) fn encode(selections: [isize; 3]) -> Result<usize> {
+    /// Packs the two selection indices, four bits each, as the fixture stores them.
+    pub(crate) fn encode(selections: [isize; 2]) -> Result<usize> {
         let mut code = 0;
         for (index, selection) in selections.into_iter().enumerate() {
             let selection = usize::try_from(selection)?;
@@ -94,14 +93,13 @@ impl Feel {
     }
 
     pub(crate) fn decode(code: usize) -> Result<Self> {
-        if code >> 12 != 0 {
+        if code >> 8 != 0 {
             bail!("feel code has unknown fields");
         }
         let verdict = |index: usize| Verdict::decode((code >> (index * 4)) & 0xf);
         Ok(Self {
             hold: verdict(0)?,
             double_tap: verdict(1)?,
-            stretch: verdict(2)?,
         })
     }
 }
@@ -471,11 +469,10 @@ mod tests {
     #[test]
     fn feel_codes_unpack_per_gesture_and_reject_unknown_values() {
         assert_eq!(
-            Feel::decode(0x312).unwrap(),
+            Feel::decode(0x12).unwrap(),
             Feel {
                 hold: Verdict::Off,
                 double_tap: Verdict::Good,
-                stretch: Verdict::Broken,
             }
         );
         assert_eq!(
@@ -483,20 +480,19 @@ mod tests {
             Feel {
                 hold: Verdict::Unrated,
                 double_tap: Verdict::Unrated,
-                stretch: Verdict::Unrated,
             }
         );
-        assert_eq!(Feel::encode([2, 1, 3]).unwrap(), 0x312);
+        assert_eq!(Feel::encode([2, 1]).unwrap(), 0x12);
         assert!(Feel::decode(0x4).is_err());
-        assert!(Feel::decode(0x1000).is_err());
+        assert!(Feel::decode(0x100).is_err());
     }
 
     #[test]
-    fn ready_requires_three_explicit_choices_including_explicit_unrated() {
-        for missing in [[-1, -1, -1], [-1, 0, 0], [0, -1, 0], [0, 0, -1]] {
+    fn ready_requires_both_explicit_choices_including_explicit_unrated() {
+        for missing in [[-1, -1], [-1, 0], [0, -1]] {
             assert!(Feel::encode(missing).is_err(), "{missing:?}");
         }
-        assert_eq!(Feel::encode([0, 0, 0]).unwrap(), 0);
-        assert!(Feel::encode([0, 4, 0]).is_err());
+        assert_eq!(Feel::encode([0, 0]).unwrap(), 0);
+        assert!(Feel::encode([0, 4]).is_err());
     }
 }

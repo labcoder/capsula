@@ -1,4 +1,4 @@
-//! The hit proxy's per-pixel-alpha mask. Pixels inside the presence's outline get alpha 1,
+//! The hit proxy's per-pixel-alpha mask. Pixels inside the presence's hit band get alpha 1,
 //! which is invisible but takes the pointer; every other pixel gets alpha 0, which Windows
 //! passes through to whatever lies beneath, in any process. The proxy never gets
 //! `WS_EX_TRANSPARENT` or a region, and the bitmap is allocated once.

@@ -221,6 +221,40 @@ fn retract_targets_require_recent_contraction_not_an_older_cycle_peak() {
 }
 
 #[test]
+fn outside_points_pass_through_just_beyond_a_filled_band() {
+    // The line draws x 100..170 on rows 21..24; its band owns those columns on rows 11..34, and
+    // the proxy is exactly that rectangle, so no unowned pixel lies inside it.
+    let mut data = sample_data();
+    let rows = (11..34)
+        .map(|y| Row {
+            drawn: (21..24).contains(&y).then_some([100, 170]),
+            owned: [Some([100, 170]), None],
+        })
+        .collect();
+    data.geometries.insert(9, Geometry { origin_y: 11, rows });
+    data.commits.push(Commit {
+        begin_qpc: 199,
+        qpc: 200,
+        epoch: 2,
+        geometry: 9,
+        proxy: [100, 11, 70, 23],
+    });
+    data.startup.as_mut().unwrap().panel = [60, 40, 150, 100];
+    let dock = [99, 1, 72, 44];
+    let cover = cover_rect(dock, [0, 0, 1000, 1000]).unwrap();
+    assert_eq!(candidate(&data, "center", dock, cover), Some([135, 23]));
+    assert_eq!(candidate(&data, "outside", dock, cover), Some([99, 23]));
+    data.startup.as_mut().unwrap().panel = [0, 0, 100, 100];
+    assert_eq!(candidate(&data, "outside", dock, cover), Some([170, 23]));
+    data.startup.as_mut().unwrap().panel = [0, 15, 1000, 30];
+    assert_eq!(candidate(&data, "outside", dock, cover), Some([135, 10]));
+    data.startup.as_mut().unwrap().panel = [0, 0, 1000, 34];
+    assert_eq!(candidate(&data, "outside", dock, cover), Some([135, 34]));
+    data.startup.as_mut().unwrap().panel = [0, 0, 1000, 100];
+    assert_eq!(candidate(&data, "outside", dock, cover), None);
+}
+
+#[test]
 fn receipt_points_never_target_the_status_panel_opened_by_a_body_click() {
     let mut data = sample_data();
     let cover = RECT {
