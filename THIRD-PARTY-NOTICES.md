@@ -86,3 +86,31 @@ SOFTWARE.
 - Changes: Kumochi modifies six files in `src/` and adds `src/vsync/frame_demand.rs`, so that idle
   windows stop waking every vblank and hidden windows open at their requested size. Each modified
   file says so in its first line; the changes are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
+
+## Voice models (downloaded on request, not in the repo)
+
+Kumochi downloads these only when the user installs voice. Pins and provenance are in
+[docs/development/voice.md](docs/development/voice.md).
+
+- **Parakeet TDT 0.6B v3** by NVIDIA, licensed under
+  [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/), from
+  [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3). Kumochi
+  uses the int8 ONNX export by the sherpa-onnx project
+  (`csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`), which quantizes and converts the
+  weights.
+- **Phonon 31M English** and the **Juniper** voice by Gradium, licensed under Apache-2.0, from
+  [gradium/phonon-31m-en](https://huggingface.co/gradium/phonon-31m-en) and
+  [gradium/phonon-voices](https://huggingface.co/gradium/phonon-voices).
+
+## Voice native runtime (shipped beside `kumochid.exe`)
+
+- **sherpa-onnx** 2.0.1 (`sherpa-onnx-c-api.dll`), Apache-2.0, from
+  [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It includes kaldi-native-fbank,
+  kaldi-decoder, kaldifst, OpenFst and simple-sentencepiece, each Apache-2.0.
+- **ONNX Runtime** 1.28.2 (`onnxruntime.dll`), MIT, from
+  [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime). It includes protobuf, re2,
+  abseil, flatbuffers, cpuinfo, ONNX, Eigen (MPL-2.0; source at
+  [gitlab.com/libeigen/eigen](https://gitlab.com/libeigen/eigen)) and Boost (BSL-1.0), among the
+  components its `ThirdPartyNotices.txt` lists. That file ships beside the DLL.
+
+The audit behind this list is in [docs/development/voice-natives.md](docs/development/voice-natives.md).
