@@ -426,6 +426,10 @@ struct Security {
     owner: PSID,
     dacl: *const ACL,
     sacl: *const ACL,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "it owns the buffer the other fields point into")
+    )]
     descriptor: Descriptor,
 }
 

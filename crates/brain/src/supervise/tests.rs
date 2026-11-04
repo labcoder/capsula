@@ -1,0 +1,249 @@
+use std::future::Future as _;
+use std::task::{Context, Poll, Waker};
+
+use super::wire::CHUNK;
+use super::*;
+
+/// A kind with small requests and string replies, never started.
+struct Test;
+
+impl Kind for Test {
+    const ARG: &'static str = "--test";
+    const NAME: &'static str = "test";
+    const MAX_REQUEST: usize = 1024;
+    const MAX_REPLY: usize = 4 * 1024 * 1024;
+    type Request = Vec<u8>;
+    type Reply = String;
+}
+
+/// `message` as the frames a worker writes for it.
+fn frames(id: u64, message: &impl Serialize, max: usize) -> Vec<Frame> {
+    let mut bytes = Vec::new();
+    write_message(&mut bytes, id, message, max).expect("written");
+    let mut reader = bytes.as_slice();
+    let mut frames = Vec::new();
+    while let Some(next) = frame::read::<Frame>(&mut reader, Pipe::Data).expect("a frame") {
+        frames.push(next);
+    }
+    frames
+}
+
+type Reply = oneshot::Receiver<Result<String, WorkerLost>>;
+
+fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
+    let (answer, receive) = oneshot::channel();
+    (
+        BTreeMap::from([(
+            id,
+            Pending {
+                until: Instant::now() + Duration::from_secs(1),
+                answer,
+                assembly: Assembly::new(Test::MAX_REPLY),
+            },
+        )]),
+        receive,
+    )
+}
+
+fn handle() -> (Handle<Test>, mpsc::Receiver<Command<Test>>) {
+    let (commands, receive) = mpsc::channel(QUEUE);
+    let (losses, _) = broadcast::channel(QUEUE);
+    (Handle { commands, losses }, receive)
+}
+
+#[test]
+fn identities_completion_trailing_and_gaps() {
+    let pong = || frames(1, &"pong", Test::MAX_REPLY).remove(0);
+    let (mut requests, mut receive) = pending(1);
+    let mut other = pong();
+    other.id = 2;
+    assert_eq!(accept(&mut requests, other), Err(WorkerLost));
+    assert_eq!(accept(&mut requests, pong()), Ok(()));
+    assert_eq!(receive.try_recv(), Ok(Ok("pong".to_owned())));
+    assert_eq!(
+        accept(&mut requests, pong()),
+        Err(WorkerLost),
+        "after the last"
+    );
+    let (mut requests, _) = pending(1);
+    let mut trailing = pong();
+    trailing.body.push(0);
+    assert_eq!(accept(&mut requests, trailing), Err(WorkerLost));
+    let (mut requests, _) = pending(1);
+    let first = Frame {
+        id: 1,
+        chunk: 0,
+        last: false,
+        body: vec![0],
+    };
+    assert_eq!(accept(&mut requests, first), Ok(()));
+    let gap = Frame {
+        id: 1,
+        chunk: 2,
+        last: true,
+        body: vec![0],
+    };
+    assert_eq!(accept(&mut requests, gap), Err(WorkerLost));
+}
+
+#[test]
+fn a_long_message_is_chunked_under_the_pipe_cap_and_reassembled() {
+    let long = "x".repeat(2 * CHUNK + 10);
+    let chunks = frames(7, &long, Test::MAX_REPLY);
+    assert_eq!(chunks.len(), 3);
+    for (number, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk.id, 7);
+        assert_eq!(chunk.chunk, u32::try_from(number).expect("small"));
+        assert_eq!(chunk.last, number == 2);
+        assert!(chunk.body.len() <= CHUNK);
+    }
+    let encoded = frame::encode(&chunks[0], Pipe::Data).expect("under the cap");
+    assert!(encoded.len() <= Pipe::Data.max_payload() + frame::HEADER_LEN);
+    let (mut requests, mut receive) = pending(7);
+    for chunk in chunks {
+        assert_eq!(accept(&mut requests, chunk), Ok(()));
+    }
+    assert_eq!(receive.try_recv(), Ok(Ok(long)));
+}
+
+#[test]
+fn reassembly_cap_empty_gap_and_duplicate() {
+    let chunk = |number, last, body| Frame {
+        id: 1,
+        chunk: number,
+        last,
+        body,
+    };
+    let mut assembly = Assembly::new(8);
+    assert_eq!(assembly.push(chunk(0, false, vec![0; 8])), Ok(None));
+    assert_eq!(
+        assembly.push(chunk(1, true, vec![0])),
+        Err(WorkerLost),
+        "over the cap"
+    );
+    for frame in [chunk(0, true, vec![]), chunk(1, true, vec![0])] {
+        assert_eq!(Assembly::new(8).push(frame), Err(WorkerLost));
+    }
+    let mut assembly = Assembly::new(8);
+    assert_eq!(assembly.push(chunk(0, false, vec![1])), Ok(None));
+    assert_eq!(
+        assembly.push(chunk(0, true, vec![2])),
+        Err(WorkerLost),
+        "a repeat"
+    );
+    assert_eq!(assembly.push(chunk(1, true, vec![2])), Ok(Some(vec![1, 2])));
+}
+
+#[test]
+fn a_message_over_its_kinds_cap_writes_nothing() {
+    let mut written = Vec::new();
+    assert!(matches!(
+        write_message(&mut written, 1, &vec![0_u8; 2000], Test::MAX_REQUEST),
+        Err(frame::FrameError::TooLarge { .. })
+    ));
+    assert!(written.is_empty());
+}
+
+#[test]
+fn the_worker_reads_whole_requests_and_refuses_broken_ones() {
+    let request = vec![9_u8; 900];
+    let mut bytes = Vec::new();
+    write_message(&mut bytes, 3, &request, Test::MAX_REQUEST).expect("written");
+    write_message(&mut bytes, 4, &vec![1_u8], Test::MAX_REQUEST).expect("written");
+    let mut input = bytes.as_slice();
+    let read = |input: &mut &[u8]| read_request::<Vec<u8>>(input, Test::MAX_REQUEST);
+    assert_eq!(read(&mut input).expect("first").map(|(id, _)| id), Some(3));
+    assert_eq!(read(&mut input).expect("second"), Some((4, vec![1])));
+    assert!(read(&mut input).expect("clean end").is_none());
+    let mut mixed = Vec::new();
+    for frame in [
+        Frame {
+            id: 5,
+            chunk: 0,
+            last: false,
+            body: vec![1],
+        },
+        Frame {
+            id: 6,
+            chunk: 1,
+            last: true,
+            body: vec![1],
+        },
+    ] {
+        frame::write(&mut mixed, &frame, Pipe::Data).expect("written");
+    }
+    assert!(matches!(
+        read(&mut mixed.as_slice()),
+        Err(frame::FrameError::Chunks)
+    ));
+    let truncated = &mixed[..=mixed.len() / 2];
+    assert!(read(&mut &truncated[..]).is_err());
+}
+
+#[tokio::test]
+async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
+    let (handle, mut receive) = handle();
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut requests = Vec::new();
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..16 {
+        let mut request = Box::pin(handle.request(vec![], until));
+        assert_eq!(request.as_mut().poll(&mut context), Poll::Pending);
+        requests.push(request);
+    }
+    assert_eq!(handle.request(vec![], until).await, Err(WorkerLost));
+    assert_eq!(receive.len(), 16);
+    for _ in 0..16 {
+        complete::<Test>(
+            receive.try_recv().expect("accepted request").answer,
+            Ok("pong".to_owned()),
+        );
+    }
+    for request in requests {
+        assert_eq!(request.await, Ok("pong".to_owned()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_queued_behind_a_held_respawn_keeps_its_deadline() {
+    let (handle, mut receive) = handle();
+    let mut request =
+        Box::pin(handle.request(vec![], Instant::now() + Duration::from_millis(1500)));
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(request.as_mut().poll(&mut context), Poll::Pending);
+    assert_eq!(receive.len(), 1);
+    tokio::time::advance(Duration::from_millis(1499)).await;
+    assert_eq!(request.as_mut().poll(&mut context), Poll::Pending);
+    tokio::time::advance(Duration::from_millis(2)).await;
+    assert_eq!(request.await, Err(WorkerLost));
+    assert!(
+        receive
+            .try_recv()
+            .expect("queued while respawning")
+            .answer
+            .is_closed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn third_fourth_fifth_loss_and_window_boundary() {
+    let mut history = VecDeque::new();
+    let now = Instant::now();
+    assert_eq!(backoff(&mut history, now), Duration::ZERO);
+    assert_eq!(backoff(&mut history, now), Duration::ZERO);
+    assert_eq!(backoff(&mut history, now), Duration::from_millis(200));
+    assert_eq!(backoff(&mut history, now), Duration::from_secs(1));
+    assert_eq!(backoff(&mut history, now), Duration::from_secs(5));
+    tokio::time::advance(
+        WINDOW
+            .checked_sub(Duration::from_nanos(1))
+            .expect("one ns under window"),
+    )
+    .await;
+    assert_eq!(
+        backoff(&mut history, Instant::now()),
+        Duration::from_secs(5)
+    );
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    assert_eq!(backoff(&mut history, Instant::now()), Duration::ZERO);
+}

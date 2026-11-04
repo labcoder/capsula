@@ -229,6 +229,54 @@ The installer must not put a VC++ runtime beside `kumochid.exe`: the brain impor
 `VCRUNTIME140.dll` itself, so an app-local copy would load first and make speech input refuse with
 `Conflict`.
 
+### The speech worker
+
+`platform::sherpa` runs only in `kumochid --speech`, a second worker kind under the screen
+worker's supervisor (`supervise`; see [screen.md](screen.md) and [processes.md](processes.md)). A
+native exception, abort, access violation or hang costs that process. The brain gets a
+content-free `WorkerLost` and keeps running. The model goes with the worker: a respawned worker has
+nothing loaded until the next load.
+
+```mermaid
+flowchart LR
+  Client["SpeechHandle"] -->|"Load / Decode / Unload, absolute deadline"| Sup["supervisor task"]
+  Sup -->|"chunked frames, stdin"| Worker["kumochid --speech"]
+  Worker -->|"reply frames, stdout"| Sup
+  Worker -.->|"stderr disconnected"| Null[" "]
+```
+
+- **Requests.** `Load { natives, models }` stages the natives from `natives`, loads them, creates
+  the recognizer and runs one second of silence as a warm-up. A load while loaded drops the old
+  model first. `Decode { rate, pcm }` carries mono 16-bit little-endian PCM. `Unload` frees the
+  recognizer and then the natives. Without a model a decode is `NotLoaded`. Request and reply
+  `Debug` show no audio, text or paths.
+- **Bounds** [guess]. The rate must be 8–48 kHz. An utterance is at most 60 s and at most
+  5,760,000 bytes (60 s at 48 kHz). Both are checked, with the rate, before any duration is
+  computed, in the brain before sending and again in the worker. A transcript is at most 16 KiB of
+  UTF-8, and the brain checks that again.
+- **Deadlines** [guess]. Load 30 s; decode 2 s plus a quarter of the audio's length; unload 5 s.
+  Each is absolute from the call and covers queueing, a respawn, every chunk and the native work.
+  Missing one loses the worker. Reply ids keep counting across respawns, so a dead worker's late
+  output can't answer its successor's request.
+- **The fail-stop boundary.** The worker serves every request inside one `catch_unwind`, and
+  sherpa-onnx's functions are `C-unwind`. A C++ exception that escapes sherpa-onnx is a defined
+  foreign unwind. A release build (`panic = "abort"`) aborts on it. A debug build either aborts
+  or returns an opaque error to the boundary, which aborts at once without inspecting or dropping
+  it. Nothing serves again on that native state. A Rust panic ends the same way, after the panic
+  hook logs only its location. The worker sets `SEM_NOGPFAULTERRORBOX`, so a crash ends at once
+  without a dialog.
+- **stderr.** sherpa-onnx prints model paths and exception text to stderr on failure (see
+  [voice-natives.md](voice-natives.md)). The worker's stderr isn't connected to anything, and its
+  log, `kumochi-speech`, records only content-free codes.
+
+Debug builds take one-request fault fixtures: hang, exit, abort, a noncontinuable access violation
+raised with `RaiseException`, a garbage frame, a panic, and a C++ throw. `tests/speech.rs` checks
+each of the first six against the real worker. The running request and the one queued behind it
+both get `WorkerLost`, a loss is broadcast, and the next worker answers a load. The throw fixture
+is Rez-only. It builds a DLL with `cl /EHs` whose export throws `std::runtime_error` and calls it
+through the worker's boundary. The worker must end before the request's deadline, without
+replying. A fresh worker must then load the real natives and Parakeet and decode.
+
 ### Checks on Rez
 
 These are ignored in CI and read the real DLLs (`SHERPA_NATIVES`, by default beside the test

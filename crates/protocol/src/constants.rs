@@ -36,6 +36,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const BRAIN_LOG: &str = "kumochi-brain";
 /// See [`BRAIN_LOG`]; the screen worker's own file.
 pub const SCREEN_LOG: &str = "kumochi-screen";
+/// See [`BRAIN_LOG`]; the speech worker's own file.
+pub const SPEECH_LOG: &str = "kumochi-speech";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
 
