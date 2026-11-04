@@ -156,9 +156,11 @@ impl Coordinator {
                     .and_then(|connection| self.refusal(connection))
                     .unwrap_or_else(sign_in_needed),
             ),
-            Finish::Completed | Finish::Failed(EngineFailure::Provider) | Finish::Interrupted => {
-                None
-            }
+            Finish::Completed
+            | Finish::Interrupted
+            | Finish::Failed(
+                EngineFailure::Provider | EngineFailure::TurnCap | EngineFailure::ClaudeStream(_),
+            ) => None,
         }
     }
 

@@ -25,6 +25,9 @@ const MAX_JWKS_KEYS: usize = 64;
 const MAX_AUDIENCES: usize = 16;
 /// Local clock tolerance retained from the owner's spike, checked through the Clock seam.
 const EXPIRY_LEEWAY_SECONDS: u64 = 30;
+/// The smallest RSA modulus accepted, in bits. ring rounds its own 2048-bit minimum up to a whole
+/// byte, so on its own it would accept a 2041- to 2047-bit modulus.
+const MIN_MODULUS_BITS: usize = 2048;
 
 /// Closed verification failures, with no token, identity or provider text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -330,8 +333,15 @@ fn signed_claims(token: &str, keys: &KeySet) -> Result<Claims, IdentityError> {
             .ok_or(IdentityError::Token)
             .and_then(base64url)
     };
+    let n = component("n")?;
+    let significant = &n[n.iter().take_while(|&&byte| byte == 0).count()..];
+    if significant.len() < MIN_MODULUS_BITS / 8
+        || (significant.len() == MIN_MODULUS_BITS / 8 && significant[0] < 0x80)
+    {
+        return Err(IdentityError::Token);
+    }
     RsaPublicKeyComponents {
-        n: component("n")?,
+        n,
         e: component("e")?,
     }
     .verify(

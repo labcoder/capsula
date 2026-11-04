@@ -161,7 +161,9 @@ lack the new key; still missing, it's `UnknownKey`. The clock is read again afte
 so a token that expires while it runs is refused. A selected key
 must be RSA, and must permit signatures and RS256 when those metadata fields are present. It
 verifies the signature itself, with ring's RSA PKCS#1 v1.5 SHA-256 check for 2048- to 8192-bit
-keys, before trusting claims: the token is exactly three unpadded base64url parts, the header's
+keys, before trusting claims. ring rounds that minimum up to a whole byte, so a modulus with fewer
+than 2048 significant bits is refused before ring sees it. The token is exactly three unpadded
+base64url parts, the header's
 `alg` is `RS256`, and a header with `crit` is refused. Claims parse into typed fields, so a
 claim with the wrong JSON type is refused rather than read as absent.
 Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
