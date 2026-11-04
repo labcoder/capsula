@@ -34,6 +34,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// Log file name prefixes; the appender adds the date. Neither may start with the other, because
 /// the appender prunes old files by prefix and would count the other process's logs.
 pub const BRAIN_LOG: &str = "kumochi-brain";
+/// See [`BRAIN_LOG`]; the screen worker's own file.
+pub const SCREEN_LOG: &str = "kumochi-screen";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
 
@@ -104,6 +106,8 @@ pub const PIPE_TAP_ENV: &str = "KUMOCHI_PIPE_TAP";
 /// Dev builds only: set this to a fixture script and the brain's fixture engine plays it instead
 /// of the built-in one.
 pub const FIXTURE_ENV: &str = "KUMOCHI_FIXTURE";
+/// Dev builds only: fail the screen worker's next request.
+pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 
 /// Dev builds only: the most model requests the brain may send, set by `cargo xtask live`.
 /// A value that isn't a count allows none.

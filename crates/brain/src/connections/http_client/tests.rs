@@ -691,6 +691,10 @@ fn proxy_probe_child() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no lib unit test makes handles inheritable, so this child can't inherit one"
+)]
 fn production_client_ignores_proxy_environment_in_an_isolated_child() {
     let target = Server::start(reply("200 OK", b"{}", ""));
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port 0");
