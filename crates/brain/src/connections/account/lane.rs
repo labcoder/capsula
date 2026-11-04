@@ -191,7 +191,7 @@ impl AccountState {
                 }
             }
             (Some(Flight::Unknown(then)), Done::Marked(result)) => {
-                self.unknown_written(then, result);
+                self.unknown_written(then, result, effects);
             }
             (
                 Some(Flight::Commit),
@@ -514,13 +514,28 @@ impl AccountState {
         }
     }
 
-    /// A token's unknown outcome was written, so the jobs after it may run; if it wasn't, the
-    /// token stays in the account, still owned, for a later pass to settle.
-    fn unknown_written(&mut self, then: Vec<Queued>, result: Result<(), VaultError>) {
+    /// A token's unknown outcome was written, so the jobs after it may run and a sign-in waiting
+    /// on it goes on. If it wasn't, the token stays in the account record, and the next sign-in
+    /// writes it again before it can replace that record.
+    fn unknown_written(
+        &mut self,
+        then: Vec<Queued>,
+        result: Result<(), VaultError>,
+        effects: &mut Vec<Effect>,
+    ) {
         match result {
-            Ok(()) => self.jobs.extend(then),
+            Ok(()) => {
+                self.jobs.extend(then);
+                if let Some(intent) = self.admitting.take() {
+                    self.sign_in(intent, effects);
+                }
+            }
             Err(failure) => {
                 tracing::warn!(%failure, "an unrecorded token's outcome wasn't written; the account keeps it");
+                self.unrecorded = Some(then);
+                if self.admitting.take().is_some() {
+                    effects.push(error(ErrorKey::CredentialsUnavailable, Action::Retry));
+                }
             }
         }
     }

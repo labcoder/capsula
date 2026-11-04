@@ -256,8 +256,12 @@ pub struct AccountState {
     /// The revocation pass outside a sign-out, and whether another is owed after it.
     pass: Pass,
     again: bool,
-    /// A sign-in that found the list full, waiting for its age-out check.
+    /// A sign-in that found the list full, waiting for its age-out check, or waiting for an
+    /// unrecorded token's outcome to be written.
     admitting: Option<Intent>,
+    /// The jobs after a token's unknown outcome whose write was refused: the token is owned only
+    /// by the account record until that write lands.
+    unrecorded: Option<Vec<Queued>>,
     /// A pending sign-out: the account is fenced.
     leaving: Option<Leaving>,
 }
@@ -289,6 +293,7 @@ impl AccountState {
             pass: Pass::Idle,
             again: false,
             admitting: None,
+            unrecorded: None,
             leaving: None,
         };
         state.loading = true;
@@ -408,6 +413,11 @@ impl AccountState {
         if self.saving_current() {
             self.deferred = Some(Deferred::SignIn(intent));
             return;
+        }
+        // A sign-in would replace the account record, the only owner of an unrecorded token.
+        if let Some(then) = self.unrecorded.take() {
+            self.admitting = Some(intent);
+            return self.jobs.push_back(Queued::Unknown(then));
         }
         let host = match &self.loaded.host {
             Some(host) if !self.loaded.damaged => host.clone(),

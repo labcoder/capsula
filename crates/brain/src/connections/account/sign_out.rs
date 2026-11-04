@@ -55,6 +55,8 @@ impl AccountState {
         self.attempt += 1;
         self.admitting = None;
         self.deferred = None;
+        // Prepare adopts an unrecorded token from the account record.
+        self.unrecorded = None;
         self.moved(effects);
         if self.live.take().is_some() {
             effects.push(Effect::Close);

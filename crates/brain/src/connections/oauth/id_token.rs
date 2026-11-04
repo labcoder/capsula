@@ -171,7 +171,10 @@ async fn bound(
     match signed(token.expose(), &first, client, binding, now) {
         // The provider may have rotated its keys since the set was fetched: fetch it once more.
         Err(IdentityError::UnknownKey) => {
-            signed(token.expose(), &keys().await?, client, binding, now)
+            let second = keys().await?;
+            // The refetch can take long enough for the token to expire meanwhile.
+            let now = clock.unix_seconds().ok_or(IdentityError::Clock)?;
+            signed(token.expose(), &second, client, binding, now)
         }
         verified => verified,
     }

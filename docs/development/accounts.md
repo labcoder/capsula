@@ -157,7 +157,8 @@ is unusable. Empty or oversized inputs are refused before anything is sent.
 `https://auth.openai.com:443`, without userinfo or a fragment. It selects the declared `kid`
 from that key set, skips unparseable keys and rejects duplicate key identifiers. A `kid` the set
 lacks gets the set fetched once more, since one fetched while the provider rotates its keys can
-lack the new key; still missing, it's `UnknownKey`. A selected key
+lack the new key; still missing, it's `UnknownKey`. The clock is read again after that refetch,
+so a token that expires while it runs is refused. A selected key
 must permit signatures and RS256 when those metadata fields are present. It verifies the
 signature before trusting claims.
 Issuer and audience must bind to OpenAI and the issued client. Expiry uses the injectable
@@ -367,7 +368,9 @@ sequenceDiagram
   portal's page can fail discovery's parse or a document's size bound. The registration-only save
   waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
   leaves `chatgpt` unowned. If that unknown outcome can't be written, the registration-only save
-  doesn't run, and the token stays in `chatgpt`.
+  doesn't run, and the token stays in `chatgpt`. The next Sign in writes that outcome again
+  before anything else, and goes on only once it lands, so its commit can't replace the
+  token's last owner; a sign-out's Prepare adopts the token from `chatgpt` instead.
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
   `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone
