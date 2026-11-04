@@ -29,7 +29,7 @@ pub fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
 #[expect(unsafe_code, reason = "calls into the pinned sherpa-onnx C API")]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "PR 4b's speech input owner calls it")
+    expect(dead_code, reason = "PR 4b's speech worker calls it")
 )]
 pub(crate) mod sherpa;
 
