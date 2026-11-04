@@ -18,6 +18,8 @@ mod deletes;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "lease_tests.rs"]
+mod leases;
 #[path = "scene_tests.rs"]
 mod scenes;
 #[path = "thread_op_tests.rs"]
@@ -117,9 +119,14 @@ fn built(run: RunId, attempt: u64, sources: &[ThreadId]) -> Input {
     })
 }
 
-fn start_engine(run: RunId, thread: ThreadId) -> Effect {
+fn start_engine(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::StartEngine {
         request: RunRequest {
+            key: BuildKey {
+                run,
+                round: 1,
+                attempt,
+            },
             run,
             thread,
             origin: Origin::Task(thread),
@@ -262,7 +269,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
     );
     assert_eq!(
         core.handle(built(R, 1, &[T])).expect("current"),
-        vec![start_engine(R, T)]
+        vec![start_engine(R, T, 1)]
     );
 }
 

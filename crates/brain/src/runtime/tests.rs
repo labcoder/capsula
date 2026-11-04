@@ -16,6 +16,7 @@ use tokio::time::timeout;
 use super::data::DataQueue;
 use super::{Brain, Ended, Link, MAX_ENDING, window};
 use crate::coordinator::Input;
+use crate::engines::Engine;
 use crate::engines::fixture::Fixture;
 use crate::ipc;
 #[cfg(windows)]
@@ -30,6 +31,8 @@ mod accounts;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "lease_tests.rs"]
+mod leases;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
@@ -322,6 +325,11 @@ fn locked_brain(scratch: &Scratch, script: &str) -> (Brain, rusqlite::Connection
 
 /// A brain whose store waits up to 10 s on a lock.
 fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
+    patient_brain_with(scratch, Box::new(Fixture::parse(script).expect("script")))
+}
+
+/// A brain whose store waits up to 10 s on a lock, answering with `engine`.
+fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main_thread = store.main_thread().expect("main thread");
@@ -330,14 +338,13 @@ fn patient_brain(scratch: &Scratch, script: &str) -> Brain {
         .conn_for_tests()
         .busy_timeout(Duration::from_secs(10))
         .expect("busy timeout");
-    let fixture = Fixture::parse(script).expect("script");
     let scenes = store.scenes().expect("scenes");
     Brain::new(
         store,
         main_thread,
         high_water,
         scenes,
-        Box::new(fixture),
+        engine,
         scratch.config(),
         crate::test_support::accounts(scratch),
     )

@@ -16,6 +16,7 @@ mod tests;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
@@ -32,8 +33,9 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, RunSnapshot};
+use crate::coordinator::LeaseId;
 use crate::coordinator::{BuildContext, Coordinator, Effect, Input, StoreOp};
-use crate::engines::{self, Cancel, Engine};
+use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
@@ -116,6 +118,10 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     /// The current run's round, aborted when its `Cancel` drops.
     round: Option<(RunId, Cancel)>,
+    /// Rounds waiting for leave to send.
+    asks: Asks,
+    /// When each granted send's deadline passes, in no order.
+    send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
     /// When owed writes are tried again.
     retry_at: Option<Instant>,
@@ -218,6 +224,8 @@ impl Brain {
             engine_tx,
             engine_events,
             round: None,
+            asks: Asks::default(),
+            send_deadlines: Vec::new(),
             deadline: None,
             retry_at: None,
             epoch: 0,
@@ -387,10 +395,12 @@ impl Brain {
     pub(crate) async fn idle(&mut self) {
         self.pump_settings_offline();
         loop {
+            let send_due = self.next_send_deadline();
             let input = tokio::select! {
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
+                () = sleep_until(send_due) => self.send_deadline_passed(),
                 done = settings::written(&mut self.config_write) => {
                     let settled = self.settings_done(done, None);
                     debug_assert!(settled.is_ok(), "settling without a shell can't fail");
@@ -598,6 +608,7 @@ impl Brain {
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
+            let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let take_turns = described && take_engine && self.room_for_turns();
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
@@ -640,6 +651,7 @@ impl Brain {
                     self.retry_at = None;
                     Input::Retry
                 }
+                () = sleep_until(send_due) => self.send_deadline_passed(),
                 () = sleep_until(deadline.map(|(_, at)| at)) => {
                     self.deadline = None;
                     match deadline {
@@ -732,6 +744,20 @@ impl Brain {
         Ok(())
     }
 
+    /// When the soonest granted send's deadline passes.
+    fn next_send_deadline(&self) -> Option<Instant> {
+        self.send_deadlines.iter().map(|&(_, at)| at).min()
+    }
+
+    /// The soonest send deadline passed: it's reported once, and it's stale if its lease settled.
+    fn send_deadline_passed(&mut self) -> Input {
+        let at = (0..self.send_deadlines.len())
+            .min_by_key(|&at| self.send_deadlines[at].1)
+            .expect("a deadline passed");
+        let (lease, _) = self.send_deadlines.swap_remove(at);
+        Input::SendDeadline { lease }
+    }
+
     /// A run's first build takes the names and default model as they are now, so a rename
     /// applies from the next run.
     fn seed(&self, build: &mut BuildContext) {
@@ -805,8 +831,19 @@ impl Brain {
                 }
                 Effect::StartEngine { request } => {
                     let run = request.run;
-                    let cancel = engines::start(&*self.engine, request, self.engine_tx.clone());
+                    let gate =
+                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+                    let cancel =
+                        engines::start(&*self.engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
+                }
+                Effect::Grant(lease) => {
+                    let granted = SendLease::new(lease, self.inputs_tx.clone());
+                    engines::answer(&self.asks, lease.key, Answer::Grant(granted));
+                }
+                Effect::Rebuild(key) => engines::answer(&self.asks, key, Answer::Rebuild),
+                Effect::ArmSendDeadline { lease, after } => {
+                    self.send_deadlines.push((lease, Instant::now() + after));
                 }
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
