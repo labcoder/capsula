@@ -30,18 +30,48 @@ fn reason(key: ErrorKey, action: Action) -> UserError {
     UserError::new(key, Vec::new(), vec![action]).expect("one action")
 }
 
-/// A coordinator that heard `availability`, with run 10 typed in a new thread 4.
-fn typed(availability: Option<Input>) -> Coordinator {
+/// A coordinator that heard `availability`, with run 10 typed in a new thread 4, and what the
+/// turn did after it was written and announced as Thinking.
+fn typed_with(availability: Option<Input>) -> (Coordinator, Vec<Effect>) {
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
     if let Some(availability) = availability {
         assert_eq!(core.handle(availability), Ok(Vec::new()));
     }
-    core.handle(Input::Turn {
-        thread: None,
-        text: "hi".to_owned(),
-    })
-    .expect("a turn is never stale");
-    core
+    let mut effects = core
+        .handle(Input::Turn {
+            thread: None,
+            text: "hi".to_owned(),
+        })
+        .expect("a turn is never stale");
+    let after = effects.split_off(3);
+    assert!(matches!(
+        effects[0],
+        Effect::Store(StoreOp::BeginTurn { run: R, .. })
+    ));
+    assert_eq!(
+        effects[1..],
+        [
+            Effect::Control(ControlToShell::RunState {
+                run: R,
+                thread: T,
+                phase: Phase::Thinking,
+                error: None,
+            }),
+            Effect::ArmDeadline {
+                run: R,
+                after: crate::coordinator::WALL_CLOCK,
+            },
+        ]
+    );
+    (core, after)
+}
+
+fn typed(availability: Option<Input>) -> Coordinator {
+    typed_with(availability).0
+}
+
+fn sign_in() -> UserError {
+    reason(ErrorKey::SignInNeeded, Action::SignIn)
 }
 
 fn key(attempt: u64) -> BuildKey {
@@ -86,10 +116,9 @@ fn draw_tool() -> ToolSchema {
     }
 }
 
-/// Run 10 ended before it answered, and the shell hears `reason`.
-fn failed(reason: Option<UserError>) -> Vec<Effect> {
+/// The shell hears run 10 failed, with `reason`.
+fn told(reason: Option<UserError>) -> Vec<Effect> {
     vec![
-        Effect::CancelEngine { run: R },
         Effect::Control(ControlToShell::RunState {
             run: R,
             thread: T,
@@ -97,15 +126,27 @@ fn failed(reason: Option<UserError>) -> Vec<Effect> {
             error: reason,
         }),
         Effect::Data(kumochi_protocol::message::DataToShell::RunEnd { run: R }),
-        Effect::Store(StoreOp::EndRun {
-            thread: T,
-            run: R,
-            text: None,
-            revealed: None,
-            clear: None,
-            end: RunEnd::Failed(Failure::Engine),
-        }),
     ]
+}
+
+/// Run 10's failure is written.
+fn written() -> Vec<Effect> {
+    vec![Effect::Store(StoreOp::EndRun {
+        thread: T,
+        run: R,
+        text: None,
+        revealed: None,
+        clear: None,
+        end: RunEnd::Failed(Failure::Engine),
+    })]
+}
+
+/// Run 10 ended after its turn was stored, before it answered, and the shell hears `reason`.
+fn failed(reason: Option<UserError>) -> Vec<Effect> {
+    let mut effects = vec![Effect::CancelEngine { run: R }];
+    effects.extend(told(reason));
+    effects.extend(written());
+    effects
 }
 
 fn started(effects: &[Effect]) -> bool {
@@ -116,23 +157,80 @@ fn started(effects: &[Effect]) -> bool {
 
 #[test]
 fn a_signed_out_turn_is_kept_and_fails_before_any_build() {
-    let mut core = typed(None);
-    assert_eq!(
-        core.handle(Input::TurnStored { run: R }),
-        Ok(failed(Some(reason(ErrorKey::SignInNeeded, Action::SignIn))))
-    );
+    let (mut core, effects) = typed_with(None);
+    assert_eq!(effects, told(Some(sign_in())));
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
 }
 
 #[test]
 fn the_accounts_own_reason_reaches_the_shell() {
     let plan = UserError::from(ErrorKey::PlanUnavailable);
-    let mut core = typed(Some(Input::Engines(Availability::Unavailable(
+    let (mut core, effects) = typed_with(Some(Input::Engines(Availability::Unavailable(
         plan.clone(),
     ))));
+    assert_eq!(effects, told(Some(plan)));
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+}
+
+/// M143-1: a sign-out accepted while the turn is still being written ends its run at once, and
+/// the next account never answers it.
+#[test]
+fn a_sign_out_before_the_turn_is_stored_ends_the_run_and_a_new_account_never_answers_it() {
+    let mut core = typed(Some(ready(7, &["m"])));
     assert_eq!(
-        core.handle(Input::TurnStored { run: R }),
-        Ok(failed(Some(plan)))
+        core.handle(Input::Engines(Availability::Unavailable(sign_in()))),
+        Ok(told(Some(sign_in())))
     );
+    assert_eq!(core.handle(ready(8, &["m"])), Ok(Vec::new()));
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+}
+
+/// M143-1: a turn sent while signed out stays refused when a sign-in lands before its write.
+#[test]
+fn a_turn_sent_signed_out_stays_refused_after_a_sign_in_beats_its_write() {
+    let (mut core, effects) = typed_with(None);
+    assert_eq!(effects, told(Some(sign_in())));
+    assert_eq!(core.handle(ready(7, &["m"])), Ok(Vec::new()));
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+}
+
+#[test]
+fn a_sign_out_during_the_first_build_ends_the_run_and_its_late_result_is_stale() {
+    let mut core = typed(Some(ready(7, &["m"])));
+    let stored = core.handle(Input::TurnStored { run: R }).expect("current");
+    assert!(
+        stored
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(_))))
+    );
+    assert_eq!(
+        core.handle(Input::Engines(Availability::Unavailable(sign_in()))),
+        Ok(failed(Some(sign_in())))
+    );
+    assert_eq!(core.handle(built(Some("m"), Vec::new())), Err(super::Stale));
+    assert_eq!(
+        core.handle(Input::SendReady { key: key(1) }),
+        Ok(vec![Effect::Rebuild(key(1))])
+    );
+}
+
+/// The check before Grant on its own: the availability changes under an admitted run without
+/// the eager cancellation an `Engines` input brings, so only `send_ready` can refuse it.
+#[test]
+fn the_grant_checks_the_runs_connection_itself() {
+    let mut core = typed(Some(ready(7, &["m"])));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    assert!(started(
+        &core.handle(built(Some("m"), Vec::new())).expect("current")
+    ));
+    core.availability = Availability::Ready(Ready {
+        connection: ConnectionTag(8),
+        models: vec![info("m")],
+        trusted_draw: false,
+    });
+    let mut refused = vec![Effect::Rebuild(key(1))];
+    refused.extend(failed(Some(sign_in())));
+    assert_eq!(core.handle(Input::SendReady { key: key(1) }), Ok(refused));
 }
 
 #[test]

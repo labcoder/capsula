@@ -1,7 +1,7 @@
 //! Whether a run may be answered, and on which connection (docs/development/runs.md,
 //! "Availability"). The runtime reports the account's state as [`Availability`]. A run is bound
-//! to the connection that was ready when its first build began, and it ends as soon as that
-//! connection stops being the ready one. The model check (S4) runs once, on the first build.
+//! to the connection that was ready when its turn arrived, and it ends as soon as that
+//! connection stops being the ready one, even while its turn is still being written. The model check (S4) runs once, on the first build.
 
 use kumochi_protocol::message::{Action, ErrorKey, ModelChoice, ModelInfo, RunId, UserError};
 
@@ -95,7 +95,7 @@ impl Coordinator {
             .and_then(|found| found.connection)
     }
 
-    /// The ready connection, which a run's first build binds it to.
+    /// The ready connection, which a new turn's run is bound to.
     pub(super) fn connection(&self) -> Option<ConnectionTag> {
         match &self.availability {
             Availability::Ready(ready) => Some(ready.connection),

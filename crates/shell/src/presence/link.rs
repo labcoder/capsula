@@ -109,7 +109,8 @@ impl Presence {
         self.runs_changed(cx)
     }
 
-    /// A run's phase changed; a failure the brain explained shows its reason.
+    /// A run's phase changed; a failure the brain explained shows its reason, unless Esc or a
+    /// delete fenced the run off first.
     fn run_state(
         &mut self,
         run: RunId,
@@ -120,7 +121,9 @@ impl Presence {
     ) {
         let applied = self.runs.apply_state(run, thread, phase);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
-        if let Some(error) = error {
+        if applied.visible
+            && let Some(error) = error
+        {
             self.show_error(error, cx);
         }
         if let Some(stop) = applied.stop {

@@ -215,9 +215,11 @@ the catalog, or `Unavailable` with what the user can do (`coordinator/availabili
   `SignInNeeded`; a declined plan `PlanNotEnabled`; an ended session `SessionEnded`; a plan
   the account can't use `PlanUnavailable`; a held credential lock `CredentialsUnavailable`.
 - **A turn while unavailable is stored**, so the text is kept, and its run fails
-  `failed(engine)` before any build, telling the shell the reason.
-- **A run is bound to the connection** that was ready when its first build began, and its
-  snapshot records it. A catalog-only change keeps the run. Any other change, a sign-out the
+  `failed(engine)` at once, telling the shell the reason. A sign-in before the turn is written
+  doesn't revive it.
+- **A run is bound to the connection** that was ready when its turn arrived, and its
+  snapshot records it. The binding holds while the turn is still being written, so a sign-out
+  then fails the run at once and a later account never answers it. A catalog-only change keeps the run. Any other change, a sign-out the
   account accepted included, cancels the engine and fails the run with the reason. A held ask
   for that run is answered `Rebuild`, and `send_ready` checks the binding again before every
   `Grant`.

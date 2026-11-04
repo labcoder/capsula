@@ -304,7 +304,8 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
-    /// The connection the run's first build bound it to.
+    /// The connection that was ready when the run's turn arrived; none means the run failed
+    /// then.
     connection: Option<crate::context::ConnectionTag>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
@@ -614,12 +615,6 @@ impl Coordinator {
             self.settle(run, effects);
             return Ok(());
         }
-        // The turn is kept, but nothing answers it.
-        if let Availability::Unavailable(reason) = &self.availability {
-            let reason = reason.clone();
-            return self.fail_with(run, Failure::Engine, reason, effects);
-        }
-        self.current(run)?.connection = self.connection();
         self.build(run, 1, effects);
         Ok(())
     }
@@ -682,7 +677,7 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: None,
             build: None,
-            connection: None,
+            connection: self.connection(),
             draw: None,
             error: None,
             finishing: false,
@@ -699,6 +694,12 @@ impl Coordinator {
             run,
             after: WALL_CLOCK,
         });
+        // The turn is kept, but nothing answers it.
+        if let Availability::Unavailable(reason) = &self.availability {
+            let reason = reason.clone();
+            self.fail_with(run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+        }
     }
 
     /// Queues held turns whose older runs all have their outcomes queued, so the store keeps a

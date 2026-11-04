@@ -25,7 +25,7 @@ flowchart LR
 | Current turn | The user's text, plus their local time to the minute (SQLite's `localtime`, so the system's time zone on every platform). It's never dropped. |
 
 Reasoning items (PR 13b) are replayed only when they came from the connection the run uses now.
-That's the connection the run's first build bound it to, recorded in its snapshot.
+That's the connection the run was bound to when its turn arrived, recorded in its snapshot.
 
 ## Origin and references
 
