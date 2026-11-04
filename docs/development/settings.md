@@ -79,10 +79,23 @@ the confirmation. Kit restores focus; a removed trigger falls back to the Settin
 Manage usage uses the fixed protocol URL and GPUI open_url through a keyboard-capable Base
 Link. No new platform adapter or credential access is added.
 
+### Accounts presentation
+
+Accounts separates its provider/identity header, status, recovery details and actions.
+Sign out stays content-width in a separate actions row. Cleanup failures emphasize the
+local saved-sign-in risk under “On this computer”; an unconfirmed remote outcome remains
+secondary under “At OpenAI”. A stuck cleanup says “Sign-out needs attention”, not that it
+is still progressing. Backlog errors have a short lead and separate recovery/expiry help;
+new sign-in is disabled while that error is retained, without disabling Retry.
+
+The shell's theme module installs persistent light/dark palette overrides after Kit init.
+Light danger text and solid danger buttons use the darker semantic danger palette; dark
+danger is unchanged. Links retain a distinct blue palette across mode changes.
+
 ### Offline Accounts captures
 
 Debug builds accept `--accounts-fixture=<state> --quit-after-ms=<1..120000>` and optional
-`--accounts-appearance=light|dark|large`. For example, run `target/debug/kumochi.exe
+`--accounts-appearance=light|dark|large|constrained`. For example, run `target/debug/kumochi.exe
 --accounts-fixture=refused-unconfirmed --accounts-appearance=light --quit-after-ms=5000`
 after building the shell. Fixed states cover waiting/offline, signed-out/unconfirmed,
 signing-in/busy, enabled/no-email/declined/unavailable, retry/sign-in-again, signing-out,
@@ -95,6 +108,8 @@ Manage usage is inert. State and appearance flags reject missing, mistyped or du
 values; the fixture requires a bounded quit deadline and quits automatically. The module,
 snapshot factory and fixture-only view state are excluded from release builds, which refuse
 the fixture flags. These renders prove UI states, not real authentication or credential cleanup.
+`constrained` keeps the normal 768×544 logical window while using 24 px base text, rather
+than growing the window with the text. The existing Settings content region owns scrolling.
 
 ## Config keys
 

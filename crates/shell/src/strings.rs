@@ -119,11 +119,20 @@ pub(crate) enum Text {
     AccountRevocationPending,
     AccountRevocationUnconfirmed,
     AccountSendFailed,
+    AccountLocal,
+    AccountRemote,
+    AccountSignOutNeedsRetry,
+    AccountCleanupRefusedHelp,
+    AccountNotDurableHelp,
+    AccountBacklogLead,
+    AccountBacklogRetry,
+    AccountBacklogExpiry,
+    AccountBacklogRecovery,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 109] = [
+    const ALL: [Self; 118] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -233,6 +242,15 @@ impl Text {
         Self::AccountRevocationPending,
         Self::AccountRevocationUnconfirmed,
         Self::AccountSendFailed,
+        Self::AccountLocal,
+        Self::AccountRemote,
+        Self::AccountSignOutNeedsRetry,
+        Self::AccountCleanupRefusedHelp,
+        Self::AccountNotDurableHelp,
+        Self::AccountBacklogLead,
+        Self::AccountBacklogRetry,
+        Self::AccountBacklogExpiry,
+        Self::AccountBacklogRecovery,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -289,6 +307,15 @@ impl Text {
             Self::AccountRevocationPending => "accounts-revocation-pending",
             Self::AccountRevocationUnconfirmed => "accounts-revocation-unconfirmed",
             Self::AccountSendFailed => "accounts-send-failed",
+            Self::AccountLocal => "accounts-local",
+            Self::AccountRemote => "accounts-remote",
+            Self::AccountSignOutNeedsRetry => "accounts-sign-out-needs-retry",
+            Self::AccountCleanupRefusedHelp => "accounts-cleanup-refused-help",
+            Self::AccountNotDurableHelp => "accounts-not-durable-help",
+            Self::AccountBacklogLead => "accounts-backlog-lead",
+            Self::AccountBacklogRetry => "accounts-backlog-retry",
+            Self::AccountBacklogExpiry => "accounts-backlog-expiry",
+            Self::AccountBacklogRecovery => "accounts-backlog-recovery",
             Self::Connecting => "status-connecting",
             Self::Connected => "status-connected",
             Self::Reconnecting => "status-reconnecting",

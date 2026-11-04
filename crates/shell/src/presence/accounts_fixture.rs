@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Styled as _, WeakEntity, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Pixels, Size, Styled as _, WeakEntity,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use kumochi_protocol::message::{
     AccountEmail, AccountRecovery, AccountView, Action, AssistantName, Cleanup, ErrorKey,
@@ -21,6 +21,7 @@ pub(crate) enum Appearance {
     Light,
     Dark,
     Large,
+    Constrained,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +157,7 @@ pub(crate) fn run(state: State, appearance: Option<Appearance>, delay: Duration)
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            crate::theme::init(cx);
             cx.set_global(Strings::english());
             if open(state, appearance, delay, cx).is_err() {
                 cx.quit();
@@ -179,18 +181,17 @@ fn open(
             None,
             cx,
         );
-        if appearance == Appearance::Large {
+        if matches!(appearance, Appearance::Large | Appearance::Constrained) {
             Theme::update(cx, |theme| theme.font_size = px(24.));
         }
     }
     let model = cx.new(|_| state.model());
     let (events, _receiver) = async_channel::unbounded();
     let rem = f32::from(Theme::global(cx).font_size);
-    let [width, height] = super::threads::PANEL_REMS.map(|value| px(value * rem));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
             point(px(100.), px(100.)),
-            size(width, height),
+            window_size(appearance, rem),
         ))),
         titlebar: None,
         kind: WindowKind::PopUp,
@@ -234,9 +235,31 @@ fn open(
     Ok(())
 }
 
+fn window_size(appearance: Option<Appearance>, rem: f32) -> Size<Pixels> {
+    if appearance == Some(Appearance::Constrained) {
+        return size(px(768.), px(544.));
+    }
+    let [width, height] = super::threads::PANEL_REMS.map(|value| px(value * rem));
+    size(width, height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constrained_window_does_not_grow_with_larger_text() {
+        for rem in [16., 24.] {
+            assert_eq!(
+                window_size(Some(Appearance::Constrained), rem),
+                size(px(768.), px(544.))
+            );
+        }
+        assert_eq!(
+            window_size(Some(Appearance::Large), 24.),
+            size(px(1152.), px(816.))
+        );
+    }
 
     #[test]
     fn fixed_states_parse_exactly() {
