@@ -688,8 +688,9 @@ flowchart LR
 ```
 
 The host must call `deferred::start()` once before intake, and refuse intake when it
-fails. Production startup is not wired yet; this foundation keeps v1 off and does not
-change when applications destroy values. Until startup, and on the dropper itself,
+fails. The brain starts the dropper before its runtime and intake; the shell starts it
+before the link. Startup fails closed if it cannot start. v1 remains off.
+Until startup, and on the dropper itself,
 values drop in place, so tests and nested
 values behave as before. `running()` turns false once the dropper thread has died,
 which only a panicking destructor in an unwinding build can cause; `start()` then
@@ -703,19 +704,46 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
-The allocation regressions exercise clear with track undo records, successful and stale
-commit, rejection of a late invalid track, and Stop both at rest and when dropping a
-step with removals and cell changes. They also measure outgoing activation over 256
-untracked rectangles; the paint frame is created outside that measurement. Each fixture
-waits for the live dropper's pending values and bytes to drain after its assertions.
-These are caller-side allocation checks, not latency measurements.
+**Known limits before v1.** The legal maximal-content fixture, measured on Rez with
+real font shaping across four scenes and 256 prepared prefixes, charges 200,009,012 B
+against the unchanged 64 MiB presenter allowance. These are requested Rust allocation
+bytes, not RSS or a font-cache ceiling. The next layer adds an eight-prefix-per-scene
+window and partial-ready consumption instead of raising the cap. Inputs and outputs
+held by up to eight workers sit outside the presenter allowance, as does the dropper
+queue. v1 still needs bounded-admission and window/consumption tests, admission at
+most 1 ms, clear/cut/eviction/timeout tails at most 2 ms, and concurrent worker/dropper
+churn measurements with throttling if the backlog grows.
 
-They do not prove every admission error, compiled-candidate rejection, rejected
-predecessor, stale activation, layout-cut error or undo-release path. Settled and
-superseded animation tracks still need retirement or measurement in the consuming
-layer's activation gate. `SceneState::attributed_bytes()` estimates whole-state ownership
-for the host's queue meter, not a heap bound. The host must protect its own held values
-and clear a paint frame before retiring the view whose geometry it shares.
+Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
+a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map
+copy and the predecessor copies attributed as it builds them, from cached owned bytes,
+so a rejection at any point queues them at their `map_bytes` estimate. Each object
+insert, motion-map growth and removal updates that cache.
+`SceneState::attributed_bytes()` is constant time. Commit, Stop, undo release and clear
+keep the owned bytes of its objects, ids, undo records and log cached, and only node
+and log capacity are added when it is read. A unit test checks the cache against the
+full walk after each transition and after replay. Admission freezes series data into its
+own allocation, which later object and undo copies share; the estimate counts its header
+and points once per holder, from `usage.marks`, so it is not additive across holders.
+
+The allocation regressions exercise clear with track undo records, successful and stale
+commit, rejection of a late invalid track, a reused id after many inserts, an unknown
+removal after motion growth, and Stop both at rest and when dropping a step with
+removals and cell changes. While a gate holds the dropper, the rejections check that
+queued attributions cover what the caller still holds, short only of payload boxes,
+channel blocks and the error. Activation is measured over 256 untracked rectangles, and
+over 16 shapes whose settled, recolored and superseded tracks have 32 or 2 keys: both
+key counts must free the same bytes on the caller. The paint frame is created outside
+those measurements. Each fixture waits for the live dropper's pending values and bytes
+to drain after its assertions. These are caller-side allocation checks, not latency
+measurements.
+
+They do not prove every admission error, compiled-candidate rejection, stale activation,
+layout-cut error or undo-release path. `SceneState::attributed_bytes()` estimates
+whole-state ownership for the host's queue meter, not a heap bound. Stop meters its
+working copy the same way as records are restored and dropped-step objects leave it.
+The host must protect its own held values and clear a paint frame before retiring the
+view whose geometry it shares.
 
 ### Tables
 

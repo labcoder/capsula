@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::{
     Handle, Record, SceneEvent, Step, StopCut,
+    deferred::Deferred,
     display::{MeasureError, TextMeasure, TextStyle},
     layout::SurfaceGeometry,
     parse_record,
@@ -25,6 +26,12 @@ const FRAME: u32 = 40;
 
 #[path = "measure_tests.rs"]
 mod measurements;
+
+#[path = "retirement_tests.rs"]
+mod retirement;
+
+#[path = "dead_dropper_tests.rs"]
+mod dead_dropper;
 
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
@@ -128,7 +135,12 @@ fn measure_v1_mirror_admission_at_caps() {
             .expect("frame bytes");
             let start = Instant::now();
             let effects = mirror
-                .data(GENERATION, message, bytes, now)
+                .data(
+                    GENERATION,
+                    Deferred::new(message, usize::try_from(bytes).expect("frame size")),
+                    bytes,
+                    now,
+                )
                 .expect("legal mirrored update");
             let elapsed = start.elapsed().as_nanos();
             assert_eq!(mirror.scenes[&LIVE].state.object_count(), objects);
@@ -195,6 +207,7 @@ fn label(id: &str, text: &str) -> Step {
 }
 
 fn presenter() -> Presenter {
+    kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {
         logical_size: [1920.0, 1080.0],
     };
@@ -219,7 +232,7 @@ fn data(
     frame: DataToShell,
     now: Instant,
 ) -> Result<Vec<Effect>, Broken> {
-    presenter.data(GENERATION, frame, FRAME, now)
+    presenter.data(GENERATION, Deferred::new(frame, 0), FRAME, now)
 }
 
 fn begin(presenter: &mut Presenter, scene: SceneId, now: Instant) -> Vec<Effect> {
@@ -369,11 +382,10 @@ fn a_matching_commit_prepares_once_and_its_result_is_charged() {
     assert_eq!(job.scene(), LIVE);
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
     let done = job.run(&mut Shaper);
-    let Completion::Prepared {
-        result: Ok(prepared),
-        ..
-    } = &done
-    else {
+    let Completion::Prepared { result, .. } = &done else {
+        panic!("a prepared step");
+    };
+    let Ok(prepared) = &**result else {
         panic!("a prepared step");
     };
     let charged = prepared.resident_bytes;
@@ -847,7 +859,12 @@ fn recovering_exhausted() -> (Presenter, Instant, Vec<PrepareJob>, SceneId) {
         .described(GENERATION + 1, &descriptors, now)
         .expect("membership");
     let effects = presenter
-        .data(GENERATION + 1, snapshot(recovered, rect("r")), FRAME, now)
+        .data(
+            GENERATION + 1,
+            Deferred::new(snapshot(recovered, rect("r")), 0),
+            FRAME,
+            now,
+        )
         .expect("a chunk");
     assert!(controls(&effects).is_empty());
     assert!(
@@ -1110,4 +1127,451 @@ fn jobs_answers_and_the_presenter_print_no_drawing_content() {
     presenter.completed(done, ms(now, 20)).expect("the batch");
     let printed = format!("{presenter:?}");
     assert!(!leaks(&printed), "{printed}");
+}
+
+/// Blocks the dropper until the returned sender drops, so whatever is discarded meanwhile stays
+/// alive in its queue instead of being destroyed where it was discarded.
+pub(crate) fn hold_dropper() -> mpsc::Sender<()> {
+    struct Gate(mpsc::Receiver<()>);
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _released = self.0.recv();
+        }
+    }
+    kumochi_scene::deferred::start().expect("the dropper starts");
+    let (release, gate) = mpsc::channel();
+    drop(Deferred::new(Gate(gate), 0));
+    release
+}
+
+/// Whether the dropper brings `probe` down to `owners` references within a few seconds.
+pub(crate) fn drained<T>(probe: &Arc<T>, owners: usize) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Arc::strong_count(probe) > owners {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+fn first_step(frame: &DataToShell) -> Arc<Step> {
+    let DataToShell::SceneSnapshotV1 { chunk } = frame else {
+        panic!("a snapshot frame");
+    };
+    let SceneEvent::Step { step, .. } = &chunk.events[0] else {
+        panic!("a step event");
+    };
+    Arc::clone(step)
+}
+
+#[test]
+fn stale_held_and_discarded_snapshot_data_drops_on_the_dropper() {
+    let scene = SceneId(10);
+    let mut presenter = presenter();
+    let now = Instant::now();
+    let release = hold_dropper();
+    let stale = snapshot(scene, rect("r"));
+    let stale_step = first_step(&stale);
+    let effects = presenter
+        .data(GENERATION + 1, Deferred::new(stale, 0), FRAME, now)
+        .expect("a stale frame");
+    assert!(effects.is_empty(), "a stale frame earns nothing");
+    let held = snapshot(scene, rect("r"));
+    let held_step = first_step(&held);
+    let effects = data(&mut presenter, held, now).expect("a chunk before membership");
+    assert!(effects.is_empty(), "a chunk before membership is held");
+    presenter.disconnected();
+    presenter.connected(GENERATION);
+    described(&mut presenter, &[scene], now);
+    let batch = snapshot(scene, rect("r"));
+    let batch_step = first_step(&batch);
+    let effects = data(&mut presenter, batch, now).expect("a chunk");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Recover(_))),
+        "the batch is sent for recovery"
+    );
+    drop(effects);
+    for (step, owners) in [(&stale_step, 2), (&held_step, 2), (&batch_step, 3)] {
+        assert_eq!(
+            Arc::strong_count(step),
+            owners,
+            "a discarded frame, log or batch waits for the dropper"
+        );
+    }
+    drop(release);
+    for step in [&stale_step, &held_step, &batch_step] {
+        assert!(drained(step, 1), "the dropper destroys it");
+    }
+}
+
+#[test]
+fn rejected_undelivered_and_discarded_preparations_drop_on_the_dropper() {
+    let theme = Arc::new(Theme::default());
+    let surface = SurfaceGeometry::Overlay {
+        logical_size: [1920.0, 1080.0],
+    };
+    let mut presenter = Presenter::new(surface, Arc::clone(&theme));
+    let release = hold_dropper();
+    presenter.connected(GENERATION);
+    let now = Instant::now();
+    let effects = presenter
+        .described(GENERATION, &Bounded::default(), now)
+        .expect("empty membership");
+    assert!(effects.is_empty(), "no scene to recover");
+    let owners = Arc::strong_count(&theme);
+    let (discarded, undelivered) = (SceneId(21), SceneId(22));
+    for scene in [LIVE, discarded, undelivered] {
+        begin(&mut presenter, scene, now);
+    }
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    presenter
+        .completed(first.run(&mut Shaper), ms(now, 5))
+        .expect("a current answer");
+    let second = commit(&mut presenter, LIVE, 1, rect("b"), ms(now, 6)).expect("a step");
+    let second = only_job(second);
+    let answer = second.run(&mut Shaper);
+    let before = Arc::strong_count(&theme);
+    let effects = presenter
+        .completed(answer, ms(now, 256))
+        .expect("a late answer");
+    assert_eq!(
+        controls(&effects),
+        [&failed(LIVE, 1, SceneFailure::Timeout)],
+        "the late step fails and its prepared predecessor is dropped"
+    );
+    assert_eq!(
+        Arc::strong_count(&theme),
+        before,
+        "the late answer and the halted prepared step wait for the dropper"
+    );
+    let effects = commit(&mut presenter, discarded, 0, rect("c"), now).expect("a step");
+    let before = Arc::strong_count(&theme);
+    drop(effects);
+    assert_eq!(
+        Arc::strong_count(&theme),
+        before,
+        "a discarded job's input waits for the dropper"
+    );
+    let job = only_job(commit(&mut presenter, undelivered, 0, rect("d"), now).expect("a step"));
+    let answer = job.run(&mut Shaper);
+    let before = Arc::strong_count(&theme);
+    let (sender, receiver) = mpsc::channel();
+    drop(receiver);
+    drop(
+        sender
+            .send(answer)
+            .expect_err("the completion recipient is gone"),
+    );
+    assert_eq!(
+        Arc::strong_count(&theme),
+        before,
+        "an undelivered answer waits for the dropper"
+    );
+    drop(release);
+    assert!(drained(&theme, owners), "the dropper destroys them all");
+}
+
+#[gpui::test]
+fn a_failed_weak_entity_update_retires_its_captured_completion(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use std::{cell::Cell, rc::Rc};
+
+    let theme = Arc::new(Theme::default());
+    let mut presenter = Presenter::new(SurfaceGeometry::default(), Arc::clone(&theme));
+    presenter.connected(GENERATION);
+    let now = Instant::now();
+    presenter
+        .described(GENERATION, &Bounded::default(), now)
+        .expect("empty membership");
+    begin(&mut presenter, LIVE, now);
+    let job = only_job(commit(&mut presenter, LIVE, 0, rect("captured"), now).expect("a step"));
+    let done = job.run(&mut Shaper);
+    let Completion::Prepared { result, .. } = &done else {
+        panic!("a preparation completion");
+    };
+    assert_eq!(result.as_ref().expect("prepared step").index, 0);
+    let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.recovery_log()[0] else {
+        panic!("the committed source");
+    };
+    let source = Arc::clone(step);
+    assert!(drained(&source, 4));
+    assert_eq!(
+        Arc::strong_count(&source),
+        4,
+        "log, step, aliased run and probe"
+    );
+    assert_eq!(Arc::strong_count(&theme), 3, "presenter, result and probe");
+
+    let recipient = cx.update(|cx| {
+        let entity = cx.new(|_| ());
+        let weak = entity.downgrade();
+        drop(entity);
+        weak
+    });
+    recipient.assert_released();
+    let called = Rc::new(Cell::new(false));
+    let observed = Rc::clone(&called);
+    let release = hold_dropper();
+    let error = recipient
+        .update(cx, move |(), _| {
+            observed.set(true);
+            drop(done);
+        })
+        .expect_err("the actual entity recipient was released");
+    assert_eq!(error.to_string(), "entity released");
+    assert!(
+        !called.get(),
+        "the failed delivery never invokes its closure"
+    );
+    assert_eq!(
+        presenter.workers(),
+        0,
+        "the discarded answer releases its slot"
+    );
+    assert_eq!(
+        Arc::strong_count(&source),
+        4,
+        "closure disposal queues its source"
+    );
+    assert_eq!(
+        Arc::strong_count(&theme),
+        3,
+        "closure disposal queues its theme"
+    );
+    drop(release);
+    assert!(
+        drained(&source, 2),
+        "the dropper releases both ticket aliases"
+    );
+    assert!(
+        drained(&theme, 2),
+        "the dropper releases the result's theme"
+    );
+    assert_eq!(
+        Arc::strong_count(&source),
+        2,
+        "only the log and probe remain"
+    );
+    assert_eq!(
+        Arc::strong_count(&theme),
+        2,
+        "only the presenter and probe remain"
+    );
+}
+
+#[test]
+fn a_kept_cut_charges_its_rest_once_and_releases_its_prepared_steps() {
+    let recovered = SceneId(10);
+    let (mut presenter, now, job) = recovering(vec![(recovered, rect("r"))]);
+    presenter
+        .completed(job.run(&mut Shaper), ms(now, 20))
+        .expect("the batch");
+    let rest = presenter.residency();
+    assert!(rest > 0, "the recovered rest is charged");
+    let job = only_job(commit(&mut presenter, recovered, 1, rect("b"), now).expect("a step"));
+    let done = job.run(&mut Shaper);
+    let Completion::Prepared { result, .. } = &done else {
+        panic!("a prepared step");
+    };
+    let Ok(prepared) = &**result else {
+        panic!("a prepared step");
+    };
+    let charged = prepared.resident_bytes;
+    presenter.completed(done, ms(now, 30)).expect("an answer");
+    assert_eq!(
+        presenter.residency(),
+        rest + charged,
+        "an adopted step adds its own charge"
+    );
+    let effects = presenter.stop(RUN, ms(now, 40)).expect("a stop");
+    assert_eq!(controls(&effects), [&stop_scenes(vec![kept(recovered)])]);
+    assert_eq!(
+        presenter.residency(),
+        rest,
+        "a stop releases the prepared step"
+    );
+    acknowledge(&mut presenter, recovered, 2, kept(recovered).cut, now).expect("the cut");
+    assert_eq!(
+        presenter.residency(),
+        rest,
+        "the kept rest replaces the old one and is charged once"
+    );
+}
+
+#[test]
+fn recovery_transfers_a_full_rest_charge_not_just_the_last_ready_delta() {
+    let (mut mirror, now) = live();
+    begin(&mut mirror, LIVE, now);
+    let first = only_job(commit(&mut mirror, LIVE, 0, rect("r"), now).expect("first step"));
+    mirror
+        .completed(first.run(&mut Shaper), ms(now, 1))
+        .expect("first answer");
+    let empty = step(r#"{"step":{"id":"empty"}}"#);
+    let second =
+        only_job(commit(&mut mirror, LIVE, 1, empty.clone(), ms(now, 2)).expect("second step"));
+    let done = second.run(&mut Shaper);
+    let Completion::Prepared { result, .. } = &done else {
+        panic!("a prepared suffix");
+    };
+    let delta = result.as_ref().expect("prepared suffix").resident_bytes;
+    let mut recovered = presenter();
+    let named = Bounded::new(vec![SceneDescriptorV1::new(LIVE, 2, 2, 2).expect("counts")])
+        .expect("one scene");
+    recovered
+        .described(GENERATION, &named, now)
+        .expect("membership");
+    let frame = DataToShell::SceneSnapshotV1 {
+        chunk: SceneSnapshotChunk {
+            scene: LIVE,
+            revision: 2,
+            ordinal: 0,
+            header: Some(header()),
+            events: Bounded::new(vec![
+                SceneEvent::Step {
+                    revision: 1,
+                    step: Arc::new(rect("r")),
+                },
+                SceneEvent::Step {
+                    revision: 2,
+                    step: Arc::new(empty),
+                },
+            ])
+            .expect("two events"),
+            last: true,
+        },
+    };
+    let job = recovery(data(&mut recovered, frame, now).expect("snapshot"));
+    recovered
+        .completed(job.run(&mut Shaper), ms(now, 20))
+        .expect("recovery answer");
+    assert_eq!(recovered.scenes[&LIVE].state.revision(), 2);
+    assert_eq!(recovered.scenes[&LIVE].state.object_count(), 1);
+    assert!(recovered.scenes[&LIVE].ready.is_empty());
+    assert!(
+        recovered.residency() > delta,
+        "the rest also owns the earlier rectangle and its source"
+    );
+    let retained = recovered.residency();
+    recovered
+        .stop(RUN, ms(now, 30))
+        .expect("stop at the recovered rest");
+    assert_eq!(
+        recovered.residency(),
+        retained,
+        "dropping unactivated work cannot release the rest's charge"
+    );
+}
+
+#[test]
+fn queued_tickets_survive_halt_expiry_and_input_errors_until_retirement() {
+    for case in 0..3 {
+        let (mut presenter, now, mut zombies) = exhausted();
+        begin(&mut presenter, LIVE, now);
+        let effects = commit(&mut presenter, LIVE, 0, rect("queued"), now).expect("queued step");
+        assert!(jobs(effects).is_empty());
+        let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.recovery_log()[0] else {
+            panic!("the queued step is recorded");
+        };
+        let probe = Arc::clone(step);
+        assert!(drained(&probe, 4));
+        assert_eq!(
+            Arc::strong_count(&probe),
+            4,
+            "log, aliased ticket inputs and probe"
+        );
+        let release = hold_dropper();
+        let effects = if case == 0 {
+            presenter.stop(RUN, now).expect("halt")
+        } else {
+            if case == 2 {
+                presenter.surface = SurfaceGeometry::Inline { width: -1.0 };
+            }
+            let zombie = zombies.pop().expect("a slot");
+            presenter
+                .completed(
+                    zombie.run(&mut Shaper),
+                    ms(now, if case == 1 { 250 } else { 100 }),
+                )
+                .expect("the old completion frees a slot")
+        };
+        let expected = match case {
+            0 => stop_scenes(vec![SceneCut {
+                scene: LIVE,
+                cut: zero_cut(),
+            }]),
+            1 => failed(LIVE, 0, SceneFailure::Timeout),
+            _ => failed(LIVE, 0, SceneFailure::Layout),
+        };
+        assert_eq!(controls(&effects), [&expected]);
+        assert_eq!(
+            Arc::strong_count(&probe),
+            4,
+            "the removed ticket stays protected"
+        );
+        drop(presenter);
+        assert_eq!(
+            Arc::strong_count(&probe),
+            4,
+            "the final scene owner is retired too"
+        );
+        drop(release);
+        assert!(drained(&probe, 1));
+    }
+}
+
+#[test]
+fn recovery_answers_keep_their_payload_when_delivery_or_validation_is_lost() {
+    for lost in [false, true] {
+        let scene = SceneId(10);
+        let mut presenter = presenter();
+        let now = Instant::now();
+        described(&mut presenter, &[scene], now);
+        let frame = snapshot(scene, rect("recovered"));
+        let job = recovery(data(&mut presenter, frame, now).expect("snapshot"));
+        let done = job.run(&mut Shaper);
+        let Completion::Recovered { scenes, .. } = &done else {
+            panic!("a recovery result");
+        };
+        let (state, _) = scenes[0].1.as_ref().expect("recovered scene");
+        let SceneEvent::Step { step, .. } = &state.recovery_log()[0] else {
+            panic!("the recovered original step");
+        };
+        let probe = Arc::clone(step);
+        assert!(drained(&probe, 2));
+        assert_eq!(Arc::strong_count(&probe), 2, "result and probe");
+        let release = hold_dropper();
+        let owners = Arc::strong_count(&probe);
+        if lost {
+            let (sender, receiver) = mpsc::channel();
+            drop(receiver);
+            drop(
+                sender
+                    .send(done)
+                    .expect_err("the recovery recipient is gone"),
+            );
+        } else {
+            presenter.clear(now).expect("clear before the answer");
+            let effects = presenter
+                .completed(done, ms(now, 20))
+                .expect("obsolete recovery");
+            assert!(effects.is_empty());
+        }
+        assert_eq!(
+            Arc::strong_count(&probe),
+            owners,
+            "discarding the answer keeps its log alive"
+        );
+        assert_eq!(
+            presenter.workers(),
+            0,
+            "answer disposal releases its slot once"
+        );
+        drop(presenter);
+        drop(release);
+        assert!(drained(&probe, 1));
+    }
 }

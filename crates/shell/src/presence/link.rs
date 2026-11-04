@@ -2,19 +2,21 @@
 
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
-use crate::link::{LinkEvent, LinkState};
+use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
+use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
 
 impl Presence {
-    /// Applies what the link reported, in order, then follows the runs once.
+    /// Applies what the link reported, in order, then follows the runs once. Each event leaves
+    /// the batch only to be applied; a scene batch's buffer still drops off this thread.
     pub(super) fn link_events(
         &mut self,
-        events: Vec<LinkEvent>,
+        mut events: Batch,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        for event in events {
+        for event in events.drain(..) {
             match event {
                 LinkEvent::State(state) => {
                     self.session = None;
@@ -59,6 +61,11 @@ impl Presence {
                     message,
                     bytes,
                 } => self.data_received(generation, message, bytes, cx),
+                LinkEvent::SceneData {
+                    generation,
+                    frame,
+                    bytes,
+                } => self.scene_data(generation, frame, bytes, cx),
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
                     Ok(effect) => {
                         self.effect(effect);
@@ -93,7 +100,31 @@ impl Presence {
                 LinkEvent::Error(error) => self.show_error(&error, cx),
             }
         }
+        events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.runs_changed(cx)
+    }
+
+    /// Scene frames go to the presenter even when stale, so it drops them off the UI thread.
+    fn scene_data(
+        &mut self,
+        generation: u64,
+        frame: Deferred<DataToShell>,
+        bytes: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let DataToShell::ScenesRemoved { scenes } = &*frame
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.generation() == generation)
+        {
+            let credit = self.runs.remove_scenes(scenes);
+            self.grant(credit);
+        }
+        let effects = self
+            .presenter
+            .data(generation, frame, bytes, Instant::now());
+        self.scene_effects(effects, cx);
     }
 
     fn data_received(
@@ -108,25 +139,6 @@ impl Presence {
             .as_ref()
             .is_some_and(|session| session.generation() == generation)
         {
-            if matches!(
-                &message,
-                DataToShell::SceneSnapshotV1 { .. }
-                    | DataToShell::SceneBegin { .. }
-                    | DataToShell::SceneStepCommit { .. }
-                    | DataToShell::SceneCutApplied { .. }
-                    | DataToShell::SceneEnd { .. }
-                    | DataToShell::ScenesRemoved { .. }
-            ) {
-                if let DataToShell::ScenesRemoved { scenes } = &message {
-                    let credit = self.runs.remove_scenes(scenes);
-                    self.grant(credit);
-                }
-                let effects = self
-                    .presenter
-                    .data(generation, message, bytes, Instant::now());
-                self.scene_effects(effects, cx);
-                return;
-            }
             let credit = match message {
                 message @ (DataToShell::ThreadList { .. }
                 | DataToShell::Page { .. }

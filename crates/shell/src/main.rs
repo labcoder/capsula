@@ -1,6 +1,14 @@
 //! `kumochi`, Kumochi's shell. It has no console window.
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+#[cfg(test)]
+#[path = "../../scene/tests/support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "shared allocator helpers serve several test binaries"
+)]
+mod allocation;
+
 mod credential;
 mod drawing;
 mod escape;

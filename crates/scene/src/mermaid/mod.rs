@@ -610,7 +610,7 @@ mod tests {
         let target = object::Object {
             handle: Handle::new(1, 0).expect("target handle"),
             kind: object::Kind::Table,
-            references: Vec::new(),
+            references: Box::default(),
             parent: None,
             work: crate::state::work::Work::default(),
         };
