@@ -62,11 +62,25 @@ impl<S: CredentialStore> CredentialStore for LaneStore<S> {
                 thread::sleep(WAIT);
             }
             self.store.delete(target)?;
-            if self.store.get(target)?.is_none() {
+            if self.absent(target)? {
                 self.written().remove(target);
                 return Ok(());
             }
         }
         Err(CredentialStoreError::Unsettled)
+    }
+}
+
+impl<S: CredentialStore> LaneStore<S> {
+    /// Gone only when every one of [`TRIES`] reads says so, since one "not found" can be a
+    /// miss hiding a delete that didn't stick (CAPS-116). A store that misses every one of them
+    /// still fools it.
+    fn absent(&self, target: &str) -> Result<bool, CredentialStoreError> {
+        for _ in 0..TRIES {
+            if self.store.get(target)?.is_some() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }

@@ -21,7 +21,7 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
 };
 use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -99,6 +99,7 @@ pub(crate) enum Quit {
 /// The coordinator and the systems that outlive one shell connection.
 #[derive(Debug)]
 pub(crate) struct Brain {
+    pub(crate) crashes: crate::relaunch::Crashes,
     coordinator: Coordinator,
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
@@ -203,6 +204,7 @@ impl Brain {
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
+            crashes: crate::relaunch::Crashes::default(),
             coordinator,
             store: Some(store),
             engine,
@@ -395,9 +397,50 @@ impl Brain {
         }
     }
 
+    pub(crate) async fn clear_before_relaunch(&mut self, scenes: &[SceneId]) -> bool {
+        if self.store.is_none() || !self.coordinator.drawing_available() {
+            return false;
+        }
+        let mut pending = scenes.to_vec();
+        let effects = self.coordinator.failed_drawings(pending.clone());
+        self.apply(effects, None)
+            .expect("offline effects cannot fill a shell queue");
+        let effects = self.coordinator.retry_clears();
+        self.apply(effects, None)
+            .expect("offline effects cannot fill a shell queue");
+        tokio::time::timeout(SCENES_WAIT, async {
+            while !pending.is_empty() || !self.coordinator.settled() {
+                let Some(input) = self.inputs.recv().await else {
+                    return false;
+                };
+                let mut failed = false;
+                if let Input::ScenesCleared { scenes, ok } = &input {
+                    failed = !ok;
+                    if *ok {
+                        pending.retain(|scene| !scenes.contains(scene));
+                    }
+                }
+                self.offline(input);
+                if failed {
+                    return false;
+                }
+            }
+            self.coordinator.drawing_available()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
+        if let Input::ScenesCleared { scenes, ok: true } = &input {
+            self.crashes.cleared(scenes);
+        }
+        self.coordinator.handle(input).ok()
+    }
+
     /// Acts on one input with no shell to tell: only the store and the engine act.
     fn offline(&mut self, input: Input) {
-        if let Ok(effects) = self.coordinator.handle(input) {
+        if let Some(effects) = self.handle(input) {
             let applied = self.apply(effects, None);
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
         }
@@ -421,6 +464,7 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
+        self.crashes.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
@@ -561,8 +605,7 @@ impl Brain {
                     link.held_pages.pop_front().expect("a held page is ready")
                 }
                 () = std::future::ready(()), if feed => {
-                    let chunk = link.recovery.as_mut().and_then(Recovery::next_chunk);
-                    if chunk.is_some_and(|chunk| link.data(&chunk).is_err()) {
+                    if self.queue_recovery(&mut link).is_err() {
                         return Ended::Lost;
                     }
                     continue;
@@ -612,7 +655,7 @@ impl Brain {
             };
             #[cfg(test)]
             self.control_taken(&input);
-            let Ok(effects) = self.coordinator.handle(input) else {
+            let Some(effects) = self.handle(input) else {
                 continue;
             };
             if self.coordinator.current_run().is_none() {
@@ -654,9 +697,11 @@ impl Brain {
             return Ok(None);
         }
         if !drawings.scenes.is_empty() {
+            let ids = drawings.scenes.iter().map(|scene| scene.scene).collect();
             link.control(&ControlToShell::ScenesV1 {
                 scenes: drawings.scenes,
             })?;
+            self.crashes.described(ids, std::time::Instant::now());
             self.coordinator.drawing_described();
             return Ok(Some(Recovery::drawings(drawings.chunks)));
         }
@@ -666,6 +711,16 @@ impl Brain {
         let recovery = Recovery::new(visible, self.chunk_target);
         self.coordinator.drawing_described();
         Ok(Some(recovery))
+    }
+
+    fn queue_recovery(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        if let Some(chunk) = link.recovery.as_mut().and_then(Recovery::next_chunk) {
+            link.data(&chunk)?;
+        }
+        if !link.recovery.as_ref().is_some_and(Recovery::pending) {
+            self.crashes.queued(std::time::Instant::now());
+        }
+        Ok(())
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the

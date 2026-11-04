@@ -22,7 +22,7 @@ mod test_support;
 use std::io;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::{self, SHELL_EXE};
@@ -33,7 +33,6 @@ use tokio::task::JoinSet;
 use crate::engines::fixture::{self, Fixture};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
-use crate::relaunch::Crashes;
 use crate::runtime::Brain;
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
@@ -193,7 +192,6 @@ async fn serve(
     brain: &mut Brain,
 ) -> Result<Option<tokio::time::Instant>, ipc::IpcError> {
     let mut tap = tap::Tap::from_env();
-    let mut crashes = Crashes::default();
     let mut launched = None;
     // Dropped when serving ends, which cancels a relaunch still waiting out its backoff.
     let mut relaunches = JoinSet::new();
@@ -217,7 +215,12 @@ async fn serve(
                 return Ok(None);
             }
             Session::ShellLost => {
-                let Some(delay) = crashes.record(Instant::now()) else {
+                let plan = brain.crashes.plan(std::time::Instant::now());
+                if !brain.clear_before_relaunch(&plan.clear).await {
+                    tracing::error!("drawing clears were not confirmed; not relaunching the shell");
+                    continue;
+                }
+                let Some(delay) = plan.delay else {
                     tracing::error!("the shell keeps crashing; not relaunching it");
                     continue;
                 };

@@ -1,6 +1,7 @@
 //! Bounded account and revocation records, kept exclusively in the brain's vault.
 
 use std::fmt;
+use std::io;
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -21,6 +22,8 @@ pub const MAX_SCOPE_BYTES: usize = 1024;
 pub const MAX_EMAIL_BYTES: usize = 254;
 /// Maximum independently owned exchange entries in the revocation list.
 pub const MAX_EXCHANGES: usize = 4;
+/// Serialized bytes one revocation entry may take, so a full list always fits its record.
+pub const MAX_ENTRY_BYTES: usize = (MAX_RECORD_BYTES - 64) / (MAX_EXCHANGES + 1);
 
 /// A registration and its optional token set; registration-only records survive ordinary sign-out.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +100,9 @@ pub(super) trait Record {
 
 impl Record for Account {
     fn validate(&self) -> Result<(), VaultError> {
+        if json_len(self) > MAX_RECORD_BYTES {
+            return Err(VaultError::Bounds);
+        }
         bounded(&self.client_id, MAX_ID_BYTES)?;
         if let Some(subject) = &self.subject {
             bounded(subject, MAX_ID_BYTES)?;
@@ -132,6 +138,38 @@ impl Record for RevocationList {
         }
         Ok(())
     }
+}
+
+/// Whether a list entry for this received token can always be saved, whatever its stamp. A
+/// token within the field bound can still escape past the record's (CAPS-116), and a save that
+/// can never succeed must never be offered.
+pub fn entry_fits(client_id: &Zeroizing<String>, refresh_token: &Zeroizing<String>) -> bool {
+    let probe = Revocable {
+        client_id: client_id.clone(),
+        refresh_token: refresh_token.clone(),
+        added_at: u64::MAX,
+        origin: Origin::Exchange,
+    };
+    !refresh_token.is_empty()
+        && refresh_token.len() <= MAX_REFRESH_BYTES
+        && client_id.len() <= MAX_ID_BYTES
+        && json_len(&probe) <= MAX_ENTRY_BYTES
+}
+
+/// Serialized length, counted without a copy of the secret bytes.
+fn json_len(value: &impl Serialize) -> usize {
+    struct Counter(usize);
+    impl io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_or(usize::MAX, |()| counter.0)
 }
 
 fn bounded(value: &str, max: usize) -> Result<(), VaultError> {

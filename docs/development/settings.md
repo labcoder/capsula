@@ -4,6 +4,11 @@ The brain owns the user's settings and keeps them in `config.toml`, in the `Kumo
 under `%APPDATA%` (`Kumochi Dev` for debug builds, so a dev build never touches an install).
 The shell shows them and asks for changes; it never reads the file.
 
+The brain resolves this folder through `platform::config_dir`, implemented in its Windows
+module. It reads `APPDATA` and requires an absolute path, just as the local data folder requires
+an absolute `LOCALAPPDATA`. Missing, empty or relative roots never fall back to the working
+directory.
+
 ## Shell editor
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored

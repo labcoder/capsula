@@ -48,11 +48,12 @@ pub enum HttpError {
     BodyTooLarge,
 }
 
-/// An HTTPS JWKS URL validated against the discovery issuer's exact origin.
-#[derive(Debug)]
-pub struct JwksUrl(Secret<Zeroizing<String>>);
+/// An HTTPS URL from discovery, such as the JWKS or revocation endpoint, validated against the
+/// issuer's exact origin.
+#[derive(Debug, Clone)]
+pub struct IssuerUrl(Secret<Zeroizing<String>>);
 
-impl JwksUrl {
+impl IssuerUrl {
     /// Validate the public discovery document's URL before any request can use it.
     ///
     /// # Errors
@@ -75,23 +76,25 @@ impl JwksUrl {
     }
 }
 
-/// The only account destinations needed by code exchange and identity verification.
+/// The only account destinations: code exchange, identity verification and revocation.
 #[derive(Debug)]
 pub enum Endpoint {
-    /// The documented form-token endpoint; the only endpoint accepting form credentials.
+    /// The documented form-token endpoint, one of the two accepting form credentials.
     Token,
     /// The public `OpenID` discovery document.
     Discovery,
     /// A validated same-origin JWKS document, with no credentials.
-    Jwks(JwksUrl),
+    Jwks(IssuerUrl),
+    /// The discovered same-origin revocation endpoint, the other one taking form credentials.
+    Revocation(IssuerUrl),
 }
 
 impl Endpoint {
-    fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         match self {
             Self::Token => "https://auth.openai.com/api/accounts/oauth/token",
             Self::Discovery => "https://auth.openai.com/.well-known/openid-configuration",
-            Self::Jwks(url) => url.0.expose(),
+            Self::Jwks(url) | Self::Revocation(url) => url.0.expose(),
         }
     }
 }
@@ -237,7 +240,7 @@ impl Client {
         if !url.starts_with("https://") {
             return Err(HttpError::Endpoint);
         }
-        let builder = if matches!(request.endpoint, Endpoint::Token) {
+        let builder = if matches!(request.endpoint, Endpoint::Token | Endpoint::Revocation(_)) {
             let fields: Vec<_> = request
                 .fields
                 .iter()

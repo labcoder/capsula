@@ -10,6 +10,8 @@
 
 mod job;
 mod lane;
+mod sign_out;
+mod sweep;
 #[cfg(test)]
 mod tests;
 
@@ -18,19 +20,20 @@ use std::mem;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState,
-    UserError,
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, ErrorKey, PlanState, UserError,
 };
 use zeroize::Zeroizing;
 
 pub use job::{Done, Job, Snapshot, Worker};
 use lane::{Deferred, Flight, Lane, Queued, Save, listed};
+use sign_out::Leaving;
+use sweep::{Pass, Why};
 
 use super::http_client::HttpError;
 use super::oauth::exchange::{ExchangeError, OAuthCode, TokenSet};
 use super::oauth::id_token::{IdentityError, VerifiedIdentity, check_subject, permits_plan};
 use super::oauth::{Authorization, BindError, Intent, LaunchError, SignInError};
-use super::records::{Account, MAX_EXCHANGES, MAX_REFRESH_BYTES, Record as _, Tokens};
+use super::records::{Account, MAX_EXCHANGES, Origin, Record as _, Revocable, Tokens, entry_fits};
 
 /// What the account machine reacts to.
 #[derive(Debug)]
@@ -55,6 +58,8 @@ pub enum Input {
         /// The issued set and its verification, or why there's none.
         result: Result<Received, ExchangeError>,
     },
+    /// A revocation run ended with these entries confirmed.
+    Revoked(Vec<Secret<Revocable>>),
 }
 
 /// How a listener ended.
@@ -110,13 +115,13 @@ pub enum Effect {
         /// The callback to exchange.
         authorization: Authorization,
     },
+    /// Revoke these listed entries within one network budget, then report [`Input::Revoked`].
+    Revoke(Vec<Secret<Revocable>>),
 }
 
 /// The account's state as last read, and what the machine learned since.
 #[derive(Debug, Default)]
 struct Loaded {
-    /// A sign-out is pending: the account is fenced.
-    fenced: bool,
     /// The provider didn't confirm that the last sign-out ended the session.
     notice: bool,
     host: Option<Secret<Zeroizing<String>>>,
@@ -163,6 +168,13 @@ pub struct AccountState {
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
+    /// The revocation pass outside a sign-out, and whether another is owed after it.
+    pass: Pass,
+    again: bool,
+    /// A sign-in that found the list full, waiting for its age-out check.
+    admitting: Option<Intent>,
+    /// A pending sign-out: the account is fenced.
+    leaving: Option<Leaving>,
 }
 
 impl AccountState {
@@ -181,6 +193,10 @@ impl AccountState {
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
+            pass: Pass::Idle,
+            again: false,
+            admitting: None,
+            leaving: None,
         };
         state.loading = true;
         state.jobs.push_back(Queued::Load { patient: true });
@@ -195,10 +211,9 @@ impl AccountState {
         if self.busy {
             return AccountView::Busy;
         }
-        if self.loaded.fenced {
-            // shortcut: nothing resumes a pending sign-out until slice 3 PR 9b part 2.
+        if let Some(cleanup) = self.cleanup() {
             return AccountView::SigningOut {
-                cleanup: Cleanup::Refused,
+                cleanup,
                 revocation_unconfirmed: self.loaded.notice,
             };
         }
@@ -239,6 +254,7 @@ impl AccountState {
             Input::Vault(done) => self.done(done, &mut effects),
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
+            Input::Revoked(confirmed) => self.revoked(confirmed),
         }
         self.pump(&mut effects);
         if answer {
@@ -262,20 +278,22 @@ impl AccountState {
             self.reload();
             return;
         }
-        if self.loaded.fenced {
+        if self.leaving.is_some() {
+            if op == AccountOp::Retry {
+                self.retry_sign_out();
+            }
             return;
         }
         match op {
             AccountOp::SignIn => self.sign_in(Intent::SignIn, effects),
             AccountOp::EnablePlan => self.sign_in(Intent::EnablePlan, effects),
             AccountOp::CancelSignIn => self.cancel(effects),
-            // shortcut: sign-out arrives with slice 3 PR 9b part 2; until then it's answered
-            // with the view, and nothing is fenced or deleted.
-            AccountOp::SignOut => {}
+            AccountOp::SignOut => self.sign_out(effects),
             AccountOp::Retry => self.retry(),
         }
     }
 
+    /// Starts an attempt; a full list first gets its age-out check.
     fn sign_in(&mut self, intent: Intent, effects: &mut Vec<Effect>) {
         if self.saving_current() {
             self.deferred = Some(Deferred::SignIn(intent));
@@ -286,9 +304,16 @@ impl AccountState {
             _ => return effects.push(error(ErrorKey::CredentialsUnavailable, Action::Retry)),
         };
         // The lane's reservation counts: the request it holds may still need a list slot.
-        if self.loaded.exchanges + usize::from(!matches!(self.lane, Lane::Free)) >= MAX_EXCHANGES {
-            return effects.push(error(ErrorKey::RevocationBacklog, Action::Retry));
+        if self.full() {
+            if self.admitting.replace(intent).is_none() {
+                self.jobs.push_back(Queued::Relist {
+                    confirmed: Vec::new(),
+                    why: Why::Admit,
+                });
+            }
+            return;
         }
+        self.admitting = None;
         self.attempt += 1;
         self.live = Some(Live {
             intent,
@@ -312,7 +337,15 @@ impl AccountState {
         });
     }
 
+    /// No list slot is free; the lane's reservation counts, since the request it holds may
+    /// still need one.
+    fn full(&self) -> bool {
+        self.loaded.exchanges + usize::from(!matches!(self.lane, Lane::Free)) >= MAX_EXCHANGES
+    }
+
     fn cancel(&mut self, effects: &mut Vec<Effect>) {
+        // A sign-in waiting for its age check is cancelled too, before it can start.
+        self.admitting = None;
         if self.saving_current() {
             self.deferred = Some(Deferred::Cancel);
             return;
@@ -338,6 +371,8 @@ impl AccountState {
             self.jobs.push_back(Queued::Save);
         } else if self.loaded.damaged && self.live.is_none() && matches!(self.lane, Lane::Free) {
             self.reload();
+        } else {
+            self.sweep();
         }
     }
 
@@ -418,9 +453,7 @@ impl AccountState {
             // The response was unusable but named a refresh token: the list owns it now.
             Err(ExchangeError::Unusable {
                 refresh_token: Some(refresh_token),
-            }) if !refresh_token.expose().is_empty()
-                && refresh_token.expose().len() <= MAX_REFRESH_BYTES =>
-            {
+            }) if entry_fits(client.expose(), refresh_token.expose()) => {
                 if current {
                     self.end_attempt(ErrorKey::SignInFailed, effects);
                 }
@@ -449,16 +482,20 @@ impl AccountState {
             identity,
             now,
         } = received;
-        // Decision (PR 9b): a grant without a refresh token can't be renewed or revoked, so
-        // it's refused; its access token is dropped and expires on its own.
-        let Some(refresh_token) = tokens.refresh_token else {
-            self.jobs.push_back(Queued::Finished {
-                outcome_unknown: false,
-            });
-            if current {
-                self.end_attempt(ErrorKey::SignInFailed, effects);
+        let refresh_token = match tokens.refresh_token {
+            Some(token) if entry_fits(client.expose(), token.expose()) => token,
+            // Decision (PR 9b): a grant without a refresh token can't be renewed or revoked, so
+            // it's refused and its access token expires on its own. A token no list could hold
+            // can't be owned, so its outcome is unknown.
+            unowned => {
+                self.jobs.push_back(Queued::Finished {
+                    outcome_unknown: unowned.is_some(),
+                });
+                if current {
+                    self.end_attempt(ErrorKey::SignInFailed, effects);
+                }
+                return;
             }
-            return;
         };
         let verdict = if current {
             self.verdict(
@@ -547,7 +584,11 @@ impl AccountState {
         ));
     }
 
-    fn loaded(&mut self, result: Result<Box<Snapshot>, super::error::VaultError>) {
+    fn loaded(
+        &mut self,
+        result: Result<Box<Snapshot>, super::error::VaultError>,
+        effects: &mut Vec<Effect>,
+    ) {
         let snapshot = match result {
             Ok(snapshot) => *snapshot,
             Err(super::error::VaultError::Busy) => {
@@ -565,6 +606,15 @@ impl AccountState {
             }
         };
         self.busy = false;
+        // A load dispatched before a sign-out was admitted can't undo it.
+        if self.admitted() {
+            return;
+        }
+        let marker = match snapshot.marker {
+            Ok(marker) => marker,
+            Err(failure) => return self.unread(&failure),
+        };
+        self.leaving = None;
         let mut damaged = false;
         let mut readable = |name: &str, failure: &super::error::VaultError| {
             tracing::warn!(%failure, record = name, "an account record can't be read");
@@ -579,19 +629,29 @@ impl AccountState {
             .inspect_err(|failure| readable("chatgpt", failure))
             .ok()
             .flatten();
-        let exchanges = snapshot
-            .exchanges
+        let revocable = snapshot
+            .revocable
             .inspect_err(|failure| readable("revoke", failure))
-            .unwrap_or(0);
+            .unwrap_or_default();
+        if let Some(sign_out) = marker.sign_out {
+            self.resume(sign_out);
+        }
         self.loaded = Loaded {
-            fenced: snapshot.marker.sign_out.is_some(),
-            notice: snapshot.marker.notice,
+            notice: marker.notice,
             host,
             account,
-            exchanges,
+            exchanges: exchanges(&revocable),
             damaged,
         };
+        self.revoke(revocable, effects);
     }
+}
+
+fn exchanges(entries: &[Secret<Revocable>]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.expose().origin == Origin::Exchange)
+        .count()
 }
 
 fn error(key: ErrorKey, action: Action) -> Effect {

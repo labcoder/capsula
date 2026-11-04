@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/protocol", "crates/scene", "crates/brain", "crates/shell", "xtask"]
+# Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,7 +17,7 @@ kumochi-scene = { path = "crates/scene" }
 fluent-bundle = "0.16"
 getrandom = { version = "0.3", features = ["std"] }
 gpui-kit = "0.8.1"
-keyring = { version = "3", features = ["windows-native"] }
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
@@ -79,3 +81,6 @@ gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
 gpui-component-macros = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
+# GPUI's Windows backend with the idle-wake fix (docs/development/gpui-patch.md). It must match
+# the gpui-pre version gpui-kit resolves; `cargo xtask check-vendor` fails CI when it stops applying.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
