@@ -187,10 +187,16 @@ impl KumoView {
     /// Whether the next frame has something to draw or to drop. A pull's frames come from the
     /// dock, which stays shown through its return.
     pub(super) fn wants_frame(&self) -> bool {
-        self.retired.is_some()
-            || (self.shown
-                && self.renderer.is_some()
-                && (self.image.is_none() || self.animator.is_animating()))
+        self.retired.is_some() || self.shades()
+    }
+
+    /// Whether the peek shades its next frame: it's shown, draws the body itself rather than
+    /// leaving it to the dock, and has no image yet or an animation under way.
+    fn shades(&self) -> bool {
+        self.shown
+            && self.pulled == Pulled::Peek
+            && self.renderer.is_some()
+            && (self.image.is_none() || self.animator.is_animating())
     }
 
     /// One paced frame: drops the image the last one replaced, then shades the next if
@@ -212,9 +218,8 @@ impl KumoView {
         {
             tracing::debug!(%error, "can't drop Kumo's last frame");
         }
-        if let Some(renderer) = self.renderer.clone()
-            && self.shown
-            && (self.image.is_none() || self.animator.is_animating())
+        if self.shades()
+            && let Some(renderer) = self.renderer.clone()
         {
             let frame = self.animator.tick(dt, 0.0);
             self.reshades += 1;

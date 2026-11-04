@@ -159,6 +159,9 @@ pub(super) struct Line {
     held: Held,
     /// Failed attempts at `requested` in a row.
     failed: u8,
+    /// A pull holds the overlay or the mask, and the dock may draw its picture: the line
+    /// takes neither back until the pull lets go.
+    pulled: bool,
 }
 
 impl Line {
@@ -170,6 +173,7 @@ impl Line {
     /// A pull moved the overlay: the next attempt moves it back to the line's.
     pub(super) fn pull_overlay(&mut self) {
         self.held.overlay = None;
+        self.pulled = true;
     }
 
     /// Windows accepted a pull's mask over `area`: the next attempt gives the line its band
@@ -177,11 +181,14 @@ impl Line {
     pub(super) fn pull_mask(&mut self, area: [i32; 4]) {
         self.held.mask = None;
         self.held.proxy = Some(area);
+        self.pulled = true;
     }
 
-    /// The pull is done with the mask and the overlay: ask for the line again, the pending
-    /// placement if there is one, with a fresh run of attempts.
+    /// The pull is done with the mask and the overlay, and the dock draws no picture of it:
+    /// ask for the line again, the pending placement if there is one, with a fresh run of
+    /// attempts.
     pub(super) fn reclaim(&mut self) {
+        self.pulled = false;
         self.requested = self.requested.or(self.accepted);
         self.failed = 0;
     }
@@ -203,7 +210,10 @@ impl Line {
     /// fails with the surfaces apart, the dock is hidden rather than left showing a line it
     /// doesn't own or owning a band it doesn't show.
     pub(super) fn attempt<S: Surfaces>(&mut self, surfaces: &mut S) -> Attempt<S::Error> {
-        let Some(target) = self.requested.filter(|_| self.failed < MAX_FAILED_UPLOADS) else {
+        let Some(target) = self
+            .requested
+            .filter(|_| !self.pulled && self.failed < MAX_FAILED_UPLOADS)
+        else {
             return Attempt::Idle;
         };
         if let Err(error) = self.converge(target, surfaces) {
@@ -482,7 +492,8 @@ pub(super) struct Dock {
     /// GPUI's atlas at this render.
     pub(super) retired: Vec<Arc<RenderImage>>,
     pub(super) aged: Vec<Arc<RenderImage>>,
-    /// `pull` was accepted and hasn't been rendered yet.
+    /// `pull` changed, to an accepted picture or to none as a pull lets go, and hasn't been
+    /// rendered since.
     pub(super) undrawn: bool,
 }
 
@@ -495,9 +506,9 @@ impl Dock {
             drawn: Drawn::default(),
             listening: false,
             pull: None,
-            // A pull's frame retires at most its two goo images.
-            retired: Vec::with_capacity(2),
-            aged: Vec::with_capacity(2),
+            // Clearing a pull's picture retires all it draws: drip, stub and body.
+            retired: Vec::with_capacity(3),
+            aged: Vec::with_capacity(3),
             undrawn: false,
         }
     }
@@ -594,6 +605,7 @@ mod tests {
     use super::{Attempt, Line, LineFrame, Placement, Surfaces, on_next_frame, slot};
     use crate::platform::ROW_SPANS;
     use crate::presence::geometry::Layout;
+    use crate::presence::pull_dock::{Holding, PullDock, Rest};
 
     /// The first and last owned pixel on each side, and the pass-through pixel beyond each.
     fn assert_edges(frame: &LineFrame, [left, top, right, bottom]: [i32; 4]) {
@@ -787,6 +799,41 @@ mod tests {
 
     fn failed([retry, closed]: [bool; 2]) -> impl Fn(&Attempt<&'static str>) -> bool {
         move |attempt| matches!(attempt, Attempt::Failed { retry: r, closed: c, .. } if *r == retry && *c == closed)
+    }
+
+    #[test]
+    fn a_pull_keeps_its_mask_until_the_dock_draws_no_body_then_a_refused_shrink_keeps_a_band() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        let area = [-228, -228, 514, 477];
+        line.pull_overlay();
+        (fake.mask, fake.pulled) = (None, Some(area));
+        line.pull_mask(area);
+        line.request(b);
+        assert_eq!(
+            line.attempt(&mut fake),
+            Attempt::Idle,
+            "the dock draws the body"
+        );
+        assert_eq!(
+            (fake.mask, fake.pulled),
+            (None, Some(area)),
+            "the body's pixels stay owned"
+        );
+        let mut dock = PullDock::new(477);
+        assert_eq!(dock.rest(Holding::Picture), Rest::Release);
+        assert_eq!(dock.rest(Holding::Clearing), Rest::Wait);
+        assert_eq!(dock.rest(Holding::Nothing), Rest::Reclaim);
+        line.reclaim();
+        fake.refuse_moves = vec![true];
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert_eq!(
+            fake.mask,
+            Some(a.frame),
+            "the band under the line the dock still draws"
+        );
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
     }
 
     #[test]

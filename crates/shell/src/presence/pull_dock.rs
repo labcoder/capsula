@@ -38,6 +38,27 @@ pub(super) enum Commit<E> {
     Failed(E),
 }
 
+/// What the dock holds of a pull, as a resting pull gives the line the dock back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Holding {
+    /// A picture, drawn or not.
+    Picture,
+    /// No picture, but the frame without it isn't drawn yet.
+    Clearing,
+    Nothing,
+}
+
+/// What a resting pull does at a dock frame to give the line the dock back.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Rest {
+    /// The dock still draws the body: it stops, and the peek shows it.
+    Release,
+    /// That frame isn't drawn yet, or the line has been asked already.
+    Wait,
+    /// The dock draws nothing of the pull: the line may take its mask and overlay back.
+    Reclaim,
+}
+
 /// The dock's state during a pull. Its rows are sized once, so a frame grows none.
 #[derive(Debug, Default)]
 pub(super) struct PullDock {
@@ -59,6 +80,20 @@ impl PullDock {
             shown: Rows::with_capacity(rows),
             mask: Rows::with_capacity(rows),
             ..Self::default()
+        }
+    }
+
+    /// A resting pull's next step. The line's mask is its band alone, so it may take over only
+    /// once the dock has drawn a frame with no body in it.
+    pub(super) fn rest(&mut self, holding: Holding) -> Rest {
+        match holding {
+            Holding::Picture => Rest::Release,
+            Holding::Clearing => Rest::Wait,
+            Holding::Nothing if self.reclaiming => Rest::Wait,
+            Holding::Nothing => {
+                self.reclaiming = true;
+                Rest::Reclaim
+            }
         }
     }
 
@@ -146,14 +181,30 @@ impl Presence {
         }
     }
 
-    /// Commits the pull's next picture, or once the body rests, asks the line to take the
-    /// dock back; the pull ends only once that's accepted.
+    /// Commits the pull's next picture, or once the body rests, hands it back to the peek and
+    /// then asks the line to take the dock back; the pull ends only once that's accepted.
     fn show_pull(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let dock = self.dock.read(cx);
+        let (holding, drawing) = match (dock.pull.is_some(), dock.undrawn) {
+            (true, false) => (Holding::Picture, Drawing::Drawn),
+            (true, true) => (Holding::Picture, Drawing::Pending),
+            (false, true) => (Holding::Clearing, Drawing::Pending),
+            (false, false) => (Holding::Nothing, Drawing::Drawn),
+        };
         if self.kumo.read(cx).resting() {
-            if !self.pull_dock.reclaiming {
-                self.pull_dock.reclaiming = true;
-                self.line.reclaim();
-                self.try_line(cx.weak_entity(), window, cx);
+            match self.pull_dock.rest(holding) {
+                Rest::Release => {
+                    self.kumo.update(cx, KumoView::dock_released);
+                    self.dock.update(cx, |dock, cx| {
+                        dock.let_go();
+                        cx.notify();
+                    });
+                }
+                Rest::Wait => {}
+                Rest::Reclaim => {
+                    self.line.reclaim();
+                    self.try_line(cx.weak_entity(), window, cx);
+                }
             }
             return;
         }
@@ -178,11 +229,6 @@ impl Presence {
                 cx.notify();
             });
         }
-        let drawing = if self.dock.read(cx).undrawn {
-            Drawing::Pending
-        } else {
-            Drawing::Drawn
-        };
         let mut drawn = self.drawn;
         let commit = self.kumo.update(cx, |kumo, cx| {
             let Some((_, next)) = kumo.next_picture() else {
@@ -217,8 +263,8 @@ impl Presence {
         }
     }
 
-    /// The line holds the dock again, so a pull still going regrows the overlay at its next
-    /// frame. A resting pull is over: the dock draws no picture and the peek shows the body.
+    /// The line holds the dock again; while a pull holds it the line takes no attempt, so a
+    /// pull that was resting is over now and the dock owns none of its pixels.
     pub(super) fn line_reclaimed(&mut self, cx: &mut App) {
         self.pull_dock.area = None;
         self.pull_dock.reclaiming = false;
@@ -252,6 +298,12 @@ impl super::line::Dock {
         self.drawn = drawn;
     }
 
+    /// Stops drawing the pulled picture; `undrawn` until a frame without it is rendered.
+    pub(super) fn let_go(&mut self) {
+        self.show_pull(None, self.drawn);
+        self.undrawn = true;
+    }
+
     /// Whether the dock has drawn the pulled picture it holds.
     pub(super) fn drew_pull(&self) -> bool {
         self.pull.is_some() && !self.undrawn
@@ -260,9 +312,15 @@ impl super::line::Dock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Commit, Drawing, PullDock};
-    use crate::presence::line::LineFrame;
-    use crate::presence::pull_picture::Rows;
+    use std::sync::Arc;
+
+    use gpui_kit::RenderImage;
+
+    use super::{Commit, Drawing, Holding, PullDock, Rest};
+    use crate::presence::kumo::Quad;
+    use crate::presence::line::{Dock, LineFrame};
+    use crate::presence::observer::Drawn;
+    use crate::presence::pull_picture::{PullPicture, Rows};
 
     const AREA: [i32; 4] = [0, 0, 200, 40];
 
@@ -344,5 +402,56 @@ mod tests {
         let (full, given) = commit(&mut dock, Drawing::Drawn, &mut next, Ok(()));
         assert!(matches!(full, Commit::Full(_)));
         assert_eq!(given, None);
+    }
+
+    #[test]
+    fn a_resting_pull_gives_the_line_the_dock_only_after_a_frame_without_the_body() {
+        let mut dock = PullDock::new(40);
+        assert_eq!(
+            dock.rest(Holding::Picture),
+            Rest::Release,
+            "the dock still draws the body"
+        );
+        assert_eq!(
+            dock.rest(Holding::Clearing),
+            Rest::Wait,
+            "the frame without it isn't drawn yet"
+        );
+        assert_eq!(dock.rest(Holding::Nothing), Rest::Reclaim);
+        assert_eq!(dock.rest(Holding::Nothing), Rest::Wait, "asked once");
+    }
+
+    #[test]
+    fn letting_go_of_a_drip_stub_and_body_retires_all_three_without_growing() {
+        let image = || {
+            let pixels = image::RgbaImage::new(1, 1);
+            Some((
+                Quad {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                Arc::new(RenderImage::new([image::Frame::new(pixels)])),
+            ))
+        };
+        let mut dock = Dock::new();
+        let reserved = dock.retired.capacity();
+        let picture = PullPicture {
+            area: AREA,
+            images: [image(), image(), image()],
+        };
+        dock.show_pull(Some(picture), Drawn::default());
+        dock.let_go();
+        assert_eq!(dock.retired.len(), 3, "the drip, the stub and the body");
+        assert_eq!(
+            dock.retired.capacity(),
+            reserved,
+            "made at the dock's start"
+        );
+        assert!(
+            dock.pull.is_none() && dock.undrawn,
+            "a frame without them is due"
+        );
     }
 }

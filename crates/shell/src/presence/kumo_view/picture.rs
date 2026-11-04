@@ -76,12 +76,17 @@ impl KumoView {
             return false;
         }
         self.resting = false;
+        self.dock_released(cx);
+        true
+    }
+
+    /// The dock no longer draws the body, so the peek does.
+    pub(in crate::presence) fn dock_released(&mut self, cx: &mut Context<'_, Self>) {
         self.pulled = Pulled::Peek;
         cx.notify();
         if self.wants_frame() {
             cx.emit(WantsFrames);
         }
-        true
     }
 }
 
@@ -209,7 +214,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_body_the_dock_drew_stays_out_until_the_line_alone_is_accepted(cx: &mut TestAppContext) {
+    fn a_body_the_dock_drew_stays_out_until_the_dock_lets_go_and_the_pull_rests_once(
+        cx: &mut TestAppContext,
+    ) {
         let view = grabbed(cx, Motion::Reduced);
         view.update(cx, |view, cx| {
             view.pull_step(STEP);
@@ -227,10 +234,32 @@ mod tests {
             view.pull_step(STEP);
             assert_eq!(view.pulling.phase(), Phase::Returning);
             assert_eq!(view.pulled, Pulled::Dock, "the dock still shows the body");
+            view.dock_released(cx);
+            assert_eq!(view.pulled, Pulled::Peek, "the dock let go of it");
+            assert_eq!(
+                view.pulling.phase(),
+                Phase::Returning,
+                "until the line is back"
+            );
             assert!(view.rested(cx));
             assert_eq!(view.pulling.phase(), Phase::Idle);
             assert_eq!(view.pulled, Pulled::Peek);
             assert!(!view.rested(cx), "it rests once");
+        });
+    }
+
+    #[gpui::test]
+    fn a_shown_peek_shades_nothing_while_the_dock_draws_the_body(cx: &mut TestAppContext) {
+        let view = grabbed(cx, Motion::Full);
+        view.update(cx, |view, cx| {
+            view.show(Motion::Full, cx);
+            assert!(view.wants_frame(), "the peek blinks");
+            view.pull_step(STEP);
+            assert!(view.take_picture().is_some());
+            view.dock_drew(cx);
+            assert!(!view.wants_frame(), "the dock draws the body");
+            view.dock_released(cx);
+            assert!(view.wants_frame(), "the peek draws it again");
         });
     }
 
