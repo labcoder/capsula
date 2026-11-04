@@ -26,6 +26,41 @@ Installed files live in `%LOCALAPPDATA%\<DATA_DIR>\models\<part>\<file>`, where 
 are `speech-input` and `spoken-replies`. The native libraries ship beside `kumochid.exe`, and
 nothing downloads them.
 
+## Spoken replies
+
+`brain::voice::tts` turns text into 24 kHz mono PCM with Phonon 31M (Q8) and the Juniper voice.
+One thread, `voice-tts`, owns the model and every open stream. The handle never waits on it.
+
+```mermaid
+flowchart LR
+  C["caller (PR 7)"] -->|"load / unload / try_speak / cancel"| H["TtsHandle"]
+  H -->|"state + condvar"| O["voice-tts owner"]
+  H -->|"generation (watch)"| O
+  O -->|"per-Speak bounded channel"| C
+  O --> P["Phonon SpeechStream"]
+```
+
+- **Load:** one load at a time from `models\spoken-replies`, CPU and Q8 weights, seed 42, then a
+  short warm-up. A failed load leaves voice output unloaded; nothing retries on its own.
+- **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame gets a fixed +5.5 dB
+  gain, is clipped and converted to `i16`. A NaN or infinity fails the segment, and so does
+  passing 30 seconds. `Done` carries the total sample count.
+- **Cancel:** `cancel` moves a generation. The owner checks it before and after each frame, and
+  while it waits for room in a full output channel, so it never blocks on a slow consumer.
+  Returning drops Phonon's stream, which stops and joins its two workers on the owner thread.
+  Dropping the receiver has the same effect. Each Speak has its own channel: on cancel the caller
+  drops that receiver, so no old-generation event reaches the next Speak.
+- **Unload and shutdown** are state, not queued commands, so a full queue can't hold them up.
+  Unload also cancels and rejects a waiting Speak with `NotLoaded`. Load and warm-up can't be
+  interrupted inside Phonon; unload and shutdown take effect when they return.
+- **Threads:** xn runs its operators on its own process-wide pool. Voice sizes it to 8 with
+  `xn::threadpool::start_pool_with` and checks the width before any inference. It never calls
+  `xn::set_num_threads`, which writes the process environment. A pool that comes up short or
+  loses a worker keeps voice output unavailable for the rest of the process. The pool's seven
+  workers live as long as the process; unload frees the model, not them.
+- **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
+  their messages can carry paths or text. Errors map to content-free `TtsError` values.
+
 ## Provenance
 
 - **Speech input:** `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` at

@@ -19,6 +19,8 @@ kumochi-scene.workspace = true
 getrandom.workspace = true
 jsonwebtoken = { version = "9", default-features = false }
 keyring.workspace = true
+# Spoken replies. Pinned exactly: the voice owner relies on xn 0.2.13's own pool API.
+ptts = { version = "=0.6.0", default-features = false, features = ["hf"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # hooks: the progress handler that stops a purge's copy.
@@ -37,6 +39,7 @@ zeroize = { version = "1", features = ["serde"] }
 unic-langid.workspace = true
 url = "2"
 webbrowser = "1"
+xn = { version = "=0.2.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

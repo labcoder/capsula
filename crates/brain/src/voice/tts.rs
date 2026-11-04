@@ -1,0 +1,383 @@
+//! Spoken replies: one owner thread, `voice-tts`, turns text into 24 kHz PCM with Phonon,
+//! frame by frame, and stops promptly when the generation moves.
+
+mod phonon;
+#[cfg(test)]
+mod tests;
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::watch;
+
+pub(crate) const SAMPLE_RATE: u32 = 24_000;
+/// shortcut: PR 1 owns the protocol's bound; this local copy goes when it lands.
+pub(crate) const MAX_SAY_BYTES: usize = 1_024;
+const MAX_SAMPLES: usize = 30 * 24_000;
+/// +5.5 dB [S5]; the owner's feel session tunes it.
+const GAIN: f32 = 1.883_649;
+
+/// The files Phonon loads, under the spoken-replies models folder.
+const CONFIG: &str = "config.json";
+const WEIGHTS: &str = "model.q8.gguf";
+const TOKENIZER: &str = "tokenizer.json";
+const VOICE: &str = "juniper.safetensors";
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TtsError {
+    #[error("spoken replies aren't loaded")]
+    NotLoaded,
+    #[error("the text can't be spoken")]
+    Text,
+    #[error("spoken replies failed to load")]
+    Load,
+    #[error("speech synthesis failed")]
+    Synthesis,
+    #[error("speech synthesis produced an invalid sample")]
+    NonFinite,
+    #[error("the speech is longer than 30 seconds")]
+    TooLong,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TtsBusy;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TtsEvent {
+    /// 24 kHz mono, one Phonon frame.
+    Pcm {
+        segment: u32,
+        samples: Vec<i16>,
+    },
+    /// The authoritative length in samples (M7).
+    Done {
+        segment: u32,
+        total: u32,
+    },
+    Failed {
+        segment: u32,
+        error: TtsError,
+    },
+}
+
+/// One segment to speak. `out` belongs to this Speak alone: PR 7 drops its receiver on
+/// cancel, which is what fences old-generation events from the next Speak.
+pub(crate) struct Speak {
+    pub segment: u32,
+    pub generation: u32,
+    pub text: String,
+    pub out: mpsc::Sender<TtsEvent>,
+}
+
+impl Speak {
+    /// Never waits: a full or closed channel just drops the report, and the receiver sees the
+    /// channel close when this Speak is dropped.
+    fn fail(self, error: TtsError) {
+        self.out
+            .try_send(TtsEvent::Failed {
+                segment: self.segment,
+                error,
+            })
+            .ok();
+    }
+}
+
+/// What the synthesis loop needs from a model, so CI can run it without Phonon.
+pub(crate) trait Engine {
+    type Stream: Iterator<Item = Result<Vec<f32>, TtsError>>;
+    fn stream(&self, text: &str) -> Result<Self::Stream, TtsError>;
+}
+
+enum Want {
+    Unloaded,
+    Loaded(PathBuf),
+}
+
+struct State {
+    want: Want,
+    waiting: Option<Speak>,
+    shutdown: bool,
+}
+
+struct Control {
+    state: Mutex<State>,
+    wake: Condvar,
+}
+
+impl Control {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Changes the state and wakes the owner. The lock is never held across model work.
+    fn update<T>(&self, change: impl FnOnce(&mut State) -> T) -> T {
+        let result = change(&mut self.lock());
+        self.wake.notify_one();
+        result
+    }
+}
+
+pub(crate) struct TtsHandle {
+    control: Arc<Control>,
+    generation: watch::Sender<u32>,
+}
+
+impl TtsHandle {
+    pub(crate) fn spawn(runtime: Handle) -> io::Result<Self> {
+        Self::spawn_with(runtime, phonon::Phonon::load)
+    }
+
+    fn spawn_with<E: Engine>(
+        runtime: Handle,
+        load: impl FnMut(&Path) -> Result<E, TtsError> + Send + 'static,
+    ) -> io::Result<Self> {
+        let control = Arc::new(Control {
+            state: Mutex::new(State {
+                want: Want::Unloaded,
+                waiting: None,
+                shutdown: false,
+            }),
+            wake: Condvar::new(),
+        });
+        let (generation, watcher) = watch::channel(0);
+        let owner = Owner {
+            control: Arc::clone(&control),
+            generation: watcher,
+            runtime,
+        };
+        std::thread::Builder::new()
+            .name("voice-tts".into())
+            .spawn(move || owner.run(load))?;
+        Ok(Self {
+            control,
+            generation,
+        })
+    }
+
+    pub(crate) fn generation(&self) -> u32 {
+        *self.generation.borrow()
+    }
+
+    /// Moves the generation: the owner drops its stream before the next frame or send.
+    pub(crate) fn cancel(&self) -> u32 {
+        self.generation.send_modify(|g| *g = g.wrapping_add(1));
+        self.generation()
+    }
+
+    pub(crate) fn load(&self, dir: PathBuf) {
+        self.control.update(|state| state.want = Want::Loaded(dir));
+    }
+
+    /// Never waits on a channel: it cancels, rejects the waiting Speak and wakes the owner.
+    pub(crate) fn unload(&self) {
+        self.cancel();
+        let waiting = self.control.update(|state| {
+            state.want = Want::Unloaded;
+            state.waiting.take()
+        });
+        if let Some(speak) = waiting {
+            speak.fail(TtsError::NotLoaded);
+        }
+    }
+
+    pub(crate) fn try_speak(&self, speak: Speak) -> Result<(), TtsBusy> {
+        self.control.update(|state| {
+            if state.waiting.is_some() {
+                return Err(TtsBusy);
+            }
+            state.waiting = Some(speak);
+            Ok(())
+        })
+    }
+}
+
+impl Drop for TtsHandle {
+    /// The owner drops the stream and the model, then exits; this doesn't wait for it.
+    fn drop(&mut self) {
+        self.cancel();
+        self.control.update(|state| state.shutdown = true);
+    }
+}
+
+enum Next {
+    Exit,
+    Unload,
+    Load(PathBuf),
+    Speak(Speak),
+}
+
+struct Owner {
+    control: Arc<Control>,
+    generation: watch::Receiver<u32>,
+    runtime: Handle,
+}
+
+impl Owner {
+    fn run<E: Engine>(mut self, mut load: impl FnMut(&Path) -> Result<E, TtsError>) {
+        let mut engine: Option<(PathBuf, E)> = None;
+        loop {
+            match self.next(engine.as_ref().map(|(dir, _)| dir.as_path())) {
+                Next::Exit => return,
+                Next::Unload => engine = None,
+                Next::Load(dir) => {
+                    engine = None;
+                    match load(&dir) {
+                        Ok(loaded) => engine = Some((dir, loaded)),
+                        Err(error) => {
+                            tracing::warn!(?error, "spoken replies failed to load");
+                            self.control.update(|state| {
+                                if matches!(&state.want, Want::Loaded(wanted) if *wanted == dir) {
+                                    state.want = Want::Unloaded;
+                                }
+                            });
+                        }
+                    }
+                }
+                Next::Speak(speak) => match &engine {
+                    Some((_, loaded)) => self.speak(loaded, speak),
+                    None => speak.fail(TtsError::NotLoaded),
+                },
+            }
+        }
+    }
+
+    fn next(&self, loaded: Option<&Path>) -> Next {
+        let mut state = self.control.lock();
+        loop {
+            if state.shutdown {
+                return Next::Exit;
+            }
+            match (&state.want, loaded) {
+                (Want::Unloaded, Some(_)) => return Next::Unload,
+                (Want::Loaded(dir), loaded) if loaded != Some(dir.as_path()) => {
+                    return Next::Load(dir.clone());
+                }
+                _ => {}
+            }
+            if let Some(speak) = state.waiting.take() {
+                return Next::Speak(speak);
+            }
+            state = self
+                .control
+                .wake
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn moved(&self, mine: u32) -> bool {
+        *self.generation.borrow() != mine
+    }
+
+    /// Returning drops the stream, which stops and joins Phonon's workers on this thread.
+    fn speak<E: Engine>(&mut self, engine: &E, speak: Speak) {
+        let Speak {
+            segment,
+            generation: mine,
+            text,
+            out,
+        } = speak;
+        if self.moved(mine) {
+            return;
+        }
+        if text.is_empty() || text.len() > MAX_SAY_BYTES || text.contains('\0') {
+            self.deliver(
+                &out,
+                mine,
+                TtsEvent::Failed {
+                    segment,
+                    error: TtsError::Text,
+                },
+            );
+            return;
+        }
+        let mut stream = match engine.stream(&text) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.deliver(&out, mine, TtsEvent::Failed { segment, error });
+                return;
+            }
+        };
+        let mut total = 0usize;
+        loop {
+            if self.moved(mine) || out.is_closed() {
+                return;
+            }
+            let frame = stream.next();
+            if self.moved(mine) {
+                return;
+            }
+            let failure = match frame {
+                None => break,
+                Some(Err(error)) => Some(error),
+                Some(Ok(frame)) => match to_pcm(&frame) {
+                    None => Some(TtsError::NonFinite),
+                    Some(samples) => {
+                        total += samples.len();
+                        if total > MAX_SAMPLES {
+                            Some(TtsError::TooLong)
+                        } else if samples.is_empty()
+                            || self.deliver(&out, mine, TtsEvent::Pcm { segment, samples })
+                        {
+                            None
+                        } else {
+                            return;
+                        }
+                    }
+                },
+            };
+            if let Some(error) = failure {
+                self.deliver(&out, mine, TtsEvent::Failed { segment, error });
+                return;
+            }
+        }
+        if !self.moved(mine) {
+            let total = u32::try_from(total).unwrap_or(u32::MAX);
+            self.deliver(&out, mine, TtsEvent::Done { segment, total });
+        }
+    }
+
+    /// Sends without ever blocking on a full channel: it waits for room or for the generation to
+    /// move, whichever comes first, and checks the generation again once room arrives.
+    fn deliver(&mut self, out: &mpsc::Sender<TtsEvent>, mine: u32, event: TtsEvent) -> bool {
+        let event = match out.try_send(event) {
+            Ok(()) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+            Err(TrySendError::Full(event)) => event,
+        };
+        let generation = &mut self.generation;
+        let permit = self.runtime.block_on(async {
+            tokio::select! {
+                biased;
+                _ = generation.wait_for(|g| *g != mine) => None,
+                permit = out.reserve() => permit.ok(),
+            }
+        });
+        match permit {
+            Some(permit) if !self.moved(mine) => {
+                permit.send(event);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Applies the gain, clips and converts; `None` if any sample is NaN or infinite.
+fn to_pcm(frame: &[f32]) -> Option<Vec<i16>> {
+    frame
+        .iter()
+        .map(|&sample| {
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_truncation,
+                reason = "clamped to ±i16::MAX and rounded first"
+            )]
+            let pcm = ((sample * GAIN).clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+            sample.is_finite().then_some(pcm)
+        })
+        .collect()
+}
