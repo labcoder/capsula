@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "PLANTED-PROSE chatpass_v2_scope_not_authorized",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "chatpass_v2_scope_not_authorized"
+  }
+}
