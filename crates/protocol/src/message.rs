@@ -32,8 +32,9 @@ pub use settings::{
     UserName,
 };
 pub use threads::{
-    Effort, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelSlug, SlugError, ThreadKind,
-    ThreadOp, ThreadTitle,
+    Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
+    MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError, ThreadKind, ThreadOp,
+    ThreadTitle,
 };
 
 /// The most rows one page carries [guess].
@@ -441,6 +442,12 @@ pub enum DataToShell {
         /// False after malformed, truncated, invalid or differing final arguments.
         complete: bool,
     },
+    /// The account's model catalog, whole: sent when a shell connects and whenever it changes,
+    /// and empty while there's no usable account or before its first read.
+    Models {
+        /// At most [`MAX_MODELS`], in the catalog's order.
+        models: Vec<ModelInfo>,
+    },
 }
 
 #[cfg(test)]
@@ -451,10 +458,10 @@ mod scene_frame_tests;
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Deleted, Effort, Hello, Incarnation, MAX_PAGE_BYTES, MAX_PAGE_ROWS, MAX_SLUG_BYTES,
-        MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, MAX_VISIBLE_SCENES, ModelChoice, ModelSlug,
-        RunId, SceneDescriptor, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
-        ThreadRow,
+        Deleted, Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
+        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS,
+        MAX_VISIBLE_SCENES, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId, SceneDescriptor,
+        SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -605,5 +612,19 @@ mod tests {
         );
         let window = usize::try_from(DATA_WINDOW).expect("the window fits in usize");
         assert!(payload + HEADER_LEN <= window, "{payload} bytes");
+    }
+
+    #[test]
+    fn the_longest_catalog_fits_a_data_frame() {
+        let model = ModelInfo {
+            slug: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
+            display_name: ModelName::new(&"界".repeat(MAX_MODEL_NAME_CHARS)).expect("valid"),
+        };
+        let models = DataToShell::Models {
+            models: vec![model; MAX_MODELS],
+        };
+        // Tag and a two-byte count, then each slug and its three-byte characters with lengths.
+        let each = 1 + MAX_SLUG_BYTES + 2 + 3 * MAX_MODEL_NAME_CHARS;
+        assert_eq!(payload(&models, Pipe::Data), 1 + 2 + MAX_MODELS * each);
     }
 }

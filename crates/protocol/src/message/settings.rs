@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::ThreadId;
+use super::{ModelChoice, ThreadId};
 
 /// The longest name, in Unicode scalar values.
 pub const MAX_NAME_CHARS: usize = 24;
@@ -111,6 +111,9 @@ pub enum SettingsOp {
     FinishOnboarding,
     /// Cap how often Kumo draws.
     SetMaxFrameRate(MaxFrameRate),
+    /// Set the model a thread with no choice runs on. Only the brain sends it today, from the
+    /// catalog (design §6).
+    SetDefaultModel(ModelChoice),
 }
 
 /// The settings as the brain holds them: once per connection before `Scenes`, and after
@@ -127,6 +130,8 @@ pub struct SettingsView {
     pub main_thread: ThreadId,
     /// The most frames a second Kumo draws.
     pub max_frame_rate: MaxFrameRate,
+    /// The model a thread with no choice runs on; unset until a catalog has been read.
+    pub default_model: Option<ModelChoice>,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at

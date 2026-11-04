@@ -41,7 +41,7 @@ pub enum OAuthCode {
 }
 
 impl OAuthCode {
-    fn parse(code: &str) -> Self {
+    pub(crate) fn parse(code: &str) -> Self {
         match code {
             "invalid_grant" => Self::InvalidGrant,
             "invalid_client" => Self::InvalidClient,

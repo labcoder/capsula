@@ -72,6 +72,11 @@ impl Drop for Scratch {
 
 /// A brain on a fresh store in `scratch`, playing `script`.
 pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
+    brain_with(scratch, script, accounts(scratch))
+}
+
+/// A brain on a fresh store in `scratch`, playing `script`, on `accounts`.
+pub(crate) fn brain_with(scratch: &Scratch, script: &str, accounts: Accounts) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main_thread = store.main_thread().expect("main thread");
@@ -86,7 +91,7 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
         scenes,
         Box::new(fixture),
         config,
-        accounts(scratch),
+        accounts,
     )
     .expect("brain")
 }

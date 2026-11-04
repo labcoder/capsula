@@ -8,6 +8,7 @@ fn settings(name: &str) -> SettingsView {
         onboarded: true,
         main_thread: ThreadId(1),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+        default_model: None,
     }
 }
 

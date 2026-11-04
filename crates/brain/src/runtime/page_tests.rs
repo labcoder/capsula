@@ -447,7 +447,8 @@ async fn read_pages_and_text(
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
-            | DataToShell::SceneEnd { .. }) => {
+            | DataToShell::SceneEnd { .. }
+            | DataToShell::Models { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }

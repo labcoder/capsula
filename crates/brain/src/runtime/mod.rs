@@ -1001,7 +1001,7 @@ impl<'a, 't> Link<'a, 't> {
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::ScenesRemoved { .. } => Owner::Marker,
+            DataToShell::ScenesRemoved { .. } | DataToShell::Models { .. } => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }

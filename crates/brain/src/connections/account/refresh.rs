@@ -584,6 +584,7 @@ impl AccountState {
     pub(super) fn moved(&mut self, effects: &mut Vec<Effect>) {
         self.generation += 1;
         self.validating = None;
+        self.unavailable = false;
         self.answer(&Err(Denied::Unusable), effects);
     }
 

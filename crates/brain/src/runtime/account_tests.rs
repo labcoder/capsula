@@ -1,6 +1,7 @@
 //! The account system over the pipes: its view's place in a connection, an op's answer, a
 //! sign-in the real listener ends, and a Busy session lock retried when a shell connects.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
-    AccountOp, AccountView, Action, ControlToBrain, ControlToShell, ErrorKey, UserError,
+    AccountOp, AccountView, Action, ControlToBrain, ControlToShell, DataToShell, Effort, ErrorKey,
+    ModelChoice, ModelInfo, ModelSlug, PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,7 +28,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::{SessionLock, SessionLockError};
-use crate::runtime::account::{Access, Accounts, Net, exchange_task};
+use crate::runtime::account::{Access, Accounts, Event, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
@@ -294,10 +296,10 @@ async fn a_blocking_browser_launch_never_stalls_the_core_loop() {
     let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
     assert!(matches!(
         input,
-        Input::Listened {
+        Event::Machine(Input::Listened {
             result: Listened::Launch(LaunchError::Launch),
             ..
-        }
+        })
     ));
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -344,7 +346,10 @@ impl Http for SlowCheck {
                 let tokens = json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600});
                 (200, serde_json::to_vec(&tokens).expect("fixture"))
             }
-            Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => {
+            Endpoint::Discovery
+            | Endpoint::Jwks(_)
+            | Endpoint::Revocation(_)
+            | Endpoint::Models(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
             }
@@ -417,7 +422,10 @@ impl Http for Rotating {
                 let tokens = json!({"access_token":"access-new", "refresh_token":"refresh-new", "token_type":"Bearer", "scope":"openid offline_access chatgpt.tokens.use.direct", "expires_in":3600});
                 (200, serde_json::to_vec(&tokens).expect("fixture"))
             }
-            Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => (503, Vec::new()),
+            Endpoint::Discovery
+            | Endpoint::Jwks(_)
+            | Endpoint::Revocation(_)
+            | Endpoint::Models(_) => (503, Vec::new()),
         };
         std::future::ready(Ok(Response {
             status,
@@ -528,6 +536,12 @@ impl Http for Gated {
 
 /// Saves an account whose bearer is due, then starts the account system on it with `http`.
 fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accounts {
+    seeded(scratch, store, http, 1_800_000_000)
+}
+
+/// Saves an account whose bearer expires at `expires_at`, then starts the account system on it
+/// with `http` at 1,800,000,000.
+fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u64) -> Accounts {
     let seed = scratch.db().with_file_name("seed.lock");
     let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
         .expect("vault")
@@ -541,7 +555,7 @@ fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accoun
                 refresh_token: Zeroizing::new("refresh-old".to_owned()),
                 id_token: None,
                 scope: Zeroizing::new("openid offline_access chatgpt.tokens.use.direct".to_owned()),
-                expires_at: 1_800_000_000,
+                expires_at,
                 pending_identity_validation: false,
                 refresh_sent: false,
             }),
@@ -730,4 +744,171 @@ async fn closing_past_the_refresh_deadline_leaves_the_token_marked() {
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     drop(SessionLock::try_acquire(&lock).expect("released"));
     drop(release);
+}
+
+/// A bearer that outlives every test.
+const LATER: u64 = 1_900_000_000;
+
+/// Answers each model-list request with the next reply, in order, and anything else with 503.
+struct Catalog(Mutex<VecDeque<(u16, String)>>);
+
+impl Catalog {
+    fn answering(replies: impl IntoIterator<Item = (u16, String)>) -> SharedHttp {
+        SharedHttp::new(Self(Mutex::new(replies.into_iter().collect())))
+    }
+}
+
+impl Http for Catalog {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let (status, body) = match request.endpoint {
+            Endpoint::Models(_) => self
+                .0
+                .lock()
+                .expect("replies")
+                .pop_front()
+                .expect("a reply for each read"),
+            _ => (503, String::new()),
+        };
+        std::future::ready(Ok(Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(body.into_bytes())),
+        }))
+    }
+}
+
+fn listing() -> (u16, String) {
+    let models = json!({ "models": [
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list" },
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list" },
+    ] });
+    (200, models.to_string())
+}
+
+fn slugs(models: &[ModelInfo]) -> Vec<&str> {
+    models.iter().map(|model| model.slug.as_str()).collect()
+}
+
+/// Runs the account system until a catalog read ends, and what the shell hears then.
+async fn read_ended(accounts: &mut Accounts) -> Vec<ControlToShell> {
+    timeout(PATIENCE, async {
+        loop {
+            let event = accounts.next().await;
+            let read = matches!(event, Event::Read { .. });
+            let frames = accounts.handle(event);
+            if read {
+                return frames;
+            }
+        }
+    })
+    .await
+    .expect("in time")
+}
+
+/// Design §6: a usable account's catalog is read at startup; a failed read offers Retry, which
+/// reads it again. Signing out clears the list, which the shell hears as empty, and a read the
+/// sign-out outdated is dropped.
+#[tokio::test]
+async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_usable() {
+    let scratch = Scratch::new("account-catalog");
+    let store = FakeStore::default();
+    let http = Catalog::answering([(503, String::new()), listing()]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]);
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline.expect("valid"))]
+    );
+    assert_eq!(accounts.models(), None);
+    accounts.handle(Input::Op(AccountOp::Retry));
+    assert_eq!(read_ended(&mut accounts).await, []);
+    let expected = Some(vec!["gpt-6-sol", "gpt-6-luna"]);
+    assert_eq!(accounts.models().map(slugs), expected);
+    assert_eq!(accounts.models_unsent().as_deref().map(slugs), expected);
+    assert_eq!(accounts.models_unsent(), None, "sent once");
+    let models = accounts.models().expect("read").to_vec();
+    accounts.handle(Input::Op(AccountOp::SignOut));
+    assert_eq!(accounts.models(), None);
+    assert_eq!(
+        accounts.models_unsent(),
+        Some(Vec::new()),
+        "the shell hears it's gone"
+    );
+    accounts.handle(Event::Read {
+        epoch: 0,
+        result: Ok(models),
+    });
+    assert_eq!(
+        accounts.models(),
+        None,
+        "a read from before the sign-out is dropped"
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Pick 2: a catalog that refuses the plan shows the account Unavailable, with no action.
+#[tokio::test]
+async fn a_plan_the_catalog_refuses_shows_the_account_unavailable() {
+    let scratch = Scratch::new("account-catalog-refused");
+    let store = FakeStore::default();
+    let refused = json!({ "error": { "code": "subscription_sharing_user_not_eligible" } });
+    let http = Catalog::answering([(403, refused.to_string())]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let unavailable = UserError::new(ErrorKey::PlanUnavailable, Vec::new(), Vec::new());
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [
+            ControlToShell::Error(unavailable.expect("valid")),
+            ControlToShell::Account(AccountView::SignedIn {
+                email: None,
+                plan: PlanState::Unavailable,
+                recovery: None,
+            }),
+        ]
+    );
+    assert_eq!(accounts.models(), None);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Design §6: a connection hears the catalog on the data pipe, then the settled settings with the
+/// default model the read set, which is saved.
+#[tokio::test]
+async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
+    let scratch = Scratch::new("account-catalog-brain");
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let luna = ModelChoice {
+        model: ModelSlug::new("gpt-6-luna").expect("valid"),
+        effort: Effort::Low,
+    };
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        match timeout(PATIENCE, shell.data()).await.expect("in time") {
+            DataToShell::Models { models } => {
+                assert_eq!(slugs(&models), ["gpt-6-sol", "gpt-6-luna"]);
+            }
+            other => panic!("expected Models, got {other:?}"),
+        }
+        loop {
+            if let ControlToShell::Settings {
+                view,
+                answer: false,
+            } = shell.frame().await
+                && view.default_model.is_some()
+            {
+                assert_eq!(view.default_model, Some(luna.clone()));
+                break;
+            }
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(scratch.config().view().default_model, Some(luna));
 }

@@ -477,6 +477,30 @@ fn an_unknown_stored_effort_reads_as_no_choice() {
     );
 }
 
+/// CAPS-152: a row whose slug no build writes still fails the page, even when its effort is one
+/// this build doesn't know, since the slug is checked first.
+#[test]
+fn a_bad_slug_fails_the_page_even_with_an_unknown_effort() {
+    let scratch = Scratch::new("choice-bad-slug-unknown-effort");
+    let mut store = opened(&scratch);
+    let planted = task(&mut store, "planted");
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET model = 'Not A Slug', effort = 'ultra' WHERE id = ?1",
+            rusqlite::params![sql(planted)],
+        )
+        .expect("planted");
+    let page = PageOf::Threads {
+        search: None,
+        after: None,
+    };
+    assert!(matches!(
+        store.pages().read_page(1, page),
+        Err(StoreError::Read)
+    ));
+}
+
 /// CAPS-65 H2: deleting a task's row takes its title and model with it, and the purge's copy
 /// carries the kept rows' columns over.
 #[test]

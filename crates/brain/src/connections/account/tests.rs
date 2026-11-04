@@ -1151,3 +1151,36 @@ fn enabling_the_plan_without_the_plan_scope_says_so_and_saves_it_declined() {
     );
     assert!(!h.account().expect("account").plan_enabled);
 }
+
+/// Pick 2: an account whose plan the catalog refused shows Unavailable, and its sign-out erases
+/// the registration; one in good standing keeps it.
+#[test]
+fn a_plan_the_catalog_refused_is_unavailable_and_its_sign_out_erases_the_registration() {
+    for refused in [false, true] {
+        let mut h = Harness::seeded("sign-out-unavailable", |vault| {
+            committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+        });
+        if refused {
+            h.feed(Input::PlanUnavailable);
+        }
+        let plan = if refused {
+            PlanState::Unavailable
+        } else {
+            PlanState::Enabled
+        };
+        assert_eq!(h.view(), &signed_in(plan, None), "{refused}");
+        h.op(AccountOp::SignOut);
+        let mut answered = 0;
+        while let Some(run) = h.revoking.get(answered).cloned() {
+            answered += 1;
+            h.feed(Input::Revoked(run));
+        }
+        assert_eq!(h.view(), &signed_out(), "{refused}");
+        let kept = h.account().map(|account| account.client_id.to_string());
+        assert_eq!(
+            kept,
+            (!refused).then(|| "client-saved".to_owned()),
+            "{refused}"
+        );
+    }
+}
