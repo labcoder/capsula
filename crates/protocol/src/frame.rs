@@ -60,6 +60,18 @@ pub enum FrameError {
     /// The transport failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A chunked message's chunks broke their order, id or cap.
+    #[error("chunks out of order")]
+    Chunks,
+}
+
+/// Serializes `message` with no frame header and no cap, for a caller that chunks it under its
+/// own cap.
+///
+/// # Errors
+/// Fails when the message can't be encoded.
+pub fn encode_payload<T: Serialize>(message: &T) -> Result<Vec<u8>, FrameError> {
+    Ok(postcard::to_allocvec(message)?)
 }
 
 /// Encodes `message` as one frame for `pipe`.

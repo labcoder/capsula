@@ -16,7 +16,10 @@ pub mod platform;
 mod relaunch;
 mod runtime;
 pub mod screen;
+#[cfg(windows)]
+pub mod speech;
 pub mod store;
+mod supervise;
 mod tap;
 #[cfg(test)]
 mod test_support;
@@ -52,6 +55,8 @@ const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
 
 /// The argument that starts `kumochid` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
+/// The argument that starts `kumochid` as the speech worker.
+pub const SPEECH_WORKER: &str = "--speech";
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]

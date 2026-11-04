@@ -12,17 +12,22 @@ mod tests;
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::marker::PhantomData;
 use std::mem;
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
-use kumochi_protocol::voice::NATIVE_FILES;
+use kumochi_protocol::constants;
+use kumochi_protocol::voice::{NATIVE_FILES, NativeFile};
 use sha2::{Digest as _, Sha256};
 
 use self::abi::{RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
-use super::windows::{Library, RawExport, missing_dependency, modules, open_locked, system_dir};
+use super::windows::{
+    Library, RawExport, Untrusted, hold_chain, hold_file, local_app_data, missing_dependency,
+    modules, open_locked, owner_only_dir, system_dir,
+};
 
 /// The longest transcript accepted, in bytes.
 // shortcut: a local bound until PR 1's MAX_TRANSCRIPT_BYTES lands; use that one then.
@@ -34,6 +39,8 @@ const VERSION: &[u8] = b"2.0.1";
 /// The v2.0.1 release's short commit, as its `SherpaOnnxGetGitSha1` reports it (read on Rez).
 const GIT_SHA1: &[u8] = b"af2d8d81";
 const SHERPA: &str = "sherpa-onnx-c-api.dll";
+/// Where the pins are staged, under the trusted root.
+const STAGE: [&str; 2] = ["natives", "sherpa-onnx-2.0.1"];
 const ORT: &str = "onnxruntime.dll";
 const MODEL_FILES: [&str; 4] = [
     "encoder.int8.onnx",
@@ -58,43 +65,64 @@ pub(crate) const NATIVE_CLOSURE: [&str; 10] = [
 ];
 
 /// Why speech input's native side failed. It carries no native text and no paths.
-#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeError {
+#[derive(
+    Debug, thiserror::Error, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum NativeError {
+    /// A native library is missing.
     #[error("a native library is missing")]
     Missing,
+    /// A folder or native library on the load path is a reparse point or resolves elsewhere.
+    #[error("a folder or native library on the load path is a reparse point or resolves elsewhere")]
+    Reparse,
+    /// Someone other than this user or the system can change the load path.
+    #[error("someone other than this user or the system can change the load path")]
+    Unsafe,
+    /// A native library doesn't match its pin.
     #[error("a native library doesn't match its pin")]
     Pin,
+    /// A module the native libraries import is already loaded from another folder.
     #[error("a module the native libraries import is already loaded from another folder")]
     Conflict,
+    /// A system library the native libraries need is missing.
     #[error("a system library the native libraries need is missing")]
     Dependency,
+    /// Loading brought in a module from an unexpected folder.
     #[error("loading brought in a module from an unexpected folder")]
     Unexpected,
+    /// A native library failed to load.
     #[error("a native library failed to load")]
     Load,
+    /// A native library lacks an export.
     #[error("a native library lacks an export")]
     Symbol,
+    /// The native library isn't the pinned release.
     #[error("the native library isn't the pinned release")]
     Abi,
+    /// The recognizer or a stream couldn't be created.
     #[error("the recognizer or a stream couldn't be created")]
     Create,
+    /// The audio can't be handed to the recognizer.
     #[error("the audio can't be handed to the recognizer")]
     Input,
+    /// Decoding gave no result.
     #[error("decoding gave no result")]
     Decode,
+    /// The transcript is too long or isn't UTF-8.
     #[error("the transcript is too long or isn't UTF-8")]
     Text,
 }
 
-type CreateRecognizer = unsafe extern "C" fn(*const RecognizerConfig) -> *const RawRecognizer;
-type DestroyRecognizer = unsafe extern "C" fn(*const RawRecognizer);
-type CreateStream = unsafe extern "C" fn(*const RawRecognizer) -> *const RawStream;
-type DestroyStream = unsafe extern "C" fn(*const RawStream);
-type AcceptWaveform = unsafe extern "C" fn(*const RawStream, i32, *const f32, i32);
-type DecodeStream = unsafe extern "C" fn(*const RawRecognizer, *const RawStream);
-type GetResult = unsafe extern "C" fn(*const RawStream) -> *const RecognizerResult;
-type DestroyResult = unsafe extern "C" fn(*const RecognizerResult);
-type StaticStr = unsafe extern "C" fn() -> *const c_char;
+type CreateRecognizer =
+    unsafe extern "C-unwind" fn(*const RecognizerConfig) -> *const RawRecognizer;
+type DestroyRecognizer = unsafe extern "C-unwind" fn(*const RawRecognizer);
+type CreateStream = unsafe extern "C-unwind" fn(*const RawRecognizer) -> *const RawStream;
+type DestroyStream = unsafe extern "C-unwind" fn(*const RawStream);
+type AcceptWaveform = unsafe extern "C-unwind" fn(*const RawStream, i32, *const f32, i32);
+type DecodeStream = unsafe extern "C-unwind" fn(*const RawRecognizer, *const RawStream);
+type GetResult = unsafe extern "C-unwind" fn(*const RawStream) -> *const RecognizerResult;
+type DestroyResult = unsafe extern "C-unwind" fn(*const RecognizerResult);
+type StaticStr = unsafe extern "C-unwind" fn() -> *const c_char;
 
 /// The closed table of the C functions Kumochi calls. Its pointers never leave `Sherpa`.
 struct Fns {
@@ -186,19 +214,23 @@ pub(crate) struct Sherpa {
 }
 
 impl Sherpa {
-    /// Loads both pinned DLLs from `natives`. In order, stopping at the first failure: refuses if
-    /// any module of their import closure is already loaded from an unexpected folder; checks
-    /// each DLL's size and SHA-256 through a handle that stays open until it's loaded; loads ONNX
-    /// Runtime, then sherpa-onnx, by full path with imports from the system folder only; checks
-    /// that every new module is a pin or a system module; then resolves the exports and checks the
-    /// release.
-    pub(crate) fn load(natives: &Path) -> Result<Self, NativeError> {
-        let natives = std::path::absolute(natives).map_err(|_| NativeError::Missing)?;
+    /// Loads both pinned DLLs, staged from `source` into `root` (see [`stage`]). In order,
+    /// stopping at the first failure: refuses if any module of their import closure is already
+    /// loaded from an unexpected folder; stages and holds them; loads ONNX Runtime, then sherpa-onnx,
+    /// by full path with imports from the system folder only, while every folder above them and
+    /// their verified handles stay held; checks that every new module is a pin or a system module;
+    /// then resolves the exports and checks the release.
+    pub(crate) fn load(source: &Path, root: &Path) -> Result<Self, NativeError> {
         let system = system_dir().map_err(|_| NativeError::Load)?;
         let before = modules().map_err(|_| NativeError::Load)?;
+        let natives = STAGE
+            .iter()
+            .fold(root.to_owned(), |dir, name| dir.join(name));
         check_closure(&before, &system, &natives)?;
-        let ort = load_pinned(&natives, ORT)?;
-        let sherpa = load_pinned(&natives, SHERPA)?;
+        let staged = stage(source, root, NATIVE_FILES)?;
+        let ort = staged.load(ORT)?;
+        let sherpa = staged.load(SHERPA)?;
+        drop(staged);
         let after = modules().map_err(|_| NativeError::Unexpected)?;
         if check_closure(&after, &system, &natives).is_err()
             || !only_expected_added(&before, &after, &system, &natives)
@@ -382,42 +414,155 @@ impl Drop for ResultGuard<'_> {
     }
 }
 
-/// Verifies one pinned DLL and loads it while the verified handle still holds its bytes.
-fn load_pinned(natives: &Path, name: &str) -> Result<Library, NativeError> {
-    let pin = NATIVE_FILES
-        .iter()
-        .find(|file| file.name == name)
-        .expect("both natives are pinned in the manifest");
-    let path = natives.join(name);
-    let held = verify(&path, pin.bytes, pin.sha256)?;
-    let loaded = Library::load(&path).map_err(|error| {
-        if missing_dependency(&error) {
-            NativeError::Dependency
-        } else {
-            NativeError::Load
+/// The trusted root natives are staged under: Kumochi's folder in the local application data
+/// folder the shell reports, never the environment's `LOCALAPPDATA`.
+pub(crate) fn staging_root() -> Result<PathBuf, NativeError> {
+    let root = local_app_data()
+        .map_err(|_| NativeError::Unsafe)?
+        .join(constants::DATA_DIR);
+    match std::fs::create_dir(&root) {
+        Ok(()) => Ok(root),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(root),
+        Err(_) => Err(NativeError::Load),
+    }
+}
+
+/// The pins staged in an owner-only folder. Every folder from the volume root down to it, and
+/// each staged DLL, stays open until this drops, so none of their names can be rebound.
+pub(crate) struct Staged {
+    dir: PathBuf,
+    // Fields drop in order: the files before the folders above them.
+    files: Vec<(&'static str, File)>,
+    _folders: Vec<File>,
+}
+
+impl Staged {
+    /// Loads the staged DLL `name` by full path while its verified handle is held.
+    fn load(&self, name: &str) -> Result<Library, NativeError> {
+        if !self.files.iter().any(|(staged, _)| *staged == name) {
+            return Err(NativeError::Missing);
         }
-    });
-    drop(held);
-    loaded
+        Library::load(&self.dir.join(name)).map_err(|error| {
+            if missing_dependency(&error) {
+                NativeError::Dependency
+            } else {
+                NativeError::Load
+            }
+        })
+    }
+}
+
+/// Stages `pins` from `source` into `root\natives\sherpa-onnx-2.0.1`. `root` and every folder
+/// above it must be trusted (see `platform::windows::protected`); the two staging folders are
+/// made owner-only. A staged file that matches its pin is kept; any other is replaced by a copy
+/// read through a source handle that refuses writers and checked while it streams. Each staged
+/// file is then opened against writers and deleters, checked and verified through that handle.
+pub(crate) fn stage(
+    source: &Path,
+    root: &Path,
+    pins: &[NativeFile],
+) -> Result<Staged, NativeError> {
+    let mut folders = hold_chain(root).map_err(untrusted)?;
+    let mut dir = root.to_owned();
+    for name in STAGE {
+        dir.push(name);
+        folders.push(owner_only_dir(&dir).map_err(untrusted)?);
+    }
+    let mut files = Vec::with_capacity(pins.len());
+    for pin in pins {
+        let path = dir.join(pin.name);
+        let held = match hold_verified(&path, pin) {
+            Err(NativeError::Missing | NativeError::Pin) => {
+                copy_pin(&source.join(pin.name), &path, pin)?;
+                hold_verified(&path, pin)?
+            }
+            held => held?,
+        };
+        files.push((pin.name, held));
+    }
+    Ok(Staged {
+        dir,
+        files,
+        _folders: folders,
+    })
+}
+
+fn untrusted(error: Untrusted) -> NativeError {
+    match error {
+        Untrusted::Missing => NativeError::Missing,
+        Untrusted::Reparse => NativeError::Reparse,
+        Untrusted::Unsafe => NativeError::Unsafe,
+        Untrusted::Io => NativeError::Load,
+    }
+}
+
+fn hold_verified(path: &Path, pin: &NativeFile) -> Result<File, NativeError> {
+    let mut file = hold_file(path).map_err(untrusted)?;
+    check_pin(&mut file, pin.bytes, pin.sha256, None)?;
+    Ok(file)
+}
+
+/// Copies `source` to the new file `path`, checking it against `pin` as it streams; a copy
+/// that fails or doesn't match is removed.
+fn copy_pin(source: &Path, path: &Path, pin: &NativeFile) -> Result<(), NativeError> {
+    let mut from = open_locked(source).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => NativeError::Missing,
+        _ => NativeError::Load,
+    })?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(NativeError::Load),
+    }
+    let mut to = File::options()
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(|_| NativeError::Load)?;
+    let copied = check_pin(&mut from, pin.bytes, pin.sha256, Some(&mut to))
+        .and_then(|()| to.sync_all().map_err(|_| NativeError::Load));
+    drop(to);
+    if copied.is_err() {
+        std::fs::remove_file(path).ok();
+    }
+    copied
 }
 
 /// Opens `path` against writers and checks its size and SHA-256 through that handle.
+#[cfg(test)]
 fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<File, NativeError> {
     let mut file = open_locked(path).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => NativeError::Missing,
         _ => NativeError::Load,
     })?;
+    check_pin(&mut file, bytes, sha256, None)?;
+    Ok(file)
+}
+
+/// Reads `file` to its end, also into `copy` when given, and checks its size and SHA-256.
+fn check_pin(
+    file: &mut File,
+    bytes: u64,
+    sha256: &str,
+    mut copy: Option<&mut File>,
+) -> Result<(), NativeError> {
     if file.metadata().map_err(|_| NativeError::Load)?.len() != bytes {
         return Err(NativeError::Pin);
     }
     let mut hash = Sha256::new();
     let mut buffer = vec![0; 1 << 16];
     loop {
-        match file.read(&mut buffer) {
+        let count = match file.read(&mut buffer) {
             Ok(0) => break,
-            Ok(count) => hash.update(&buffer[..count]),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return Err(NativeError::Load),
+        };
+        hash.update(&buffer[..count]);
+        if let Some(copy) = copy.as_deref_mut() {
+            copy.write_all(&buffer[..count])
+                .map_err(|_| NativeError::Load)?;
         }
     }
     let mut hex = String::with_capacity(64);
@@ -427,7 +572,7 @@ fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<File, NativeError> {
     if hex != sha256 {
         return Err(NativeError::Pin);
     }
-    Ok(file)
+    Ok(())
 }
 
 /// Refuses when a module named like one in [`NATIVE_CLOSURE`] is loaded from anywhere but its

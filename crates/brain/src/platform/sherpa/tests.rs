@@ -4,12 +4,28 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io;
+use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
+use kumochi_protocol::voice::NativeFile;
+use sha2::{Digest as _, Sha256};
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, WRITE_DAC,
+    WRITE_OWNER,
+};
+use windows_sys::Win32::System::IO::DeviceIoControl;
+use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+
+use super::super::windows::{dacl_sddl, final_path_matches, local_app_data};
 use super::abi::{LAYOUT, RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
 use super::{
     Fns, MAX_TRANSCRIPT_BYTES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa, check_closure,
-    only_expected_added, sample_count, verify,
+    only_expected_added, sample_count, stage, verify,
 };
 use crate::test_support::Scratch;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
@@ -49,7 +65,9 @@ fn read(text: *const c_char) -> String {
         .into_owned()
 }
 
-unsafe extern "C" fn create_recognizer(config: *const RecognizerConfig) -> *const RawRecognizer {
+unsafe extern "C-unwind" fn create_recognizer(
+    config: *const RecognizerConfig,
+) -> *const RawRecognizer {
     // SAFETY: the code under test passes a live config.
     let config = unsafe { &*config };
     let model = &config.model_config;
@@ -71,13 +89,13 @@ unsafe extern "C" fn create_recognizer(config: *const RecognizerConfig) -> *cons
     })
 }
 
-unsafe extern "C" fn destroy_recognizer(raw: *const RawRecognizer) {
+unsafe extern "C-unwind" fn destroy_recognizer(raw: *const RawRecognizer) {
     fake(|fake| fake.calls.push("destroy recognizer"));
     // SAFETY: made by create_recognizer's Box.
     drop(unsafe { Box::from_raw(raw.cast_mut().cast::<u8>()) });
 }
 
-unsafe extern "C" fn create_stream(_: *const RawRecognizer) -> *const RawStream {
+unsafe extern "C-unwind" fn create_stream(_: *const RawRecognizer) -> *const RawStream {
     fake(|fake| {
         fake.calls.push("create stream");
         if fake.null_stream {
@@ -88,13 +106,18 @@ unsafe extern "C" fn create_stream(_: *const RawRecognizer) -> *const RawStream 
     })
 }
 
-unsafe extern "C" fn destroy_stream(raw: *const RawStream) {
+unsafe extern "C-unwind" fn destroy_stream(raw: *const RawStream) {
     fake(|fake| fake.calls.push("destroy stream"));
     // SAFETY: made by create_stream's Box.
     drop(unsafe { Box::from_raw(raw.cast_mut().cast::<u8>()) });
 }
 
-unsafe extern "C" fn accept_waveform(_: *const RawStream, rate: i32, samples: *const f32, n: i32) {
+unsafe extern "C-unwind" fn accept_waveform(
+    _: *const RawStream,
+    rate: i32,
+    samples: *const f32,
+    n: i32,
+) {
     let n = usize::try_from(n).expect("a positive count");
     // SAFETY: the code under test passes `n` live samples.
     let samples = unsafe { std::slice::from_raw_parts(samples, n) }.to_vec();
@@ -104,11 +127,11 @@ unsafe extern "C" fn accept_waveform(_: *const RawStream, rate: i32, samples: *c
     });
 }
 
-unsafe extern "C" fn decode_stream(_: *const RawRecognizer, _: *const RawStream) {
+unsafe extern "C-unwind" fn decode_stream(_: *const RawRecognizer, _: *const RawStream) {
     fake(|fake| fake.calls.push("decode"));
 }
 
-unsafe extern "C" fn get_result(_: *const RawStream) -> *const RecognizerResult {
+unsafe extern "C-unwind" fn get_result(_: *const RawStream) -> *const RecognizerResult {
     let (null, text) = fake(|fake| {
         fake.calls.push("get result");
         (fake.null_result, fake.text.clone())
@@ -123,13 +146,13 @@ unsafe extern "C" fn get_result(_: *const RawStream) -> *const RecognizerResult 
     Box::into_raw(Box::new(FakeResult { result, text })).cast()
 }
 
-unsafe extern "C" fn destroy_result(raw: *const RecognizerResult) {
+unsafe extern "C-unwind" fn destroy_result(raw: *const RecognizerResult) {
     fake(|fake| fake.calls.push("destroy result"));
     // SAFETY: made by get_result's Box; `result` is FakeResult's first field.
     drop(unsafe { Box::from_raw(raw.cast_mut().cast::<FakeResult>()) });
 }
 
-unsafe extern "C" fn version() -> *const c_char {
+unsafe extern "C-unwind" fn version() -> *const c_char {
     c"2.0.1".as_ptr()
 }
 
@@ -333,6 +356,356 @@ fn the_verified_handle_refuses_writers() {
     drop(held);
 }
 
+// Staging and the held load path. The pins here are copies of a harmless system DLL under names
+// no other test loads.
+
+/// A fresh scratch folder in the local application data folder, removed on drop. The temp
+/// folder won't do: on Rez it grants other accounts write access, which the checks refuse, and
+/// on CI it's spelled with 8.3 short names.
+struct TrustedScratch(PathBuf);
+
+impl TrustedScratch {
+    fn new(name: &str) -> Self {
+        let dir = local_app_data().expect("local app data").join(format!(
+            "{}-test-{}-{name}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("old scratch folder removable");
+        }
+        std::fs::create_dir(&dir).expect("scratch folder");
+        Self(dir)
+    }
+}
+
+impl Drop for TrustedScratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn stage_root(name: &str) -> (TrustedScratch, PathBuf) {
+    let scratch = TrustedScratch::new(name);
+    let dir = scratch.0.clone();
+    (scratch, dir)
+}
+
+fn fake_pin(source: &Path, name: &'static str) -> NativeFile {
+    std::fs::create_dir_all(source).expect("source folder");
+    let system = super::system_dir().expect("system folder");
+    let bytes = std::fs::read(system.join("version.dll")).expect("version.dll");
+    std::fs::write(source.join(name), &bytes).expect("pin written");
+    let mut hex = String::new();
+    for byte in Sha256::digest(&bytes) {
+        write!(hex, "{byte:02x}").expect("a String takes writes");
+    }
+    NativeFile {
+        name,
+        bytes: u64::try_from(bytes.len()).expect("small"),
+        sha256: Box::leak(hex.into_boxed_str()),
+    }
+}
+
+fn staged_dir(root: &Path) -> PathBuf {
+    root.join("natives").join("sherpa-onnx-2.0.1")
+}
+
+fn loaded_from(path: &Path) -> bool {
+    let path = path.to_string_lossy().to_lowercase();
+    super::modules()
+        .expect("module list")
+        .iter()
+        .any(|module| module.to_string_lossy().to_lowercase() == path)
+}
+
+fn loaded_named(name: &str) -> bool {
+    super::modules()
+        .expect("module list")
+        .iter()
+        .any(|module| module.ends_with(name))
+}
+
+/// A protected DACL with one entry, which its files and folders inherit.
+fn owner_only(folder: &Path) -> bool {
+    let sddl = dacl_sddl(folder);
+    let entries = sddl
+        .strip_prefix("D:P")
+        .map(|rest| rest.trim_start_matches("AI"));
+    entries.is_some_and(|entries| {
+        entries.matches('(').count() == 1 && entries.starts_with("(A;OICI;FA;;;")
+    })
+}
+
+fn sharing_violation(result: io::Result<()>) -> bool {
+    result.err().and_then(|error| error.raw_os_error()) == Some(32)
+}
+
+fn icacls(path: &Path, args: &[&str]) {
+    run(std::process::Command::new("icacls").arg(path).args(args));
+}
+
+/// Makes the empty folder `dir` a junction to `target` in place: a mount-point reparse point set
+/// through a handle opened for write-data and write-attributes, the rights NTFS asks for.
+fn set_junction(dir: &Path, target: &Path) -> io::Result<()> {
+    let folder = File::options()
+        .access_mode(FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let substitute: Vec<u16> = format!(r"\??\{}", target.display())
+        .encode_utf16()
+        .collect();
+    let name = u16::try_from(substitute.len() * 2).expect("a short path");
+    let mut buffer = Vec::new();
+    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    for field in [8 + name + 4, 0, 0, name, name + 2, 0] {
+        buffer.extend(field.to_le_bytes());
+    }
+    for unit in substitute {
+        buffer.extend(unit.to_le_bytes());
+    }
+    buffer.extend([0; 4]);
+    let size = u32::try_from(buffer.len()).expect("small");
+    let mut returned = 0;
+    // SAFETY: `buffer` is a complete mount-point REPARSE_DATA_BUFFER of `size` bytes, the handle
+    // is open, and no output buffer or overlapped I/O is used.
+    let set = unsafe {
+        DeviceIoControl(
+            folder.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            size,
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[test]
+fn final_paths_compare_by_drive_path_without_case() {
+    assert!(final_path_matches(r"\\?\C:\Users\Me\x", r"c:\users\me\x\"));
+    assert!(final_path_matches(r"\\?\C:\", r"C:\"));
+    assert!(final_path_matches(r"\\?\C:\", r"C:"));
+    assert!(!final_path_matches(r"\\?\D:\x", r"C:\x"));
+    assert!(!final_path_matches(
+        r"\\?\UNC\server\share\x",
+        r"\\server\share\x"
+    ));
+    assert!(!final_path_matches(r"\\?\Volume{0}\x", r"C:\x"));
+    assert!(
+        !final_path_matches(r"C:\x", r"C:\x"),
+        "always the long form"
+    );
+    assert!(!final_path_matches(
+        r"\\?\C:\Users\RUNNER~1",
+        r"C:\Users\runneradmin"
+    ));
+}
+
+#[test]
+fn staging_copies_checked_pins_into_owner_only_folders_and_keeps_them() {
+    let (_scratch, root) = stage_root("stage");
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-stage.dll");
+    let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
+    let file = staged_dir(&root).join(pin.name);
+    assert_eq!(
+        std::fs::read(&file).ok(),
+        std::fs::read(source.join(pin.name)).ok()
+    );
+    assert!(owner_only(&root.join("natives")) && owner_only(&staged_dir(&root)));
+    drop(staged);
+    std::fs::remove_file(source.join(pin.name)).expect("source removed");
+    drop(stage(&source, &root, std::slice::from_ref(&pin)).expect("a matching copy is kept"));
+    std::fs::write(&file, b"drifted").expect("staged copy changed");
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Missing),
+        "a drifted copy is replaced, which needs the source again"
+    );
+}
+
+#[test]
+fn a_source_that_misses_its_pin_leaves_nothing_staged() {
+    let (_scratch, root) = stage_root("stage-bad");
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-bad.dll");
+    let wrong = NativeFile {
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        ..pin
+    };
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&wrong)).err(),
+        Some(NativeError::Pin)
+    );
+    assert!(!staged_dir(&root).join(wrong.name).exists());
+}
+
+#[test]
+fn nothing_rebinds_the_staged_pins_between_verification_and_load() {
+    let (_scratch, root) = stage_root("stage-held");
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-held.dll");
+    let decoy = root.join("decoy");
+    fake_pin(&decoy, "kumochi-test-held.dll");
+    let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
+    let dir = staged_dir(&root);
+    let file = dir.join(pin.name);
+    let away = root.join("away");
+    assert!(sharing_violation(std::fs::rename(&file, &away)), "the DLL");
+    assert!(sharing_violation(std::fs::remove_file(&file)), "the DLL");
+    // A folder rename may fail on the open files below it first, so any refusal will do.
+    for folder in [&dir, &root.join("natives"), &root] {
+        let renamed = std::fs::rename(folder, root.with_extension("away"));
+        assert!(renamed.is_err() && folder.is_dir(), "{renamed:?}");
+    }
+    assert!(
+        set_junction(&dir, &decoy).is_err(),
+        "a non-empty folder can't become a junction"
+    );
+    let library = staged.load(pin.name).expect("the verified bytes load");
+    assert!(loaded_from(&file));
+    assert!(!loaded_from(&decoy.join(pin.name)));
+    drop(library);
+}
+
+#[test]
+fn a_junction_on_the_root_path_is_refused_before_anything_loads() {
+    let (_scratch, base) = stage_root("stage-junction");
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir_all(&real).expect("real folder");
+    std::fs::create_dir_all(&link).expect("link folder");
+    set_junction(&link, &real).expect("an empty folder becomes a junction");
+    let source = base.join("source");
+    let pin = fake_pin(&source, "kumochi-test-junction.dll");
+    for root in [link.clone(), link.join("below")] {
+        assert_eq!(
+            stage(&source, &root, std::slice::from_ref(&pin)).err(),
+            Some(NativeError::Reparse)
+        );
+    }
+    std::fs::create_dir_all(staged_dir(&real)).expect("staging folders");
+    let staged = staged_dir(&real).join("kumochi-test-junction.dll");
+    std::fs::create_dir_all(&staged).expect("a folder where the DLL goes");
+    set_junction(&staged, &source).expect("a junction where the DLL goes");
+    assert_eq!(
+        stage(&source, &real, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Reparse),
+        "a reparse point in the DLL's place"
+    );
+    assert!(!loaded_named(pin.name));
+}
+
+#[test]
+fn an_existing_staging_folder_others_could_change_is_made_owner_only() {
+    let (_scratch, root) = stage_root("stage-harden");
+    let natives = root.join("natives");
+    std::fs::create_dir_all(&natives).expect("natives folder");
+    icacls(&natives, &["/grant", "*S-1-1-0:(F)"]);
+    assert!(!owner_only(&natives));
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-harden.dll");
+    drop(stage(&source, &root, std::slice::from_ref(&pin)).expect("staged"));
+    assert!(owner_only(&natives));
+}
+
+#[test]
+fn a_root_others_can_change_is_refused() {
+    let (_scratch, base) = stage_root("stage-open");
+    let root = base.join("open");
+    std::fs::create_dir_all(&root).expect("root folder");
+    icacls(&root, &["/grant", "*S-1-1-0:(M)"]);
+    let source = base.join("source");
+    let pin = fake_pin(&source, "kumochi-test-open.dll");
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Unsafe)
+    );
+    assert!(!root.join("natives").exists());
+}
+
+#[test]
+fn a_staging_folder_labelled_low_is_refused() {
+    let (_scratch, root) = stage_root("stage-low-label");
+    let natives = root.join("natives");
+    std::fs::create_dir_all(&natives).expect("natives folder");
+    icacls(&natives, &["/setintegritylevel", "low"]);
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-label.dll");
+    assert_eq!(
+        stage(&source, &root, std::slice::from_ref(&pin)).err(),
+        Some(NativeError::Unsafe)
+    );
+}
+
+/// Set for the child process the low-integrity test starts: the staging root.
+const LOW_CHILD: &str = "KUMOCHI_TEST_SHERPA_LOW";
+
+/// A copy of this test binary labelled low runs at low integrity, as a sandboxed process under
+/// this user would, and can't open anything on the held path with a right that changes it.
+#[test]
+fn a_lower_integrity_process_cant_change_the_staged_path() {
+    let (_scratch, root) = stage_root("stage-low");
+    let source = root.join("source");
+    let pin = fake_pin(&source, "kumochi-test-low.dll");
+    let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
+    let exe = root.join("low.exe");
+    std::fs::copy(std::env::current_exe().expect("own path"), &exe).expect("copied");
+    icacls(&exe, &["/setintegritylevel", "low"]);
+    let stdout = run(std::process::Command::new(&exe)
+        .args([
+            "--ignored",
+            "--exact",
+            "platform::sherpa::tests::child_at_low_integrity_changes_nothing",
+        ])
+        .env(LOW_CHILD, &root));
+    assert!(stdout.contains("1 passed"), "the child passed: {stdout}");
+    drop(staged);
+}
+
+#[test]
+#[ignore = "the low-integrity test's child process"]
+fn child_at_low_integrity_changes_nothing() {
+    let Some(root) = std::env::var_os(LOW_CHILD).map(PathBuf::from) else {
+        return;
+    };
+    assert!(
+        std::fs::write(root.join("probe"), b"").is_err(),
+        "it runs below medium"
+    );
+    let dir = staged_dir(&root);
+    for path in [
+        root.clone(),
+        root.join("natives"),
+        dir.clone(),
+        dir.join("kumochi-test-low.dll"),
+    ] {
+        for access in [
+            FILE_WRITE_ATTRIBUTES,
+            FILE_WRITE_DATA,
+            DELETE,
+            WRITE_DAC,
+            WRITE_OWNER,
+        ] {
+            let opened = File::options()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path);
+            assert!(opened.is_err(), "access {access:#x} was granted");
+        }
+    }
+    assert!(set_junction(&dir, &root).is_err());
+}
+
 const SYSTEM: &str = r"C:\Windows\System32";
 const NATIVES: &str = r"C:\Program Files\Kumochi";
 
@@ -440,7 +813,7 @@ fn child_preloads_a_foreign_onnxruntime() {
     std::fs::copy(system.join("version.dll"), &foreign).expect("copied");
     let _foreign = super::Library::load(&foreign).expect("the renamed copy loads");
     assert_eq!(
-        Sherpa::load(&dir.join("natives")).err(),
+        Sherpa::load(&dir.join("natives"), &dir).err(),
         Some(NativeError::Conflict)
     );
     let modules = super::modules().expect("module list");
@@ -578,21 +951,17 @@ fn measure_native_imports() {
 #[test]
 #[ignore = "Rez only: loads the pinned DLLs into this process"]
 fn measure_planted_neighbor() {
-    let scratch = Scratch::new("sherpa-neighbor");
-    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
-    let natives = natives_dir();
-    for dll in [SHERPA, ORT] {
-        std::fs::copy(natives.join(dll), scratch.dir().join(dll)).expect("pin copied");
-    }
+    let (_scratch, root) = stage_root("sherpa-neighbor");
+    drop(stage(&natives_dir(), &root, kumochi_protocol::voice::NATIVE_FILES).expect("staged"));
     let system = super::system_dir().expect("system folder");
     std::fs::copy(
         system.join("version.dll"),
-        scratch.dir().join("MSVCP140.dll"),
+        staged_dir(&root).join("MSVCP140.dll"),
     )
-    .expect("neighbor planted");
-    let sherpa = Sherpa::load(scratch.dir()).expect("loads with the neighbor ignored");
+    .expect("neighbor planted beside the staged pins");
+    let sherpa = Sherpa::load(&natives_dir(), &root).expect("loads with the neighbor ignored");
     let modules = super::modules().expect("module list");
-    let dir = scratch.dir().to_string_lossy().to_lowercase();
+    let dir = staged_dir(&root).to_string_lossy().to_lowercase();
     let from_scratch: Vec<String> = modules
         .iter()
         .map(|path| path.to_string_lossy().to_lowercase())

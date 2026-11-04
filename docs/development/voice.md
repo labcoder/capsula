@@ -174,6 +174,11 @@ flowchart LR
 
 `platform::sherpa` is the only code that calls sherpa-onnx. Its ten C functions sit in a private
 table resolved once at load, and the `#[repr(C)]` structs are transcribed from v2.0.1's `c-api.h`.
+The table's functions are declared `extern "C-unwind"`. sherpa-onnx v2.0.1 doesn't catch every C++
+exception (`SherpaOnnxDecodeOfflineStream` reaches ONNX Runtime's throwing `Session::Run`, and
+stream and result creation allocate with `new`), and an exception entering Rust through a plain
+`extern "C"` is undefined behavior. With `C-unwind` it's a defined foreign unwind instead, which
+the speech worker's boundary turns into the worker's exit; nothing recovers from it in-process.
 Compile-time assertions pin their sizes, alignments and the offsets Kumochi writes or reads, and
 `measure_sherpa_layout` checks the same values against the header with `cl` on Rez. Every native
 object becomes a guard as soon as it's created. The guards borrow from each other, so they're
@@ -182,27 +187,120 @@ module is `Send`.
 
 ### The loader policy
 
-`Sherpa::load` stops at the first failure:
+`Sherpa::load(source, root)` stops at the first failure:
 
 1. **Closure check.** If any module named like one the two DLLs import (the list in
    `NATIVE_CLOSURE`, from [voice-natives.md](voice-natives.md)) is already loaded from anywhere but
    its place, it refuses with `Conflict` and loads nothing. The pins must be exactly at the natives
    folder, and everything else directly in the system folder. Windows binds an import to an
    already-loaded module of that name, whatever folder it came from.
-2. **Pins.** Each DLL is opened against writers and deleters, and its size and SHA-256 are checked
-   through that handle, which stays open until the DLL is loaded.
+2. **Staging.** The DLLs are loaded only from `<root>\natives\sherpa-onnx-2.0.1`, never from
+   `source` (the install folder, or the dev link). See [Staging](#staging) below.
 3. **Loads.** ONNX Runtime, then sherpa-onnx, by full path with `LOAD_LIBRARY_SEARCH_SYSTEM32`:
    sherpa-onnx's `onnxruntime.dll` import binds to the one just loaded, and every other import
    comes from the system folder, never from the DLL's folder, `PATH` or the current directory. A
    missing system dependency, most likely the VC++ runtime, is `Dependency`.
+   Every folder from the volume root down and each verified DLL handle stay open until both
+   loads return.
 4. **Inventory.** The closure check runs again, and every module that appeared must be a pin or a
    system module, or both DLLs unload and it's `Unexpected`.
 5. **Release check.** `SherpaOnnxGetVersionStr` must be `2.0.1` and `SherpaOnnxGetGitSha1`
    `af2d8d81`, or it's `Abi`.
 
+### Staging
+
+The threat is code that isn't this user at medium integrity: another account, or a
+lower-integrity process running as this user. Medium-integrity code running as this user can
+already change the brain, so it isn't defended against. `platform::windows::protected` holds the
+policy.
+
+- **Root.** In production `root` is Kumochi's folder in the local application data folder that
+  `SHGetKnownFolderPath` reports. The `LOCALAPPDATA` variable isn't consulted, because a value
+  pointing elsewhere would choose which folders are trusted.
+- **Held chain.** Each component from the volume root to `root` is opened without delete sharing
+  and with `FILE_FLAG_OPEN_REPARSE_POINT`. Then it's checked through that handle while the
+  components above it stay open:
+  - It isn't a reparse point.
+  - Its final path is the lexical one, compared without case after the `\\?\` form. A UNC or
+    volume-GUID result never matches.
+  - Its owner is this user, SYSTEM, Administrators or `TrustedInstaller`.
+  - No allow entry gives anyone else delete, write-DAC, write-owner, write-data, write-attributes
+    or delete-child. Setting a reparse point needs only write-data or write-attributes, so holding
+    a handle without delete sharing isn't enough on its own.
+  - It isn't labelled below medium integrity.
+
+  A component that fails is refused (`Reparse` or `Unsafe`), and nothing loads. On Rez the temp
+  folder grants other accounts write access, so it can't be a root.
+- **Staging folders.** `natives` and `sherpa-onnx-2.0.1` are created with a protected DACL that
+  has one entry: full access for this user, inherited by their files. An existing folder with a
+  trusted owner is reset to that DACL through the handle that stays held. One that's a reparse
+  point, owned by anyone else or labelled low is refused.
+- **Files.** A staged DLL that matches its pin is kept. Otherwise it's replaced by a copy of the
+  source, read through a handle that refuses writers, with its size and SHA-256 checked as it
+  streams. A copy that fails or doesn't match is removed. Each staged DLL is then held against
+  writers and deleters, checked like a folder (anyone else may not append either), and verified
+  again through that handle.
+
+The tests stage copies of a system DLL in scratch folders under the local application data folder.
+They check that a rename or delete of the DLL is a sharing violation while it's held, and that
+renames of every held folder fail. A non-empty held folder can't be turned into a junction. A
+junction anywhere on the root path, or in the DLL's place, is `Reparse`, with nothing loaded. A
+root others can change is `Unsafe`, an existing staging folder others could change is reset to
+owner-only, a staging folder labelled low is `Unsafe`, and a bad source leaves nothing staged. A
+copy of the test binary labelled low runs at low integrity and can't open the root, either staging
+folder or the DLL for write-attributes, write-data, delete, write-DAC or write-owner.
+
 The installer must not put a VC++ runtime beside `kumochid.exe`: the brain imports
 `VCRUNTIME140.dll` itself, so an app-local copy would load first and make speech input refuse with
 `Conflict`.
+
+### The speech worker
+
+`platform::sherpa` runs only in `kumochid --speech`, a second worker kind under the screen
+worker's supervisor (`supervise`; see [screen.md](screen.md) and [processes.md](processes.md)). A
+native exception, abort, access violation or hang costs that process. The brain gets a
+content-free `WorkerLost` and keeps running. The model goes with the worker: a respawned worker has
+nothing loaded until the next load.
+
+```mermaid
+flowchart LR
+  Client["SpeechHandle"] -->|"Load / Decode / Unload, absolute deadline"| Sup["supervisor task"]
+  Sup -->|"chunked frames, stdin"| Worker["kumochid --speech"]
+  Worker -->|"reply frames, stdout"| Sup
+  Worker -.->|"stderr disconnected"| Null[" "]
+```
+
+- **Requests.** `Load { natives, models }` stages the natives from `natives`, loads them, creates
+  the recognizer and runs one second of silence as a warm-up. A load while loaded drops the old
+  model first. `Decode { rate, pcm }` carries mono 16-bit little-endian PCM. `Unload` frees the
+  recognizer and then the natives. Without a model a decode is `NotLoaded`. Request and reply
+  `Debug` show no audio, text or paths.
+- **Bounds** [guess]. The rate must be 8–48 kHz. An utterance is at most 60 s and at most
+  5,760,000 bytes (60 s at 48 kHz). Both are checked, with the rate, before any duration is
+  computed, in the brain before sending and again in the worker. A transcript is at most 16 KiB of
+  UTF-8, and the brain checks that again.
+- **Deadlines** [guess]. Load 30 s; decode 2 s plus a quarter of the audio's length; unload 5 s.
+  Each is absolute from the call and covers queueing, a respawn, every chunk and the native work.
+  Missing one loses the worker. Reply ids keep counting across respawns, so a dead worker's late
+  output can't answer its successor's request.
+- **The fail-stop boundary.** The worker serves every request inside one `catch_unwind`, and
+  sherpa-onnx's functions are `C-unwind`. A C++ exception that escapes sherpa-onnx is a defined
+  foreign unwind. A release build (`panic = "abort"`) aborts on it. A debug build either aborts
+  or returns an opaque error to the boundary, which aborts at once without inspecting or dropping
+  it. Nothing serves again on that native state. A Rust panic ends the same way, after the panic
+  hook logs only its location. The worker sets `SEM_NOGPFAULTERRORBOX`, so a crash ends at once
+  without a dialog.
+- **stderr.** sherpa-onnx prints model paths and exception text to stderr on failure (see
+  [voice-natives.md](voice-natives.md)). The worker's stderr isn't connected to anything, and its
+  log, `kumochi-speech`, records only content-free codes.
+
+Debug builds take one-request fault fixtures: hang, exit, abort, a noncontinuable access violation
+raised with `RaiseException`, a garbage frame, a panic, and a C++ throw. `tests/speech.rs` checks
+each of the first six against the real worker. The running request and the one queued behind it
+both get `WorkerLost`, a loss is broadcast, and the next worker answers a load. The throw fixture
+is Rez-only. It builds a DLL with `cl /EHs` whose export throws `std::runtime_error` and calls it
+through the worker's boundary. The worker must end before the request's deadline, without
+replying. A fresh worker must then load the real natives and Parakeet and decode.
 
 ### Checks on Rez
 
@@ -213,7 +311,7 @@ binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODE
 - `measure_sherpa_layout` compiles a probe against `c-api.h` and compares every layout value.
 - `measure_native_imports` checks `NATIVE_CLOSURE` against `dumpbin /dependents` of both DLLs,
   minus API sets and `KnownDLLs`.
-- `measure_planted_neighbor` plants an `MSVCP140.dll` beside copies of the pins and checks the
+- `measure_planted_neighbor` stages the pins, plants an `MSVCP140.dll` beside them and checks the
   system one loads instead.
 - `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
   the owner at 16, 44.1 and 48 kHz, with WER against S5's reference transcripts, and lists the

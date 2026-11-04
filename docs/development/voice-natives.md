@@ -1,7 +1,7 @@
 # Voice native runtime
 
-Speech input runs Parakeet through sherpa-onnx's C API, loaded at run time from beside
-`kumochid.exe`. Nothing links to it at build time, so builds, tests and CI never need it, and
+Speech input runs Parakeet through sherpa-onnx's C API, loaded at run time from an owner-only
+copy under the user's local application data folder (see voice.md, "Staging"). Nothing links to it at build time, so builds, tests and CI never need it, and
 voice stays optional. Loading it at run time doesn't change what shipping it obliges, which is
 what this page records.
 
@@ -38,7 +38,11 @@ pins came from `System32`: `combase`, `msvcp_win`, `win32u`, `gdi32`, `gdi32full
 **Its own output:** with `debug = 0`, sherpa-onnx still prints one line group to stderr each time
 it resamples a non-16 kHz utterance: `offline-stream.cc:AcceptWaveformImpl:155 Creating a
 resampler:` followed by the input and output sample rates. It names no file, text or audio. The
-brain doesn't capture its own stderr today; whoever routes it later should drop that line.
+brain doesn't capture its own stderr today; whoever routes it later should drop that line. Its
+failure paths print more, also with `debug = 0`: a missing tokens file or model file is printed
+with its path (`offline-model-config.cc:104–106`, `offline-transducer-model-config.cc:117–131`),
+and recognizer creation prints the exception text (`c-api.cc:719`). So stderr from sherpa-onnx
+must never be captured or routed anywhere.
 
 ## Licenses
 
