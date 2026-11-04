@@ -24,10 +24,7 @@ The dock is a transparent `PopUp` overlay, sized for the stretch. Its native sty
 layered, transparent, no-activate and tool-window; app-window is removed. A separate native hit
 proxy owns exactly the outline's pixels and reports pointer entry and exit (see
 [Stretch and hit testing](#stretch-and-hit-testing)). The panel is interactive, nonactivating and excluded from the taskbar in the same way.
-The panel is created at startup, then explicitly positioned and sized while still hidden.
-GPUI saves requested bounds for a hidden window instead of applying them immediately; leaving
-the native window at Windows' default size also leaves its renderer's textures oversized.
-Hidden placement bounds those resources without moving window creation into the first click.
+The panel is created hidden at startup, so the first click doesn't create a window.
 The same panel is hidden and reused, never recreated for each click. The typing panel is the
 one exception to never activating: it's a tool window without no-activate, created on the first
 double tap, activated only explicitly, and hidden rather than closed. While it's open, pointer

@@ -1187,6 +1187,12 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
             let ((), counts) = allocation::activity(|| {
                 for (view, frame) in views.iter().zip(&mut frames) {
                     view.frame(now, frame).expect("caps frame");
+                    std::hint::black_box(
+                        frame
+                            .paint_items()
+                            .map(|(_, primitives)| primitives.len())
+                            .sum::<usize>(),
+                    );
                 }
             });
             assert_eq!(

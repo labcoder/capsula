@@ -107,3 +107,39 @@ fn focused_text_panel_escape_clears_idle_mirrored_scenes_without_a_global_hold()
     );
     assert!(!activity.holds_global_escape());
 }
+
+struct Blank;
+
+impl gpui_kit::Render for Blank {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<'_, Self>,
+    ) -> impl gpui_kit::IntoElement {
+        gpui_kit::div()
+    }
+}
+
+#[test]
+#[ignore = "opens a real hidden window: cargo test -p kumochi-shell -- --ignored hidden_window"]
+fn a_hidden_window_takes_its_requested_size() {
+    use gpui_kit::AppContext as _;
+
+    let viewport = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = std::rc::Rc::clone(&viewport);
+    gpui_kit::application().run(move |cx| {
+        let window = cx
+            .open_window(super::options(), |_, cx| cx.new(|_| Blank))
+            .expect("a hidden window opens");
+        seen.set(Some(
+            window
+                .update(cx, |_, window, _| window.viewport_size())
+                .expect("the window is open"),
+        ));
+        cx.quit();
+    });
+    assert_eq!(
+        viewport.get(),
+        Some(gpui_kit::size(gpui_kit::px(112.0), gpui_kit::px(48.0)))
+    );
+}

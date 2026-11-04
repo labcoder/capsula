@@ -359,6 +359,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
         ErrorKey::AccountMisconfigured => "error-account-misconfigured",
         ErrorKey::SignOutNotDurable => "error-sign-out-not-durable",
+        ErrorKey::SessionEnded => "error-session-ended",
+        ErrorKey::PlanUnavailable => "error-plan-unavailable",
     }
 }
 

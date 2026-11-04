@@ -1,4 +1,5 @@
-// Modified for Kumochi: wakes only windows that want a frame (docs/development/gpui-patch.md).
+// Modified for Kumochi: wakes only windows that want a frame, and sizes hidden windows on open
+// (docs/development/gpui-patch.md).
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
@@ -588,6 +589,12 @@ impl WindowsWindow {
             }
             unsafe { SetWindowPlacement(hwnd, &placement)? };
         } else {
+            // Size the window now, still hidden, so its renderer isn't left at Windows' default size.
+            let hidden = WINDOWPLACEMENT {
+                showCmd: SW_HIDE.0 as u32,
+                ..placement
+            };
+            unsafe { SetWindowPlacement(hwnd, &hidden)? };
             this.state.initial_placement.set(Some(WindowOpenStatus {
                 placement,
                 state: WindowOpenState::Windowed,

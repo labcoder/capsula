@@ -407,10 +407,13 @@ do not feed reserialized storage JSON back through the model-record byte cap in 
 
 ## Starting and reconnecting
 
-A per-session mutex keeps one shell. If no brain pipe answers, the shell starts `kumochid.exe`
-detached, outside its own job where the job allows it, and retries for up to ten seconds. A shell
-started by hand finds a running brain the same way, so after a shell crash nothing needs
-restarting.
+One shell runs per Windows session. It holds an exclusive `std::fs::File::try_lock` on the empty
+file `<SHELL_LOCK>-<session id>.lock` in the data folder for its whole life, and a second shell
+that finds it held exits. The OS releases the lock when the shell exits, even after a crash, and
+a shell that can't resolve the data folder or open the lock refuses to start. If no brain pipe
+answers, the shell starts `kumochid.exe` detached, outside its own job where the job allows it,
+and retries for up to ten seconds. A shell started by hand finds a running brain the same way, so
+after a shell crash nothing needs restarting.
 
 ## Debugging
 

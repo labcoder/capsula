@@ -1,7 +1,8 @@
 # The GPUI Windows patch
 
 Kumochi carries GPUI's Windows backend, `gpui-pre-windows` 0.3.10, in `vendor/gpui-pre-windows/`
-with one change: an idle window no longer wakes on every vblank. `[patch.crates-io]` in
+with two changes: an idle window no longer wakes on every vblank, and a window opened hidden
+takes its requested size at once. `[patch.crates-io]` in
 `Cargo.toml` points the crate at the vendored copy, and `cargo xtask check-vendor` (run by CI)
 fails unless Cargo resolves the crate to that directory at the vendored version. Upstream tracking: zed-industries/zed#66221.
 The core crate, `gpui-pre`, is not vendored.
@@ -93,6 +94,20 @@ These need hardware and are checked by hand at the desk (OSC-132):
 - an idle window with two fingers resting on the touchpad before a slow pan or pinch;
 - device loss while Kumochi is idle, visible and unfocused, with no input or resize afterwards.
 
+## Hidden windows open at their requested size
+
+Upstream defers a hidden window's placement: `WindowsWindow::new` creates the window at
+`CW_USEDEFAULT` and, when `show` is false, saves the requested placement in
+`initial_placement` until `activate`. A window that's shown some other way, as Kumochi's
+presence windows are (`SetWindowPos` without activation), kept Windows' default size until then,
+and so did its renderer's textures: a 112×48 presence window opened with a 1904×1015 viewport on
+Rez. The patch also applies that placement at once with `showCmd = SW_HIDE`, which sizes the
+window and its renderer without showing it; `activate` still applies the saved placement as
+before. `presence::tests::a_hidden_window_takes_its_requested_size` opens a real window, so it's
+`#[ignore]`d: run it on Windows with `cargo test -p kumochi-shell -- --ignored hidden_window`.
+macOS doesn't defer: `gpui-pre-macos` creates the `NSWindow` with the requested content rect
+and `show` only decides whether to order it front.
+
 ## Re-vendoring on a GPUI bump
 
 1. Check whether upstream fixed #66221. If it did, delete `vendor/gpui-pre-windows`, its
@@ -105,11 +120,13 @@ These need hardware and are checked by hand at the desk (OSC-132):
 4. Re-apply the patch from the previous release's patch commit (`git log -- vendor/`), fixing
    conflicts by hand. The patch touches six upstream files (`events.rs`, `platform.rs`,
    `window.rs`, `vsync.rs`, `direct_manipulation.rs`, `directx_renderer.rs`) and adds
-   `vsync/frame_demand.rs`; `directx_renderer.rs` and `window.rs` carry the `test-support`
+   `vsync/frame_demand.rs`; the hidden-window sizing is the `SW_HIDE` placement in
+   `WindowsWindow::new`'s `else` branch; `directx_renderer.rs` and `window.rs` carry the `test-support`
    cfg narrowing that lets CI run `frame_demand`'s tests. Check that `begin_vsync_thread`, `draw_window`, `schedule_frame` and
    `on_input` still have the shapes the patch assumes, and that the core still calls
    `schedule_frame` after updates and still has its input-rate sustain.
 5. `cargo build --locked`, `cargo xtask check-vendor`, `cargo test --workspace`, and
    `cargo test -p gpui-pre-windows --locked --lib frame_demand`.
-6. Re-measure `cargo xtask bench idle` and `bench stretch` against the previous build, and
+6. Run the hidden-window test above.
+7. Re-measure `cargo xtask bench idle` and `bench stretch` against the previous build, and
    repeat the OSC-132 hand checks.

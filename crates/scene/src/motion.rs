@@ -351,6 +351,7 @@ struct Node {
     handle: Handle,
     parent: Option<usize>,
     primitives: Arc<[Prim]>,
+    label_start: usize,
     transform: Affine,
     pivot: Vec2,
     rest: Rest,
@@ -375,7 +376,7 @@ fn slot(track: Track) -> usize {
 
 /// Orders placed objects parent-first, so one pass composes every world transform.
 fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<Node> {
-    let items: BTreeMap<Handle, (&Item, Rest, f32)> = layout
+    let items: BTreeMap<Handle, (&Item, Rest, f32, usize)> = layout
         .placed()
         .map(|entry| (entry.0.handle, entry))
         .collect();
@@ -402,11 +403,12 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
     order
         .iter()
         .map(|(_, handle)| {
-            let (item, rest, inherited) = items[handle];
+            let (item, rest, inherited, label_start) = items[handle];
             Node {
                 handle: *handle,
                 parent: item.parent.and_then(|parent| index.get(&parent).copied()),
                 primitives: Arc::clone(&item.primitives),
+                label_start,
                 transform: item.transform,
                 pivot: item.bounds.center(),
                 rest,
@@ -426,6 +428,7 @@ pub struct FrameItem {
     pub handle: Handle,
     /// Prepared geometry, shared with the layout rather than copied.
     pub primitives: Arc<[Prim]>,
+    label_start: usize,
     /// World transform, including ancestors, pose and entrance.
     pub transform: Affine,
     /// World opacity: ancestors, inherited factor, own opacity and entrance.
@@ -497,9 +500,21 @@ impl Frame {
             generation: None,
         }
     }
-    /// Items in handle order, the same paint order as prepared display lists.
+    /// Objects in handle order. Use [`Self::paint_items`] for layered painting.
     pub fn items(&self) -> &[FrameItem] {
         &self.items
+    }
+    /// Ordinary geometry followed by edge-label chips and text, without allocation.
+    pub fn paint_items(&self) -> impl Iterator<Item = (&FrameItem, &[Prim])> {
+        self.items
+            .iter()
+            .map(|item| (item, &item.primitives[..item.label_start]))
+            .chain(
+                self.items
+                    .iter()
+                    .map(|item| (item, &item.primitives[item.label_start..])),
+            )
+            .filter(|(_, primitives)| !primitives.is_empty())
     }
     /// Releases shared geometry and the view binding while keeping the reserved capacity.
     /// It may free the last references to replaced primitives, so call it outside paint.
@@ -859,6 +874,7 @@ impl SceneView {
             out.items.push(FrameItem {
                 handle: node.handle,
                 primitives: Arc::clone(&node.primitives),
+                label_start: node.label_start,
                 transform: world.transform,
                 opacity: world.opacity,
                 draw: world.draw,
