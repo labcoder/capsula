@@ -1,6 +1,6 @@
 use super::{
-    Body, Failure, Framing, Head, MAX_CHUNK_LINE_BYTES, MAX_HEAD_BYTES, MAX_TRAILER_BYTES, Step,
-    head, request,
+    Body, Failure, Framing, Head, MAX_CHUNK_LINE_BYTES, MAX_HEAD_BYTES, MAX_TRAILER_BYTES, Media,
+    Step, head, request,
 };
 
 /// Decodes `wire` fed in chunks of `size`: the data, and the bytes left after the body or why it failed.
@@ -216,10 +216,20 @@ fn interim_heads_are_100_and_103_and_101_is_refused() {
 fn the_media_type_and_close_are_read_from_their_headers() {
     let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nContent-Length: 0\r\n\r\n";
     let head = parsed(bytes).expect("a head").expect("whole").0;
-    assert!(head.event_stream && !head.close);
+    assert!(head.media == Media::EventStream && !head.close);
     let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
     let head = parsed(bytes).expect("a head").expect("whole").0;
-    assert!(!head.event_stream && head.close);
+    assert!(head.media == Media::Other && head.close);
+    let bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        parsed(bytes).expect("a head").expect("whole").0.media,
+        Media::Absent
+    );
+    let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        parsed(bytes).expect("a head").expect("whole").0.media,
+        Media::Other
+    );
 }
 
 #[test]

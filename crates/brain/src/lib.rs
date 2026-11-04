@@ -19,7 +19,13 @@ pub mod store;
 mod tap;
 #[cfg(test)]
 mod test_support;
-#[cfg_attr(not(test), expect(dead_code, reason = "PR 5 wires speech input"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "PR 5 wires speech input; PR 8 wires voice installation"
+    )
+)]
 mod voice;
 
 use std::io;
