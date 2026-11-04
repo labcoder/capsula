@@ -225,20 +225,31 @@ fn geometry_rows_carry_two_drawn_and_four_owned_spans() {
     observation
         .line("geometry id=3 origin_y=0 rows=1 trimmed=false spans=1:2,-,1:2,7:8,-,-")
         .unwrap();
-    for row in [
-        "spans=1:2,8:9,1:2,4:5,7:8,10:11",
-        "spans=-,-,1:2,4:5,7:8",
-        "spans=-,-,1:2,4:5,7:8,10:11,13:14",
+    for (row, why) in [
+        (
+            "spans=1:2,8:9,1:2,4:5,7:8,10:11",
+            "geometry draws outside the band it owns",
+        ),
+        ("spans=-,-,1:2,4:5,7:8", "invalid geometry row"),
+        ("spans=-,-,1:2,4:5,7:8,10:11,13:14", "invalid geometry row"),
     ] {
-        assert!(
-            observation
-                .line(&format!(
-                    "geometry id=3 origin_y=0 rows=1 trimmed=true {row}"
-                ))
-                .is_err(),
-            "must reject {row}"
-        );
+        let error = observation
+            .line(&format!(
+                "geometry id=4 origin_y=0 rows=1 trimmed=true {row}"
+            ))
+            .expect_err(row);
+        assert!(format!("{error:#}").contains(why), "{row}: {error:#}");
     }
+    let version_1 = finish(
+        format!(
+            "{GEOMETRY}{COMMIT}{}",
+            STARTUP.replace("version=2", "version=1")
+        ),
+        0,
+        0,
+    );
+    let error = parsed(&version_1).expect_err("version 1 is refused");
+    assert!(format!("{error:#}").contains("wrong version"), "{error:#}");
 }
 
 #[test]
