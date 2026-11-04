@@ -367,7 +367,6 @@ fn install(
     );
     object.anchors = [Vec2::default(); 2];
     object.rank = None;
-    object.initialized = true;
 
     state.handles.insert(handle, id.clone());
     state.objects.insert(id, object);
@@ -395,7 +394,7 @@ pub(super) fn place(
                     let mut output = old.item.primitives.to_vec();
                     output.retain(|primitive| !matches!(primitive, Prim::Rect { .. }));
                     let mut column = 0;
-                    // shortcut: frozen rows retain their rule while bounds grow; revisit in A9's visual gate.
+                    // shortcut: detached rows keep their original grid as text grows; rebuild the table to reflow it.
                     let mut bounds = old.item.bounds;
                     for primitive in &mut output {
                         if let Prim::Text {

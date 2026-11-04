@@ -1,6 +1,6 @@
 use super::{
     Glide, PrepareError, SurfaceGeometry, compound, diagram,
-    primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect},
+    primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect, text_origin},
     state::{LayoutState, Placed, Rest},
 };
 use crate::{
@@ -16,6 +16,17 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+
+/// Smallest initial fit, so 15 px labels stay at least 12 px.
+const FIT_FLOOR: f32 = 0.8;
+
+fn fit_transform(group: &Placed) -> Affine {
+    if matches!(&*group.source, Op::Diagram(diagram) if diagram.parent.is_none()) {
+        group.item.transform
+    } else {
+        Affine::default()
+    }
+}
 
 /// Places nodes and clusters, and returns the generated glides plus the new contents a cluster
 /// owns that are built here, anchored inside it, so they are in its size before it is ranked.
@@ -59,14 +70,21 @@ pub(super) fn place(
                 )
             })
             .transpose()?;
-        let mut size = Vec2::new(
+        let text = Vec2::new(
             label.x.max(sub.map_or(0.0, |size| size.x)) + 24.0,
-            (label.y + sub.map_or(0.0, |size| size.y + 4.0) + 20.0).max(40.0),
+            label.y + sub.map_or(0.0, |size| size.y + 4.0) + 20.0,
         );
-        size.x = size.x.max(80.0);
-        if node.shape == NodeShape::Circle {
-            let diameter = size.x.max(size.y);
-            size = Vec2::new(diameter, diameter);
+        let mut size = Vec2::new(text.x.max(80.0), text.y.max(40.0));
+        match node.shape {
+            NodeShape::Circle => {
+                let diameter = size.x.max(size.y);
+                size = Vec2::new(diameter, diameter);
+            }
+            NodeShape::Diamond => {
+                let extent = (text.x + text.y).max(80.0);
+                size = Vec2::new(extent, extent);
+            }
+            _ => {}
         }
         measured.insert(id.clone(), (size, label, sub));
     }
@@ -112,6 +130,7 @@ pub(super) fn place(
     // An edge ranks once, in its endpoints' least common group, between the two members there
     // that hold them; edges inside one member never count toward that group's edge cap.
     let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
+    let mut labels = BTreeMap::<Option<Handle>, Vec2>::new();
     let mut edges = BTreeMap::new();
     for object in state.objects.values() {
         if let Op::Edge(edge) = &*object.source {
@@ -140,6 +159,21 @@ pub(super) fn place(
             && from != to
         {
             ranked.entry(group).or_default().push((from, to));
+            if let Some(label) = &edge.label
+                && groups.contains_key(&group)
+            {
+                let style = TextStyle {
+                    size: build.theme.font_size - 1.0,
+                    bold: false,
+                };
+                let size = build.measure(label, style, Some(180.0))?;
+                labels
+                    .entry(group)
+                    .and_modify(|widest: &mut Vec2| {
+                        *widest = Vec2::new(widest.x.max(size.x), widest.y.max(size.y));
+                    })
+                    .or_insert(size);
+            }
         }
     }
     let mut owned_by = BTreeMap::<Handle, Vec<&crate::WireId>>::new();
@@ -202,7 +236,14 @@ pub(super) fn place(
             })
             .unwrap_or(build.viewport);
         let direction = compound::direction(state, parent, surface);
-        let initialized = group.is_some_and(|group| group.initialized);
+        let gap = labels.get(&parent).map_or(diagram::RANK_GAP, |label| {
+            let along = if direction.0 == Direction::Right {
+                label.x
+            } else {
+                label.y
+            };
+            diagram::RANK_GAP.max(along + 24.0)
+        });
         let members = children.remove(&parent).unwrap_or_default();
         let mut all = Vec::new();
         let mut nodes = 0;
@@ -258,7 +299,7 @@ pub(super) fn place(
             .flatten()
             .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
             .collect();
-        let placement = diagram::layout(&sizes, nodes, &edges, direction, diagram::RANK_GAP)?;
+        let placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
         let mut ranks = placement.ranks.clone();
         for (slot, (_, id, _)) in all.iter().enumerate() {
             if let Some(rank) = state.objects.get(id).and_then(|object| object.rank) {
@@ -272,11 +313,30 @@ pub(super) fn place(
                 }
             }
         }
-        // shortcut: wide initial batches stay unscaled until A9's visual gate.
-        let initial = !initialized && all.iter().all(|(_, id, _)| new_ids.contains(id));
+        let initial = fresh.iter().all(|fresh| *fresh);
+        // shortcut: only unboxed top-level diagrams fit their initial batch; boxed, nested and
+        // diagram-less batches stay unscaled until a render shows one overflowing.
+        let fits = initial
+            && group.is_some_and(|group| {
+                group.item.parent.is_none()
+                    && matches!(&*group.source, Op::Diagram(diagram) if diagram.parent.is_none() && diagram.bounds.is_none())
+            });
+        // shortcut: slots retain model pose units; upgrade when scaled or rotated reflow is needed.
+        let view = match group {
+            Some(group) if !cluster && !initial => fit_transform(group)
+                .compose(Affine::pose(
+                    1.0,
+                    0.0,
+                    group.rest.pos + Vec2::new(group.rest.x, group.rest.y),
+                ))
+                .inverse()
+                .ok_or_else(|| layout_error(ErrorCode::TransformOverflow))?
+                .bounds(viewport),
+            _ => viewport,
+        };
         let translate = Vec2::new(
-            viewport.center().x - placement.bounds.center().x,
-            viewport.origin.y + 16.0 - placement.bounds.origin.y,
+            view.center().x - placement.bounds.center().x,
+            view.origin.y + 16.0 - placement.bounds.origin.y,
         );
         let mut focus = None;
         new_ids.sort_by_key(|id| ranks[index[id]]);
@@ -297,7 +357,8 @@ pub(super) fn place(
                         rank,
                         size,
                         direction,
-                        viewport,
+                        gap,
+                        view,
                         placement.rects[slot].center() + translate,
                     )?
                 };
@@ -329,7 +390,8 @@ pub(super) fn place(
                     rank,
                     size,
                     direction,
-                    viewport,
+                    gap,
+                    view,
                     placement.rects[slot].center() + translate,
                 )?
             };
@@ -348,7 +410,6 @@ pub(super) fn place(
             );
             object.anchors = [Vec2::default(); 2];
             object.rank = Some(previous.as_ref().and_then(|old| old.rank).unwrap_or(rank));
-            object.initialized = false;
             object.rest = rests.get(&id).copied().unwrap_or_default();
 
             state.handles.insert(*handle, id.clone());
@@ -359,7 +420,7 @@ pub(super) fn place(
         // once, in source order, before its parent ranks it; its own transform cancels in them.
         // shortcut: contents anchored outside this cluster's subtree, or to the cluster itself,
         // are still drawn, but late, after its parent ranks it, so they don't count toward its
-        // ranked size; A9's renders judge whether that needs placing first.
+        // ranked size; keep cached cross-group anchors until motion-owned reflow can replace them.
         if cluster
             && let Some(owner) = parent
             && let Some(waiting) = owned_by.remove(&owner)
@@ -376,17 +437,23 @@ pub(super) fn place(
                     }
                     (id, references)
                 })
+                .filter(|(_, references)| {
+                    references.iter().all(|reference| {
+                        !state.objects.contains_key(reference)
+                            || compound::inside(state, reference, owner)
+                    })
+                })
                 .collect();
             while let Some(index) = waiting.iter().position(|(_, references)| {
                 references
                     .iter()
-                    .all(|reference| compound::inside(state, reference, owner))
+                    .all(|reference| state.objects.contains_key(reference))
             }) {
                 build.check_cancel()?;
                 let (id, _) = waiting.remove(index);
                 let (handle, source) = &sources[id];
                 let mut object = if matches!(&**source, Op::Edge(_)) {
-                    edge(source, *handle, parent, state, build, None)?
+                    edge(source, *handle, parent, direction.0, state, build, None)?
                 } else {
                     build.primitive(source, *handle, parent, state, None)?
                 };
@@ -415,8 +482,24 @@ pub(super) fn place(
                 .objects
                 .get_mut(&group_id)
                 .expect("group was resolved above");
-            group.initialized |= focus.is_some();
+            if fits && focus.is_some() {
+                let bounds = Rect {
+                    origin: placement.bounds.origin + translate,
+                    size: placement.bounds.size,
+                };
+                let room = viewport.size - Vec2::new(32.0, 32.0);
+                let scale = (room.x / bounds.size.x)
+                    .min(room.y / bounds.size.y)
+                    .clamp(FIT_FLOOR, 1.0);
+                let top = Vec2::new(bounds.center().x, bounds.origin.y);
+                let mut offset = top - top * scale;
+                if bounds.size.x * scale > room.x {
+                    offset.x = viewport.origin.x + 16.0 - scale * bounds.origin.x;
+                }
+                group.item.transform = Affine::pose(scale, 0.0, offset);
+            }
             if let Some((text, size)) = title {
+                // shortcut: groups stay frameless pending P3 check 8's membership verdict; add frames if it rejects headings.
                 let (bounds, origin) = compound::banded(contents.unwrap_or_default(), size);
                 group.item.bounds = bounds;
                 group.item.primitives = Arc::from([Prim::Text {
@@ -431,24 +514,30 @@ pub(super) fn place(
             } else if let Some(contents) = contents {
                 group.item.bounds = contents;
             }
-            // shortcut: a cluster growing on a later step never glides or moves, so it can overlap
-            // a sibling or end off-screen with nothing bringing it into view; revisit in A9.
+            // shortcut: a cluster growing on a later step never moves its siblings or glides, so it
+            // can overlap one or end off-screen; moving them means rebuilding their cached edge
+            // anchors and references; P3 check 8 must accept this or require motion-owned reflow.
             if !cluster && let Some(focus) = focus {
                 let current = group.rest.pos;
-                let shifted = Rect {
-                    origin: focus.origin + current,
-                    size: focus.size,
-                };
+                let shifted = group.rest.transform().bounds(focus);
+                let visible = fit_transform(group)
+                    .inverse()
+                    .ok_or_else(|| layout_error(ErrorCode::TransformOverflow))?
+                    .bounds(viewport);
                 let mut delta = Vec2::default();
-                if shifted.max().x > viewport.max().x {
-                    delta.x = viewport.max().x - shifted.max().x;
-                } else if shifted.origin.x < viewport.origin.x {
-                    delta.x = viewport.origin.x - shifted.origin.x;
+                if !fits || shifted.size.x <= visible.size.x {
+                    if shifted.max().x > visible.max().x {
+                        delta.x = visible.max().x - shifted.max().x;
+                    } else if shifted.origin.x < visible.origin.x {
+                        delta.x = visible.origin.x - shifted.origin.x;
+                    }
                 }
-                if shifted.max().y > viewport.max().y {
-                    delta.y = viewport.max().y - shifted.max().y;
-                } else if shifted.origin.y < viewport.origin.y {
-                    delta.y = viewport.origin.y - shifted.origin.y;
+                if !fits || shifted.size.y <= visible.size.y {
+                    if shifted.max().y > visible.max().y {
+                        delta.y = visible.max().y - shifted.max().y;
+                    } else if shifted.origin.y < visible.origin.y {
+                        delta.y = visible.origin.y - shifted.origin.y;
+                    }
                 }
                 if delta.x.abs() > f32::EPSILON || delta.y.abs() > f32::EPSILON {
                     glides.push(Glide {
@@ -462,16 +551,21 @@ pub(super) fn place(
     Ok((glides, prebuilt))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a slot needs its rank, size, flow, rank gap, visible area and ranked fallback"
+)]
 fn free_slot(
     state: &LayoutState,
     parent: Option<Handle>,
     rank: usize,
     size: Vec2,
     (dir, reverse): (Direction, bool),
+    gap: f32,
     viewport: Rect,
     fallback: Vec2,
 ) -> Result<Rect, PrepareError> {
-    // shortcut: slots ignore edge alignment and the resting glide; revisit in A9.
+    // shortcut: slots ignore edge alignment; add it when renders show crooked incremental edges.
     let mut same_rank: Vec<_> = state
         .objects
         .values()
@@ -507,7 +601,7 @@ fn free_slot(
         })
         .max_by(f32::total_cmp);
     let fallback = prior.map_or(lengthwise(fallback), |edge| {
-        sign * (edge + diagram::RANK_GAP + lengthwise(size) * 0.5)
+        sign * (edge + gap + lengthwise(size) * 0.5)
     });
     let along = same_rank
         .first()
@@ -674,7 +768,14 @@ fn node_primitives(
         bounds.center().y - total_height * 0.5,
     );
     output.push(Prim::Text {
-        origin,
+        origin: text_origin(
+            Rect {
+                origin,
+                size: label,
+            },
+            Some(180.0),
+            Align::Center,
+        ),
         text: node.label.clone(),
         style: TextStyle {
             size: build.theme.font_size,
@@ -687,7 +788,14 @@ fn node_primitives(
     if let Some(text) = &node.sub {
         let size = sub.expect("subtitle was measured");
         output.push(Prim::Text {
-            origin: Vec2::new(bounds.center().x - size.x * 0.5, origin.y + label.y + 4.0),
+            origin: text_origin(
+                Rect {
+                    origin: Vec2::new(bounds.center().x - size.x * 0.5, origin.y + label.y + 4.0),
+                    size,
+                },
+                Some(180.0),
+                Align::Center,
+            ),
             text: text.clone(),
             style: TextStyle {
                 size: build.theme.font_size - 2.0,
@@ -701,10 +809,36 @@ fn node_primitives(
     output
 }
 
+/// Where a ray from `rect`'s center toward `toward` leaves the outline of the node `id`: its
+/// diamond or ellipse inscribed in `rect`, else `rect` itself.
+fn port(state: &LayoutState, id: &crate::WireId, rect: Rect, toward: Vec2) -> Vec2 {
+    let shape = state
+        .objects
+        .get(id)
+        .and_then(|object| match &*object.source {
+            Op::Node(node) => Some(node.shape),
+            _ => None,
+        });
+    let center = rect.center();
+    let delta = toward - center;
+    let half = rect.size * 0.5;
+    let reach = match shape {
+        Some(NodeShape::Diamond) => (delta.x / half.x).abs() + (delta.y / half.y).abs(),
+        Some(NodeShape::Circle) => (delta.x / half.x).hypot(delta.y / half.y),
+        _ => return rect.edge_toward(toward),
+    };
+    if reach.is_normal() {
+        center + delta * reach.recip()
+    } else {
+        rect.edge_toward(toward)
+    }
+}
+
 pub(super) fn edge(
     source: &Arc<Op>,
     handle: Handle,
     parent: Option<Handle>,
+    direction: Direction,
     state: &LayoutState,
     build: &mut Build<'_>,
     cached: Option<&Placed>,
@@ -717,10 +851,18 @@ pub(super) fn edge(
     } else {
         let from = super::primitives::reference(state, &edge.from, parent)?;
         let to = super::primitives::reference(state, &edge.to, parent)?;
-        [from.edge_toward(to.center()), to.edge_toward(from.center())]
+        [
+            port(state, &edge.from, from, to.center()),
+            port(state, &edge.to, to, from.center()),
+        ]
     };
     let middle = (a + b) * 0.5;
-    let control = Vec2::new(middle.x, a.y);
+    // shortcut: curves can obscure skipped-rank and back links; P3 check 8 decides whether detour routing is required.
+    let control = if direction == Direction::Right {
+        Vec2::new(middle.x, a.y)
+    } else {
+        Vec2::new(a.x, middle.y)
+    };
     let mut points = Vec::new();
     let pieces = u16::try_from(crate::path::PROCEDURAL_CURVE_PIECES)
         .expect("procedural curve count fits u16");
@@ -765,7 +907,7 @@ pub(super) fn edge(
         let origin = middle - size * 0.5;
         bounds = bounds.union(Rect { origin, size });
         primitives.push(Prim::Text {
-            origin,
+            origin: text_origin(Rect { origin, size }, Some(180.0), Align::Center),
             text: label.clone(),
             style,
             color: build.theme.fg.into(),
