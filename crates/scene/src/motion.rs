@@ -2,6 +2,7 @@
 //! schedule, and an allocation-free sampler over activated layout.
 use crate::{
     Handle, Ms, Op, Text,
+    deferred::Deferred,
     display::{Item, Paint, Prim},
     geom::{Affine, Vec2},
     layout::{LayoutState, PrepareError, PreparedStep, Rest},
@@ -570,12 +571,14 @@ impl SceneView {
     /// on this view's layout.
     pub fn activate(
         &mut self,
-        step: PreparedStep,
+        mut step: PreparedStep,
         now: u64,
         segment_ms: u64,
         out: &mut Frame,
     ) -> Result<(), PrepareError> {
         if !step.is_based_on(&self.layout) {
+            let bytes = step.resident_bytes;
+            drop(Deferred::new(step, bytes));
             return Err(PrepareError::Stale);
         }
         out.clear();
@@ -652,11 +655,23 @@ impl SceneView {
             starts.push(node.timing.start);
         }
         self.tracks = own(&mut nodes, candidates);
-        self.paint = paint_order(&nodes);
-        self.nodes = nodes;
-        self.activated = step.index + 1;
+        let paint = paint_order(&nodes);
+        // The outgoing layout may hold the last references to geometry this step removed.
+        let bytes = self.layout.index_bytes()
+            + self.nodes.capacity() * size_of::<Node>()
+            + self.paint.capacity() * size_of::<usize>();
+        let activated = step.index + 1;
+        std::mem::swap(&mut self.layout, &mut step.after);
+        drop(Deferred::new(
+            (
+                step,
+                std::mem::replace(&mut self.nodes, nodes),
+                std::mem::replace(&mut self.paint, paint),
+            ),
+            bytes,
+        ));
+        self.activated = activated;
         self.deadline = now.saturating_add(u64::from(MAX_MOTION_MS));
-        self.layout = step.after;
         self.generation = Arc::new(());
         Ok(())
     }

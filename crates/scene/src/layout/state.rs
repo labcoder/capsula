@@ -1,6 +1,7 @@
 use super::{PrepareError, primitives};
 use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
+    deferred::Deferred,
     display::Item,
     geom::{Affine, Vec2},
     mermaid::Extra,
@@ -174,10 +175,14 @@ impl LayoutState {
     }
     /// Index and placement records, which every prepared result holds its own copy of,
     /// including the two heap copies of each object's id.
-    pub(super) fn index_bytes(&self) -> usize {
+    pub(crate) fn index_bytes(&self) -> usize {
         let ids: usize = self.objects.keys().map(|id| id.as_str().len()).sum();
         self.objects.len() * (size_of::<Placed>() + size_of::<WireId>() + size_of::<usize>() * 3)
             + 2 * ids
+    }
+    /// Every placed handle in order: what a Stop at rest reveals, without building a view.
+    pub fn revealed_at_rest(&self) -> Vec<Handle> {
+        self.handles.keys().copied().collect()
     }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {
@@ -246,8 +251,7 @@ impl LayoutState {
         if self.revision > self.cut_revision.max(scene.activated()) {
             return Err(primitives::layout_error(ErrorCode::OutOfRange));
         }
-        let mut after = self.clone();
-        let mut retained = BTreeMap::new();
+        let mut retained = Deferred::new(BTreeMap::new(), self.index_bytes());
         for (id, handle, parent) in scene.preparation_objects() {
             let mut object = self
                 .objects
@@ -276,20 +280,23 @@ impl LayoutState {
             object.item.parent = parent;
             retained.insert(id.clone(), object);
         }
-        after.objects = retained;
-        after.handles = after
-            .objects
-            .iter()
-            .map(|(id, object)| (object.item.handle, id.clone()))
-            .collect();
+        let mut after = retained.map(|objects| Self {
+            owner: Arc::clone(&self.owner),
+            cut_revision: scene.preparation_cut(),
+            revision: scene.revision(),
+            version: Arc::new(()),
+            handles: objects
+                .iter()
+                .map(|(id, object)| (object.item.handle, id.clone()))
+                .collect(),
+            objects,
+            extras: self.extras.clone(),
+        });
         after.prune_extras();
-        after.revision = scene.revision();
-        after.cut_revision = scene.preparation_cut();
-        after.version = Arc::new(());
         for object in after.objects.values() {
             after.world_bounds(object)?;
         }
-        Ok(after)
+        Ok(after.into_inner())
     }
 }
 

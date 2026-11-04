@@ -578,6 +578,47 @@ local/cross views at the shared 1,500-object cap. Three warm-ups precede 16 time
 the histories, resident-byte totals and result destruction are outside the timer, and
 text measurement is the fixed fake. Run it like the preparation measurement above.
 
+### Deferred destruction
+
+`deferred::Deferred<T>` hands a discarded value to one long-lived `scene-dropper`
+thread, so freeing a large prefix or semantic state never runs on the thread that
+discarded it, above all the shell's UI thread. Dropping one costs a `Box` and an
+unbounded channel send, and never waits.
+
+```mermaid
+flowchart LR
+    D[Discard on the UI or a worker] -->|Box and send| Q[Unbounded queue, metered]
+    Q --> T[scene-dropper runs the destructor]
+    T -->|thread dies| F[running is false: stop intake, leak later values]
+```
+
+The host must call `deferred::start()` once before intake, and refuse intake when it
+fails. Production startup is not wired yet; this foundation keeps v1 off and does not
+change when applications destroy values. Until startup, and on the dropper itself,
+values drop in place, so tests and nested
+values behave as before. `running()` turns false once the dropper thread has died,
+which only a panicking destructor in an unwinding build can cause; `start()` then
+fails too. Later values are leaked rather than destroyed on the caller, because a dead
+dropper is a failure, not a shutdown path. There is no shutdown call: at exit, whatever
+is queued goes with the process.
+
+`pending()` reports the values queued or still being destroyed and the bytes their
+owners attributed; `take_peak()` returns the attributed high water since its last
+call. Attributions are owner estimates, not heap measurements, and nested values
+aren't counted again. The queue has no byte bound and sits outside the 64 MiB
+presenter cap: it is metered, not limited, which is a known shortcut.
+
+Inside the crate, admission keeps its candidate map and change records protected, so
+an early error, a stale commit or a discarded `Admitted` retires them. `commit`,
+`stop`, `clear` and step retirement swap out the replaced object map and undo records
+and retire them. `LayoutState::cut` builds the kept prefix directly and retires a
+partial one on error. `PrepareInput::new` retires a rejected predecessor, and
+`SceneView::activate` retires a stale step or the outgoing layout, nodes and paint
+order. `SceneState::attributed_bytes()` estimates what a whole semantic state owns, for
+the host's attribution. The host wraps everything it holds or discards itself, and
+clears a paint frame before discarding the view it sampled, since the frame shares that
+view's geometry.
+
 ### Tables
 
 `layout::table` ports S1's fitted column widths and number formatting into preparation.
