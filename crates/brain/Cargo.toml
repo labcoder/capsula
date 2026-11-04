@@ -37,6 +37,8 @@ zeroize = { version = "1", features = ["serde"] }
 unic-langid.workspace = true
 url = "2"
 webbrowser = "1"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
