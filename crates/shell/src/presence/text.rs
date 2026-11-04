@@ -216,7 +216,6 @@ impl Presence {
     }
 
     fn hide_text(&mut self, reason: Hide, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let bounds = self.layout.panel;
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
@@ -232,12 +231,11 @@ impl Presence {
             .take()
             .filter(|_| matches!(reason, Hide::Dismiss));
         text.window
-            .update(cx, |_, window, cx| {
+            .update(cx, |_, window, _| {
                 if let Some(previous) = previous {
                     platform::restore_foreground(window, previous);
                 }
-                platform::place_hidden_presence_window(window, bounds)?;
-                window.bounds_changed(cx);
+                platform::hide_presence_window(window)?;
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;

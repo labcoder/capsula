@@ -1,7 +1,9 @@
 # Frame rate
 
-The stretch is Kumochi's only animation, and it draws no faster than the user's **Max frame
-rate** (Settings → General). The choices are Automatic (the default), 30, 60, 72, 120 and 144.
+The stretch is the only animation Kumochi paces itself, and it draws no faster than the
+user's **Max frame rate** (Settings → General). A few of Kit's own animations run at the full
+refresh; [Pacing](#pacing) lists them. The choices are Automatic (the default), 30, 60, 72, 120
+and 144.
 The code is `shell/src/presence/frame_rate.rs` and the stretch's `tick`; all of it is
 cross-platform, reading the display's refresh through GPUI's `Window::refresh_interval`.
 

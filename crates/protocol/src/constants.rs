@@ -58,11 +58,12 @@ pub const INSTANCE_SERVICE: &str = if cfg!(debug_assertions) {
     "Kumochi instance"
 };
 
-/// The shell's single-instance mutex, per session.
-pub const SHELL_MUTEX: &str = if cfg!(debug_assertions) {
-    r"Local\kumochi-dev-shell"
+/// The shell's single-instance lock file, `<SHELL_LOCK>-<session id>.lock` in the [`DATA_DIR`]
+/// folder under `%LOCALAPPDATA%`: one shell per Windows session.
+pub const SHELL_LOCK: &str = if cfg!(debug_assertions) {
+    "kumochi-dev-shell"
 } else {
-    r"Local\kumochi-shell"
+    "kumochi-shell"
 };
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
