@@ -274,6 +274,34 @@ fn trailers_may_be_exactly_the_cap_and_no_longer() {
 }
 
 #[test]
+#[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release measure_ -- --ignored --nocapture"]
+fn measure_chunked_framing() {
+    use std::time::Instant;
+    let payload = vec![b'x'; 1024 * 1024];
+    let mut wire = Vec::new();
+    for chunk in payload.chunks(16 * 1024) {
+        wire.extend(format!("{:x}\r\n", chunk.len()).into_bytes());
+        wire.extend_from_slice(chunk);
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"0\r\n\r\n");
+    let rounds: u32 = 200;
+    let started = Instant::now();
+    for _ in 0..rounds {
+        let (data, end) = decode(Framing::Chunked, &wire, 16 * 1024);
+        assert_eq!(data.len(), payload.len());
+        assert!(end.is_ok());
+    }
+    let took = started.elapsed();
+    let mib = f64::from(rounds) * f64::from(u32::try_from(wire.len()).expect("about 1 MiB"))
+        / (1024.0 * 1024.0);
+    eprintln!(
+        "chunked framing: {:.0} MiB/s over 16 KiB reads, copy out included",
+        mib / took.as_secs_f64()
+    );
+}
+
+#[test]
 fn length_and_close_bodies_end_where_they_say() {
     assert_eq!(
         decode(Framing::Length(5), b"helloNEXT", 2),

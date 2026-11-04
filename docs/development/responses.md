@@ -66,7 +66,17 @@ request was fully written, its response framing was read to the end (`response.c
 the end of the HTTP body, so the rest gets one more second), no bytes are left over, and the
 server didn't send `Connection: close`.
 
-**HTTP bounds.** ALPN offers only `http/1.1`, and TLS early data is off.
+**HTTP bounds.** ALPN offers only `http/1.1`, and TLS early data is off. The framing bounds are
+under HTTP framing below. On top of them, an error body is read up to 1 MiB and a response up to
+17 MiB of wire bytes. A 2xx must be `text/event-stream`, and a 3xx is refused.
+
+## HTTP framing
+
+`wire` holds the HTTP/1.1 the transport speaks, so the transport, not a library buffer, decides
+when the request's last byte has left. `request` builds the request in one buffer, sized once and
+wiped on drop, and refuses a bearer that isn't a valid header value (no CR, LF, NUL, space or
+other control bytes). `head` parses a response head with `httparse`, and `Body` steps through the
+body's framing, handing out the data between framing bytes.
 
 | Bound | Limit |
 | --- | --- |
@@ -74,14 +84,15 @@ server didn't send `Connection: close`.
 | Interim heads (100, 103) | 4; 101 and other 1xx are refused |
 | A chunk-size line, extensions included | 1 KiB, at most 16 hex digits |
 | Trailers | 16 KiB |
-| An error body | 1 MiB |
-| Wire bytes per response | 17 MiB |
 
 Framing is one clear choice: `Content-Length`, `Transfer-Encoding: chunked`, or read to close
 with `Connection: close`. Both length and chunked, a repeated length, another transfer coding, or
-no framing at all is refused. Header names and tokens match case-insensitively, lengths parse with
-checked arithmetic, and no peer-supplied length sizes an allocation. A 2xx must be
-`text/event-stream`, and a 3xx is refused.
+no framing at all is refused, and so is anything but HTTP/1.1. Header names and tokens match
+case-insensitively, lengths parse with checked arithmetic, and no peer-supplied length sizes an
+allocation. A body that ends inside its framing is `Truncated`.
+
+`budget` caps model requests for live checks: debug builds read `KUMOCHI_LIVE_BUDGET`, which
+`cargo xtask live` sets, and a value that isn't a count allows none. Release builds have no cap.
 
 ## Reading the stream
 
