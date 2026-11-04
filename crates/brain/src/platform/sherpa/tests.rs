@@ -27,6 +27,7 @@ use super::{
     Fns, MAX_TRANSCRIPT_BYTES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa, check_closure,
     only_expected_added, sample_count, stage, verify,
 };
+use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
 
@@ -1083,7 +1084,9 @@ fn ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
-/// Release to text through the owner, beside S5's 169/391/1,355 ms (p95 197/476/1,467).
+/// Release to text through the owner and the speech worker, beside the in-process run 2's
+/// 253/631/1,894 ms and S5's 169/391/1,355 ms. Build the release `kumochid` first
+/// (`cargo test --release --no-run` does).
 #[test]
 #[ignore = "Rez only: real models, under measuring.lock"]
 fn measure_parakeet() {
@@ -1091,26 +1094,25 @@ fn measure_parakeet() {
     let natives = natives_dir();
     let models = env_dir("VOICE_MODELS");
     let clips = env_dir("STT_CLIPS");
-    let before = super::modules().expect("module list");
-
-    let started = std::time::Instant::now();
-    let sherpa = Sherpa::load(&natives).expect("natives load");
-    let loaded = started.elapsed();
-    let recognizer = sherpa.recognizer(&models).expect("recognizer");
-    let created = started.elapsed();
-    recognizer
-        .decode(16_000, &vec![0; 16_000])
-        .expect("prewarm");
-    println!(
-        "load: natives {:.0} ms, recognizer {:.0} ms, prewarm {:.0} ms",
-        ms(loaded),
-        ms(created.saturating_sub(loaded)),
-        ms(started.elapsed().saturating_sub(created))
-    );
-    drop(recognizer);
-    drop(sherpa);
-
-    let handle = SttHandle::spawn(natives).expect("worker");
+    let worker = std::env::current_exe()
+        .expect("own path")
+        .ancestors()
+        .nth(2)
+        .expect("target/<profile>/deps")
+        .join("kumochid.exe");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let tasks = runtime.handle().clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let driver = std::thread::spawn(move || runtime.block_on(stopped).ok());
+    let job = std::sync::Arc::new(crate::platform::Job::new().expect("job"));
+    let handle = {
+        let _context = tasks.enter();
+        let speech = SpeechSupervisor::start(worker, job).expect("speech worker");
+        SttHandle::spawn(tasks.clone(), speech, natives).expect("owner")
+    };
     handle.load(models);
     let ask = |rate: u32, samples: Vec<i16>| {
         let (reply, answer) = tokio::sync::oneshot::channel();
@@ -1165,8 +1167,7 @@ fn measure_parakeet() {
             sixteen.get_or_insert(text);
         }
     }
-    let after = super::modules().expect("module list");
-    for path in after.iter().filter(|path| !before.contains(path)) {
-        println!("new module: {}", path.display());
-    }
+    drop(handle);
+    drop(stop);
+    driver.join().expect("the runtime ends");
 }

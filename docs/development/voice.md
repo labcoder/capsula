@@ -147,15 +147,16 @@ makes lives on the thread that loaded it.
 
 ### The owner
 
-`voice::stt::SttHandle` owns speech input. Its one thread, `voice-stt`, loads the natives and
-Parakeet, decodes and unloads, so the coordinator never waits on native work.
+`voice::stt::SttHandle` owns speech input. Its one thread, `voice-stt`, asks the speech worker
+(below) to load, decode and unload through the brain's runtime, so the coordinator never waits on
+that work. sherpa-onnx never loads in the brain.
 
 ```mermaid
 flowchart LR
   C["coordinator (PR 5)"] -->|"load / unload / try_decode, never blocking"| H["SttHandle: state behind a mutex"]
   H --> T["voice-stt thread"]
-  T --> S["platform::sherpa: Sherpa, Recognizer"]
-  S --> L["platform::windows::library: pinned loads"]
+  T --> S["speech::SpeechHandle"]
+  S --> W["kumochid --speech: platform::sherpa"]
 ```
 
 - **Control:** load, unload and shutdown set fields in one shared state; none of them queues, so
@@ -163,12 +164,14 @@ flowchart LR
   `SttBusy`. While no model is ready (unloaded, loading, or after a failed load) a decode is
   answered `NotLoaded` at once, and so is one that arrives after unload while a decode still runs.
   Unload answers a waiting decode `Stale`; a decode in progress finishes and is answered, then the
-  model is torn down. A decode whose caller has gone is skipped.
-- **Load:** `Sherpa::load`, the recognizer and one second of silence as warm-up. A failed load
-  leaves speech input unloaded until the next `load`. A new models folder reloads, and a decode
-  left waiting is served by the new model.
-- **Shutdown:** dropping the handle lets the current native call finish, tears down in order and
-  ends the thread; nothing waits for it.
+  model is unloaded. A decode whose caller has gone is skipped. `Decode` and `SttResult` print no
+  samples and no transcript text.
+- **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
+  `load`. A new models folder reloads, and a decode left waiting is served by the new model.
+- **A lost worker:** the running decode is answered `Failed(WorkerLost)`, a waiting one
+  `NotLoaded`, and speech input stays unloaded until the next `load`.
+- **Shutdown:** dropping the handle lets the request in flight finish, unloads and ends the
+  thread; nothing waits for it.
 
 ### The FFI owner
 
@@ -314,5 +317,5 @@ binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODE
 - `measure_planted_neighbor` stages the pins, plants an `MSVCP140.dll` beside them and checks the
   system one loads instead.
 - `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
-  the owner at 16, 44.1 and 48 kHz, with WER against S5's reference transcripts, and lists the
-  modules that appeared.
+  the owner and the release `kumochid --speech` at 16, 44.1 and 48 kHz, with WER against S5's
+  reference transcripts.

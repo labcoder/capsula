@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use super::{Decode, Decoder, NativeError, State, SttBusy, SttHandle, SttResult};
+use super::{Decode, Decoder, Served, State, SttBusy, SttHandle, SttResult};
+use crate::speech::{NativeError, SpeechError};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -24,10 +25,11 @@ enum Event {
 struct FakeDecoder {
     events: mpsc::Sender<Event>,
     release: Arc<Mutex<mpsc::Receiver<()>>>,
+    lose: Arc<AtomicBool>,
 }
 
 impl Decoder for FakeDecoder {
-    fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, NativeError> {
+    fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
         self.events
             .send(Event::Decoding(samples.len()))
             .expect("the test watches");
@@ -36,6 +38,9 @@ impl Decoder for FakeDecoder {
             .expect("one decoder")
             .recv_timeout(WAIT)
             .expect("the test releases the decode");
+        if self.lose.load(Ordering::SeqCst) {
+            return Err(SpeechError::WorkerLost);
+        }
         Ok(format!("{rate}:{}", samples.len()))
     }
 }
@@ -54,6 +59,8 @@ struct Harness {
     events: mpsc::Receiver<Event>,
     release: mpsc::Sender<()>,
     fail_load: Arc<AtomicBool>,
+    /// The running decode's worker is lost when it's released.
+    lose: Arc<AtomicBool>,
 }
 
 impl Harness {
@@ -63,19 +70,25 @@ impl Harness {
         let released = Arc::new(Mutex::new(released));
         let fail_load = Arc::new(AtomicBool::new(false));
         let fail = Arc::clone(&fail_load);
+        let lose = Arc::new(AtomicBool::new(false));
+        let losing = Arc::clone(&lose);
         let exit = OnExit(events_in.clone());
         let handle = SttHandle::spawn_with(move |models: &Path, serve| {
             let _exit = &exit;
             if fail.load(Ordering::SeqCst) {
-                return Err(NativeError::Load);
+                return Err(SpeechError::Native(NativeError::Load));
             }
             events_in
                 .send(Event::Loaded(models.to_owned()))
                 .expect("the test watches");
-            serve(&FakeDecoder {
+            let served = serve(&FakeDecoder {
                 events: events_in.clone(),
                 release: Arc::clone(&released),
+                lose: Arc::clone(&losing),
             });
+            if served == Served::Lost {
+                return Err(SpeechError::WorkerLost);
+            }
             events_in.send(Event::TornDown).expect("the test watches");
             Ok(())
         })
@@ -85,6 +98,7 @@ impl Harness {
             events,
             release,
             fail_load,
+            lose,
         }
     }
 
@@ -148,6 +162,27 @@ fn answer(reply: oneshot::Receiver<SttResult>) -> SttResult {
 
 fn text(len: usize) -> SttResult {
     SttResult::Text(format!("16000:{len}"))
+}
+
+#[test]
+fn debug_shows_no_samples_and_no_transcript() {
+    let marker = "kumochi-transcript-sentinel";
+    let bytes = format!("{:?}", marker.as_bytes());
+    let text = format!("{:?}", SttResult::Text(marker.into()));
+    assert_eq!(text, format!("Text({} bytes)", marker.len()));
+    assert!(!text.contains(marker) && !text.contains(&bytes[1..bytes.len() - 1]));
+
+    let (reply, _answer) = oneshot::channel();
+    let decode = format!(
+        "{:?}",
+        Decode {
+            rate: 16_000,
+            samples: vec![31_337; 3],
+            reply,
+        }
+    );
+    assert!(!decode.contains("31337"), "{decode}");
+    assert!(decode.contains("samples: 3"), "{decode}");
 }
 
 #[test]
@@ -251,6 +286,30 @@ fn a_failed_load_leaves_it_unloaded_until_asked_again() {
         SttResult::NotLoaded
     );
     harness.fail_load.store(false, Ordering::SeqCst);
+    harness.handle.load("models".into());
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+}
+
+#[test]
+fn a_lost_worker_fails_the_running_decode_and_leaves_it_unloaded_until_asked_again() {
+    let harness = Harness::loaded();
+    let running = harness.decode(1).expect("runs");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    let waiting = harness.decode(2).expect("waits");
+    harness.lose.store(true, Ordering::SeqCst);
+    harness.release();
+    assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
+    assert_eq!(
+        answer(waiting),
+        SttResult::NotLoaded,
+        "nothing runs on the lost model"
+    );
+    assert_eq!(
+        answer(harness.decode(3).expect("answered")),
+        SttResult::NotLoaded
+    );
+    harness.no_event();
+    harness.lose.store(false, Ordering::SeqCst);
     harness.handle.load("models".into());
     assert_eq!(harness.event(), Event::Loaded("models".into()));
 }
