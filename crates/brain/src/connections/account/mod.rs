@@ -606,6 +606,11 @@ impl AccountState {
             }
         };
         self.busy = false;
+        let marker = match snapshot.marker {
+            Ok(marker) => marker,
+            Err(failure) => return self.unread(&failure),
+        };
+        self.leaving = None;
         let mut damaged = false;
         let mut readable = |name: &str, failure: &super::error::VaultError| {
             tracing::warn!(%failure, record = name, "an account record can't be read");
@@ -624,11 +629,11 @@ impl AccountState {
             .revocable
             .inspect_err(|failure| readable("revoke", failure))
             .unwrap_or_default();
-        if let Some(sign_out) = snapshot.marker.sign_out {
+        if let Some(sign_out) = marker.sign_out {
             self.resume(sign_out);
         }
         self.loaded = Loaded {
-            notice: snapshot.marker.notice,
+            notice: marker.notice,
             host,
             account,
             exchanges: exchanges(&revocable),

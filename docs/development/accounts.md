@@ -293,7 +293,8 @@ set back while it's listed only delays its age-out.
 **Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
 at once: the attempt moves, the listener closes, the account leaves memory, and the view is
 `SigningOut { cleanup: Running, revocation_unconfirmed: true }`. A save the current attempt already
-dispatched finishes and is published first. One marker write then promotes the sign-out
+dispatched still lands behind that fence: no later op replaces the sign-out, the view stays
+`SigningOut`, and Prepare adopts what it saved. One marker write then promotes the sign-out
 (`sign_out: Keep/Revoking`, `sweep`, `notice`) before any token-bearing write or delete. If that's
 refused, the view is `NotDurable` with `SignOutNotDurable` and Retry, and use stays fenced in this
 process only: a restart loads the account again. Every later step is safe to repeat, and a restart
@@ -304,22 +305,23 @@ or Retry enters at the first step of the persisted phase:
    save, an ambiguous ending sets `outcome_unknown`, and a refused save holds the set (`Refused`)
    until Retry; after a crash its `request_pending` keeps the warning.
 2. **Prepare.** `chatgpt`'s refresh token becomes the `Account` entry unless one is listed (that
-   token or its successor), so a replay never duplicates or overwrites it. A record that can't be
-   read persists `outcome_unknown` first; an unreadable list isn't rewritten, but the account token
-   is still revoked.
+   token or its successor), so a replay never duplicates or overwrites it. A record whose data is
+   damaged persists `outcome_unknown` first; a damaged list isn't rewritten, but the account token
+   is still revoked. A refused read decides nothing: the step is `Refused` and Retry reruns it.
 3. **Revoke.** One run over the list, inside the usual 10 s budget.
 4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
    counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
-   only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. If
-   it's refused, the phase stays `Revoking` and nothing is deleted.
+   only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With
+   `outcome_unknown` persisted, an absent list isn't checked against the account, so a damaged
+   account still reaches Delete. If it's refused, the phase stays `Revoking` and nothing is deleted.
 5. **Delete**, driven by the marker alone, whether or not a manifest survives. Keep rewrites a
    readable account to its registration and deletes every other name of the record by name. An
-   account with no manifest, or one that can't be read, is erased, as Erase does. Then `revoke` is
-   erased. An erase deletes the manifest first, then all 128 chunk names, then checks all 129 gone,
+   account with no manifest, or with damaged data, is erased, as Erase does; a refused read erases
+   nothing: the step is `Refused` and Retry reruns it. Then `revoke` is erased. An erase deletes the manifest first, then all 128 chunk names, then checks all 129 gone,
    so an interruption leaves chunks with no manifest that the next start or Retry still deletes.
 6. **Finish.** Only once its own by-name check of both records passes, the marker becomes
-   notice-only or is deleted. The view becomes `SignedOut { revocation_unconfirmed: notice }`, and
-   the vault is read again so the next sign-in reuses the kept registration.
+   notice-only or is deleted. Use stays fenced until the vault is read again, so the next sign-in
+   reuses the kept registration; then the view becomes `SignedOut { revocation_unconfirmed: notice }`.
 
 ```mermaid
 stateDiagram-v2
@@ -345,8 +347,10 @@ stateDiagram-v2
 
 While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start nothing and are
 answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
-(`Keep`); `Erase` comes only from a persisted marker, an unreadable one included, until PR 10
-reports `PlanState::Unavailable`. Fixtures crash after, and refuse, each of the store mutations a
+(`Keep`); `Erase` comes only from a persisted marker, a damaged one included (it reads as
+`Erase`/`Revoking`), until PR 10 reports `PlanState::Unavailable`. A refused marker read at startup
+decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and Retry or the next start
+reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
 whole sign-out makes, for Keep and Erase.
 
 ## Credential storage

@@ -7,6 +7,7 @@
 )]
 
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 
 use super::*;
 use crate::connections::http_client::HttpError;
@@ -111,15 +112,23 @@ fn left(keep: bool, notice: bool) -> Vec<&'static str> {
     names
 }
 
+/// Answers each revocation run after the first `answered` until the sign-out ends or a step is
+/// refused; returns how many runs are answered then.
+fn answer(h: &mut Harness, confirm: bool, mut answered: usize) -> usize {
+    while h.revoking.len() > answered {
+        let run = h.revoking[answered].clone();
+        answered += 1;
+        h.feed(Input::Revoked(if confirm { run } else { Vec::new() }));
+    }
+    answered
+}
+
 /// Answers each revocation run after the first `answered`, and retries each refusal, until the
 /// sign-out ends.
 fn finish(h: &mut Harness, confirm: bool, mut answered: usize) {
     for _ in 0..16 {
-        if h.revoking.len() > answered {
-            let run = h.revoking[answered].clone();
-            answered += 1;
-            h.feed(Input::Revoked(if confirm { run } else { Vec::new() }));
-        } else if matches!(
+        answered = answer(h, confirm, answered);
+        if matches!(
             h.view(),
             AccountView::SigningOut {
                 cleanup: Cleanup::Refused | Cleanup::NotDurable,
@@ -187,9 +196,76 @@ fn boot(store: &FakeStore, service: &str) -> Harness {
     )
 }
 
-/// A whole sign-out, live Keep or resumed Erase, with `fault` at mutation `at`: a crash restarts
-/// the brain, a refusal is retried. Whether it crashed comes back too.
-fn faulted(seeded: &(FakeStore, String), erase: bool, at: usize, fault: Fault) -> (Harness, bool) {
+/// The store at a fault, before any recovery.
+struct Boundary {
+    marker: Option<String>,
+    names: Vec<String>,
+    /// Refresh tokens still held in `chatgpt` or durably listed.
+    tokens: Vec<String>,
+}
+
+fn boundary(store: &FakeStore, service: &str, lock: &Path) -> Boundary {
+    let reader = Vault::with_service(store.clone(), service, lock).expect("reader");
+    let account = reader
+        .load_for_sign_out()
+        .or_else(|_| reader.load_account())
+        .expect("readable account");
+    let mut tokens: Vec<String> = account
+        .and_then(|account| {
+            account
+                .expose()
+                .tokens
+                .as_ref()
+                .map(|t| t.refresh_token.to_string())
+        })
+        .into_iter()
+        .collect();
+    if let Some(list) = reader.load_revocations().expect("readable list") {
+        tokens.extend(
+            list.expose()
+                .entries
+                .iter()
+                .map(|e| e.refresh_token.to_string()),
+        );
+    }
+    let state = store.0.lock().expect("fake lock");
+    let prefix = format!("{service}/");
+    Boundary {
+        marker: state
+            .values
+            .get(&format!("{prefix}signout"))
+            .map(|bytes| String::from_utf8(bytes.expose().to_vec()).expect("JSON")),
+        names: state
+            .values
+            .keys()
+            .map(|name| name.strip_prefix(&prefix).expect("own service").to_owned())
+            .collect(),
+        tokens,
+    }
+}
+
+/// The names a clean run's first mutations leave on top of `seed`.
+fn replay(seed: &[String], prefix: &str, log: &[Mutation]) -> Vec<String> {
+    let mut names: std::collections::BTreeSet<String> = seed.iter().cloned().collect();
+    for mutation in log {
+        match mutation {
+            Mutation::Set(name) => names.insert(name.strip_prefix(prefix).expect("own").to_owned()),
+            Mutation::Delete(name) => names.remove(name.strip_prefix(prefix).expect("own")),
+        };
+    }
+    names.into_iter().collect()
+}
+
+/// A whole sign-out, live Keep or resumed Erase, with `fault` at mutation `at`. The store is captured
+/// at the fault: after the crash, or when the refusal stops the sign-out (or it ends). Then a
+/// crash restarts the brain and a refusal is retried. Whether it crashed comes back too.
+fn faulted(
+    seeded: &(FakeStore, String),
+    lock: &Path,
+    erase: bool,
+    at: usize,
+    fault: Fault,
+) -> (Harness, Boundary, bool) {
     let (store, service) = (seeded.0.fork(), seeded.1.clone());
     let mut first = None;
     let crashed = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -201,30 +277,49 @@ fn faulted(seeded: &(FakeStore, String), erase: bool, at: usize, fault: Fault) -
             store.arm(at, fault);
             h.op(AccountOp::SignOut);
         }
-        finish(h, true, 0);
+        answer(h, true, 0);
     }))
     .is_err();
-    if let Some(h) = first.filter(|_| !crashed) {
-        return (h, false);
+    let at_fault = boundary(&store, &service, lock);
+    if let Some(mut h) = first.filter(|_| !crashed) {
+        let answered = h.revoking.len();
+        finish(&mut h, true, answered);
+        return (h, at_fault, false);
     }
     let mut h = boot(&store, &service);
     finish(&mut h, true, 0);
-    (h, true)
+    (h, at_fault, true)
 }
 
-/// OSC-117: a crash after, or a refusal of, any one of the store mutations a whole sign-out makes
-/// leaves it to finish on the next start or Retry. The outcome is decided once, every token name
-/// goes, and a restart after the checkpoint only deletes and finishes.
+/// OSC-117 and CAPS-138 M2: a crash after, or a refusal of, any one of the store mutations a
+/// whole sign-out makes. At the fault, before recovery, the marker holds the phase and notice its
+/// position allows, a crash leaves exactly the clean run's names so far, and until the checkpoint
+/// the account record is whole and still holds its token. Afterwards the next start or Retry
+/// finishes: the outcome is decided once, every token name goes, and a restart after the
+/// checkpoint only deletes and finishes.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix, with its boundary and final assertions side by side"
+)]
 fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
+    let reader = Scratch::new("sign-out-boundary");
+    let lock = reader.db().with_file_name("reader.lock");
     for erase in [false, true] {
         let seeded = store(erase);
-        let (dry, _) = faulted(&seeded, erase, usize::MAX, Fault::Refuse);
+        let prefix = format!("{}/", seeded.1);
+        let seed: Vec<String> = seeded
+            .0
+            .names()
+            .iter()
+            .map(|name| name.strip_prefix(&prefix).expect("own service").to_owned())
+            .collect();
+        let account_names: Vec<&String> =
+            seed.iter().filter(|n| n.starts_with("chatgpt")).collect();
+        assert_eq!(account_names, ["chatgpt", "chatgpt/0/0"]);
+        let (dry, _, _) = faulted(&seeded, &lock, erase, usize::MAX, Fault::Refuse);
         let mutations = dry.store.0.lock().expect("fake lock").mutations.clone();
-        let (list, marker) = (
-            format!("{}/revoke", dry.service),
-            format!("{}/signout", dry.service),
-        );
+        let (list, marker) = (format!("{prefix}revoke"), format!("{prefix}signout"));
         let flips: Vec<usize> = (0..mutations.len())
             .filter(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == list))
             .collect();
@@ -234,14 +329,73 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
         let checkpoint = (flips[1]..mutations.len())
             .find(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == marker))
             .expect("the checkpoint write");
+        let finished = mutations.len() - 1;
+        assert!(
+            matches!(&mutations[finished], Mutation::Delete(name) if *name == marker),
+            "Finish deletes the marker last"
+        );
+        // Keep's registration save under Delete: a refusal of its old-slot cleanup after the
+        // flip is a commit with leftovers, which Delete's by-name sweep then removes.
+        let cleanup = (!erase).then(|| {
+            let flip = (checkpoint..finished)
+                .find(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == format!("{prefix}chatgpt")))
+                .expect("the registration's flip");
+            assert!(
+                matches!(&mutations[flip + 1], Mutation::Delete(name) if *name == format!("{prefix}chatgpt/0/0")),
+                "{:?}",
+                mutations[flip + 1]
+            );
+            flip + 1
+        });
+        let disposition = if erase { "Erase" } else { "Keep" };
+        let revoking = pending(disposition, "Revoking", false, false, true);
+        let deleting = pending(disposition, "Deleting", false, false, false);
         for at in 0..mutations.len() {
             for fault in [Fault::CrashAfter, Fault::Refuse] {
-                let (h, crashed) = faulted(&seeded, erase, at, fault);
+                let (h, at_fault, crashed) = faulted(&seeded, &lock, erase, at, fault);
                 let context = format!("erase {erase}, mutation {at}, {fault:?}");
                 assert_eq!(crashed, matches!(fault, Fault::CrashAfter), "{context}");
+                // A refusal in the checkpoint's own list rewrite, or of that cleanup, doesn't stop
+                // the sign-out.
+                let ran_on =
+                    !crashed && ((flips[0] + 1..checkpoint).contains(&at) || cleanup == Some(at));
                 // A refused rewrite leaves the confirmed entry listed, so the checkpoint can't
                 // claim confirmation.
-                let notice = !crashed && rewrite.contains(&at);
+                let notice = ran_on && rewrite.contains(&at);
+                let expected = if ran_on {
+                    notice.then(|| NOTICE_ONLY.to_owned())
+                } else if !crashed && !erase && at == 0 {
+                    None
+                } else if at < checkpoint || (!crashed && at == checkpoint) {
+                    revoking.clone()
+                } else if at < finished || !crashed {
+                    deleting.clone()
+                } else {
+                    None
+                };
+                assert_eq!(
+                    at_fault.marker, expected,
+                    "{context}: the marker at the fault"
+                );
+                if crashed {
+                    assert_eq!(
+                        at_fault.names,
+                        replay(&seed, &prefix, &mutations[..=at]),
+                        "{context}: the names at the crash"
+                    );
+                }
+                if !ran_on && at <= checkpoint {
+                    assert!(
+                        account_names
+                            .iter()
+                            .all(|name| at_fault.names.contains(name)),
+                        "{context}: nothing is deleted before the checkpoint"
+                    );
+                    assert!(
+                        at_fault.tokens.iter().any(|token| token == "refresh-old"),
+                        "{context}: the token is held until it's confirmed revoked"
+                    );
+                }
                 assert_eq!(h.view(), &signed_out_with(notice), "{context}");
                 assert_eq!(
                     h.marker(),
@@ -503,31 +657,56 @@ fn a_refused_promotion_is_not_durable_until_retry_writes_it() {
     }
 }
 
-/// R2-4: a sign-out during the current attempt's dispatched save waits for it, and then revokes
-/// what it saved.
+/// CAPS-130 87-H1: a sign-out during the current attempt's dispatched save fences at once. No op
+/// before or after it can replace it, the save lands without a usable account being shown or the
+/// notice cleared, and Prepare adopts what it saved.
 #[test]
-fn a_sign_out_during_a_dispatched_save_waits_and_revokes_the_saved_set() {
-    let mut h = Harness::seeded("sign-out-commit", account_only);
-    h.op(AccountOp::SignIn);
-    h.callback("client-saved");
-    h.hold = true;
-    h.reply(received(Some("refresh-new"), "subject-1", PLAN));
-    h.op(AccountOp::SignOut);
-    assert_eq!(h.view(), &AccountView::SigningIn);
-    h.release();
-    assert_eq!(
-        h.views[h.views.len() - 2..],
-        [
-            signed_in(PlanState::Enabled, None),
-            signing_out(Cleanup::Running, true)
-        ]
-    );
-    assert_eq!(
-        tokens(&h.revoking[0]),
-        [("refresh-new".to_owned(), Origin::Account)]
-    );
-    finish(&mut h, true, 0);
-    assert_eq!(h.view(), &signed_out());
+fn a_sign_out_during_a_dispatched_save_fences_at_once_and_revokes_the_saved_set() {
+    for (op, first) in [
+        (AccountOp::CancelSignIn, false),
+        (AccountOp::SignIn, false),
+        (AccountOp::EnablePlan, false),
+        (AccountOp::SignIn, true),
+    ] {
+        let context = format!("{op:?}, before the sign-out: {first}");
+        let mut h = Harness::seeded("sign-out-commit", account_only);
+        h.op(AccountOp::SignIn);
+        h.callback("client-saved");
+        h.hold = true;
+        h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+        if first {
+            h.op(op);
+        }
+        let shown = h.views.len();
+        h.op(AccountOp::SignOut);
+        assert_eq!(h.view(), &signing_out(Cleanup::Running, true), "{context}");
+        if !first {
+            h.op(op);
+        }
+        h.release();
+        assert_eq!(
+            h.view(),
+            &signing_out(Cleanup::Running, true),
+            "{context}: the save doesn't clear the notice"
+        );
+        assert_eq!(h.listening.len(), 1, "{context}: no replacement listener");
+        assert_eq!(
+            tokens(&h.revoking[0]),
+            [("refresh-new".to_owned(), Origin::Account)],
+            "{context}"
+        );
+        finish(&mut h, true, 0);
+        let mut expected = vec![signing_out(Cleanup::Running, true)];
+        if !first {
+            expected.push(signing_out(Cleanup::Running, true));
+        }
+        expected.extend([signing_out(Cleanup::Running, false), signed_out()]);
+        assert_eq!(h.views[shown..], expected, "{context}");
+        assert!(h.errors.is_empty(), "{context}");
+        // The save flipped the account to slot 1, so Keep's registration is back in slot 0.
+        assert_eq!(names(&h), ["chatgpt", "chatgpt/0/0", "host"], "{context}");
+        assert_eq!(h.account(), Some(registration()), "{context}");
+    }
 }
 
 /// Step 3: the sent exchange runs to its end and its set gets its own entry. An ambiguous ending
@@ -753,4 +932,220 @@ fn a_refused_account_read_during_delete_keeps_the_registration() {
     assert_eq!(h.view(), &signed_out());
     assert_eq!(names(&h), left(true, false));
     assert_eq!(h.account(), Some(registration()));
+}
+
+/// CAPS-138 M1: a refused startup marker read keeps use fenced and decides nothing, not even a
+/// fail-closed Erase. Once reads recover, Retry reads the real marker: no sign-out leaves the
+/// account usable, Revoking resumes there, and Deleting only deletes and finishes.
+#[test]
+fn a_refused_marker_read_at_startup_waits_for_the_real_marker() {
+    for phase in ["absent", "Revoking", "Deleting"] {
+        let (store, service) = prepared(|vault, _| {
+            account_only(vault);
+            vault.host_id().expect("host");
+            if phase != "absent" {
+                vault
+                    .update_marker(MarkerUpdate::Promote(Disposition::Keep))
+                    .expect("promoted");
+            }
+            if phase == "Deleting" {
+                vault
+                    .update_marker(MarkerUpdate::Checkpoint {
+                        list_empty_on_disk: false,
+                    })
+                    .expect("checkpoint");
+            }
+        });
+        store.0.lock().expect("fake lock").denied_read = Some(format!("{service}/signout"));
+        let mut h = boot(&store, &service);
+        assert_eq!(h.views, [signing_out(Cleanup::Refused, true)], "{phase}");
+        let (names_before, marker_before) = (names(&h), h.marker());
+        for op in [
+            AccountOp::SignIn,
+            AccountOp::EnablePlan,
+            AccountOp::CancelSignIn,
+            AccountOp::SignOut,
+        ] {
+            h.op(op);
+        }
+        assert!(h.listening.is_empty() && h.revoking.is_empty(), "{phase}");
+        assert_eq!(h.markers.len(), 1, "{phase}: only the refused load ran");
+        assert_eq!(names(&h), names_before, "{phase}");
+        assert_eq!(h.marker(), marker_before, "{phase}");
+        allow_reads(&h);
+        h.op(AccountOp::Retry);
+        match phase {
+            "absent" => {
+                assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+                assert!(h.revoking.is_empty());
+                assert_eq!(names(&h), names_before);
+                assert_eq!(h.marker(), None);
+            }
+            "Revoking" => {
+                assert_eq!(h.view(), &signing_out(Cleanup::Running, true));
+                assert_eq!(
+                    tokens(&h.revoking[0]),
+                    [("refresh-old".to_owned(), Origin::Account)]
+                );
+                finish(&mut h, true, 0);
+                assert_eq!(h.view(), &signed_out());
+                assert_eq!(names(&h), left(true, false));
+            }
+            _ => {
+                assert_eq!(h.view(), &signed_out_with(true));
+                assert!(h.revoking.is_empty(), "Deleting sends no revocation");
+                assert!(h.markers.iter().flatten().all(|m| !m.contains("Revoking")));
+                assert_eq!(names(&h), left(true, true));
+            }
+        }
+    }
+}
+
+/// CAPS-138 M2: a refused checkpoint holds the sign-out in Revoking with nothing deleted, and
+/// Retry runs Prepare, Revoke and the checkpoint again.
+#[test]
+fn a_refused_checkpoint_deletes_nothing_before_retry() {
+    let mut h = Harness::seeded("sign-out-refused-checkpoint", account_only);
+    h.op(AccountOp::SignOut);
+    let before = names(&h);
+    assert_eq!(
+        before,
+        [
+            "chatgpt",
+            "chatgpt/0/0",
+            "host",
+            "revoke",
+            "revoke/0/0",
+            "signout"
+        ]
+    );
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.feed(Input::Revoked(h.revoking[0].clone()));
+    assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
+    assert_eq!(h.marker(), pending("Keep", "Revoking", false, false, true));
+    assert_eq!(names(&h), before, "nothing is deleted");
+    assert_eq!(
+        h.revocations(),
+        [(
+            "client-saved".to_owned(),
+            "refresh-old".to_owned(),
+            NOW,
+            Origin::Account
+        )],
+        "the refused rewrite left the entry listed"
+    );
+    h.store.0.lock().expect("fake lock").refusing = false;
+    h.op(AccountOp::Retry);
+    assert_eq!(h.revoking.len(), 2, "Revoke runs again");
+    finish(&mut h, true, 1);
+    assert_eq!(h.view(), &signed_out());
+    assert_eq!(names(&h), left(true, false));
+}
+
+/// CAPS-138 M2: a refused Finish leaves the decided notice in a Deleting marker, and a restart
+/// only finishes, reporting that notice.
+#[test]
+fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
+    let held = || {
+        let mut h = Harness::seeded("sign-out-refused-finish", account_only);
+        h.op(AccountOp::SignOut);
+        h.hold = true;
+        h.feed(Input::Revoked(Vec::new()));
+        h.hold = true;
+        h.release();
+        h
+    };
+    let mut dry = held();
+    dry.store.arm(usize::MAX, Fault::Refuse);
+    dry.release();
+    let finish_write = dry.store.0.lock().expect("fake lock").mutations.len() - 1;
+    let mut h = held();
+    h.store.arm(finish_write, Fault::Refuse);
+    h.release();
+    assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
+    assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
+    assert_eq!(
+        names(&h),
+        ["chatgpt", "chatgpt/1/0", "host", "signout"],
+        "Delete finished; only its marker write was refused"
+    );
+    let h = h.restart();
+    assert_eq!(
+        h.views,
+        [signing_out(Cleanup::Running, true), signed_out_with(true)]
+    );
+    assert!(h.revoking.is_empty());
+    assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
+    assert_eq!(names(&h), left(true, true));
+}
+
+/// CAPS-130 87-H2: with no revocation list and a damaged account, the uncertainty Prepare persists
+/// lets the checkpoint through without rereading that account, so Keep and Erase both finish
+/// unconfirmed and every token-bearing name goes.
+#[test]
+fn a_damaged_account_with_no_list_still_reaches_delete() {
+    for disposition in [Disposition::Keep, Disposition::Erase] {
+        let (store, service) = prepared(|vault, raw| {
+            account_only(vault);
+            vault.host_id().expect("host");
+            vault
+                .update_marker(MarkerUpdate::Promote(disposition))
+                .expect("promoted");
+            raw("chatgpt", b"{");
+        });
+        let h = boot(&store, &service);
+        assert_eq!(
+            h.views,
+            [signing_out(Cleanup::Running, true), signed_out_with(true)],
+            "{disposition:?}"
+        );
+        assert!(h.revoking.is_empty(), "{disposition:?}: nothing was listed");
+        assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()), "{disposition:?}");
+        assert_eq!(names(&h), left(false, true), "{disposition:?}");
+    }
+}
+
+/// CAPS-130 87-M1: a sign-in while the load after Finish is still out starts nothing. Once that
+/// load lands, the next sign-in reuses the kept registration's client and keeps its subject.
+#[test]
+fn a_sign_in_before_the_final_load_waits_for_the_kept_registration() {
+    let mut h = Harness::seeded("sign-out-final-load", account_only);
+    h.op(AccountOp::SignOut);
+    h.hold = true;
+    h.feed(Input::Revoked(h.revoking[0].clone()));
+    for _ in 0..2 {
+        h.hold = true;
+        h.release();
+    }
+    assert_eq!(
+        h.markers.last(),
+        Some(&None),
+        "Finish ran; its reload is held"
+    );
+    h.op(AccountOp::SignIn);
+    assert!(
+        h.listening.is_empty(),
+        "no sign-in before the registration is back"
+    );
+    assert_eq!(h.view(), &signing_out(Cleanup::Running, false));
+    h.release();
+    assert_eq!(h.view(), &signed_out());
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.saved_clients, [Some("client-saved".to_owned())]);
+    h.callback("client-saved");
+    assert_eq!(
+        h.account(),
+        Some(registration()),
+        "nothing is registered anew"
+    );
+    h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    let account = h.account().expect("signed in");
+    assert_eq!(
+        (
+            account.client_id.as_str(),
+            account.subject.as_deref().map(String::as_str)
+        ),
+        ("client-saved", Some("subject-1"))
+    );
 }

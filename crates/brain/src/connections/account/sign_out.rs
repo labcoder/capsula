@@ -6,16 +6,16 @@
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, Cleanup, ErrorKey};
 
-use super::lane::{Deferred, Lane};
+use super::lane::Lane;
 use super::sweep::Pass;
 use super::{AccountState, Done, Effect, Job, Loaded, Queued, error};
+use crate::connections::error::VaultError;
 use crate::connections::marker::{Disposition, MarkerUpdate, Phase, SignOut};
 use crate::connections::records::Revocable;
 
 /// A sign-out, from admission or a startup load until Finish.
 #[derive(Debug)]
 pub(super) struct Leaving {
-    disposition: Disposition,
     step: Step,
     /// The step was refused; it waits for Retry or the next start.
     stuck: Option<Cleanup>,
@@ -23,8 +23,11 @@ pub(super) struct Leaving {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
+    /// Waiting for a load: the marker couldn't be read, so whether a sign-out is pending is
+    /// unknown, or Finish ended and the registration Keep left isn't back in memory yet.
+    Read,
     /// The promotion write.
-    Promote,
+    Promote(Disposition),
     /// Prepare starts once the lane's request and any revocation pass have ended.
     Settle,
     Prepare,
@@ -37,22 +40,20 @@ enum Step {
 impl AccountState {
     /// Admission: the attempt is cancelled and the account dropped from memory, then the
     /// promotion write makes the sign-out durable. A dispatched save of the current attempt
-    /// finishes first (R2-4).
+    /// still lands, as a disk fact Prepare adopts; the promotion queues behind it.
     pub(super) fn sign_out(&mut self, effects: &mut Vec<Effect>) {
-        if self.saving_current() {
-            self.deferred = Some(Deferred::SignOut);
-            return;
-        }
-        if self
-            .loaded
-            .account
-            .as_ref()
-            .is_none_or(|account| account.expose().tokens.is_none())
+        if !self.saving_current()
+            && self
+                .loaded
+                .account
+                .as_ref()
+                .is_none_or(|account| account.expose().tokens.is_none())
         {
             return;
         }
         self.attempt += 1;
         self.admitting = None;
+        self.deferred = None;
         if self.live.take().is_some() {
             effects.push(Effect::Close);
         }
@@ -62,8 +63,7 @@ impl AccountState {
         // that account's sign-out erases its registration (pick 2).
         let disposition = Disposition::Keep;
         self.leaving = Some(Leaving {
-            disposition,
-            step: Step::Promote,
+            step: Step::Promote(disposition),
             stuck: None,
         });
         self.step(Job::Marker(MarkerUpdate::Promote(disposition)));
@@ -73,13 +73,25 @@ impl AccountState {
     pub(super) fn resume(&mut self, sign_out: SignOut) {
         let deleting = sign_out.phase == Phase::Deleting;
         self.leaving = Some(Leaving {
-            disposition: sign_out.disposition,
             step: if deleting { Step::Delete } else { Step::Settle },
             stuck: None,
         });
         if deleting {
             self.step(Job::Finish);
         }
+    }
+
+    /// A refused marker read keeps use fenced without deciding anything; Retry reads it again.
+    pub(super) fn unread(&mut self, failure: &VaultError) {
+        tracing::warn!(%failure, "the sign-out marker can't be read; use stays fenced");
+        self.leaving = Some(Leaving {
+            step: Step::Read,
+            stuck: Some(Cleanup::Refused),
+        });
+        self.loaded = Loaded {
+            notice: true,
+            ..Loaded::default()
+        };
     }
 
     /// The local cleanup's progress, while a sign-out is pending.
@@ -105,8 +117,8 @@ impl AccountState {
             return;
         }
         match leaving.step {
-            Step::Promote => {
-                let disposition = leaving.disposition;
+            Step::Read => self.reload(),
+            Step::Promote(disposition) => {
                 self.step(Job::Marker(MarkerUpdate::Promote(disposition)));
             }
             Step::Delete => self.step(Job::Finish),
@@ -164,19 +176,15 @@ impl AccountState {
                 self.loaded.notice = notice;
                 return self.step(Job::Finish);
             }
-            Done::SignedOut(Ok(notice)) => {
-                self.leaving = None;
-                self.loaded = Loaded {
-                    notice,
-                    host: self.loaded.host.take(),
-                    ..Loaded::default()
-                };
-                // The next sign-in needs the registration Keep left.
+            // Use stays fenced until the reload brings back the registration Keep left, which
+            // the next sign-in reuses.
+            Done::SignedOut(Ok(())) => {
+                leaving.step = Step::Read;
                 return self.reload();
             }
             Done::Marked(Err(failure)) => {
                 effects.push(error(ErrorKey::SignOutNotDurable, Action::Retry));
-                (failure, Step::Promote, Cleanup::NotDurable)
+                (failure, leaving.step, Cleanup::NotDurable)
             }
             Done::Prepared(Err(failure)) | Done::Checkpointed(Err(failure)) => {
                 (failure, Step::Settle, Cleanup::Refused)

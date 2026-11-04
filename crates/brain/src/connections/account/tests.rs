@@ -168,6 +168,8 @@ struct Harness {
     /// The persisted marker after every credential job, in order.
     markers: Vec<Option<String>>,
     listening: Vec<(u64, Intent)>,
+    /// Each listener's saved client, in order.
+    saved_clients: Vec<Option<String>>,
     closed: usize,
     /// Every token request sent, in order.
     sent: Vec<(u64, Authorization)>,
@@ -212,6 +214,7 @@ impl Harness {
             errors: Vec::new(),
             markers: Vec::new(),
             listening: Vec::new(),
+            saved_clients: Vec::new(),
             closed: 0,
             sent: Vec::new(),
             revoking: Vec::new(),
@@ -271,8 +274,15 @@ impl Harness {
                 }
                 Effect::Vault(next) => assert!(job.replace(next).is_none(), "one job in flight"),
                 Effect::Listen {
-                    attempt, intent, ..
-                } => self.listening.push((attempt, intent)),
+                    attempt,
+                    intent,
+                    saved,
+                    ..
+                } => {
+                    self.listening.push((attempt, intent));
+                    self.saved_clients
+                        .push(saved.map(|account| account.expose().client_id.to_string()));
+                }
                 Effect::Close => self.closed += 1,
                 Effect::Exchange {
                     attempt,

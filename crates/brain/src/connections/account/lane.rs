@@ -85,13 +85,12 @@ pub(super) enum Flight {
     Leaving,
 }
 
-/// An op that arrived while the current attempt's save was running (R2-4): it waits for that
-/// save, and only the newest is kept.
+/// A sign-in op that arrived while the current attempt's save was running (R2-4): it waits for
+/// that save, and only the newest is kept. A sign-out never waits here.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Deferred {
     SignIn(Intent),
     Cancel,
-    SignOut,
 }
 
 impl AccountState {
@@ -153,7 +152,8 @@ impl AccountState {
                     notice_cleared,
                 },
             ) => {
-                if notice_cleared {
+                // A sign-out admitted during the save keeps its pessimistic notice.
+                if notice_cleared && self.leaving.is_none() {
                     self.loaded.notice = false;
                 }
                 self.committed(result, effects);
@@ -164,7 +164,6 @@ impl AccountState {
                 match self.deferred.take() {
                     Some(Deferred::SignIn(intent)) => self.sign_in(intent, effects),
                     Some(Deferred::Cancel) => self.cancel(effects),
-                    Some(Deferred::SignOut) => self.sign_out(effects),
                     None => {}
                 }
             }

@@ -107,16 +107,17 @@ pub enum Done {
     Prepared(Result<Vec<Secret<Revocable>>, VaultError>),
     /// The notice the checkpoint decided.
     Checkpointed(Result<bool, VaultError>),
-    /// The notice a finished sign-out leaves.
-    SignedOut(Result<bool, VaultError>),
+    /// Delete and Finish ended.
+    SignedOut(Result<(), VaultError>),
 }
 
 /// What the vault held when it was read. Each record fails on its own, so one damaged record
 /// doesn't hide the others.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Control state; a refused read fails closed like an unreadable marker.
-    pub marker: SignOutMarker,
+    /// Control state. Damaged data already reads as the fail-closed marker, so an error is a
+    /// refused read: it decides nothing, and the other records aren't read (`Fenced`).
+    pub marker: Result<SignOutMarker, VaultError>,
     /// This machine's host id, created on first use.
     pub host: Result<Secret<Zeroizing<String>>, VaultError>,
     /// The account, never usable while a sign-out is pending.
@@ -257,9 +258,7 @@ impl<S: CredentialStore> Worker<S> {
             Job::Prepare => Done::Prepared(prepare(vault, added_at)),
             Job::Checkpoint(confirmed) => Done::Checkpointed(checkpoint(vault, &confirmed)),
             Job::Finish => Done::SignedOut(match vault.delete_for_sign_out() {
-                DeleteResult::Gone => vault
-                    .update_marker(MarkerUpdate::FinishSignOut)
-                    .map(|marker| marker.notice),
+                DeleteResult::Gone => vault.update_marker(MarkerUpdate::FinishSignOut).map(drop),
                 DeleteResult::Refused(error) => Err(error),
             }),
         }
@@ -304,10 +303,17 @@ impl<S: CredentialStore> Worker<S> {
         }
         let aged = self.now_for_age_out();
         let vault = self.vault.as_mut().expect("opened above");
-        let marker = vault.marker().unwrap_or_else(|error| {
-            tracing::warn!(%error, "the sign-out marker can't be read; failing closed");
-            SignOutMarker::fail_closed()
-        });
+        let marker = match vault.marker() {
+            Ok(marker) => marker,
+            Err(error) => {
+                return Ok(Snapshot {
+                    marker: Err(error),
+                    host: Err(VaultError::Fenced),
+                    account: Err(VaultError::Fenced),
+                    revocable: Err(VaultError::Fenced),
+                });
+            }
+        };
         // Nothing leaves the list but a confirmed revocation while a sign-out is pending.
         let revocable = if marker.sign_out.is_some() {
             vault.load_revocations().map(|list| {
@@ -324,7 +330,7 @@ impl<S: CredentialStore> Worker<S> {
             relist(vault, |entry| aged.is_some_and(|now| expired(entry, now)))
         };
         Ok(Snapshot {
-            marker,
+            marker: Ok(marker),
             host: vault.host_id(),
             account: vault.load_account(),
             revocable,
@@ -414,6 +420,9 @@ fn checkpoint<S: CredentialStore>(
     })
     .inspect_err(|error| tracing::warn!(%error, "confirmed revocations stay listed"))
     .is_ok_and(|entries| entries.is_empty());
+    // Uncertainty Prepare persisted already decides the notice, so the absent-list check, which
+    // rereads an account Prepare found damaged, isn't asked for.
+    let list_empty_on_disk = list_empty_on_disk && !vault.marker()?.outcome_unknown;
     vault
         .update_marker(MarkerUpdate::Checkpoint { list_empty_on_disk })
         .map(|marker| marker.notice)
