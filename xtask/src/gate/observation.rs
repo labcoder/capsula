@@ -409,7 +409,7 @@ impl Observation {
                     .1,
             )
         };
-        validate_union(&geometry, previous)?;
+        validate_ownership(&geometry, previous)?;
         self.geometries.insert(id, geometry);
         Ok(())
     }
@@ -466,6 +466,18 @@ impl Observation {
                 .context("mask epoch overflow")?
         };
         ensure!(epoch == expected_epoch, "invalid accepted mask epoch");
+        let proxy = rect(proxy)?;
+        let [left, top, width, height] = proxy;
+        let band = &self.geometries[&geometry];
+        ensure!(
+            band.origin_y == top
+                && band.rows.len() == usize::try_from(height)?
+                && band
+                    .rows
+                    .iter()
+                    .all(|row| row.owned == [Some([left, left + width]), None]),
+            "committed geometry does not own exactly the hit proxy"
+        );
         let qpc = ordered(counter, previous.map_or(0, |value| value.qpc))?;
         let begin_qpc = positive(begin)?;
         ensure!(
@@ -477,7 +489,7 @@ impl Observation {
             qpc,
             epoch,
             geometry,
-            proxy: rect(proxy)?,
+            proxy,
         });
         Ok(())
     }
@@ -787,23 +799,21 @@ fn inside_panel([left, top, width, height]: [i32; 4], [x, y, w, h]: [i32; 4]) ->
         && i64::from(y) + i64::from(h) <= i64::from(top) + i64::from(height)
 }
 
-fn validate_union(geometry: &Geometry, previous: Option<&Geometry>) -> Result<()> {
+/// Each row owns what it draws and, when untrimmed, what the previous geometry drew there.
+fn validate_ownership(geometry: &Geometry, previous: Option<&Geometry>) -> Result<()> {
     for (index, row) in geometry.rows.iter().enumerate() {
         let y = geometry.origin_y + i32::try_from(index)?;
         let old = previous
             .and_then(|value| value.row(y))
             .and_then(|row| row.drawn);
-        let expected = match (row.drawn, old) {
-            (Some([left, right]), Some([other_left, other_right]))
-                if left <= other_right && other_left <= right =>
-            {
-                [Some([left.min(other_left), right.max(other_right)]), None]
-            }
-            (current, old) => [current, old],
-        };
         ensure!(
-            row.owned == expected,
-            "geometry ownership does not match exact current/previous union"
+            [row.drawn, old].into_iter().flatten().all(|[left, right]| {
+                row.owned
+                    .iter()
+                    .flatten()
+                    .any(|[owned_left, owned_right]| *owned_left <= left && right <= *owned_right)
+            }),
+            "geometry draws outside the band it owns"
         );
     }
     if let Some(previous) = previous {
