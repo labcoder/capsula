@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "PLANTED-PROSE subscription_sharing_user_not_eligible",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "subscription_sharing_user_not_eligible"
+  }
+}
