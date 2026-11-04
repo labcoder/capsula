@@ -316,7 +316,12 @@ impl Surfaces for Desktop<'_> {
     }
 
     fn clear_mask(&mut self, hit: [i32; 4]) -> Result<(), PresenceError> {
-        self.native.reshape(hit, |_| [None; 2]).map(drop)
+        let begin_qpc = observer::begin(self.cx);
+        let update = self.native.reshape(hit, |_| [None; 2]);
+        let drawn = observer::commit(self.cx, begin_qpc, None, hit, &update);
+        update?;
+        self.drawn = drawn;
+        Ok(())
     }
 }
 
