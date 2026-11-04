@@ -184,6 +184,16 @@ Tests cover releasing outside the peek, Esc followed by a late release, a second
 
 Its tests cover the three orders of a release and its capture loss (the release first, the loss first, and the loss with no release), a duplicate loss, holding still where the body was pressed, the exact mapping on a work area at (−1280, 0) at 125%, the return ending only at `rested`, a press during the return, and a new scale or work area mid-drag.
 
+## The native bridge
+
+A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence.rs`) adds what Windows knows, through `platform/input.rs`'s `Input`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
+
+- **One sequence.** Each forwarded button press is stamped with the next value of one UI-thread sequence, and so is each capture loss, where it's produced and never when it's drained. The press handler reads the press's stamp with `pressed` while the press is being forwarded. A press forwarded inside another gets its own stamp and gives the outer one back when it returns.
+- **Releases have a scope.** Each `WM_*BUTTONUP` is forwarded inside `release`, which names its button for that forward only, as a depth so nesting is safe. A `WM_CAPTURECHANGED` during it is `CaptureLost { released: Some(button) }`; at any other time it's `None`. `WM_CANCELMODE` is always `None`, so always involuntary, and it's still forwarded to the default handling.
+- **Reconcile after the release returns.** The presence drains a loss into `Pulling`, then asks `reconcile_after_release`. With no release being forwarded, it defers one reconcile at once. Otherwise the loss waits, and the outermost release, as it returns, sends one `PresenceEvent::Reconcile`. Nothing reschedules itself, so a nested forward can't spin GPUI's effect loop, and an inner release never reconciles early.
+
+Tests cover stamps that never repeat across presses, losses and cancel modes, a nested press giving the outer stamp back, a capture change naming the button only during its release, a cancel mode naming none, a loss with no release running, and a loss drained inside nested releases, which is due exactly once, when the outermost returns.
+
 ## Expressions
 
 `expression.rs`'s `Animator` turns a `Mood` (idle, listening, thinking, speaking) into frames.

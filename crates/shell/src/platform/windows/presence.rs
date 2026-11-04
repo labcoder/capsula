@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use gpui_kit::Window;
+use gpui_kit::{MouseButton, NavigationDirection, Window};
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -47,11 +47,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
+use crate::platform::input;
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -87,6 +92,15 @@ pub(crate) enum PresenceEvent {
     Quit,
     /// `--gate-observer` only: the harness asked for one dock repaint.
     Repaint,
+    /// A presence window lost mouse capture, stamped `seq` in the UI thread's input sequence.
+    /// `released` is the button whose forwarded release caused it; `None` is a cancel mode or a
+    /// capture taken from outside.
+    CaptureLost {
+        seq: u64,
+        released: Option<MouseButton>,
+    },
+    /// The outermost button release returned while a drained capture loss waited for it.
+    Reconcile,
 }
 
 /// The localized text of the tray icon and its menu.
@@ -934,8 +948,24 @@ unsafe extern "system" fn proxy_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+/// The button a press or release message is for, as GPUI names it.
+fn button(message: u32, wparam: WPARAM) -> Option<MouseButton> {
+    match message {
+        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(MouseButton::Left),
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(MouseButton::Right),
+        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(MouseButton::Middle),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => match u16::try_from((wparam.0 >> 16) & 0xFFFF) {
+            Ok(XBUTTON1) => Some(MouseButton::Navigate(NavigationDirection::Back)),
+            Ok(XBUTTON2) => Some(MouseButton::Navigate(NavigationDirection::Forward)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Reports pointer enter and leave on a presence window and refuses mouse activation, which
-/// GPUI grants.
+/// GPUI grants. Stamps button presses and capture losses in the input sequence, and forwards
+/// each release inside its scope, so a pull can tell its own release from a loss.
 unsafe extern "system" fn hover_subclass(
     hwnd: HWND,
     message: u32,
@@ -945,8 +975,43 @@ unsafe extern "system" fn hover_subclass(
     data: usize,
 ) -> LRESULT {
     let hover = std::ptr::with_exposed_provenance::<Hover>(data);
+    // SAFETY: forwards the unmodified message down the chain.
+    let forward = || unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    // SAFETY: `data` is the Hover boxed in `configure_presence_window`, freed only on
+    // WM_NCDESTROY, which never reaches the arms that send.
+    let events = || unsafe { hover.as_ref() }.map(|hover| &hover.events);
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX)),
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+            return input::input(|input| input.press(forward));
+        }
+        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
+            if let Some(released) = button(message, wparam) {
+                let (result, due) = input::input(|input| input.release(released, forward));
+                if due && let Some(events) = events() {
+                    send(events, PresenceEvent::Reconcile);
+                }
+                return result;
+            }
+        }
+        WM_CAPTURECHANGED => {
+            let (seq, released) = input::input(input::Input::capture_changed);
+            if let Some(events) = events() {
+                send(events, PresenceEvent::CaptureLost { seq, released });
+            }
+        }
+        WM_CANCELMODE => {
+            let seq = input::input(input::Input::cancelled);
+            if let Some(events) = events() {
+                send(
+                    events,
+                    PresenceEvent::CaptureLost {
+                        seq,
+                        released: None,
+                    },
+                );
+            }
+        }
         WM_MOUSEMOVE | WM_MOUSELEAVE => {
             // SAFETY: `data` is the Hover boxed in `configure_presence_window`, freed
             // only on WM_NCDESTROY below.
@@ -963,8 +1028,7 @@ unsafe extern "system" fn hover_subclass(
         }
         _ => {}
     }
-    // SAFETY: forwards the unmodified message down the chain.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    forward()
 }
 
 #[cfg(test)]

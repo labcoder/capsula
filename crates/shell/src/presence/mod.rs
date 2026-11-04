@@ -17,6 +17,7 @@ mod link;
 pub(crate) mod observer;
 mod paint;
 mod panels;
+mod pull_input;
 mod pulling;
 mod settings;
 mod settings_view;
@@ -114,6 +115,8 @@ struct Presence {
     drawn: Drawn,
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
+    /// Pulling Kumo out of the peek.
+    pulling: pulling::Pulling,
     /// The one source of animation frames.
     frames: FrameLoop,
     /// Retries deletes the control queue had no room for.
@@ -877,6 +880,7 @@ pub(crate) fn open(
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
+            pulling: pulling::Pulling::default(),
             frames: FrameLoop::default(),
         }
     });
@@ -965,6 +969,10 @@ fn listen(
                     PresenceEvent::Escape => this.escape(cx)?,
                     PresenceEvent::Quit => this.quit(cx),
                     PresenceEvent::Repaint => this.dock.update(cx, |_, cx| cx.notify()),
+                    PresenceEvent::CaptureLost { seq, released } => {
+                        this.capture_lost(seq, released, cx);
+                    }
+                    PresenceEvent::Reconcile => this.reconcile_pull(),
                 }
                 Ok::<_, OpenError>(())
             });
