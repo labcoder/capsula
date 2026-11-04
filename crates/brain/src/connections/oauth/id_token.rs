@@ -43,6 +43,10 @@ pub enum IdentityError {
     /// The signature, algorithm, binding or required claims failed validation.
     #[error("invalid identity token")]
     Token,
+    /// The token names a key its key set lacks, even fetched once more. A set fetched while the
+    /// provider rotates its keys can lack the new one, so it isn't proof the token is bad.
+    #[error("identity token key unavailable")]
+    UnknownKey,
     /// An identity field or document exceeded a local byte/count bound.
     #[error("identity data exceeds its bounds")]
     Bounds,
@@ -152,16 +156,25 @@ async fn bound(
         return Err(IdentityError::Discovery);
     }
     let url = IssuerUrl::parse(&discovery.jwks_uri).map_err(|_| IdentityError::Discovery)?;
-    let keys: KeySet = document(
-        &http
-            .execute(Request {
-                endpoint: Endpoint::Jwks(url),
-                fields: Vec::new(),
-            })
-            .await?,
-    )?;
+    let keys = async || {
+        document::<KeySet>(
+            &http
+                .execute(Request {
+                    endpoint: Endpoint::Jwks(url.clone()),
+                    fields: Vec::new(),
+                })
+                .await?,
+        )
+    };
+    let first = keys().await?;
     let now = clock.unix_seconds().ok_or(IdentityError::Clock)?;
-    signed(token.expose(), &keys, client, binding, now)
+    match signed(token.expose(), &first, client, binding, now) {
+        // The provider may have rotated its keys since the set was fetched: fetch it once more.
+        Err(IdentityError::UnknownKey) => {
+            signed(token.expose(), &keys().await?, client, binding, now)
+        }
+        verified => verified,
+    }
 }
 
 fn document<T: DeserializeOwned>(response: &Response) -> Result<T, IdentityError> {
@@ -234,7 +247,7 @@ fn signed(
             selected = Some(key);
         }
     }
-    let key = selected.ok_or(IdentityError::Token)?;
+    let key = selected.ok_or(IdentityError::UnknownKey)?;
     if key.get("use").is_some_and(|usage| usage != "sig")
         || key.get("alg").is_some_and(|algorithm| algorithm != "RS256")
     {

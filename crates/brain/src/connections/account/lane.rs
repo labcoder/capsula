@@ -16,6 +16,11 @@ use crate::connections::oauth::{Authorization, Intent};
 use crate::connections::records::{Account, MAX_EXCHANGES, Origin, Revocable};
 use crate::connections::vault::SaveResult;
 
+/// The marker write for a token whose outcome is unknown.
+const UNKNOWN: MarkerUpdate = MarkerUpdate::RequestFinished {
+    outcome_unknown: true,
+};
+
 /// The one token request the lane admits, from its pending-flag write to its durable owner.
 #[derive(Debug)]
 pub(super) enum Lane {
@@ -86,6 +91,9 @@ pub(super) enum Queued {
     Rotate(Secret<Account>, Rotation),
     /// A check's save, built at dispatch from the account as it is then.
     Verify(u64),
+    /// The unknown outcome of a token no list slot holds; the jobs after it run only once it's
+    /// written, so the token never leaves the account unrecorded.
+    Unknown(Vec<Queued>),
 }
 
 /// The credential job in flight.
@@ -103,6 +111,7 @@ pub(super) enum Flight {
     Relist(Why),
     Leaving,
     Rotate(Rotation),
+    Unknown(Vec<Queued>),
 }
 
 /// A sign-in op that arrived while the current attempt's save was running (R2-4): it waits for
@@ -180,6 +189,9 @@ impl AccountState {
                 if let Err(failure) = result {
                     tracing::warn!(%failure, "the token lane's pending flag stays set");
                 }
+            }
+            (Some(Flight::Unknown(then)), Done::Marked(result)) => {
+                self.unknown_written(then, result);
             }
             (
                 Some(Flight::Commit),
@@ -355,12 +367,7 @@ impl AccountState {
                         tracing::warn!(
                             "a discarded set no list slot can hold has an unknown outcome"
                         );
-                        self.jobs.push_back(Queued::Finished {
-                            outcome_unknown: true,
-                        });
-                        // shortcut: the save behind runs even if this write is refused, so the
-                        // token can leave unrecorded; give the write its own flight in 10b.
-                        self.jobs.extend(then);
+                        self.jobs.push_back(Queued::Unknown(then));
                         continue;
                     };
                     self.after_list = then;
@@ -423,6 +430,7 @@ impl AccountState {
                     Flight::Finished,
                     Job::Marker(MarkerUpdate::RequestFinished { outcome_unknown }),
                 ),
+                Queued::Unknown(then) => (Flight::Unknown(then), Job::Marker(UNKNOWN)),
                 // A save for a replaced account never overwrites its successor.
                 Queued::Rotate(_, Rotation::Ended(generation) | Rotation::Unmarked(generation))
                     if generation != self.generation =>
@@ -503,6 +511,17 @@ impl AccountState {
             };
             self.flight = Some(flight);
             effects.push(Effect::Vault(job));
+        }
+    }
+
+    /// A token's unknown outcome was written, so the jobs after it may run; if it wasn't, the
+    /// token stays in the account, still owned, for a later pass to settle.
+    fn unknown_written(&mut self, then: Vec<Queued>, result: Result<(), VaultError>) {
+        match result {
+            Ok(()) => self.jobs.extend(then),
+            Err(failure) => {
+                tracing::warn!(%failure, "an unrecorded token's outcome wasn't written; the account keeps it");
+            }
         }
     }
 

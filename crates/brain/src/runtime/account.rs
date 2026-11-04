@@ -353,15 +353,21 @@ async fn refresh_task(
     net: Net,
     events: mpsc::UnboundedSender<Input>,
 ) {
-    let result = async {
-        let build = Arc::clone(&net.http);
+    let build = Arc::clone(&net.http);
+    // Its own task, so one that panics still ends the flight; the payload isn't logged.
+    let result = tokio::spawn(async move {
         let http = tokio::task::spawn_blocking(move || build())
             .await
             .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
             .map_err(ExchangeError::Http)?;
         refresh(&http, client.expose(), refresh_token.expose()).await
-    }
-    .await;
+    })
+    .await
+    .unwrap_or_else(|_| {
+        tracing::error!("a refresh task stopped before it reported");
+        // The request may have gone out, so its outcome is unknown.
+        Err(ExchangeError::Http(HttpError::Transport))
+    });
     // Its lifetime starts on arrival.
     let now = net.clock.unix_seconds();
     events
@@ -379,8 +385,9 @@ async fn validate_task(
     net: Net,
     events: mpsc::UnboundedSender<Input>,
 ) {
-    let result = async {
-        let build = Arc::clone(&net.http);
+    let (build, clock) = (Arc::clone(&net.http), Arc::clone(&net.clock));
+    // Its own task, so one that panics still ends the flight; the payload isn't logged.
+    let result = tokio::spawn(async move {
         let http = tokio::task::spawn_blocking(move || build())
             .await
             .map_err(|_| IdentityError::Http(HttpError::Configuration))??;
@@ -389,11 +396,16 @@ async fn validate_task(
             &id_token,
             client.expose(),
             subject.expose(),
-            net.clock.as_ref(),
+            clock.as_ref(),
         )
         .await
-    }
-    .await;
+    })
+    .await
+    .unwrap_or_else(|_| {
+        tracing::error!("an identity check task stopped before it reported");
+        // The set stays pending, for the next use to check again.
+        Err(IdentityError::Discovery)
+    });
     let now = net.clock.unix_seconds();
     events
         .send(Input::Validated {
