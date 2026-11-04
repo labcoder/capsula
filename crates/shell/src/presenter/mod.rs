@@ -280,7 +280,9 @@ impl Presenter {
                             | DataToShell::SceneEnd { .. }
                     );
                 let direct = if matches!(self.phase, Phase::Live) {
-                    self.lane.is_none() && self.held.is_empty()
+                    self.lane.is_none()
+                        && self.held.is_empty()
+                        && !self.waits_for_consumption(&frame)
                 } else {
                     removed
                 };

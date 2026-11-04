@@ -44,6 +44,11 @@ impl Lane {
 }
 
 impl Presenter {
+    pub(super) fn waits_for_consumption(&self, frame: &DataToShell) -> bool {
+        matches!(frame, DataToShell::SceneStepCommit { scene, .. }
+            if self.scenes.get(scene).is_some_and(|scene| scene.pending_consumption.is_some()))
+    }
+
     /// A commit at the head of the stream enters the lane once its scene and index check out.
     pub(super) fn admit(
         &mut self,
@@ -122,12 +127,7 @@ impl Presenter {
             let Some((frame, _)) = self.held.front() else {
                 return Ok(());
             };
-            if let DataToShell::SceneStepCommit { scene, .. } = **frame
-                && self
-                    .scenes
-                    .get(&scene)
-                    .is_some_and(|scene| scene.pending_consumption.is_some())
-            {
+            if self.waits_for_consumption(frame) {
                 return Ok(());
             }
             let (frame, bytes) = self
