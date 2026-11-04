@@ -26,6 +26,8 @@ pub enum StoreOp {
         /// The page to read.
         page: PageOf,
     },
+    /// Build a round's context on the page reader, in one read transaction.
+    BuildContext(super::BuildContext),
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
@@ -116,6 +118,7 @@ impl StoreOp {
             | Self::EndRun { run, .. } => Some(*run),
             Self::Drawing { .. }
             | Self::ReadPage { .. }
+            | Self::BuildContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
@@ -136,6 +139,11 @@ impl StoreOp {
                 request: *request,
                 reply: DataToShell::PageFailed { request: *request },
             },
+            Self::BuildContext(build) => Input::ContextBuilt(super::ContextBuilt {
+                key: build.key,
+                snapshot: build.snapshot.clone(),
+                result: Err(super::Unbuilt::Failed),
+            }),
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },

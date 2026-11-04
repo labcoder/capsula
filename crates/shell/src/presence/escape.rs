@@ -48,7 +48,9 @@ impl Presence {
             }
             Escape::Dismiss => {
                 if panel == EscapePanel::Settings {
-                    self.dismiss_settings(cx)?;
+                    if !self.dismiss_account_confirmation(cx) {
+                        self.dismiss_settings(cx)?;
+                    }
                 } else if panel == EscapePanel::Threads {
                     self.dismiss_threads(cx)?;
                 } else {

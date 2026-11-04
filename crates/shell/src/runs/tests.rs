@@ -4,7 +4,9 @@ use kumochi_protocol::message::{
     SceneDescriptor, SceneId, Step, ThreadId,
 };
 
-use kumochi_brain::coordinator::{Coordinator, Effect as BrainEffect, Input, StoreOp};
+use kumochi_brain::coordinator::{
+    ContextBuilt, Coordinator, Effect as BrainEffect, Input, StoreOp,
+};
 use kumochi_brain::engines::TurnEvent;
 use kumochi_brain::store::Store;
 use kumochi_protocol::message::ControlToShell;
@@ -353,6 +355,16 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     deliver(&mut runs, Some(&mut store), effects);
     let run = RunId(1);
     let effects = brain.handle(Input::TurnStored { run }).expect("stored");
+    let build = effects
+        .iter()
+        .find_map(|effect| match effect {
+            BrainEffect::Store(StoreOp::BuildContext(build)) => Some(build),
+            _ => None,
+        })
+        .expect("the run's context is built");
+    let admitted = Input::ContextBuilt(ContextBuilt::own_thread(build));
+    deliver(&mut runs, Some(&mut store), effects);
+    let effects = brain.handle(admitted).expect("admitted");
     deliver(&mut runs, Some(&mut store), effects);
     let answer = Input::Engine {
         run,

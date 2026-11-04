@@ -2,16 +2,24 @@ use kumochi_protocol::message::{
     ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step, ThreadId,
 };
 
-use super::{Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, Stale, StoreOp, WALL_CLOCK};
+use super::{
+    BuildContext, BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, Stale,
+    StoreOp, WALL_CLOCK,
+};
+use crate::context::{Built, ModelRequest, Origin};
 use crate::engines::{CallId, Finish, RunRequest, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
+#[path = "admission_tests.rs"]
+mod admission;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "lease_tests.rs"]
+mod leases;
 #[path = "scene_tests.rs"]
 mod scenes;
 #[path = "thread_op_tests.rs"]
@@ -70,14 +78,76 @@ fn draw_step(core: &mut Coordinator, run: RunId, label: &str) -> Result<Vec<Effe
     Ok(effects)
 }
 
-fn start_engine(run: RunId, thread: ThreadId, turn: &str) -> Effect {
+/// What every test build sends.
+fn request() -> ModelRequest {
+    ModelRequest {
+        choice: None,
+        instructions: "built".to_owned(),
+        input: Vec::new(),
+        tools: Vec::new(),
+    }
+}
+
+/// Attempt `attempt` of `run`'s first round in task `thread`, before the run read its snapshot.
+fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
+    Effect::Store(StoreOp::BuildContext(BuildContext {
+        key: BuildKey {
+            run,
+            round: 1,
+            attempt,
+        },
+        thread,
+        origin: Origin::Task(thread),
+        snapshot: None,
+        first: true,
+    }))
+}
+
+/// That build's request, rendered from `sources`.
+fn built(run: RunId, attempt: u64, sources: &[ThreadId]) -> Input {
+    Input::ContextBuilt(ContextBuilt {
+        key: BuildKey {
+            run,
+            round: 1,
+            attempt,
+        },
+        snapshot: None,
+        result: Ok(Built {
+            request: request(),
+            sources: sources.to_vec(),
+        }),
+    })
+}
+
+fn start_engine(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::StartEngine {
         request: RunRequest {
+            key: BuildKey {
+                run,
+                round: 1,
+                attempt,
+            },
             run,
             thread,
-            turn: turn.to_owned(),
+            origin: Origin::Task(thread),
+            request: request(),
         },
     }
+}
+
+/// Stores `run`'s turn and admits its build, which rendered only the run's own thread.
+fn admit(core: &mut Coordinator, run: RunId) -> Vec<Effect> {
+    let mut effects = core.handle(Input::TurnStored { run }).expect("current");
+    let at = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(_))))
+        .expect("a build starts");
+    let Effect::Store(StoreOp::BuildContext(build)) = effects.remove(at) else {
+        unreachable!("matched above");
+    };
+    let done = built(run, build.key.attempt, &[build.thread]);
+    effects.extend(core.handle(done).expect("admitted"));
+    effects
 }
 
 fn ack(index: u32, label: &str) -> Input {
@@ -164,7 +234,7 @@ fn started() -> Coordinator {
         text: "hi".to_owned(),
     })
     .expect("a turn is never stale");
-    core.handle(Input::TurnStored { run: R }).expect("current");
+    admit(&mut core, R);
     core
 }
 
@@ -195,7 +265,11 @@ fn a_turn_is_stored_before_the_engine_starts() {
     );
     assert_eq!(
         core.handle(Input::TurnStored { run: R }).expect("current"),
-        vec![start_engine(R, T, "  \n  Draw a cat\nplease")]
+        vec![build_context(R, T, 1)]
+    );
+    assert_eq!(
+        core.handle(built(R, 1, &[T])).expect("current"),
+        vec![start_engine(R, T, 1)]
     );
 }
 
@@ -409,8 +483,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         core.handle(engine(R, TurnEvent::TextDelta("old".to_owned()))),
         Err(Stale)
     );
-    core.handle(Input::TurnStored { run: RunId(11) })
-        .expect("the new run is current");
+    admit(&mut core, RunId(11));
     assert_eq!(
         core.handle(engine(RunId(11), TurnEvent::Finished(Finish::Completed)))
             .expect("current"),
@@ -588,7 +661,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     assert_eq!(
         core.handle(Input::TurnStored { run: RunId(11) })
             .expect("the replacement is untouched"),
-        vec![start_engine(RunId(11), T, "again")]
+        vec![build_context(RunId(11), T, 2)]
     );
 }
 
@@ -918,6 +991,6 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
     );
     assert_eq!(
         core.handle(Input::TurnStored { run: c }).expect("current"),
-        vec![start_engine(c, T, "c")]
+        vec![build_context(c, T, 2)]
     );
 }

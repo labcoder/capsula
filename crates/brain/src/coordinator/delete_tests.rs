@@ -6,7 +6,9 @@ use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, Phase, RunId, SceneId, ThreadId,
 };
 
-use super::{R, S, T, ack, draw_step, end_run, engine, fresh, run_end, started, state, step};
+use super::{
+    R, S, T, ack, admit, draw_step, end_run, engine, fresh, run_end, started, state, step,
+};
 use crate::coordinator::{Coordinator, Effect, Input, Stale, StoreOp};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Interruption, RunEnd, SceneState};
@@ -347,7 +349,7 @@ fn visible_ids(core: &Coordinator) -> Vec<u64> {
 fn first_step_queued(ids: &[u64]) -> Coordinator {
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
     core.handle(turn(None)).expect("a turn is never stale");
-    core.handle(Input::TurnStored { run: R }).expect("current");
+    admit(&mut core, R);
     draw_step(&mut core, R, "a").expect("current");
     core
 }
