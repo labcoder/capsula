@@ -32,7 +32,7 @@ pub fn request(bearer: &str, body: &[u8]) -> Result<Zeroizing<Vec<u8>>, Failure>
         b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer ",
         bearer.as_bytes(),
         b"\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\n\
-          Connection: keep-alive\r\nContent-Length: ",
+          Accept-Encoding: identity\r\nConnection: keep-alive\r\nContent-Length: ",
         length.as_bytes(),
         b"\r\n\r\n",
         body,
@@ -74,7 +74,8 @@ pub struct Head {
 /// The head at the start of `bytes` and its length, or `None` while it's incomplete.
 ///
 /// # Errors
-/// [`Failure::Protocol`] for anything but a bounded HTTP/1.1 head with one clear framing.
+/// [`Failure::Protocol`] for anything but a bounded HTTP/1.1 head with one clear framing and no
+/// content coding.
 pub fn head(bytes: &[u8]) -> Result<Option<(Head, usize)>, Failure> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut response = httparse::Response::new(&mut headers);
@@ -115,6 +116,10 @@ pub fn head(bytes: &[u8]) -> Result<Option<(Head, usize)>, Failure> {
             head.close |= value
                 .split(|&byte| byte == b',')
                 .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"close"));
+        } else if header.name.eq_ignore_ascii_case("content-encoding") {
+            if !value.eq_ignore_ascii_case(b"identity") {
+                return Err(Failure::Protocol);
+            }
         } else if header.name.eq_ignore_ascii_case("content-type") {
             let media = value.split(|&byte| byte == b';').next().unwrap_or_default();
             head.event_stream = media

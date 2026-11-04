@@ -47,10 +47,27 @@ fn the_request_is_the_line_the_headers_and_the_body() {
     assert_eq!(
         bytes.as_slice(),
         b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer tok.en-1\r\n\
-          Content-Type: application/json\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\
-          Content-Length: 2\r\n\r\n{}"
+          Content-Type: application/json\r\nAccept: text/event-stream\r\n\
+          Accept-Encoding: identity\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}"
     );
     assert_eq!(bytes.capacity(), bytes.len());
+}
+
+#[test]
+fn a_content_coding_other_than_identity_is_refused() {
+    for coding in ["gzip", "GZIP", "br", "deflate", "identity, gzip", ""] {
+        let bytes =
+            format!("HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(parsed(bytes.as_bytes()), Err(Failure::Protocol), "{coding}");
+        let bytes =
+            format!("HTTP/1.1 400 Bad\r\ncontent-encoding: {coding}\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(parsed(bytes.as_bytes()), Err(Failure::Protocol), "{coding}");
+    }
+    for coding in ["identity", "Identity"] {
+        let bytes =
+            format!("HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: 0\r\n\r\n");
+        assert!(matches!(parsed(bytes.as_bytes()), Ok(Some(_))), "{coding}");
+    }
 }
 
 #[test]
