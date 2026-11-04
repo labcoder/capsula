@@ -1,5 +1,6 @@
 //! Win32 implementations of the shell's platform functions.
 
+mod folders;
 mod hit_mask;
 mod keyboard;
 mod observer;
@@ -7,6 +8,7 @@ mod pipe;
 mod presence;
 mod process;
 
+pub(crate) use folders::data_dir;
 pub(crate) use hit_mask::MaskUpdate;
 pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
 pub(crate) use observer::{

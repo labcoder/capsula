@@ -11,7 +11,8 @@ use crate::{
 };
 
 /// Smallest gap between ranks.
-// shortcut: edge labels do not widen ranks; revisit in A9's visual gate.
+// shortcut: callers widen one gap per group for its widest edge label, not per rank pair;
+// upgrade when one long label visibly spreads a whole diagram.
 pub(super) const RANK_GAP: f32 = 72.0;
 const NODE_GAP: f32 = 30.0;
 const SWEEPS: usize = 4;

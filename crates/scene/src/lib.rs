@@ -2,6 +2,7 @@
 //! JSON tool arguments and binary messages validate through the same types.
 
 pub mod budget;
+pub mod deferred;
 pub mod display;
 pub mod error;
 pub mod geom;

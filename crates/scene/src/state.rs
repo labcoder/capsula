@@ -1,21 +1,26 @@
 //! Canonical semantic state, atomic admission and replayable Stop cuts.
 pub(crate) mod metrics;
 pub(crate) mod object;
+mod retire;
 pub(crate) mod work;
 
 use crate::{
     Begin, Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Record, Step, StepError, WireId,
     budget::Usage,
+    deferred::Deferred,
+    layout::heap,
     limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
     mermaid::{self, Expansion},
     record::Start,
     text::Bounded,
 };
 use object::Object;
+use retire::{map_bytes, records_bytes, retire_undo};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
+    mem::take,
     sync::Arc,
 };
 
@@ -69,10 +74,6 @@ fn deserialize_step<'de, D: serde::Deserializer<'de>>(
 
 /// Validation either creates an owned candidate or recognizes a retransmission.
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "keep the owned admission candidate unboxed without a per-step allocation or public API change"
-)]
 pub enum Admission {
     /// A checked candidate, bound to its state and budget generations.
     New(Admitted),
@@ -88,6 +89,10 @@ pub struct Admitted {
     generation: u64,
     mutation: u64,
     usage: Usage,
+    candidate: Deferred<Box<Candidate>>,
+}
+
+struct Candidate {
     step: Arc<Step>,
     run: Arc<Step>,
     extras: Arc<BTreeMap<usize, mermaid::Extra>>,
@@ -100,7 +105,7 @@ impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Admitted")
             .field("revision", &self.revision)
-            .field("objects", &self.after.len())
+            .field("objects", &self.candidate.after.len())
             .finish_non_exhaustive()
     }
 }
@@ -396,14 +401,20 @@ impl SceneState {
         global
             .check(self.bound_usage(), minimum)
             .map_err(|code| fail(FieldPath::default(), code))?;
-        let original = Arc::new(step.clone());
+        let original = Deferred::new(
+            Arc::new(step.clone()),
+            heap::ARC_HEADER + heap::step_bytes(step),
+        );
         let expansion = mermaid::expand(
             &original,
             revision,
             &self.reserved,
             MAX_LIVE_OBJECTS - minimum.objects,
         )?;
-        self.candidate(original, &expansion, global)
+        let bytes = heap::compiled_bytes(&original, &expansion.run)
+            + heap::extras_bytes(std::iter::empty(), [&expansion.extras]);
+        let expansion = Deferred::new(expansion, bytes);
+        self.candidate(&original, &expansion, global)
             .map(Admission::New)
             .map_err(|error| expansion.blame(error))
     }
@@ -412,7 +423,7 @@ impl SceneState {
     /// slots until `Expansion::blame` moves them onto the original step.
     fn candidate(
         &self,
-        original: Arc<Step>,
+        original: &Arc<Step>,
         expansion: &Expansion,
         global: &GlobalBudget,
     ) -> Result<Admitted, StepError> {
@@ -428,7 +439,7 @@ impl SceneState {
                 ));
             }
         }
-        let mut after = self.objects.clone();
+        let mut after = Deferred::new(self.objects.clone(), map_bytes(&self.objects));
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
             if let Some(v) = object::visual(op) {
@@ -458,11 +469,13 @@ impl SceneState {
         }
         object::acyclic(step, &after)?;
         object::validate_changes(step, &after, &removal_ids)?;
-        let mut changed = work::changes(step, &mut after, revision)?;
+        let changed = work::changes(step, &mut after, revision)?;
+        let changed_bytes = map_bytes(&changed);
+        let mut changed = Deferred::new(changed, changed_bytes);
         metrics::validate(step, &mut after, |handle| {
             expansion.source_slot(handle, revision)
         })?;
-        for (id, object) in &after {
+        for (id, object) in after.iter() {
             if let Some(previous) = self.objects.get(id)
                 && previous.work.usage != object.work.usage
             {
@@ -471,6 +484,7 @@ impl SceneState {
                     .or_insert_with(|| previous.clone());
             }
         }
+        changed.attribute(map_bytes(&changed));
         let usage = metrics::charge(
             after
                 .iter()
@@ -481,7 +495,9 @@ impl SceneState {
         global
             .check(self.bound_usage(), usage)
             .map_err(|code| fail(FieldPath::default(), code))?;
-        let mut removed = object::removals(step, &mut after, &removal_ids)?;
+        let removed = object::removals(step, &mut after, &removal_ids)?;
+        let removed_bytes = records_bytes(&removed);
+        let mut removed = Deferred::new(removed, removed_bytes);
         for object in after
             .values_mut()
             .chain(removed.iter_mut().map(|(_, object)| object))
@@ -490,6 +506,18 @@ impl SceneState {
                 data.freeze(step);
             }
         }
+        let mut candidate = after
+            .map(|after| Candidate {
+                step: Arc::clone(original),
+                run: Arc::clone(&expansion.run),
+                extras: Arc::clone(&expansion.extras),
+                after,
+                created,
+                removed: removed.into_inner(),
+                changed: changed.into_inner().into_iter().collect(),
+            })
+            .map(Box::new);
+        candidate.attribute(candidate.attributed_bytes());
         Ok(Admitted {
             owner: Arc::clone(&self.identity),
             global: Arc::clone(&global.identity),
@@ -497,13 +525,7 @@ impl SceneState {
             generation: global.generation(),
             mutation: self.mutation,
             usage,
-            step: original,
-            run: Arc::clone(&expansion.run),
-            extras: Arc::clone(&expansion.extras),
-            after,
-            created,
-            removed,
-            changed: changed.into_iter().collect(),
+            candidate,
         })
     }
 
@@ -526,10 +548,12 @@ impl SceneState {
         }
         let revision = self.revision + 1;
         let resized: HashSet<_> = admitted
+            .candidate
             .changed
             .iter()
             .filter_map(|(id, old)| {
                 admitted
+                    .candidate
                     .after
                     .get(id)
                     .filter(|new| new.work.usage.segments != old.work.usage.segments)
@@ -537,6 +561,7 @@ impl SceneState {
             })
             .collect();
         let path_scales = admitted
+            .candidate
             .after
             .iter()
             .filter_map(|(id, object)| {
@@ -549,36 +574,44 @@ impl SceneState {
             owner: Arc::clone(&self.identity),
             cut_revision: self.last_cut_revision,
             revision,
-            step: Arc::clone(&admitted.step),
-            run: Arc::clone(&admitted.run),
-            extras: Arc::clone(&admitted.extras),
+            step: Arc::clone(&admitted.candidate.step),
+            run: Arc::clone(&admitted.candidate.run),
+            extras: Arc::clone(&admitted.candidate.extras),
             path_scales,
             canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
         };
+        let Candidate {
+            step,
+            run: _,
+            extras: _,
+            after,
+            created,
+            removed,
+            changed,
+        } = *admitted.candidate.into_inner();
         self.reserved
-            .extend(admitted.created.iter().map(|(id, _)| id.clone()));
-        self.step_ids.insert(admitted.step.id.clone(), revision);
+            .extend(created.iter().map(|(id, _)| id.clone()));
+        self.step_ids.insert(step.id.clone(), revision);
         self.steps.insert(
             revision,
             StoredStep {
                 event: self.log.len(),
                 kept: true,
                 retired: false,
-                removed: admitted.removed,
-                changed: admitted.changed,
+                removed,
+                changed,
             },
         );
-        self.log.push(SceneEvent::Step {
-            revision,
-            step: admitted.step,
-        });
-        self.objects = admitted.after;
+        self.log.push(SceneEvent::Step { revision, step });
+        let replaced = std::mem::replace(&mut self.objects, after);
+        let bytes = map_bytes(&replaced);
+        drop(Deferred::new(replaced, bytes));
         self.revision = revision;
         self.apply_usage(global, admitted.usage);
         Ok(Committed {
             index: revision - 1,
             revision,
-            handles: admitted.created,
+            handles: created,
             preparation,
         })
     }
@@ -617,10 +650,11 @@ impl SceneState {
     }
 
     fn forget_activated(&mut self) {
-        for (_, stored) in self.steps.range_mut(..=self.activated) {
-            stored.removed.clear();
-            stored.changed.clear();
-        }
+        retire_undo(
+            self.steps
+                .range_mut(..=self.activated)
+                .flat_map(|(_, stored)| [take(&mut stored.removed), take(&mut stored.changed)]),
+        );
     }
 
     /// Drops unactivated work and retains precisely the finished handles.
@@ -654,7 +688,8 @@ impl SceneState {
         {
             return Err(at("activated", ErrorCode::OutOfRange));
         }
-        let mut after = self.objects.clone();
+        let mut after = Deferred::new(self.objects.clone(), map_bytes(&self.objects));
+        let mut discarded = Deferred::new(Vec::new(), 0);
         let dropped: Vec<u32> = self
             .steps
             .iter()
@@ -662,14 +697,16 @@ impl SceneState {
             .collect();
         for revision in dropped.iter().rev() {
             let stored = &self.steps[revision];
-            for (id, object) in &stored.removed {
-                after.insert(id.clone(), object.clone());
+            for (id, object) in stored.removed.iter().chain(&stored.changed) {
+                if let Some(replaced) = after.insert(id.clone(), object.clone()) {
+                    discarded.push((id.clone(), replaced));
+                }
             }
-            for (id, object) in &stored.changed {
-                after.insert(id.clone(), object.clone());
-            }
-            after.retain(|_, object| object.handle.revision() != *revision);
+            discarded
+                .extend(after.extract_if(.., |_, object| object.handle.revision() == *revision));
         }
+        let discarded_bytes = records_bytes(&discarded);
+        discarded.attribute(discarded_bytes);
         let present: BTreeSet<Handle> = after.values().map(|o| o.handle).collect();
         let mut revealed = BTreeSet::new();
         for (index, handle) in cut.revealed.iter().enumerate() {
@@ -695,7 +732,9 @@ impl SceneState {
             }
         }
         metrics::freeze_detached(&mut after, &revealed).map_err(StepError::new)?;
-        after.retain(|_, object| revealed.contains(&object.handle));
+        discarded.extend(after.extract_if(.., |_, object| !revealed.contains(&object.handle)));
+        let discarded_bytes = records_bytes(&discarded);
+        discarded.attribute(discarded_bytes);
         let effective =
             !dropped.is_empty() || after.len() != self.objects.len() || cut.activated == 0;
         let usage = if cut.activated == 0 {
@@ -729,12 +768,17 @@ impl SceneState {
                 object.parent = None;
             }
         }
-        for (_, stored) in self.steps.range_mut(cut.activated + 1..) {
-            stored.kept = false;
-            stored.removed.clear();
-            stored.changed.clear();
-        }
-        self.objects = after;
+        retire_undo(
+            self.steps
+                .range_mut(cut.activated + 1..)
+                .flat_map(|(_, stored)| {
+                    stored.kept = false;
+                    [take(&mut stored.removed), take(&mut stored.changed)]
+                }),
+        );
+        let replaced = std::mem::replace(&mut self.objects, after.into_inner());
+        let bytes = map_bytes(&replaced);
+        drop(Deferred::new(replaced, bytes));
         self.activated = cut.activated;
         self.retire_through(cut.activated);
         self.forget_activated();
@@ -744,10 +788,10 @@ impl SceneState {
         }
         if cut.activated == 0 {
             self.cleared = true;
-            for stored in self.steps.values_mut() {
+            retire_undo(self.steps.values_mut().map(|stored| {
                 stored.kept = false;
-                stored.removed.clear();
-            }
+                take(&mut stored.removed)
+            }));
         }
         self.apply_usage(global, usage);
         Ok(if self.cleared {
@@ -765,12 +809,13 @@ impl SceneState {
         if self.cleared {
             return Ok(());
         }
-        self.objects.clear();
-        for step in self.steps.values_mut() {
+        let objects = take(&mut self.objects);
+        let bytes = map_bytes(&objects);
+        drop(Deferred::new(objects, bytes));
+        retire_undo(self.steps.values_mut().flat_map(|step| {
             step.kept = false;
-            step.removed.clear();
-            step.changed.clear();
-        }
+            [take(&mut step.removed), take(&mut step.changed)]
+        }));
         self.cleared = true;
         self.apply_usage(global, Usage::default());
         Ok(())

@@ -37,6 +37,25 @@ pub enum VaultError {
     Random(#[from] getrandom::Error),
 }
 
+impl VaultError {
+    /// Stored data that's malformed, incomplete or oversized, as opposed to a refused operation,
+    /// which a retry may get past.
+    #[must_use]
+    pub fn is_damage(&self) -> bool {
+        matches!(
+            self,
+            Self::Unreadable
+                | Self::Bounds
+                | Self::Store(
+                    CredentialStoreError::MissingChunk
+                        | CredentialStoreError::InvalidChunkLength
+                        | CredentialStoreError::InvalidChunkCount
+                        | CredentialStoreError::InvalidBlob,
+                )
+        )
+    }
+}
+
 impl From<SessionLockError> for VaultError {
     fn from(error: SessionLockError) -> Self {
         match error {

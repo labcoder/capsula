@@ -11,6 +11,7 @@ id from the vault.
 
 `open_browser` hands a `LaunchTarget` to an injectable `Launcher`. Production uses
 `SystemBrowser` and `webbrowser`; tests record the URL without opening a browser.
+The runtime opens it on tokio's blocking pool, because an OS launch can block the core loop.
 `webbrowser` owns discovery of the OS browser
 executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
 even when a saved record has ID, access and refresh tokens. Returning sign-in uses the
@@ -201,7 +202,7 @@ stateDiagram-v2
     [*] --> Busy: start, read the vault
     Busy --> SignedOut: read, no account
     Busy --> SignedIn: read, account
-    Busy --> SigningOut: read, sign-out pending (fenced)
+    Busy --> SigningOut: read, sign-out pending (resumes at its phase)
     Busy --> Busy: lock held; retried on each op and connection
     SignedOut --> SigningIn: SignIn / EnablePlan
     SignedIn --> SigningIn: SignIn / EnablePlan
@@ -209,6 +210,10 @@ stateDiagram-v2
     SigningIn --> SignedIn: verified set committed
     SigningIn --> SignedOut: cancelled, refused or failed
     SigningIn --> SignedIn: cancelled or failed with an account
+    SignedIn --> SigningOut: SignOut (use stops)
+    SigningIn --> SigningOut: SignOut with an account (attempt cancelled)
+    SigningOut --> SigningOut: a step refused, waits for Retry or the next start
+    SigningOut --> SignedOut: Finish, from the decided notice
 ```
 
 Every op is answered with the current view; anything else sends one only when it changed.
@@ -245,7 +250,12 @@ a later success never clears it.
 **Local policies:**
 - A grant without a refresh token is refused; nothing is saved for it.
 - An unusable 200 response that named a refresh token lists that token, when it's non-empty and
-  within 8 KiB; otherwise its outcome is unknown.
+  its list entry fits; otherwise its outcome is unknown.
+- A list entry may take at most 9,817 serialized bytes (`MAX_ENTRY_BYTES`), so the account entry and
+  four exchanges always fit one 48 KiB record. A received set whose refresh token escapes past
+  that, or whose account record escapes past 48 KiB, is refused where it arrives, so no save that
+  can never land is offered for Retry; the token's outcome is unknown, or it's listed when only
+  the account record was too big.
 - A 4xx without an OAuth error object (a proxy page, say) leaves issuance unknown.
 - Sign-in is refused with `RevocationBacklog` when the list's four exchange slots, counting one
   reserved for the request in flight, are full. Nothing is dropped to make room.
@@ -257,9 +267,91 @@ a later success never clears it.
 - A list entry stamped on a clock before 1970 gets `added_at = u64::MAX`, so age-out never
   evicts it early.
 
-Sign-out, revocation and age-out land in slice 3 PR 9b part 2. Until then `SignOut` and a
-backlog `Retry` are answered with the view, and a pending sign-out found at startup keeps the
-account fenced (`SigningOut`, `Cleanup::Refused`).
+**Revocation outside a sign-out.** A pass revokes every listed entry, the account's first, then
+rewrites the list without the ones an empty 200 confirmed. Passes run at startup, when an entry
+is added and on `Retry`, never on a timer, one at a time: a request during a pass becomes one more
+pass after it. None runs while the lock is Busy or a sign-out is pending. When the list empties,
+the empty list is saved, its names are deleted and checked, and `sweep` clears. A pass that a
+sign-out overtook only saves the shorter list: the sign-out's Delete removes the names. The manifest is
+deleted before its chunks, so a crash or refusal at any step leaves either the readable empty
+list or chunks with no manifest, and the next start or Retry finishes the job.
+
+`oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
+passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
+`client_id`. Only an empty 200 confirms. A transport failure or a `5xx` is tried three times in
+all, 0.5 s then 1 s apart, and the whole pass has one 10 s budget [local policy]. A discovery
+document that fails a check sends no token anywhere.
+
+**Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
+30-day refresh-token lifetime plus a 2-day margin [local policy]. It's checked at startup, and
+when a full list would refuse a sign-in, so a full list frees what expired since, except entries
+stamped `u64::MAX`, which never age out. While the brain runs, wall time moving more than an hour
+[local policy] further than monotonic time is a clock jump: age-out waits for the next start. An
+entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
+set back while it's listed only delays its age-out.
+
+**Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
+at once: the attempt moves, the listener closes, the account leaves memory, and the view is
+`SigningOut { cleanup: Running, revocation_unconfirmed: true }`. A save the current attempt already
+dispatched still lands behind that fence: no later op replaces the sign-out, the view stays
+`SigningOut`, and Prepare adopts what it saved. One marker write then promotes the sign-out
+(`sign_out: Keep/Revoking`, `sweep`, `notice`) before any token-bearing write or delete. If that's
+refused, the view is `NotDurable` with `SignOutNotDurable` and Retry, and use stays fenced in this
+process only: a restart loads the account again. Every later step is safe to repeat, and a restart
+or Retry enters at the first step of the persisted phase:
+
+1. **Settle.** The lane's outstanding request runs to its end, and a running revocation pass ends
+   first. A queued code is never sent. A stale set gets its own list entry through the lane's own
+   save, an ambiguous ending sets `outcome_unknown`, and a refused save holds the set (`Refused`)
+   until Retry; after a crash its `request_pending` keeps the warning.
+2. **Prepare.** `chatgpt`'s refresh token becomes the `Account` entry unless one is listed (that
+   token or its successor), so a replay never duplicates or overwrites it. A record whose data is
+   damaged persists `outcome_unknown` first; a damaged list isn't rewritten, but the account token
+   is still revoked. A refused read decides nothing: the step is `Refused` and Retry reruns it.
+3. **Revoke.** One run over the list, inside the usual 10 s budget.
+4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
+   counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
+   only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With
+   `outcome_unknown` persisted, an absent list isn't checked against the account, so a damaged
+   account still reaches Delete. If it's refused, the phase stays `Revoking` and nothing is deleted.
+5. **Delete**, driven by the marker alone, whether or not a manifest survives. Keep rewrites a
+   readable account to its registration and deletes every other name of the record by name. An
+   account with no manifest, or with damaged data, is erased, as Erase does; a refused read erases
+   nothing: the step is `Refused` and Retry reruns it. Then `revoke` is erased. An erase deletes the manifest first, then all 128 chunk names, then checks all 129 gone,
+   so an interruption leaves chunks with no manifest that the next start or Retry still deletes.
+6. **Finish.** Only once its own by-name check of both records passes, the marker becomes
+   notice-only or is deleted. Use stays fenced until the vault is read again, so the next sign-in
+   reuses the kept registration; then the view becomes `SignedOut { revocation_unconfirmed: notice }`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Promote: SignOut
+    Promote --> Promote: refused, NotDurable; Retry
+    Promote --> Settle: marker Revoking, notice set
+    state "phase Revoking (a start resumes at Settle)" as Revoking {
+        Settle --> Prepare: lane free, no pass running
+        Prepare --> Revoke: entries listed
+        Prepare --> Checkpoint: nothing listed
+        Revoke --> Checkpoint: confirmed entries
+        Prepare --> Settle: refused; Retry or restart
+        Checkpoint --> Settle: refused; Retry or restart
+    }
+    Checkpoint --> Delete: marker Deleting, notice decided
+    state "phase Deleting (a start resumes at Delete)" as Deleting {
+        Delete --> Finish: every name gone
+        Delete --> Delete: refused; Retry or restart
+        Finish --> Delete: refused; Retry or restart
+    }
+    Finish --> [*]: SignedOut, notice-only marker or none
+```
+
+While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start nothing and are
+answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
+(`Keep`); `Erase` comes only from a persisted marker, a damaged one included (it reads as
+`Erase`/`Revoking`), until PR 10 reports `PlanState::Unavailable`. A refused marker read at startup
+decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and Retry or the next start
+reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
+whole sign-out makes, for Keep and Erase.
 
 ## Credential storage
 
@@ -270,9 +362,12 @@ also left an entry, so tests verify cleanup by exact name. Production reads and 
 account system's one credentials thread, through the vault's one store handle, which takes
 neither failure at its word: "not found" for a name the handle wrote and hasn't deleted since
 is tried 4 times, 25 ms apart [guess], then fails as `Unsettled` instead of reading as absent,
-and every delete is read back and retried the same way until the name is gone. Whether a
-concurrent write from another process (the shell, another app) causes the same misses is
-untested. `Worker::system` is the only way outside tests to
+and every delete is read back and retried the same way until the name is gone. A delete counts
+as gone only when 4 reads in a row say so, since one "not found" can hide a delete that didn't
+stick. Whether a concurrent write from another process (the shell, another app) causes the same
+misses is untested. The shell's `keyring` read of the instance capability needs no retry of its
+own: a failed read fails that handshake, and the link tries the whole handshake again every
+50 ms for 10 s. `Worker::system` is the only way outside tests to
 reach the real store: `Vault::open` is private to `connections`, and `WindowsCredentialStore`
 to the crate.
 
@@ -337,8 +432,7 @@ manifest. Before that commit the old value remains active; afterwards the new on
 `SaveResult::Committed { leftovers }` distinguishes a successful commit with failed old-slot
 cleanup from `NotCommitted`. An unknown or dirty inactive slot gets a full 64-name sweep;
 ordinary post-commit cleanup uses the old manifest's count. Reads never fall back to old data.
-An unreadable `chatgpt` manifest requires sign-out recovery, whose orchestration belongs to
-PR 9. An unreadable `host` fails closed: sign-in is refused as `CredentialsUnavailable` and Retry
+An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. An unreadable `host` fails closed: sign-in is refused as `CredentialsUnavailable` and Retry
 reads it again, but nothing replaces it, so a damaged host id blocks sign-in until it's fixed. This layer does not silently replace either record.
 
 ```mermaid
@@ -356,7 +450,8 @@ flowchart LR
 Marker updates merge the current persisted state, not a default or queued snapshot. A late
 sweep cannot undo a sign-out promotion. The checkpoint atomically enters `Deleting`, decides
 the notice, and folds uncertainty flags; repeating it cannot change that decision. Deletes
-are fenced until the checkpoint and never change the marker. Finish checks secret names
+are fenced until the checkpoint and never change the marker; `delete_for_sign_out` runs the
+whole Delete step from the marker's disposition. Finish checks secret names
 absent, including orphan chunks, before removing sign-out state; Keep allows only the live
 registration-only slot. An empty marker is deleted rather than stored. Notice-only state
 can survive local deletion without retaining tokens. `SignInCommitted` clears an old notice

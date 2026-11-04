@@ -8,7 +8,6 @@ use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    mermaid::Extra,
     record::{Anchor, Change, Enter, Track},
     state::{object, work},
     theme::Theme,
@@ -34,7 +33,7 @@ pub fn prepare(
     cancel: &AtomicBool,
 ) -> Result<PreparedStep, PrepareError> {
     let PrepareInput {
-        ticket,
+        mut ticket,
         before,
         surface,
         theme,
@@ -229,8 +228,7 @@ pub fn prepare(
             min: [old.x.min(to.x), old.y.min(to.y)],
             max: [old.x.max(to.x), old.y.max(to.y)],
         };
-        group
-            .motion
+        Arc::make_mut(group.motion.get_or_insert_with(Arc::default))
             .entry("pos")
             .and_modify(|cached| *cached = cached.peak(glide))
             .or_insert(glide);
@@ -269,6 +267,7 @@ pub fn prepare(
                 source,
                 *handle,
                 parent,
+                compound::direction(&after, parent, surface).0,
                 &after,
                 &mut build,
                 previous.as_ref(),
@@ -282,15 +281,16 @@ pub fn prepare(
     }
     update_group_bounds(&mut after);
     for ((id, property), motion) in motions {
-        after
-            .objects
-            .get_mut(&id)
-            .ok_or_else(invariant)?
-            .motion
-            .insert(property, motion);
+        let object = after.objects.get_mut(&id).ok_or_else(invariant)?;
+        Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
     }
     after.prune_extras();
     validate_bounds(&after)?;
+    if after.objects.is_empty() {
+        // Removals leave an emptied B-tree's root leaf, which the index charge doesn't count.
+        after.objects = BTreeMap::new();
+        after.handles = BTreeMap::new();
+    }
     let mut items: Vec<_> = after
         .objects
         .iter()
@@ -299,23 +299,32 @@ pub fn prepare(
                 !Arc::ptr_eq(&old.item.primitives, &object.item.primitives)
                     || old.item.bounds != object.item.bounds
                     || old.item.parent != object.item.parent
+                    || old.item.transform != object.item.transform
             })
         })
         .map(|(_, object)| object.item.clone())
         .collect();
     items.sort_by_key(|item| item.handle);
     let resident_bytes = residency(before.objects.values().map(|object| &object.item), &items)
-        + heap::source_bytes(before.objects.values(), after.objects.values())
+        + heap::shared_bytes(before.objects.values(), after.objects.values())
         + heap::compiled_bytes(&ticket.step, &ticket.run)
+        + heap::extras_bytes(
+            before.extras.values(),
+            after.extras.values().chain([&ticket.extras]),
+        )
         + chart_bytes
-        + ticket.extras.values().map(Extra::bytes).sum::<usize>()
-        + after.index_bytes();
+        + after.index_bytes()
+        + items.capacity() * size_of::<Item>()
+        + removed.capacity() * size_of::<Handle>()
+        + glides.capacity() * size_of::<Glide>();
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
     }
     after.revision = ticket.revision;
     after.version = Arc::new(());
     build.check_cancel()?;
+    // Only preparation reads the sizing facts, so the held result keeps none.
+    ticket.path_scales.clear();
     Ok(PreparedStep {
         index: ticket.revision - 1,
         display: DisplayList { items },
@@ -624,7 +633,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
             inherited_min_scale: scale,
             inherited_translation: matrix[4].abs().max(matrix[5].abs()),
             inherited_rotation: matrix[1] != 0.0 || matrix[2] != 0.0,
-            motion: placed.motion.clone(),
+            motion: placed.motion.as_deref().cloned().unwrap_or_default(),
             enter,
             ..work::Work::default()
         };
@@ -652,7 +661,8 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
     Ok(())
 }
 
-/// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once.
+/// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once with its
+/// `Arc` header.
 pub(super) fn residency<'a>(
     shared: impl IntoIterator<Item = &'a Item>,
     items: impl IntoIterator<Item = &'a Item>,
@@ -672,13 +682,13 @@ pub(super) fn residency<'a>(
         if !shared_arrays.insert(item.primitives.as_ptr()) {
             continue;
         }
-        bytes += item.primitives.len() * size_of::<Prim>();
+        bytes += heap::ARC_HEADER + item.primitives.len() * size_of::<Prim>();
         for primitive in &*item.primitives {
             match primitive {
                 Prim::Fill { points, .. } | Prim::Line { points, .. }
                     if vertices.insert(points.as_ptr()) =>
                 {
-                    bytes += points.len() * size_of::<Vec2>();
+                    bytes += heap::ARC_HEADER + points.len() * size_of::<Vec2>();
                 }
                 Prim::Text { text, .. } => bytes += text.as_str().len(),
                 _ => {}
@@ -726,7 +736,8 @@ mod tests {
                 before.objects.values().map(|o| &o.item),
                 std::slice::from_ref(&item)
             ),
-            2 * size_of::<Prim>() + 3 * size_of::<Vec2>()
+            2 * heap::ARC_HEADER + 2 * size_of::<Prim>() + 3 * size_of::<Vec2>(),
+            "one primitive array and one vertex array shared by the stroke and the fill"
         );
         let crate::Record::Step(step) = crate::parse_record(
             br#"{"step":{"id":"first","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}]}}"#,
@@ -751,7 +762,7 @@ mod tests {
         };
         assert_eq!(
             residency(before.objects.values().map(|o| &o.item), &[recolored]),
-            2 * size_of::<Prim>()
+            heap::ARC_HEADER + 2 * size_of::<Prim>()
         );
     }
 }

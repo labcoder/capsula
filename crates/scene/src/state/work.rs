@@ -2,6 +2,7 @@ use super::object::{Object, path as op_path};
 use crate::{
     ErrorCode, FieldPath, Finite, Step, StepError, WireId,
     budget::Usage,
+    deferred::Deferred,
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
     record::{Anchor, Anim, Axis, AxisScale, ChartKind, Ease, Enter, KeyValue, Op, Point, Track},
@@ -402,7 +403,7 @@ pub(super) fn changes(
             ErrorCode::OverBudget(crate::Budget::Tracks),
         ));
     }
-    let mut original = BTreeMap::new();
+    let mut original = Deferred::new(BTreeMap::new(), 0);
     let mut owners = BTreeMap::<(WireId, &'static str), Motion>::new();
     for (index, op) in step.put.iter().enumerate() {
         if let Op::Anim(anim) = op {
@@ -453,7 +454,7 @@ pub(super) fn changes(
             object.work.usage.marks = data.len();
         }
     }
-    Ok(original)
+    Ok(original.into_inner())
 }
 
 #[cfg(test)]

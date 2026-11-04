@@ -1,7 +1,7 @@
-# cargo deny check: licenses, advisories, bans and sources, for what ships on Windows.
+# cargo deny check: licenses, advisories, bans and sources, for Windows and macOS.
 
 [graph]
-targets = ["x86_64-pc-windows-msvc"]
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [advisories]
 # Vulnerabilities always fail. Unmaintained crates fail only when Kumochi depends on them
@@ -34,6 +34,10 @@ exceptions = [
     # MPL-2.0, file-level copyleft, allowed when a dependency needs it: dirs-sys, through
     # gpui-kit-assets' rust-embed.
     { crate = "option-ext", allow = ["MPL-2.0"] },
+    # MPL-2.0: gpui-pre-apple's build-only dependency.
+    { crate = "cbindgen", allow = ["MPL-2.0"] },
+    # MPL-2.0: zed-font-kit, through gpui-pre-apple.
+    { crate = "dwrote", allow = ["MPL-2.0"] },
 ]
 
 [licenses.private]

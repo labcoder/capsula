@@ -5,6 +5,18 @@ GPUI nor tokio. The brain parses model JSON; the shell decodes the same validate
 types from postcard. The brain's drawing reducer owns canonical scene state; preparation is
 synchronous and host-independent, and rendering is not wired yet.
 
+```mermaid
+flowchart LR
+    Bytes[Drawing bytes] --> Tokenizer[Bounded tokenizer]
+    Tokenizer --> Record[Typed record]
+    Record --> Admit[Admission and bounded Mermaid compilation]
+    Admit --> Commit[Commit original typed history]
+    Commit --> Prepare[Text measurement and layout]
+    Prepare --> View[Activation and frame sampling]
+    Commit --> Replay[Retained prefix for recovery]
+    Replay --> Admit
+```
+
 ## Records
 
 A drawing call is `{"records":[begin, step, ..., end]}`. Each record is externally
@@ -164,6 +176,10 @@ targets. A generated object cannot satisfy an otherwise dangling reference.
 All expanded objects and operations count once against the ordinary scene and step
 caps before handles are constructed. The 48-node and 96-edge caps apply to each
 diagram after membership and edge ownership are resolved, not to the whole source.
+
+A header-only chart is accepted and costs its one empty boxless root; it draws nothing.
+An explicitly blank node label, quoted or unquoted, stays empty rather than falling
+back to its id. The node still occupies its normal shape and counts against the budget.
 
 The original `Step` remains authoritative for duplicate identity, `SceneState::step`,
 `PreparedStep::step` and recovery. A private executable step and slot-origin map drive
@@ -400,8 +416,21 @@ comparisons retain that original workload and label the wider glide/property var
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
 It returns rectangles in input order and has no scene, clock, activation or rendering
-dependency. The initial batch is every node in the first step adding nodes to a
-diagram. Later additions use free slots without moving existing node-local rectangles.
+dependency. A batch is initial when no member of the group already has a rank;
+cutting away all members lets the next batch start fresh. Unboxed, originally top-level
+diagrams fit that batch inside 16-pixel margins, between scale 0.8 and 1.0, keeping default
+15-pixel labels at least 12 pixels. Wider content stays at the floor and starts at the
+leading margin; fitting does not promise that every diagram fits. The fit is an item
+transform, separate from model tracks, and stays fixed during incremental growth.
+Boxed, nested, detached and diagram-less batches remain unscaled. Fit and model poses
+still compose under the existing transform guards, including minimum-normal scale.
+Later additions use free slots without moving existing node-local rectangles. Their
+slot viewport follows the fit and resting translation/glide, preserving the prior
+placement units for model scale and rotation. A detached ancestor's absorbed pose
+never acts as an automatic fit camera; new detached nodes can remain off-screen.
+The fit composes outside model tracks, so 100 model pixels move 80 screen pixels at scale 0.8.
+Initial fitting suppresses glides on
+axes where the fitted focus remains oversized, preserving its leading margin.
 Inline defaults to downwards flow at the host's narrow width (360 logical pixels by
 default); overlay defaults to rightwards flow. Explicit diagram direction and bounds
 win. Inline `begin.size` overrides host dimensions when present.
@@ -422,16 +451,21 @@ The 48-node and 96-edge limits apply per diagram, not per nested drawing. Cluste
 consume the scene's existing object and depth budgets rather than its direct-node
 budget. Incremental additions keep earlier node rectangles and cluster placements
 stable; a cluster can grow into its siblings or off-screen on a later step because
-it neither moves nor glides to bring new contents into view; A9 revisits this limit.
+it neither moves nor glides to bring new contents into view. Moving siblings would
+also require rebuilding their cached edge anchors and cross-object references.
 Groups have no frame or label in the plain diagram vocabulary.
 New text, shapes, lines, paths, highlights and callouts inside a cluster contribute
 to its ranked size in a step that places the cluster or adds a node to it, when all
 their anchors are absolute or refer to placed objects strictly inside its subtree.
 Source-order readiness passes resolve local dependency chains before ranking.
+An already placed reference outside the cluster is classified once and sent late,
+rather than walking its ancestry again after every local item is built. References
+not yet placed still wait in source order; this does not change placement semantics.
 Anchors to or across a boxed diagram draw late because its glide applies after
 placement. References to the cluster itself, its ancestors, siblings or outside
-objects are also drawn late, so they do not contribute to its ranked size; A9's
-renders judge this shortcut. Changed objects retain the later-growth behavior above.
+objects are also drawn late, so they do not contribute to its ranked size. Keep
+cached cross-group anchors until a motion-owned reflow policy can replace them.
+Changed objects retain the later-growth behavior above.
 Private Mermaid group titles reserve the band described above before parent ranking;
 their text belongs to the group handle, not a synthetic child.
 
@@ -457,9 +491,20 @@ Deliberate differences are typed colors instead of string parsing and a fallible
 result for excess node/edge counts, unsafe measured dimensions or generated coordinates
 outside the scene cap. Empty input, singleton placement, deterministic exact-cap output
 and those failure boundaries have additional tests.
-Outside that pure port, node sizing is smaller, the rank gap is fixed, edges use
-quadratic routing, and wide initial batches are not scaled to fit; A9's visual gate
-will decide these differences from S1.
+Outside that pure port, labels wrap at 180 pixels and nodes reserve 24 horizontal and 20
+vertical pixels around their text, with an 80-by-40 minimum. Circles use the larger
+dimension; diamonds enlarge to contain the text rectangle. The minimum 72-pixel rank
+gap widens once per group for its longest along-flow edge label plus 24 pixels. This
+can spread unrelated rank pairs; per-pair gaps wait for a render showing the need.
+Quadratic routes follow the inherited flow axis but do not avoid intervening nodes
+or group title bands; cycles and cross-group links can cross them. Diamond and circle ports intersect
+their inscribed outlines in the resolved axis-aligned bounds; other shapes retain
+rectangular ports. Fully rotated-outline routing is not implemented. Text primitive
+origins name the wrapping box, while item bounds continue to describe aligned ink.
+At the 0.8 floor, default edge labels are 11.2px and subtitles 10.4px, not 12px.
+P3 check 8's owner look must decide whether frameless group membership, obscured
+skipped-rank/back links, later cluster overlap and floor-clipped content are acceptable.
+These are disclosed limits, not claims that the reference gates are free of collisions.
 
 The ignored `cluster_inputs::prepare_many_clusters` test times initial preparation
 with deterministic text measurement: flat 16/32/64/128-cluster growth, a successful
@@ -549,15 +594,22 @@ The shell's recovery deadline is sized from the measurement below.
 `PreparedStep::resident_bytes` charges what a result adds to its predecessor: new
 primitive and vertex arrays, chart bases and plots, and the layout's own `Op` source
 copies, plus the result's full index, because every result holds its own copy of the
-maps. `LayoutState::resident_bytes()` charges everything a retained layout holds,
+maps, the display/removal/glide vectors at capacity, and the ticket's compiled record
+and private facts. Motion maps are shared between prefixes and copied only when an
+explicit track or generated glide changes them. `LayoutState::resident_bytes()` charges everything a retained layout holds,
 counting each shared allocation once by pointer. So the retained layout plus the
 queued results make up the scene's residency, and a recovered layout charges exactly
 what the live one did. Source copies are counted field by field for each record
 type: each string's bytes and each sequence's elements at their own size, which
 matches what they allocate because cloned records have exact capacities. The index
-charge is a fixed allowance per object for its two map entries, plus both heap copies
-of its id; map node overhead, motion maps and allocator headers aren't counted beyond
-it. Preparation rejects a single estimate over 64 MiB, and the shell enforces the
+charge covers all three B-trees with a conservative node allowance pinned to Rust 1.98,
+plus both heap copies of each id and the version allocation. Shared source copies,
+motion maps, geometry, chart storage and private facts include their Arc headers
+and are counted once by allocation identity. Empty indexes release retained root
+leaves, and preparation discards sizing facts before publishing its result. These
+are requested-byte allowances, not RSS or allocator bookkeeping bounds. When a ready
+result becomes the rest, charge its layout in full and keep only later ready deltas.
+Preparation rejects a single estimate over 64 MiB, and the shell enforces the
 64 MiB cap across visible scenes.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
@@ -577,6 +629,50 @@ history, in its control and cross-group forms; a 600-object scene of 306 cluster
 local/cross views at the shared 1,500-object cap. Three warm-ups precede 16 timed recoveries per workload; building
 the histories, resident-byte totals and result destruction are outside the timer, and
 text measurement is the fixed fake. Run it like the preparation measurement above.
+
+### Deferred destruction
+
+`deferred::Deferred<T>` hands a discarded value to one long-lived `scene-dropper`
+thread, so freeing a large prefix or semantic state never runs on the thread that
+discarded it, above all the shell's UI thread. Dropping one costs a `Box` and an
+unbounded channel send, and never waits.
+
+```mermaid
+flowchart LR
+    D[Discard on the UI or a worker] -->|Box and send| Q[Unbounded queue, metered]
+    Q --> T[scene-dropper runs the destructor]
+    T -->|thread dies| F[running is false: stop intake, leak later values]
+```
+
+The host must call `deferred::start()` once before intake, and refuse intake when it
+fails. Production startup is not wired yet; this foundation keeps v1 off and does not
+change when applications destroy values. Until startup, and on the dropper itself,
+values drop in place, so tests and nested
+values behave as before. `running()` turns false once the dropper thread has died,
+which only a panicking destructor in an unwinding build can cause; `start()` then
+fails too. Later values are leaked rather than destroyed on the caller, because a dead
+dropper is a failure, not a shutdown path. There is no shutdown call: at exit, whatever
+is queued goes with the process.
+
+`pending()` reports the values queued or still being destroyed and the bytes their
+owners attributed; `take_peak()` returns the attributed high water since its last
+call. Attributions are owner estimates, not heap measurements, and nested values
+aren't counted again. The queue has no byte bound and sits outside the 64 MiB
+presenter cap: it is metered, not limited, which is a known shortcut.
+
+The allocation regressions exercise clear with track undo records, successful and stale
+commit, rejection of a late invalid track, and Stop both at rest and when dropping a
+step with removals and cell changes. They also measure outgoing activation over 256
+untracked rectangles; the paint frame is created outside that measurement. Each fixture
+waits for the live dropper's pending values and bytes to drain after its assertions.
+These are caller-side allocation checks, not latency measurements.
+
+They do not prove every admission error, compiled-candidate rejection, rejected
+predecessor, stale activation, layout-cut error or undo-release path. Settled and
+superseded animation tracks still need retirement or measurement in the consuming
+layer's activation gate. `SceneState::attributed_bytes()` estimates whole-state ownership
+for the host's queue meter, not a heap bound. The host must protect its own held values
+and clear a paint frame before retiring the view whose geometry it shares.
 
 ### Tables
 

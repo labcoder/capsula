@@ -33,5 +33,7 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo fmt --all --check
       - run: cargo deny --locked check
+      - run: cargo xtask check-vendor
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: cargo test -p gpui-pre-windows --locked --lib frame_demand
