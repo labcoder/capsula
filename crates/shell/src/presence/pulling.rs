@@ -29,6 +29,15 @@ impl PullSpace {
         self.physical([x, y])
     }
 
+    /// `p`, in pull space, in physical screen pixels.
+    pub(crate) fn screen(self, p: Vec2) -> [f64; 2] {
+        let scale = f64::from(self.scale);
+        [
+            f64::from(self.area[0]) + f64::from(p.x) * scale,
+            f64::from(self.area[1]) + f64::from(p.y) * scale,
+        ]
+    }
+
     /// A physical screen rectangle in pull space.
     fn rect(self, [x, y, width, height]: [i32; 4]) -> Rect {
         let origin = self.physical([f64::from(x - self.area[0]), f64::from(y - self.area[1])]);
@@ -188,6 +197,11 @@ impl Pulling {
         let (pull, _) = self.pull.as_mut()?;
         pull.update(dt);
         Some(pull)
+    }
+
+    /// The pull, with the space it was grabbed in, from the press until it has rested.
+    pub(crate) fn pull(&self) -> Option<(&Pull, PullSpace)> {
+        self.pull.as_ref().map(|(pull, space)| (pull, *space))
     }
 
     /// The picture just accepted shows the body at rest at home: the pull is over. Physics

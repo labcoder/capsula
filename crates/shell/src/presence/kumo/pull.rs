@@ -142,6 +142,11 @@ impl Pull {
         mix(PEEK_WIDTH, CARRY_WIDTH, out)
     }
 
+    /// The pull area, which the free body stays inside.
+    pub(crate) fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
     pub(crate) fn neck(&self) -> &Neck {
         &self.neck
     }

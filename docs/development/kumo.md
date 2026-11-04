@@ -191,7 +191,20 @@ The peek's Kumo owns the `Pulling` (`presence/kumo_view/pull.rs`), since its win
 - **The press** is a left press on Kumo, read while the native bridge forwards it, so it carries that forward's stamp. A press nothing stamped starts nothing. The line and the slot come from the placement Windows last accepted.
 - **Moves and releases** are window listeners, not Kumo's own: capture keeps them in the peek for the whole drag, but GPUI's element listeners hear only the pointer over their hitbox. Each move and the release while the drag is live re-read the work area, since Windows posts nothing the peek follows when it changes, so a release after a change with no move in between is lost too, as is one whose work area can't be read. Hiding the peek loses the drag.
 - **The presence follows.** Kumo emits `PullChanged` as a drag is grabbed and as it ends. While it's live, Esc is held system-wide and cancels the pull before it stops work, clears a drawing or dismisses a panel, and the peek's owner is `Owner::Pull`, which keeps it open wherever the pointer goes. The 80 ms grace reads the owner when it fires, so one already queued at the grab keeps the peek open too. Quit ends a live drag as lost and gives back its Esc before any shutdown work waits, and no grab starts after it.
-- shortcut: nothing draws the pull yet. The body stays in the peek, and `rested` follows the physics' settling at once; the picture layer calls it only once the dock accepts the resting mask.
+
+## The pulled picture
+
+While a pull exists, the dock draws Kumo and the peek's slot is empty (`presence/pull_picture.rs`, `presence/pull_dock.rs`, `presence/kumo_view/picture.rs`).
+
+- **The art** is made once per bake, off the UI thread, beside the peek's bake: the body rendered at the carry width (84 px at the display's scale) in its still pose, its row hulls, and the goo's scratch.
+- **Each frame** of the peek's frame loop steps the pull and makes the next picture: the goo pieces the neck has now, shaded at half the display's scale, and the body's image stretched by the neck's `body_scale` about its bottom centre. Each image's device quad is snapped as GPUI snaps it, and the pixels it can show come from its row hulls through `device_spans`.
+- **The mask** owns the line's band, the next picture's pixels and the shown picture's pixels, since the shown picture stays on screen until the next one is drawn. Each row holds at most four spans; spans that touch merge, and a fifth is refused, never truncated, so that frame isn't shown. The hit mask is allocated once at the largest pull area, the slot grown on every side by `SNAP_LEN` plus the carry width.
+- **The overlay** grows to the pull area at the first picture and moves with it, so the line keeps its place in it.
+- **Accepted pictures only.** The dock draws a picture only once Windows has accepted its mask; a failed upload keeps the picture it shows, and the peek's slot empties only once the dock shows the body. The images a picture no longer draws leave GPUI's atlas a frame later; the body's, the same in every frame of a pull, stays.
+- **Rest.** Once the released body is home and still, Kumo wants no more frames and the line asks for the dock back: its mask and overlay alone. Only once that's accepted does `rested` end the pull, the dock stop drawing the body and the peek get it back, so a failed upload keeps the pull returning, the body out and the overlay grown, until a retry is accepted. A dock that fails closed ends the pull too.
+- shortcut: the observer records a pull's commits without their geometry, and a pull area taller than its 512 rows, as a full-height pull area is from 110% scale up, would overflow it. The measurement layer gives it the line, the body and their owned spans.
+
+Tests cover four disjoint spans in order and a fifth refused, spans that bridge a gap merging, spans outside the rows dropped, the largest area, a reduced-motion frame whose body is inside the pull area with every owned pixel within its quad and a snap pixel, a full-motion frame drawing the neck under the body, and a resting body that stays out of the peek through a failed upload until the line is accepted, then rests once.
 
 ## The native bridge
 

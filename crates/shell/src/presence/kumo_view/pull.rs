@@ -77,7 +77,7 @@ impl KumoView {
     }
 
     /// Starts a pull at `at` in the peek whose client area starts at `origin`, unless one exists.
-    fn grab(
+    pub(super) fn grab(
         &mut self,
         button: MouseButton,
         seq: u64,

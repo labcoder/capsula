@@ -3,10 +3,12 @@
 //! finds it without the line growing. A placement becomes current only once Windows accepts its
 //! mask, so the line never shows where the mask isn't.
 
+use std::sync::Arc;
+
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, canvas,
-    div, px,
+    App, Context, IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _,
+    StyledImage as _, WeakEntity, Window, canvas, div, img, px,
 };
 
 use super::diagnostics::{self, PendingPaint};
@@ -14,6 +16,7 @@ use super::geometry::Layout;
 use super::kumo_view::PullSite;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
+use super::pull_picture::PullPicture;
 use super::{OpenError, Presence, platform};
 use crate::platform::{PresenceError, PresenceNative, ROW_SPANS, RowSpans};
 
@@ -155,6 +158,25 @@ pub(super) struct Line {
 }
 
 impl Line {
+    /// The line Windows last accepted.
+    pub(super) fn accepted_frame(&self) -> Option<LineFrame> {
+        self.accepted.map(|placement| placement.frame)
+    }
+
+    /// A pull has the mask and the overlay: the next attempt gives them back to the line.
+    pub(super) fn disturb(&mut self) {
+        self.held.mask = None;
+        self.held.overlay = None;
+    }
+
+    /// The pull is done with the mask and the overlay: ask for the line again, the pending
+    /// placement if there is one, with a fresh run of attempts.
+    pub(super) fn reclaim(&mut self) {
+        self.disturb();
+        self.requested = self.requested.or(self.accepted);
+        self.failed = 0;
+    }
+
     /// What the mask owns now: the pixels that take the pointer.
     pub(super) fn contains(&self, point: [i32; 2]) -> bool {
         self.accepted
@@ -277,15 +299,15 @@ pub(super) fn on_next_frame<T: 'static>(
 }
 
 /// The real surfaces: the proxy's mask and visibility, and the dock's overlay window.
-struct Desktop<'a> {
-    native: &'a mut PresenceNative,
+struct Desktop<'n, 'a> {
+    native: &'n mut PresenceNative,
     window: &'a mut Window,
     cx: &'a mut App,
     /// The observer's state after the last accepted upload, which the dock names when it draws.
     drawn: Drawn,
 }
 
-impl Surfaces for Desktop<'_> {
+impl Surfaces for Desktop<'_, '_> {
     type Error = PresenceError;
 
     fn upload(&mut self, frame: &LineFrame) -> Result<(), PresenceError> {
@@ -355,7 +377,12 @@ impl Presence {
 
     /// One attempt at the requested placement. Returns whether it became current, with its
     /// layout and line published.
-    fn try_line(&mut self, owner: WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
+    pub(super) fn try_line(
+        &mut self,
+        owner: WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
         let mut surfaces = Desktop {
             native: &mut self.native,
             window,
@@ -383,6 +410,7 @@ impl Presence {
                     slot: placement.layout.dock,
                 };
                 self.kumo.update(cx, |kumo, _| kumo.set_site(Some(site)));
+                self.line_reclaimed(cx);
                 true
             }
             Attempt::Failed {
@@ -401,6 +429,7 @@ impl Presence {
                         cx.notify();
                     });
                     self.kumo.update(cx, |kumo, _| kumo.set_site(None));
+                    self.line_reclaimed(cx);
                 }
                 if retry {
                     on_next_frame(window, owner, Self::retry_line);
@@ -432,6 +461,12 @@ pub(super) struct Dock {
     pub(super) drawn: Drawn,
     /// While Listening, the line takes the accent colour.
     pub(super) listening: bool,
+    /// The pulled picture whose mask Windows accepted, drawn over the line.
+    pub(super) pull: Option<PullPicture>,
+    /// Images no picture draws any more, and those retired a frame earlier, which leave
+    /// GPUI's atlas at this render.
+    pub(super) retired: Vec<Arc<RenderImage>>,
+    pub(super) aged: Vec<Arc<RenderImage>>,
 }
 
 impl Render for Dock {
@@ -448,6 +483,12 @@ impl Render for Dock {
             .absolute()
             .size_full()
         });
+        for image in self.aged.drain(..) {
+            if let Err(error) = window.drop_image(image) {
+                tracing::debug!(%error, "can't drop a pulled frame");
+            }
+        }
+        std::mem::swap(&mut self.aged, &mut self.retired);
         let scale = window.scale_factor();
         let fill = if self.listening {
             cx.theme().primary
@@ -467,11 +508,25 @@ impl Render for Dock {
                 .border_1()
                 .border_color(cx.theme().border)
         });
+        let pulled = self
+            .pull
+            .iter()
+            .flat_map(|picture| picture.images.iter().flatten());
+        let pulled = pulled.map(|(quad, image)| {
+            img(Arc::clone(image))
+                .absolute()
+                .left(logical(quad.x - origin_x, scale))
+                .top(logical(quad.y - origin_y, scale))
+                .w(logical(quad.width, scale))
+                .h(logical(quad.height, scale))
+                .object_fit(ObjectFit::Fill)
+        });
         div()
             .size_full()
             .relative()
             .child(Stamp(Surface::Dock, self.drawn))
             .children(line)
+            .children(pulled)
             // After the frame's stamp, so the paint qpc it logs falls inside that frame.
             .children(marker)
     }
