@@ -161,8 +161,9 @@ flowchart LR
 - **Control:** load, unload and shutdown set fields in one shared state; none of them queues, so
   none can be refused or held up. At most one decode waits behind the running one, and another is
   `SttBusy`. While no model is ready (unloaded, loading, or after a failed load) a decode is
-  answered `NotLoaded` at once. Unload answers a waiting decode `Stale`; a decode in progress
-  finishes and is answered, then the model is torn down. A decode whose caller has gone is skipped.
+  answered `NotLoaded` at once, and so is one that arrives after unload while a decode still runs.
+  Unload answers a waiting decode `Stale`; a decode in progress finishes and is answered, then the
+  model is torn down. A decode whose caller has gone is skipped.
 - **Load:** `Sherpa::load`, the recognizer and one second of silence as warm-up. A failed load
   leaves speech input unloaded until the next `load`. A new models folder reloads, and a decode
   left waiting is served by the new model.

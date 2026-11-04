@@ -146,11 +146,11 @@ impl SttHandle {
         }
     }
 
-    /// Queues `decode` behind the one in progress. While no model is ready it's answered
-    /// `NotLoaded` at once.
+    /// Queues `decode` behind the one in progress. While no model is ready, or once unload is
+    /// asked for even with a decode still running, it's answered `NotLoaded` at once.
     pub(crate) fn try_decode(&self, decode: Decode) -> Result<(), SttBusy> {
         let refused = self.control.update(|state| {
-            if !state.ready {
+            if !state.ready || state.want.is_none() {
                 return Ok(Some(decode));
             }
             if state.waiting.is_some() {

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use super::{Decode, Decoder, NativeError, SttBusy, SttHandle, SttResult};
+use super::{Decode, Decoder, NativeError, State, SttBusy, SttHandle, SttResult};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -108,13 +108,17 @@ impl Harness {
     }
 
     fn wait_ready(&self) {
+        self.wait_for(|state| state.ready, "the model never became ready");
+    }
+
+    fn wait_for(&self, done: impl Fn(&State) -> bool, never: &str) {
         for _ in 0..500 {
-            if self.handle.control.lock().ready {
+            if done(&self.handle.control.lock()) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("the model never became ready");
+        panic!("{never}");
     }
 
     /// Asks for a decode of `len` samples; the sample count names it in events and replies.
@@ -168,6 +172,11 @@ fn unload_answers_the_waiting_decode_at_once_and_tears_down_after_the_running_on
     let waiting = harness.decode(2).expect("waits");
     harness.handle.unload();
     assert_eq!(answer(waiting), SttResult::Stale);
+    assert_eq!(
+        answer(harness.decode(3).expect("answered")),
+        SttResult::NotLoaded,
+        "a decode after unload isn't held behind the running one"
+    );
     harness.release();
     assert_eq!(answer(running), text(1));
     assert_eq!(harness.event(), Event::TornDown);
@@ -212,6 +221,10 @@ fn a_decode_whose_caller_left_is_skipped() {
     drop(harness.decode(2).expect("waits"));
     harness.release();
     assert_eq!(answer(running), text(1));
+    harness.wait_for(
+        |state| state.waiting.is_none(),
+        "the worker never took the abandoned decode",
+    );
     let next = harness.decode(3).expect("runs");
     assert_eq!(
         harness.event(),
