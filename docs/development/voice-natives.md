@@ -28,12 +28,17 @@ Read with `dumpbin /dependents` on Rez, 2026-11-04:
 | `onnxruntime.dll` | `MSVCP140.dll`, `MSVCP140_1.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, UCRT; Windows' `dbghelp.dll`, `SETUPAPI.dll`, `dxgi.dll` |
 
 The VC++ 2015–2022 runtime is a prerequisite, and slice 10's clean-machine rehearsal proves it.
-Import tables don't show libraries loaded with `LoadLibrary`, so `measure_parakeet` records the
-modules that appear after load, warm-up and decodes. On Rez (2026-11-04) every one besides the two
+Import tables don't show libraries loaded with `LoadLibrary`, so the Parakeet measurement records
+the modules that appear after load, warm-up and decodes. On Rez (2026-11-04) every one besides the two
 pins came from `System32`: `combase`, `msvcp_win`, `win32u`, `gdi32`, `gdi32full`, `USER32`, `IMM32`,
 `DEVOBJ`, `cfgmgr32`, `WINTRUST`, `MSASN1`, `dxcore`, `kernel.appcore`, `SETUPAPI`, `MSVCP140`,
 `MSVCP140_1`, `dbghelp`, `OLEAUT32`, `VCRUNTIME140_1`, `dxgi`, `powrprof`, `UMPDC` and
 `directxdatabasehelper`.
+
+**Its own output:** with `debug = 0`, sherpa-onnx still prints one line group to stderr each time
+it resamples a non-16 kHz utterance: `offline-stream.cc:AcceptWaveformImpl:155 Creating a
+resampler:` followed by the input and output sample rates. It names no file, text or audio. The
+brain doesn't capture its own stderr today; whoever routes it later should drop that line.
 
 ## Licenses
 

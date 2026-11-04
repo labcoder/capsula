@@ -89,6 +89,19 @@ partway, the links that run made are removed. Run it again after `cargo clean`.
 
 ## Speech input
 
+`platform::sherpa` runs Parakeet through sherpa-onnx's C API, loaded at run time. Everything it
+makes lives on the thread that loaded it.
+
+- **Recognizer:** Parakeet's transducer files, 8 CPU threads and greedy search.
+- **Audio:** mono 16-bit PCM at its capture rate, converted to `f32` once and passed to sherpa-onnx's
+  `AcceptWaveformOffline`, which resamples it. Empty audio, a zero rate and lengths past `i32` are
+  refused before any native call.
+- **Text:** at most 16 KiB of UTF-8, copied out before the result is destroyed.
+- **Errors** are `NativeError` values, which carry no native text and no paths. sherpa-onnx itself
+  prints one line to stderr when it resamples (see [voice-natives.md](voice-natives.md)).
+
+### The owner
+
 `voice::stt::SttHandle` owns speech input. Its one thread, `voice-stt`, loads the natives and
 Parakeet, decodes and unloads, so the coordinator never waits on native work.
 
@@ -105,14 +118,11 @@ flowchart LR
   `SttBusy`. While no model is ready (unloaded, loading, or after a failed load) a decode is
   answered `NotLoaded` at once. Unload answers a waiting decode `Stale`; a decode in progress
   finishes and is answered, then the model is torn down. A decode whose caller has gone is skipped.
-- **Load:** `Sherpa::load`, the recognizer (8 CPU threads, greedy search) and one second of silence
-  as warm-up. A failed load leaves speech input unloaded until the next `load`.
-- **Audio:** mono 16-bit PCM at its capture rate, converted to `f32` once and passed to sherpa-onnx's
-  `AcceptWaveformOffline`, which resamples it. Empty audio, a zero rate and lengths past `i32` are
-  refused before any native call.
-- **Text:** at most 16 KiB of UTF-8, copied out before the result is destroyed.
-- **Errors** are `NativeError` values, which carry no native text and no paths. sherpa-onnx itself
-  prints one line to stderr when it resamples, naming the two rates and nothing else.
+- **Load:** `Sherpa::load`, the recognizer and one second of silence as warm-up. A failed load
+  leaves speech input unloaded until the next `load`. A new models folder reloads, and a decode
+  left waiting is served by the new model.
+- **Shutdown:** dropping the handle lets the current native call finish, tears down in order and
+  ends the thread; nothing waits for it.
 
 ### The FFI owner
 
@@ -151,12 +161,14 @@ The installer must not put a VC++ runtime beside `kumochid.exe`: the brain impor
 ### Checks on Rez
 
 These are ignored in CI and read the real DLLs (`SHERPA_NATIVES`, by default beside the test
-binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODELS`) and the
-clips (`STT_CLIPS`):
+binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODELS`) and the clips
+(`STT_CLIPS`):
 
 - `measure_sherpa_layout` compiles a probe against `c-api.h` and compares every layout value.
 - `measure_native_imports` checks `NATIVE_CLOSURE` against `dumpbin /dependents` of both DLLs,
   minus API sets and `KnownDLLs`.
 - `measure_planted_neighbor` plants an `MSVCP140.dll` beside copies of the pins and checks the
   system one loads instead.
-- `measure_parakeet` runs the layout check, then times load and decodes through the owner.
+- `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
+  the owner at 16, 44.1 and 48 kHz, with WER against S5's reference transcripts, and lists the
+  modules that appeared.
