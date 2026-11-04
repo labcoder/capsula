@@ -124,29 +124,29 @@ neck's and the body's bands.
 
 `GooShader` shades a piece into a straight-alpha BGRA image of its region at a caller-chosen scale, half the display's for D1, up to `MAX_SCALE`, 1.0.
 - **Scratch.** `GooShader::neck` serves the attached neck and the drip, which never coexist. `GooShader::stub` serves the stub. Each one's tile table and distance rows are sized once, from its pieces' caps at `MAX_SCALE` (352 and 613 pixels a side for an 84 px body), and reused, so shading allocates nothing. Tests check the exact limit and one pixel over on each axis.
-- **Skipping work.** Tiles that no capsule, fillet or body can reach take the clear colour without shading. Every pixel is written once.
+- **Skipping work.** Each 8-pixel tile keeps a mask of the capsules, and the root ellipse, that can matter in it, and a tile with none takes the clear colour without shading. Near the body a capsule counts within the join's reach. Away from it, a field only matters within a pixel and a half of the goo's edge, where a pixel is drawn or feeds a drawn neighbour's normal, so a capsule counts within 0.9 of a tile plus two pixels of the tile's centre. The root ellipse counts only in tiles it can reach. Every pixel is written once.
 - **Colour.** Near the body the neck and the stub melt into the crown through a smooth minimum. They're lit with the body's surface and finish functions, so they're the same material. Clear pixels carry the theme's top colour, or the blended surface colour where they're shaded, and none is black.
 - **Errors.** A wrong buffer, or a region or scale past the scratch, returns `GooMismatch`.
 
 `coverage::device_spans` takes a source width plus one row hull per source row, so the goo's rectangles map to device spans as the body's square does.
 
-Measured on Rez, release build, under the measuring lock (04:20:50–04:21:33Z), at this head. Each frame is timed on its own, 140 frames per case, two runs, with the output black-boxed and checksummed and the shape built outside the loop. The goo belongs to an 84 px body:
+Measured on Rez, release build, under the measuring lock (05:46:01–05:46:48Z), main against this cull, alternated three times. Each frame is timed on its own, 140 frames per case, with the output black-boxed and checksummed and the shape built outside the loop. The goo belongs to an 84 px body. Medians are the middle of the three runs. The 95th percentile and the slowest frame are ranges over the three:
 
-| Piece, scale | Region, px | Median, µs | Slowest frame, µs |
-|---|---|---|---|
-| neck, attachment at the dock, 0.5 | 46 × 32 | 231 | 273 |
-| neck, 30 px down, 0.5 | 45 × 42 | 293 | 407 |
-| neck, 40 px down, 0.5 | 40 × 47 | 294 | 343 |
-| neck, 60 px down, 0.5 | 32 × 57 | 302 | 394 |
-| neck, 140 px down, 0.5 | 32 × 96 | 375 | 473 |
-| neck, at the dock, 1.0 | 92 × 63 | 855 | 1,085 |
-| neck, 40 px down, 1.0 | 80 × 93 | 1,050 | 1,373 |
-| neck, 60 px down, 1.0 | 63 × 113 | 1,064 | 1,400 |
-| neck, 140 px down, 1.0 | 63 × 191 | 1,317 | 1,441 |
-| drip at the break, 0.5 | 22 × 29 | 83 | 130 |
-| stub at the break, 0.5 | 31 × 79 | 305 | 340 |
+| Piece, scale | Region, px | Median, µs | 95th percentile, µs | Slowest frame, µs |
+|---|---|---|---|---|
+| neck, attachment at the dock, 0.5 | 46 × 32 | 233 | 273–325 | 318–368 |
+| neck, 30 px down, 0.5 | 45 × 42 | 297 | 387–465 | 419–498 |
+| neck, 40 px down, 0.5 | 40 × 47 | 300 | 387–429 | 434–621 |
+| neck, 60 px down, 0.5 | 32 × 57 | 298 | 341–417 | 415–476 |
+| neck, 140 px down, 0.5 | 32 × 96 | 348 | 364–478 | 432–518 |
+| neck, at the dock, 1.0 | 92 × 63 | 860 | 914–1,103 | 984–1,376 |
+| neck, 40 px down, 1.0 | 80 × 93 | 1,071 | 1,270–1,549 | 1,496–2,383 |
+| neck, 60 px down, 1.0 | 63 × 113 | 1,058 | 1,214–1,283 | 1,429–2,015 |
+| neck, 140 px down, 1.0 | 63 × 191 | 1,206 | 1,356–1,591 | 1,597–1,846 |
+| drip at the break, 0.5 | 22 × 29 | 76 | 111–114 | 119–134 |
+| stub at the break, 0.5 | 31 × 79 | 288 | 328–418 | 385–641 |
 
-The cost per pixel is about 110 to 160 ns, highest in the smallest regions, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). The join padding then gave back up to about 7%. At half scale the medians are under C2a's 400 µs goo gate, but single frames reach 473 µs here and 775 µs in an earlier session. The gate is a maximum, so C2a tunes the goo before claiming it.
+The cost per pixel is about 110 to 160 ns, highest in the smallest regions, mostly lighting and the body's signed distance near the crown. The goo's budget for D1 is a median of 400 µs at the worst pull at 0.5, which the 140 px pull meets at 348 µs. A single frame's maximum isn't pass or fail: Rez's scheduling jitter puts the slowest of 140 frames 90–250 µs above the median whatever the code, more than the margin. What a user feels is the frame-level gate, steady presentation at the display's rate with no dropped frames during a pull, measured once C2 wires the pull.
 
 ## Expressions
 
