@@ -26,8 +26,10 @@ coordinator's deadline) closes the socket at once.
    the request before it connects.
 5. **The upload.** The transport writes the HTTP/1.1 request itself, then flushes. tokio-rustls's
    flush returns only once rustls holds no TLS records and the TCP flush has returned, so a
-   completed flush means no request byte is left in the process. If response bytes arrive first,
-   writing stops for good, the refusal is read, the connection closes, and only then does the
+   completed flush means no request byte is left in the process. Response bytes that arrive
+   meanwhile are read: interim heads (100, 103) are skipped and a success head is kept, so the
+   upload goes on. Any other final head stops writing for good: the refusal is read, the
+   connection closes, and only then does the
    lease settle.
 6. **The answer.** The head is read with `httparse`, the body is framed by `wire::Body`, and an
    event-stream body goes through the reader below.
@@ -68,7 +70,10 @@ server didn't send `Connection: close`.
 
 **HTTP bounds.** ALPN offers only `http/1.1`, and TLS early data is off. The framing bounds are
 under HTTP framing below. On top of them, an error body is read up to 1 MiB and a response up to
-17 MiB of wire bytes. A 2xx must be `text/event-stream`, and a 3xx is refused.
+17 MiB of wire bytes. A 2xx must be `text/event-stream` or have no Content-Type, and a 3xx is
+refused. With no Content-Type, the body's first 128 bytes must start like an event stream (blank
+space, then `data:`, `event:` or a `:` comment); those bytes then go to the reader. Another type,
+or more than one, is refused.
 
 ## HTTP framing
 

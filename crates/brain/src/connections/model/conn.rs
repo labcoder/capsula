@@ -119,8 +119,8 @@ fn quiet(io: &mut (impl AsyncRead + Unpin)) -> bool {
 pub(super) enum Upload {
     /// Every request byte was written and flushed.
     Flushed,
-    /// Response bytes arrived first, so writing stopped.
-    Early,
+    /// A final head other than a success arrived first, so writing stopped.
+    Refused(Head),
 }
 
 /// One request's use of a connection.
@@ -129,6 +129,10 @@ pub(super) struct ModelConn<Io> {
     /// Response bytes read but not yet consumed.
     pub(super) buf: Vec<u8>,
     wire: usize,
+    /// Interim heads read so far.
+    interim: usize,
+    /// A success head that arrived while the request was still uploading.
+    answer: Option<Head>,
 }
 
 impl<Io> fmt::Debug for ModelConn<Io> {
@@ -146,32 +150,43 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
             io,
             buf: Vec::new(),
             wire: 0,
+            interim: 0,
+            answer: None,
         }
     }
 
-    /// Writes and flushes `request`, stopping for good at the first response byte.
+    /// Writes and flushes `request`. Interim heads that arrive meanwhile are skipped and a
+    /// success head is kept for [`Self::head`], so writing goes on; any other final head stops it
+    /// for good.
     pub(super) async fn upload(&mut self, request: &[u8]) -> Result<Upload, Failure> {
-        let Self { io, buf, wire } = self;
         let mut written = 0;
         poll_fn(|cx| {
-            let mut chunk = [0; 1024];
-            let mut early = ReadBuf::new(&mut chunk);
-            match Pin::new(&mut *io).poll_read(cx, &mut early) {
-                Poll::Ready(Ok(())) if !early.filled().is_empty() => {
-                    buf.extend_from_slice(early.filled());
-                    *wire += early.filled().len();
-                    return Poll::Ready(Ok(Upload::Early));
+            while self.answer.is_none() {
+                let mut chunk = [0; 1024];
+                let mut early = ReadBuf::new(&mut chunk);
+                match Pin::new(&mut self.io).poll_read(cx, &mut early) {
+                    Poll::Ready(Ok(())) if !early.filled().is_empty() => {
+                        self.buf.extend_from_slice(early.filled());
+                        self.count(early.filled().len())?;
+                        match self.final_head()? {
+                            Some(head) if (200..300).contains(&head.status) => {
+                                self.answer = Some(head);
+                            }
+                            Some(head) => return Poll::Ready(Ok(Upload::Refused(head))),
+                            None => {}
+                        }
+                    }
+                    Poll::Ready(_) => return Poll::Ready(Err(Failure::Transport)),
+                    Poll::Pending => break,
                 }
-                Poll::Ready(_) => return Poll::Ready(Err(Failure::Transport)),
-                Poll::Pending => {}
             }
             while written < request.len() {
-                match ready!(Pin::new(&mut *io).poll_write(cx, &request[written..])) {
+                match ready!(Pin::new(&mut self.io).poll_write(cx, &request[written..])) {
                     Ok(0) | Err(_) => return Poll::Ready(Err(Failure::Transport)),
                     Ok(count) => written += count,
                 }
             }
-            Pin::new(&mut *io).poll_flush(cx).map(|flushed| {
+            Pin::new(&mut self.io).poll_flush(cx).map(|flushed| {
                 flushed
                     .map(|()| Upload::Flushed)
                     .map_err(|_| Failure::Transport)
@@ -182,21 +197,33 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
 
     /// The final head, past any interim ones; each read waits at most `idle`.
     pub(super) async fn head(&mut self, idle: Duration) -> Result<Head, Failure> {
-        let mut interim = 0;
+        if let Some(head) = self.answer.take() {
+            return Ok(head);
+        }
         loop {
-            if let Some((head, length)) = wire::head(&self.buf)? {
-                self.buf.drain(..length);
-                if head.status >= 200 {
-                    return Ok(head);
-                }
-                interim += 1;
-                if interim > MAX_INTERIM_HEADS {
-                    return Err(Failure::Protocol);
-                }
-            } else if self.fill(idle).await? {
+            if let Some(head) = self.final_head()? {
+                return Ok(head);
+            }
+            if self.fill(idle).await? {
                 return Err(Failure::Truncated);
             }
         }
+    }
+
+    /// The final head at the front of `buf`, past the interim ones, or `None` while it's
+    /// incomplete.
+    fn final_head(&mut self) -> Result<Option<Head>, Failure> {
+        while let Some((head, length)) = wire::head(&self.buf)? {
+            self.buf.drain(..length);
+            if head.status >= 200 {
+                return Ok(Some(head));
+            }
+            self.interim += 1;
+            if self.interim > MAX_INTERIM_HEADS {
+                return Err(Failure::Protocol);
+            }
+        }
+        Ok(None)
     }
 
     /// The length of the body's next data at the front of `buf`, or `None` at its end.
@@ -229,11 +256,17 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
         let read = read.ok().and_then(Result::ok);
         self.buf.truncate(start + read.unwrap_or(0));
         let read = read.ok_or(Failure::Transport)?;
+        self.count(read)?;
+        Ok(read == 0)
+    }
+
+    /// Counts `read` more bytes against the response's wire cap.
+    fn count(&mut self, read: usize) -> Result<(), Failure> {
         self.wire = self
             .wire
             .checked_add(read)
             .filter(|wire| *wire <= MAX_WIRE_BYTES)
             .ok_or(Failure::Protocol)?;
-        Ok(read == 0)
+        Ok(())
     }
 }

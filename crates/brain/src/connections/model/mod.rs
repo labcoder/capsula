@@ -23,7 +23,7 @@ use self::budget::Budget;
 use self::conn::{Connect, ModelClient, ModelConn, Upload};
 use self::error::{Failure, ProviderError};
 use self::sse::{Progress, Reader, SseEvent};
-use self::wire::{Body, Head};
+use self::wire::{Body, Head, Media};
 use crate::connections::http_client::MAX_BODY_BYTES;
 
 /// The largest request body [guess].
@@ -38,6 +38,8 @@ pub const ERROR_BODY_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a completed stream may take to end its framing; after that its connection is closed
 /// instead of reused [guess].
 const DRAIN: Duration = Duration::from_secs(1);
+/// How much of a body with no Content-Type is checked for the start of an event stream.
+const SNIFF_BYTES: usize = 128;
 
 /// A Responses request's JSON, checked before any credential or connection is touched.
 pub struct ResponsesBody(Secret<Zeroizing<Vec<u8>>>);
@@ -119,10 +121,7 @@ pub async fn stream<C: Connect, L>(
         let conn = attempt.conn.insert(ModelConn::new(io));
         match conn.upload(&request).await? {
             Upload::Flushed => Ok(()),
-            Upload::Early => {
-                let head = conn.head(IDLE).await?;
-                Err(Failure::Provider(refusal(conn, head).await?))
-            }
+            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
         }
     });
     upload.await.map_err(|_| Failure::Transport)??;
@@ -136,21 +135,21 @@ pub async fn stream<C: Connect, L>(
         let refused = timeout(ERROR_BODY_DEADLINE, refusal(conn, head)).await;
         return Err(Failure::Provider(refused.map_err(|_| Failure::Transport)??));
     }
-    if !head.event_stream {
-        return Err(Failure::Protocol);
-    }
     let mut events = Reader::default();
     let mut body = Body::new(head.framing);
-    loop {
+    let mut progress = match head.media {
+        Media::EventStream => Progress::More,
+        Media::Absent => events.feed(&sniff(conn, &mut body).await?, &mut on_event)?,
+        Media::Other => return Err(Failure::Protocol),
+    };
+    while progress == Progress::More {
         let length = conn
             .next(&mut body, IDLE)
             .await?
             .ok_or(Failure::Truncated)?;
-        let progress = events.feed(&conn.buf[..length], &mut on_event);
+        let fed = events.feed(&conn.buf[..length], &mut on_event);
         conn.buf.drain(..length);
-        if progress? == Progress::Completed {
-            break;
-        }
+        progress = fed?;
     }
     // `response.completed` isn't the body's end: reuse needs the framing read to its end.
     let drained = timeout(DRAIN, async {
@@ -168,6 +167,29 @@ pub async fn stream<C: Connect, L>(
         client.put(conn.io);
     }
     Ok(())
+}
+
+/// The first data of a body whose head names no type, once its first 128 bytes show an event
+/// stream: blank space, then `data:`, `event:` or a `:` comment.
+async fn sniff<Io>(conn: &mut ModelConn<Io>, body: &mut Body) -> Result<Vec<u8>, Failure>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    const FIELDS: [&[u8]; 3] = [b"data:", b"event:", b":"];
+    let mut prefix = Vec::new();
+    loop {
+        let window = &prefix[..prefix.len().min(SNIFF_BYTES)];
+        let start = window.trim_ascii_start();
+        if FIELDS.iter().any(|field| start.starts_with(field)) {
+            return Ok(prefix);
+        }
+        if window.len() == SNIFF_BYTES || !FIELDS.iter().any(|field| field.starts_with(start)) {
+            return Err(Failure::Protocol);
+        }
+        let length = conn.next(body, IDLE).await?.ok_or(Failure::Protocol)?;
+        prefix.extend_from_slice(&conn.buf[..length]);
+        conn.buf.drain(..length);
+    }
 }
 
 /// A refusal's bounded body, read to the end of its framing.

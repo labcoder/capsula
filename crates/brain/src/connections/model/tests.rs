@@ -537,6 +537,92 @@ async fn dropping_the_round_mid_write_closes_then_settles() {
 }
 
 #[tokio::test]
+async fn dropping_the_round_after_a_sent_prefix_closes_then_settles() {
+    let harness = Harness::new(4096);
+    let body = body(&"p".repeat(64 * 1024));
+    let request = wire::request(harness.bearer.expose(), body.0.expose()).expect("a valid bearer");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    assert_eq!(harness.settled(), []);
+    drop(call);
+    assert_eq!(harness.seen(), (vec![], vec![0]));
+    assert_eq!(harness.settled().len(), 1);
+    // The pipe took the first 4096 bytes; nothing after them was written, and then it closed.
+    assert_eq!(received(&mut server), (request[..4096].to_vec(), true));
+}
+
+#[tokio::test]
+async fn an_interim_head_mid_upload_keeps_the_upload_going() {
+    let harness = Harness::new(4096);
+    let body = body(&"p".repeat(64 * 1024));
+    let request = wire::request(harness.bearer.expose(), body.0.expose()).expect("a valid bearer");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    let (mut got, _) = received(&mut server);
+    assert_eq!(got.len(), 4096);
+    reply(
+        &mut server,
+        b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n",
+    );
+    while got.len() < request.len() {
+        assert!(poll(&mut call).is_pending());
+        let (more, closed) = received(&mut server);
+        assert!(
+            !more.is_empty() && !closed,
+            "the upload stopped at {}",
+            got.len()
+        );
+        got.extend(more);
+    }
+    assert_eq!(got, *request);
+    assert_eq!(harness.settled().len(), 1);
+    reply(&mut server, &sse(TEXT));
+    let Poll::Ready((result, kinds)) = poll(&mut call) else {
+        panic!("the stream didn't end");
+    };
+    assert_eq!(
+        (result, kinds),
+        (Ok(()), TEXT_KINDS.map(str::to_owned).to_vec())
+    );
+    assert_eq!(harness.seen().0, vec![0]);
+}
+
+#[tokio::test]
+async fn a_success_head_while_the_flush_is_held_is_the_answer() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.hold_flush = true);
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    assert_eq!(
+        received(&mut server).0.len(),
+        request_length(&harness, &body)
+    );
+    reply(&mut server, &sse(TEXT));
+    assert!(poll(&mut call).is_pending());
+    assert_eq!(harness.settled(), []);
+    harness.valve(|valve| valve.hold_flush = false);
+    let Poll::Ready((result, kinds)) = poll(&mut call) else {
+        panic!("the stream didn't end");
+    };
+    assert_eq!(
+        (result, kinds),
+        (Ok(()), TEXT_KINDS.map(str::to_owned).to_vec())
+    );
+    assert_eq!(harness.seen().0, vec![0]);
+    assert_eq!(harness.settled().len(), 1);
+}
+
+#[tokio::test]
 async fn an_early_400_stops_the_upload_without_the_server_closing() {
     let harness = Harness::new(4096);
     let body = body(&"p".repeat(64 * 1024));
@@ -842,6 +928,108 @@ async fn answers_that_arent_an_event_stream_fail_closed() {
     );
 }
 
+/// A length-framed 200 carrying `body`, with `media` as its Content-Type when there is one.
+fn typed(media: Option<&str>, body: &[u8]) -> Vec<u8> {
+    let media = media.map(|media| format!("Content-Type: {media}\r\n"));
+    let mut bytes = format!(
+        "HTTP/1.1 200 OK\r\n{}Content-Length: {}\r\n\r\n",
+        media.unwrap_or_default(),
+        body.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+#[tokio::test]
+async fn a_missing_type_is_sniffed_across_reads_and_every_event_is_read() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    let (first, rest) = TEXT.split_at(3);
+    let mut bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n".to_vec();
+    bytes.extend_from_slice(first);
+    reply(&mut server, &bytes);
+    // "eve" could still start an event stream, so the transport waits for more.
+    assert!(poll(&mut call).is_pending());
+    let mut bytes = format!("\r\n{:x}\r\n", rest.len()).into_bytes();
+    bytes.extend_from_slice(rest);
+    bytes.extend_from_slice(b"\r\n0\r\n\r\n");
+    reply(&mut server, &bytes);
+    let Poll::Ready((result, kinds)) = poll(&mut call) else {
+        panic!("the stream didn't end");
+    };
+    assert_eq!(
+        (result, kinds),
+        (Ok(()), TEXT_KINDS.map(str::to_owned).to_vec())
+    );
+}
+
+#[tokio::test]
+async fn a_missing_type_needs_an_event_stream_in_its_first_128_bytes() {
+    let mut within = vec![b'\n'; 122];
+    within.extend_from_slice(TEXT);
+    let mut past = vec![b'\n'; 123];
+    past.extend_from_slice(TEXT);
+    let cases = [
+        (typed(None, TEXT), Ok(())),
+        (typed(None, &within), Ok(())),
+        (typed(None, &past), Err(Failure::Protocol)),
+        (
+            typed(None, b"{\"type\":\"response.created\"}"),
+            Err(Failure::Protocol),
+        ),
+        (typed(None, b""), Err(Failure::Protocol)),
+        (typed(Some("text/plain"), TEXT), Err(Failure::Protocol)),
+    ];
+    for (index, (response, expected)) in cases.into_iter().enumerate() {
+        assert_eq!(answered(&response), expected, "case {index}");
+    }
+    // The decision comes at the 128th byte, without waiting for more of the body.
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    let mut bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n80\r\n".to_vec();
+    bytes.extend_from_slice(&past[..128]);
+    reply(&mut server, &bytes);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Protocol), _))
+    ));
+}
+
+#[tokio::test]
+async fn four_interim_heads_pass_and_a_fifth_is_refused() {
+    for (count, expected) in [(4, Ok(())), (5, Err(Failure::Protocol))] {
+        let mut response = b"HTTP/1.1 100 Continue\r\n\r\n".repeat(count);
+        response.extend(sse(TEXT));
+        assert_eq!(answered(&response), expected, "{count} interim heads");
+    }
+}
+
+#[test]
+fn a_body_may_be_exactly_the_request_limit() {
+    let sized =
+        |length: usize| json!({"store": false, "stream": true, "input": "x".repeat(length)});
+    let base = serde_json::to_vec(&sized(0)).expect("json").len();
+    let exact = super::MAX_REQUEST_BYTES - base;
+    assert!(ResponsesBody::new(&sized(exact)).is_ok());
+    assert!(matches!(
+        ResponsesBody::new(&sized(exact + 1)),
+        Err(Failure::Request)
+    ));
+}
+
 #[tokio::test]
 async fn rebuild_a_closed_gate_or_a_dropped_answer_sends_nothing() {
     for answer in 0..3 {
@@ -898,6 +1086,32 @@ async fn a_retry_after_a_failed_send_asks_again_on_a_new_connection() {
             send: 2
         }]
     );
+}
+
+#[tokio::test]
+async fn a_retry_spends_its_own_unit_and_the_next_is_refused() {
+    let harness = Harness::budgeted(1 << 20, Some(2));
+    let body = body("hello");
+    harness.valve(|valve| valve.fail_after = Some(40));
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    drop(call);
+    drop(harness.accept());
+    harness.valve(|valve| valve.fail_after = None);
+    complete(&harness, &body, 2, None);
+    let mut call = harness.call(&body, 3);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(3);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Spent), _))
+    ));
+    assert_eq!(harness.accepts(), 0);
 }
 
 #[tokio::test]
