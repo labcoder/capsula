@@ -150,7 +150,13 @@ fn workloads() -> Vec<(&'static str, DataToShell)> {
         },
     };
     vec![
-        ("assistant_text", DataToShell::AssistantText { run: RunId(1), delta: "delta ".repeat(4) }),
+        (
+            "assistant_text",
+            DataToShell::AssistantText {
+                run: RunId(1),
+                delta: "delta ".repeat(4),
+            },
+        ),
         ("commit_rect1", commit(tiny)),
         ("commit_rects300_tracks128", commit(large)),
         ("snapshot_rects300_tracks128", snapshot),
