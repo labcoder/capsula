@@ -484,7 +484,10 @@ impl StoreThread {
     pub(crate) fn send(&self, op: StoreOp) -> bool {
         if matches!(
             op,
-            StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadJob(_)
+            StoreOp::ReadPage { .. }
+                | StoreOp::BuildContext(_)
+                | StoreOp::ReadJob(_)
+                | StoreOp::CompactContext(_)
         ) {
             let stamp = self.accepted.load(Ordering::Relaxed);
             return self.reads.send(Read { stamp, op }).is_ok();
@@ -520,7 +523,10 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::DrawingWritten { serial, reply });
             purger.op_arrived(store);
         }
-        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadJob(_) => {
+        StoreOp::ReadPage { .. }
+        | StoreOp::BuildContext(_)
+        | StoreOp::ReadJob(_)
+        | StoreOp::CompactContext(_) => {
             unreachable!("StoreThread::send hands reads to the reader")
         }
         StoreOp::ClearScenes { scenes } => {

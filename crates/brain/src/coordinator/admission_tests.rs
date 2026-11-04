@@ -214,7 +214,7 @@ fn a_rebuild_reuses_the_snapshot_the_first_build_read() {
 #[test]
 fn a_build_too_large_fails_the_run_on_its_budget_and_a_failed_one_on_the_store() {
     for (unbuilt, failure) in [
-        (Unbuilt::TooLarge, Failure::Budget),
+        (Unbuilt::TooLarge { room: None }, Failure::Budget),
         (Unbuilt::Failed, Failure::Store),
     ] {
         let mut core = fresh();

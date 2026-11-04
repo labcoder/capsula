@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
+use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
 use crate::engines::RunRequest;
@@ -69,8 +70,12 @@ impl ContextBuilt {
 /// Why a build made no request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unbuilt {
-    /// Even the current turn is over the request's bound.
-    TooLarge,
+    /// Over the request's bound. `room` is what the bound leaves for the thread's summary after
+    /// the current turn, when the turn fits without it.
+    TooLarge {
+        /// Bytes left for a summary; `None` when the current turn alone doesn't fit.
+        room: Option<usize>,
+    },
     /// The read failed, or the stored thread couldn't be built.
     Failed,
 }
@@ -87,9 +92,28 @@ pub(super) struct Build {
     admitted: bool,
     /// The admitted request's sources, checked again before each send.
     sources: Vec<ThreadId>,
+    /// An inline compaction's progress; `None` for a normal build.
+    pub(super) inline: Option<Inline>,
 }
 
 impl Build {
+    pub(super) fn new(key: BuildKey, exposed: BTreeSet<ThreadId>, inline: Option<Inline>) -> Self {
+        Self {
+            key,
+            exposed,
+            blocked: BTreeSet::new(),
+            admitted: false,
+            sources: Vec::new(),
+            inline,
+        }
+    }
+
+    /// Admits the request that carries `sources`.
+    pub(super) fn admit(&mut self, sources: Vec<ThreadId>) {
+        self.admitted = true;
+        self.sources = sources;
+    }
+
     pub(super) fn admitted(&self) -> bool {
         self.admitted
     }
@@ -127,13 +151,7 @@ impl Coordinator {
         let Ok(current) = self.current(run) else {
             return;
         };
-        current.build = Some(Build {
-            key,
-            exposed,
-            blocked: BTreeSet::new(),
-            admitted: false,
-            sources: Vec::new(),
-        });
+        current.build = Some(Build::new(key, exposed, None));
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             key,
             thread: current.thread,
@@ -181,21 +199,27 @@ impl Coordinator {
         let pending = self.pending_deletes();
         let main = self.main_thread;
         let current = self.current(key.run)?;
-        if !current
-            .build
-            .as_ref()
-            .is_some_and(|build| build.key == key && !build.admitted && build.blocked.is_empty())
-        {
+        if !current.build.as_ref().is_some_and(|build| {
+            build.key == key
+                && !build.admitted
+                && build.blocked.is_empty()
+                && build.inline.is_none()
+        }) {
             return Err(Stale);
         }
-        let made = match result {
-            Ok(made) => made,
-            Err(Unbuilt::TooLarge) => return self.fail(key.run, Failure::Budget, effects),
-            Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
-        };
         if let Some(snapshot) = snapshot {
             current.snapshot.get_or_insert(snapshot);
         }
+        let made = match result {
+            Ok(made) => made,
+            Err(Unbuilt::TooLarge { room: Some(room) }) => {
+                return self.compact_inline(key, room, effects);
+            }
+            Err(Unbuilt::TooLarge { room: None }) => {
+                return self.fail(key.run, Failure::Budget, effects);
+            }
+            Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
+        };
         let thread = current.thread;
         let build = current.build.as_mut().expect("the build was just matched");
         let voided = build.voided(&made.sources);
@@ -203,8 +227,8 @@ impl Coordinator {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.admitted = true;
-        build.sources = made.sources;
+        build.admit(made.sources);
+        current.compacted = None;
         effects.push(Effect::StartEngine {
             request: RunRequest {
                 key: SendKey::Build(key),
