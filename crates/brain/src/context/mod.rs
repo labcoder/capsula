@@ -148,14 +148,6 @@ pub(crate) struct Supplied {
     pub(crate) items: Vec<Item>,
 }
 
-/// The input item a summary becomes.
-pub(crate) fn summary_item(first: EventId, last: EventId, text: &str) -> InputItem {
-    InputItem::Message {
-        role: Role::Developer,
-        text: format!("Summary of events {}–{}:\n{text}", first.0, last.0),
-    }
-}
-
 /// Who a message is from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -264,13 +256,9 @@ pub(crate) enum BuildError {
     /// A tool call and its result are apart, or an item is repeated.
     #[error("a tool call is split from its result, or an item repeats")]
     InvalidCut,
-    /// Even the current run and the summary are over the bound. `room` is what the bound leaves
-    /// for a summary after the current run, when the current run fits without one.
+    /// Even the current run and the summary are over the bound.
     #[error("the request is over its size bound")]
-    TooLarge {
-        /// Bytes left for a summary; `None` when the current run alone doesn't fit.
-        room: Option<usize>,
-    },
+    TooLarge,
     /// The read failed.
     #[error("can't read the context")]
     Store(#[from] StoreError),

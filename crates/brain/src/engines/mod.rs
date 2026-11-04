@@ -431,8 +431,7 @@ async fn collect(
             TurnEvent::Finished(Finish::Completed) => {
                 break match kind {
                     JobKind::Title => crate::jobs::clean_title(&text).map(JobOutput::Title),
-                    JobKind::Compact => clean_summary(&text, crate::context::compact::MAX_SUMMARY)
-                        .map(JobOutput::Summary),
+                    JobKind::Compact => clean_summary(&text).map(JobOutput::Summary),
                 };
             }
             _ => break None,
