@@ -515,7 +515,7 @@ impl AccountState {
                     tokens: Some(Tokens {
                         access_token: tokens.access_token.expose().clone(),
                         refresh_token: refresh_token.expose().clone(),
-                        id_token: Some(tokens.id_token.expose().clone()),
+                        id_token: tokens.id_token.as_ref().map(|token| token.expose().clone()),
                         scope: tokens.scope.expose().clone(),
                         expires_at,
                         pending_identity_validation: false,
@@ -598,6 +598,9 @@ impl AccountState {
             Err(failure) => {
                 tracing::warn!(%failure, "the account's session lock failed");
                 self.busy = false;
+                if self.leaving.is_some() {
+                    return self.read_refused();
+                }
                 self.loaded = Loaded {
                     damaged: true,
                     ..Loaded::default()
@@ -668,7 +671,13 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
             HttpError::Configuration | HttpError::Endpoint | HttpError::Request,
         )
         | ExchangeError::OAuth {
-            code: OAuthCode::InvalidGrant | OAuthCode::Other,
+            code:
+                OAuthCode::InvalidGrant
+                | OAuthCode::SessionEnded
+                | OAuthCode::NotEligible
+                | OAuthCode::PlanBusy
+                | OAuthCode::GrantRefused
+                | OAuthCode::Other,
             ..
         } => (false, ErrorKey::SignInFailed),
         ExchangeError::OAuth {

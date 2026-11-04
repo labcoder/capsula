@@ -4,6 +4,7 @@ mod callback;
 pub mod exchange;
 pub mod id_token;
 mod pkce;
+pub mod refresh;
 pub mod revoke;
 #[cfg(test)]
 mod tests;

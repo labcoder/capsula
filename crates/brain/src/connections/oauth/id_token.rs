@@ -104,7 +104,42 @@ pub async fn verify(
     nonce: &str,
     clock: &(impl Clock + ?Sized),
 ) -> Result<VerifiedIdentity, IdentityError> {
-    check_inputs(token.expose(), client, nonce)?;
+    bound(http, token, client, Binding::SignIn(nonce), clock).await
+}
+
+/// Verify a refreshed set's identity token against the subject this account already verified.
+/// Local continuity policy (design §3 rule 3), never used for a sign-in: the token carries no
+/// nonce of ours, and its expiry claim isn't checked.
+///
+/// # Errors
+/// As [`verify`], and `OtherAccount` for any other subject.
+pub async fn verify_refreshed(
+    http: &impl Http,
+    token: &Secret<Zeroizing<String>>,
+    client: &str,
+    subject: &str,
+    clock: &(impl Clock + ?Sized),
+) -> Result<VerifiedIdentity, IdentityError> {
+    bound(http, token, client, Binding::Refresh(subject), clock).await
+}
+
+/// What a token is bound to besides its client.
+#[derive(Clone, Copy)]
+enum Binding<'a> {
+    /// This attempt's nonce, and an unexpired token.
+    SignIn(&'a str),
+    /// The saved subject.
+    Refresh(&'a str),
+}
+
+async fn bound(
+    http: &impl Http,
+    token: &Secret<Zeroizing<String>>,
+    client: &str,
+    binding: Binding<'_>,
+    clock: &(impl Clock + ?Sized),
+) -> Result<VerifiedIdentity, IdentityError> {
+    check_inputs(token.expose(), client, binding)?;
     let discovery: Discovery = document(
         &http
             .execute(Request {
@@ -126,7 +161,7 @@ pub async fn verify(
             .await?,
     )?;
     let now = clock.unix_seconds().ok_or(IdentityError::Clock)?;
-    verify_signed(token.expose(), &keys, client, nonce, now)
+    signed(token.expose(), &keys, client, binding, now)
 }
 
 fn document<T: DeserializeOwned>(response: &Response) -> Result<T, IdentityError> {
@@ -141,17 +176,21 @@ fn document<T: DeserializeOwned>(response: &Response) -> Result<T, IdentityError
     serde_json::from_slice(response.body.expose()).map_err(|_| IdentityError::Discovery)
 }
 
-fn check_inputs(token: &str, client: &str, nonce: &str) -> Result<(), IdentityError> {
-    if token.len() > MAX_TOKEN_BYTES || client.len() > MAX_ID_BYTES || nonce.len() > MAX_NONCE_BYTES
-    {
+fn check_inputs(token: &str, client: &str, binding: Binding<'_>) -> Result<(), IdentityError> {
+    let (bound, limit) = match binding {
+        Binding::SignIn(nonce) => (nonce, MAX_NONCE_BYTES),
+        Binding::Refresh(subject) => (subject, MAX_ID_BYTES),
+    };
+    if token.len() > MAX_TOKEN_BYTES || client.len() > MAX_ID_BYTES || bound.len() > limit {
         return Err(IdentityError::Bounds);
     }
-    if token.is_empty() || client.is_empty() || nonce.is_empty() {
+    if token.is_empty() || client.is_empty() || bound.is_empty() {
         return Err(IdentityError::Token);
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn verify_signed(
     token: &str,
     keys: &KeySet,
@@ -159,7 +198,17 @@ fn verify_signed(
     nonce: &str,
     now: u64,
 ) -> Result<VerifiedIdentity, IdentityError> {
-    check_inputs(token, client, nonce)?;
+    signed(token, keys, client, Binding::SignIn(nonce), now)
+}
+
+fn signed(
+    token: &str,
+    keys: &KeySet,
+    client: &str,
+    binding: Binding<'_>,
+    now: u64,
+) -> Result<VerifiedIdentity, IdentityError> {
+    check_inputs(token, client, binding)?;
     let header = decode_header(token).map_err(|_| IdentityError::Token)?;
     if header.alg != Algorithm::RS256 {
         return Err(IdentityError::Token);
@@ -222,22 +271,33 @@ fn verify_signed(
     {
         return Err(IdentityError::Bounds);
     }
+    let bound = match binding {
+        Binding::SignIn(nonce) => {
+            claims
+                .exp
+                .checked_add(EXPIRY_LEEWAY_SECONDS)
+                .is_some_and(|expiry| now <= expiry)
+                && bool::from(
+                    claims
+                        .nonce
+                        .as_ref()
+                        .map_or(&[][..], |n| n.as_bytes())
+                        .ct_eq(nonce.as_bytes()),
+                )
+        }
+        Binding::Refresh(_) => true,
+    };
     if claims.sub.is_empty()
-        || claims
-            .exp
-            .checked_add(EXPIRY_LEEWAY_SECONDS)
-            .is_none_or(|expiry| now > expiry)
+        || !bound
         || claims.azp.as_ref().is_some_and(|a| a.as_str() != client)
         || (audiences.len() > 1 && claims.azp.as_ref().is_none_or(|a| a.as_str() != client))
-        || !bool::from(
-            claims
-                .nonce
-                .as_ref()
-                .map_or(&[][..], |n| n.as_bytes())
-                .ct_eq(nonce.as_bytes()),
-        )
     {
         return Err(IdentityError::Token);
+    }
+    if let Binding::Refresh(subject) = binding
+        && claims.sub.as_str() != subject
+    {
+        return Err(IdentityError::OtherAccount);
     }
     Ok(VerifiedIdentity {
         subject: Secret::new(claims.sub),

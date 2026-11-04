@@ -1,4 +1,5 @@
-//! Closed vault errors, without record contents or serialization diagnostics.
+//! Closed vault errors, without record contents or serialization diagnostics, and what a typed
+//! provider error asks the user to do.
 
 use std::io;
 
@@ -54,6 +55,19 @@ impl VaultError {
                 )
         )
     }
+}
+
+/// What a typed provider error asks for. Only the public ledger's codes map here (design §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// The session ended: clear the tokens, keep the registration, and sign in again.
+    SignInAgain,
+    /// Keep the credentials and try again later.
+    RetryLater,
+    /// The client or grant is wrong, so retrying it unchanged won't help.
+    FixRequest,
+    /// This account can't use the plan.
+    Unavailable,
 }
 
 impl From<SessionLockError> for VaultError {

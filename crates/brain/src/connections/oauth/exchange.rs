@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use super::{Authorization, DYNAMIC_CLIENT, RESOURCE};
 use crate::connections::clock::Clock;
+use crate::connections::error::Recovery;
 use crate::connections::http_client::{
     Endpoint, Http, HttpError, MAX_BODY_BYTES, Request, Response,
 };
@@ -27,8 +28,50 @@ pub enum OAuthCode {
     InvalidGrant,
     /// The issued client registration wasn't accepted.
     InvalidClient,
+    /// A refresh token that's expired, invalidated or reused.
+    SessionEnded,
+    /// `subscription_sharing_user_not_eligible`.
+    NotEligible,
+    /// `subscription_sharing_usage_unavailable` or `subscription_sharing_user_unavailable`.
+    PlanBusy,
+    /// `chatpass_v2_scope_not_authorized` or `chatpass_v2_invalid_authorization_context`.
+    GrantRefused,
     /// Another typed OAuth error; never log its raw text.
     Other,
+}
+
+impl OAuthCode {
+    fn parse(code: &str) -> Self {
+        match code {
+            "invalid_grant" => Self::InvalidGrant,
+            "invalid_client" => Self::InvalidClient,
+            "invalid_refresh_token"
+            | "token_expired"
+            | "refresh_token_expired"
+            | "refresh_token_invalidated"
+            | "refresh_token_reused" => Self::SessionEnded,
+            "subscription_sharing_user_not_eligible" => Self::NotEligible,
+            "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => {
+                Self::PlanBusy
+            }
+            "chatpass_v2_scope_not_authorized" | "chatpass_v2_invalid_authorization_context" => {
+                Self::GrantRefused
+            }
+            _ => Self::Other,
+        }
+    }
+
+    /// What this code asks for on a refresh or a plan request; an unlisted code goes by status.
+    #[must_use]
+    pub fn recovery(self, status: u16) -> Recovery {
+        match self {
+            Self::InvalidGrant | Self::SessionEnded => Recovery::SignInAgain,
+            Self::NotEligible => Recovery::Unavailable,
+            Self::PlanBusy => Recovery::RetryLater,
+            Self::Other if status == 429 || status >= 500 => Recovery::RetryLater,
+            Self::InvalidClient | Self::GrantRefused | Self::Other => Recovery::FixRequest,
+        }
+    }
 }
 
 /// A bounded exchange failure. Only a typed OAuth 4xx conclusively reports no tokens issued.
@@ -73,8 +116,9 @@ pub struct TokenSet {
     pub access_token: Secret<Zeroizing<String>>,
     /// The rotating credential, including when later identity verification fails.
     pub refresh_token: Option<Secret<Zeroizing<String>>>,
-    /// The signed identity token, still untrusted until verification succeeds.
-    pub id_token: Secret<Zeroizing<String>>,
+    /// The signed identity token, still untrusted until verification succeeds. A refresh may
+    /// leave it out; an exchange never does.
+    pub id_token: Option<Secret<Zeroizing<String>>>,
     /// The actual grant, not the originally requested scopes.
     pub scope: Secret<Zeroizing<String>>,
     /// Provider lifetime clipped to the local one-day cap.
@@ -165,10 +209,16 @@ pub async fn exchange(
             fields,
         })
         .await?;
-    parse_response(&response)
+    let tokens = parse_response(&response)?;
+    if tokens.id_token.is_none() {
+        return Err(ExchangeError::Unusable {
+            refresh_token: tokens.refresh_token,
+        });
+    }
+    Ok(tokens)
 }
 
-fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
+pub(super) fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     let bytes = response.body.expose();
     if bytes.len() > MAX_BODY_BYTES {
         return Err(ExchangeError::Http(HttpError::BodyTooLarge));
@@ -201,11 +251,7 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
             if !code.is_empty() {
                 return Err(ExchangeError::OAuth {
                     status: response.status,
-                    code: match code.as_str() {
-                        "invalid_grant" => OAuthCode::InvalidGrant,
-                        "invalid_client" => OAuthCode::InvalidClient,
-                        _ => OAuthCode::Other,
-                    },
+                    code: OAuthCode::parse(&code),
                 });
             }
         }
@@ -219,9 +265,9 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
             });
         }
     };
-    let (Some(access_token), Some(id_token), Some(scope), Some(token_type), Some(expires_in)) = (
+    let id_token = data.id_token;
+    let (Some(access_token), Some(scope), Some(token_type), Some(expires_in)) = (
         data.access_token,
-        data.id_token,
         data.scope,
         data.token_type,
         data.expires_in,
@@ -232,11 +278,11 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     };
     let invalid_fields = [
         (&access_token, MAX_TOKEN_BYTES),
-        (&id_token, MAX_TOKEN_BYTES),
         (&scope, MAX_SCOPE_BYTES),
         (&token_type, MAX_ID_BYTES),
     ]
     .into_iter()
+    .chain(id_token.as_ref().map(|value| (value, MAX_TOKEN_BYTES)))
     .chain(
         refresh_token
             .as_ref()
@@ -254,7 +300,7 @@ fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     Ok(TokenSet {
         access_token: Secret::new(access_token),
         refresh_token: refresh_token.map(Secret::new),
-        id_token: Secret::new(id_token),
+        id_token: id_token.map(Secret::new),
         scope: Secret::new(scope),
         expires_in: expires_in.min(MAX_EXPIRES_IN),
     })

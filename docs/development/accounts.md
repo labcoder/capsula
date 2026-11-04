@@ -146,6 +146,11 @@ string `error` on a 4xx response conclusively reports refusal; transport failure
 replies, oversized data and other statuses leave issuance uncertain for the later token lane.
 No provider message or body enters an error.
 
+`oauth::refresh::refresh` posts `grant_type=refresh_token`, the saved `client_id`, the refresh
+token and `resource`, with a 30 s deadline [local policy], and parses the answer as an exchange's.
+Unlike an exchange, it may leave out `id_token` or `refresh_token`; an exchange without `id_token`
+is unusable. Empty or oversized inputs are refused before anything is sent.
+
 ### Signed identity and plan permission
 
 `oauth::id_token::verify` checks discovery's exact issuer and allows JWKS only on
@@ -349,8 +354,8 @@ While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start no
 answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
 (`Keep`); `Erase` comes only from a persisted marker, a damaged one included (it reads as
 `Erase`/`Revoking`), until PR 10 reports `PlanState::Unavailable`. A refused marker read at startup
-decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and Retry or the next start
-reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
+decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and so does a lock error on
+the load after Finish; Retry or the next start reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
 whole sign-out makes, for Keep and Erase.
 
 ## Credential storage

@@ -37,11 +37,15 @@ pub enum ErrorKey {
     AccountMisconfigured,
     /// The sign-out couldn't be recorded, so a restart before Retry would sign in again.
     SignOutNotDurable,
+    /// The provider ended the session; the saved registration signs in again.
+    SessionEnded,
+    /// This account can't use its plan here.
+    PlanUnavailable,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -55,6 +59,8 @@ impl ErrorKey {
         Self::PlanNotEnabled,
         Self::AccountMisconfigured,
         Self::SignOutNotDurable,
+        Self::SessionEnded,
+        Self::PlanUnavailable,
     ];
 }
 

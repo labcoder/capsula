@@ -292,9 +292,13 @@ pub(super) async fn exchange_task(
         let tokens = exchange(&http, &authorization).await?;
         // Its lifetime starts on arrival, not after the identity check.
         let now = net.clock.unix_seconds();
+        let id_token = tokens
+            .id_token
+            .as_ref()
+            .expect("an exchange's set carries an identity token");
         let identity = verify(
             &http,
-            &tokens.id_token,
+            id_token,
             authorization.client_id.expose(),
             authorization.nonce.expose(),
             net.clock.as_ref(),
