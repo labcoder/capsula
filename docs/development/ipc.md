@@ -151,10 +151,14 @@ flowchart LR
 |---|---|---|
 | `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
 | `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
+| `Models` | Data, brain to shell | at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,403 bytes, under the data frame cap |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
 - `AccountOp` is on the tap's content-free list. `Account` isn't, because it carries the email.
+- `Models` goes out after a connection's account view, and again whenever the list changes; an
+  empty one means the account no longer has one. Nothing revokes it. shortcut: the shell drops it
+  until PR 18b's picker shows it.
 - The view is authoritative: every op is answered by one `Account`, a refused one included, and
   the shell never moves the account on its own. See [accounts](accounts.md).
 - shortcut: until slice 3 PR 9b wires the account system the brain ignores `AccountOp`, and the

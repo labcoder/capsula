@@ -9,6 +9,10 @@ use tokio::task::{JoinError, JoinHandle};
 use super::{Brain, Full, Link};
 use crate::config::{ConfigError, Pending};
 
+/// The epoch of a change the brain makes itself. Connections count from 1, so a shell hears only
+/// the settled settings.
+pub(super) const BRAIN: u64 = 0;
+
 /// A settings change waiting its turn, with the connection that sent it.
 #[derive(Debug)]
 pub(super) struct Queued {

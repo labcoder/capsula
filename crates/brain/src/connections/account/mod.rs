@@ -77,6 +77,8 @@ pub enum Input {
         /// Wall time when it arrived, for its expiry.
         now: Option<u64>,
     },
+    /// The model list refused this account's plan (`subscription_sharing_user_not_eligible`).
+    PlanUnavailable,
     /// The identity check of `generation`'s rotated set ended.
     Validated {
         /// The account generation it checked.
@@ -221,7 +223,7 @@ type Verified = (Zeroizing<String>, Option<Zeroizing<String>>, u64);
 #[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "independent facts: the lock, a load, a revocation pass owed, a renewal sent"
+    reason = "independent facts: the lock, a load, a revocation pass owed, a renewal sent, a plan refused"
 )]
 pub struct AccountState {
     busy: bool,
@@ -248,8 +250,6 @@ pub struct AccountState {
     /// The generation a session the provider ended left: the registration and email stay, shown
     /// as `SignInAgain` until the account moves again.
     ended: Option<u64>,
-    /// The jobs that wait for the lane's list save to commit.
-    after_list: Vec<Queued>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -260,6 +260,9 @@ pub struct AccountState {
     admitting: Option<Intent>,
     /// A pending sign-out: the account is fenced.
     leaving: Option<Leaving>,
+    /// The plan isn't available to this account, as its catalog read learned; in memory only,
+    /// until the account moves. Its sign-out erases the registration (pick 2).
+    unavailable: bool,
 }
 
 impl AccountState {
@@ -282,7 +285,6 @@ impl AccountState {
             renewed: false,
             now: None,
             ended: None,
-            after_list: Vec::new(),
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
@@ -290,6 +292,7 @@ impl AccountState {
             again: false,
             admitting: None,
             leaving: None,
+            unavailable: false,
         };
         state.loading = true;
         state.jobs.push_back(Queued::Load { patient: true });
@@ -320,7 +323,9 @@ impl AccountState {
                         .email
                         .as_ref()
                         .and_then(|email| AccountEmail::new(email).ok()),
-                    plan: if account.plan_enabled {
+                    plan: if self.unavailable {
+                        PlanState::Unavailable
+                    } else if account.plan_enabled {
                         PlanState::Enabled
                     } else {
                         PlanState::Declined
@@ -354,6 +359,14 @@ impl AccountState {
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
             Input::Revoked(confirmed) => self.revoked(confirmed),
+            Input::PlanUnavailable => {
+                self.unavailable = self.leaving.is_none()
+                    && self
+                        .loaded
+                        .account
+                        .as_ref()
+                        .is_some_and(|account| account.expose().tokens.is_some());
+            }
             Input::Access { ticket, now } => self.access(ticket, now, &mut effects),
             Input::Refreshed {
                 generation,

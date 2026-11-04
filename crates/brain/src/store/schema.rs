@@ -112,6 +112,8 @@ mod tests {
     use super::*;
 
     /// CAPS-90 L2: only a test asks for a version past the end, so a mistyped one fails loudly.
+    /// The check is a `debug_assert!`, so optimized test builds skip it.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "no migration past the known ones")]
     fn a_target_past_the_known_migrations_is_a_bug() {

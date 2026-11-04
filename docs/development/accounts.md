@@ -255,8 +255,25 @@ lane; it is tried again once when the attempt moves (as a list entry, since its 
 or on Retry, never on every pass. A live attempt ends then with `CredentialsUnavailable` and
 Retry, since its code could only wait behind the held set.
 A pending flag a crash left behind becomes `outcome_unknown` as soon as the next start reads the
-vault, before any save could finish it as known, and a later success never clears it. A list
-save that no request owns (a rejected refresh set's) finishes no request.
+vault, before any save could finish it as known, and a later success never clears it.
+
+**Replacing a token.** A refresh token leaves `chatgpt` only once the provider spent it, the list
+holds the same client and token, or the marker records `outcome_unknown`. A sign-in's Commit
+checks this against the disk, in the same credential job, before it saves: it lists the token
+`chatgpt` holds (the old account's, a rejected or pending set, a spent one) as an exchange's
+entry, stamped with the job's monotonic-safe time, but only while two exchange slots are free, so
+the incoming set keeps the slot it was admitted on should its own save be refused. Otherwise, or
+when the token can't fit an entry, it writes `outcome_unknown` first. An equal entry already
+listed needs nothing, so a Retry never lists it twice. The job reports a list it saved even when
+the account save is then refused; the machine takes its count and starts a revocation pass for it
+before anything else runs. Once the account manifest commits, the sign-in is committed, whatever
+the marker writes after it do.
+
+Listing comes before replacing, so if the account save fails after the old account's token was
+listed, that token can be revoked before the new set is installed: the old session's next refresh
+gets `invalid_grant` and goes down the usual sign-in-again path. Retry can still commit the held
+set; Cancel doesn't bring the old session back. With three exchanges listed, the replaced token is
+recorded unknown instead, so the next sign-out's notice is unconfirmed.
 
 **Local policies:**
 - A grant without a refresh token is refused; nothing is saved for it.
@@ -362,24 +379,25 @@ sequenceDiagram
 - `verify_refreshed` binds the token to the subject this account already verified, with no
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
   Another subject or an invalid token, like a pending set with nothing to check, ends the session
-  and lists the set's refresh token as an exchange's would be (unknown when no slot is free).
+  and leaves the set in `chatgpt`, still pending so it's never used, with nothing written.
   Network, status, discovery, bounds and clock failures, and a key still missing after its
   refetch, leave the set pending, since a captive
-  portal's page can fail discovery's parse or a document's size bound. The registration-only save
-  waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
-  leaves `chatgpt` unowned. If that unknown outcome can't be written, the save still runs, so the
-  token can leave unrecorded (a known gap, OSC-204).
+  portal's page can fail discovery's parse or a document's size bound. The rejected set's token
+  leaves `chatgpt` only through the next sign-in's Commit or the sign-out's Prepare, which own it
+  first; a restart checks the set again and rejects it again, writing nothing.
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
-  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone
-  that lasts in this process only: after a restart it's `SignedOut`. A token kept because it may
-  be consumed keeps its mark, so `SignInAgain` outlasts a restart.
+  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. After a `SignInAgain`
+  code the tokens are gone, so that lasts in this process only: after a restart it's `SignedOut`.
+  A rejected set stays pending and is rejected again, and a token kept because it may be consumed
+  keeps its mark, so `SignInAgain` outlasts a restart.
 - A result that arrives under an old generation never becomes the account: during a sign-out its
   rotated token replaces the listed `Account` entry, so the successor is what gets revoked. One
   that didn't rotate leaves the old token in place, so nothing is unknown.
 - An unusable answer that names a refresh token lists it as an exchange's would be, when an
-  exchange slot is free and its entry fits; otherwise its outcome is unknown. Either way the
-  session ends, since the token it replaced was consumed.
+  exchange slot is free and its entry fits, and that list save ends its request; otherwise its
+  outcome is unknown. Either way the session ends, since the token it replaced was consumed, and
+  that token stays in `chatgpt`, marked as sent, so it's never sent again.
 - A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
   sign-out saves nothing.
 
@@ -412,9 +430,11 @@ or Retry enters at the first step of the persisted phase:
    save, an ambiguous ending sets `outcome_unknown`, and a refused save holds the set (`Refused`)
    until Retry; after a crash its `request_pending` keeps the warning.
 2. **Prepare.** `chatgpt`'s refresh token becomes the `Account` entry unless one is listed (that
-   token or its successor), so a replay never duplicates or overwrites it. A record whose data is
-   damaged persists `outcome_unknown` first; a damaged list isn't rewritten, but the account token
-   is still revoked. A refused read decides nothing: the step is `Refused` and Retry reruns it.
+   token or its successor) or the same client and token are, so a replay never duplicates or
+   overwrites it. A record whose data is damaged persists `outcome_unknown` first; a damaged list
+   isn't rewritten, but the account token is still revoked. So is a list the account token can
+   never fit (`Bounds`): `outcome_unknown` is persisted first, the list stays as it was, and the
+   token is revoked from memory; if that marker write is refused, the step is `Refused`. A refused read decides nothing: the step is `Refused` and Retry reruns it.
 3. **Revoke.** One run over the list, inside the usual 10 s budget.
 4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
    counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
@@ -454,11 +474,44 @@ stateDiagram-v2
 
 While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start nothing and are
 answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
-(`Keep`); `Erase` comes only from a persisted marker, a damaged one included (it reads as
-`Erase`/`Revoking`), until PR 10 reports `PlanState::Unavailable`. A refused marker read at startup
+(`Keep`), unless the catalog found the account's plan unavailable: then it erases it (`Erase`,
+pick 2). `Erase` also comes from a persisted marker, a damaged one included (it reads as
+`Erase`/`Revoking`). A refused marker read at startup
 decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and so does a lock error on
 the load after Finish; Retry or the next start reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
 whole sign-out makes, for Keep and Erase.
+
+## Model catalog
+
+`connections::catalog::read` sends one bearer GET to `/v1/models` and keeps the `models` entries
+whose `visibility` is `"list"`, in the server's order. Each must have a `ModelSlug` and a
+one-line `ModelName` (1–80 characters); a mistyped, invalid or duplicate entry, or one past
+`MAX_MODELS` (200), is skipped and counted, and only the count is logged. Every listed model is
+treated as tool-capable (`LISTED_MODELS_CALL_TOOLS`, a local policy).
+
+`runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
+(`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
+while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
+account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
+its client or awaits the answer, and the list is cleared; the shell then hears an empty
+`Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
+wait started. It's keyed by that epoch rather than the machine's
+generation, which moves on every rotation and would clear the list hourly.
+
+| Answer | Shown |
+| --- | --- |
+| 200 with a model list | `Models` on the data pipe, once per change and per connection |
+| 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
+| 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
+| `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
+| other codes | as the refresh table above maps them |
+
+`Unavailable` lasts in memory until the account moves, and that account's sign-out erases the
+registration. shortcut: a 401 only offers Retry; PR 11's request path refreshes on it.
+
+A read that leaves `default_model` unset or no longer listed sets it, as the brain's own settings
+change: `gpt-6-luna` at `Low` when listed, otherwise the first model at `Low`. A listed choice is
+never overwritten, and an empty list changes nothing (see [settings](settings.md#config-keys)).
 
 ## Credential storage
 

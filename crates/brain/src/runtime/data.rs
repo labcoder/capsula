@@ -21,7 +21,8 @@ pub(crate) enum Owner {
     Page,
     /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
-    /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete.
+    /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete, or the model
+    /// catalog.
     Marker,
 }
 

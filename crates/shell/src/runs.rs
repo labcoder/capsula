@@ -507,8 +507,10 @@ impl Runs {
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
-            | DataToShell::SceneEnd { .. } => {
+            | DataToShell::SceneEnd { .. }
+            | DataToShell::Models { .. } => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
+                // shortcut: the catalog is credited and dropped until PR 18b's picker shows it.
             }
         }
     }
@@ -573,6 +575,7 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
             // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             None
         }
+        DataToShell::Models { .. } => None,
     }
 }
 

@@ -79,7 +79,8 @@ impl IssuerUrl {
     }
 }
 
-/// The only account destinations: code exchange, identity verification and revocation.
+/// The only account destinations: code exchange, identity verification, revocation and the
+/// model list.
 #[derive(Debug)]
 pub enum Endpoint {
     /// The documented form-token endpoint, one of the two accepting form credentials.
@@ -90,6 +91,8 @@ pub enum Endpoint {
     Jwks(IssuerUrl),
     /// The discovered same-origin revocation endpoint, the other one taking form credentials.
     Revocation(IssuerUrl),
+    /// The account's model list, the only destination given the bearer.
+    Models(Secret<Zeroizing<String>>),
 }
 
 impl Endpoint {
@@ -98,6 +101,7 @@ impl Endpoint {
             Self::Token => "https://auth.openai.com/api/accounts/oauth/token",
             Self::Discovery => "https://auth.openai.com/.well-known/openid-configuration",
             Self::Jwks(url) | Self::Revocation(url) => url.0.expose(),
+            Self::Models(_) => "https://api.openai.com/v1/models",
         }
     }
 }
@@ -262,7 +266,10 @@ impl Client {
             if !request.fields.is_empty() {
                 return Err(HttpError::Request);
             }
-            self.0.get(url).timeout(Duration::from_secs(10))
+            match &request.endpoint {
+                Endpoint::Models(bearer) => self.0.get(url).bearer_auth(bearer.expose().as_str()),
+                _ => self.0.get(url).timeout(Duration::from_secs(10)),
+            }
         };
         let response = builder
             .send()

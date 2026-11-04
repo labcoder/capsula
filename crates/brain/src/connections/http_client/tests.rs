@@ -30,6 +30,7 @@ struct Server {
 struct WireRequest {
     line: Zeroizing<String>,
     content_type: Option<String>,
+    authorization: Option<String>,
     body: Secret<Zeroizing<Vec<u8>>>,
 }
 
@@ -125,6 +126,11 @@ impl Server {
                     .split("\r\n")
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, value)| value.trim().to_owned()),
+                authorization: header
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
                     .map(|(_, value)| value.trim().to_owned()),
                 body: Secret::new(body),
             };
@@ -489,6 +495,7 @@ async fn token_posts_are_form_encoded_and_public_gets_have_no_body() {
         .expect("POST");
     let wire = server.finish().expect("captured POST");
     assert_eq!(wire.line.as_str(), "POST /fixture HTTP/1.1");
+    assert_eq!(wire.authorization, None);
     assert_eq!(
         wire.content_type.as_deref(),
         Some("application/x-www-form-urlencoded")
@@ -504,19 +511,25 @@ async fn token_posts_are_form_encoded_and_public_gets_have_no_body() {
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect()
     );
-    for endpoint in [
-        Endpoint::Discovery,
-        Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+    let bearer = Secret::new(Zeroizing::new("bearer-token".to_owned()));
+    for (endpoint, authorization) in [
+        (Endpoint::Discovery, None),
+        (
+            Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+            None,
+        ),
+        (Endpoint::Models(bearer), Some("Bearer bearer-token")),
     ] {
         let server = Server::start(reply("200 OK", b"{}", ""));
         server
             .client()
             .send_to(&server.url(), request(endpoint))
             .await
-            .expect("public GET");
+            .expect("GET");
         let wire = server.finish().expect("captured GET");
         assert_eq!(wire.line.as_str(), "GET /fixture HTTP/1.1");
         assert_eq!(wire.content_type, None);
+        assert_eq!(wire.authorization.as_deref(), authorization);
         assert!(wire.body.expose().is_empty());
     }
 }
@@ -526,6 +539,7 @@ async fn public_endpoints_refuse_fields_before_connecting() {
     for endpoint in [
         Endpoint::Discovery,
         Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
+        Endpoint::Models(Secret::new(Zeroizing::new("bearer-token".to_owned()))),
     ] {
         let server = Server::start(reply("200 OK", b"{}", ""));
         let client = server.client();

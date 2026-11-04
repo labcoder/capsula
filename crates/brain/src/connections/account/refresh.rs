@@ -216,12 +216,10 @@ impl AccountState {
             Err(ExchangeError::Unusable {
                 refresh_token: Some(token),
             }) => {
-                let ended = if current {
-                    self.end_session(effects)
-                } else {
-                    None
-                };
-                return self.reject_successor(client.expose(), token.expose(), ended);
+                if current {
+                    self.end_session(effects);
+                }
+                return self.reject_successor(client.expose(), token.expose());
             }
             Err(failure) => {
                 let (outcome_unknown, key) = classify(&failure);
@@ -267,8 +265,8 @@ impl AccountState {
                 });
             }
             if let Some(token) = successor {
-                let ended = self.end_session(effects);
-                return self.reject_successor(client.expose(), token.expose(), ended);
+                self.end_session(effects);
+                return self.reject_successor(client.expose(), token.expose());
             }
             // The token sent wasn't replaced, so it may go again; the access token issued with
             // it has no owner.
@@ -488,7 +486,8 @@ impl AccountState {
     }
 
     /// The session ended: the tokens go, the registration stays, and the account is replaced.
-    /// Returns the registration's save, for the caller to queue.
+    /// Returns the registration's save, which only a refused token's caller queues; any other token
+    /// stays on disk until a sign-in's Commit or the sign-out's Prepare owns it.
     fn end_session(&mut self, effects: &mut Vec<Effect>) -> Option<Queued> {
         self.session_lost(effects);
         let registration = Secret::new(Account {
@@ -530,44 +529,16 @@ impl AccountState {
         self.ended == Some(self.generation)
     }
 
-    /// A rotated set that can't be verified: its token goes to the list, and the session ends.
+    /// A rotated set that can't be verified: the session ends, and the set stays in `chatgpt`,
+    /// pending so it's never used, until a sign-in's Commit or the sign-out's Prepare owns it.
     fn reject_set(&mut self, effects: &mut Vec<Effect>) {
-        let account = self.loaded.account.as_ref().map(Secret::expose);
-        let rejected = account.and_then(|account| {
-            let tokens = account.tokens.as_ref()?;
-            Some((account.client_id.clone(), tokens.refresh_token.clone()))
-        });
-        let ended = self.end_session(effects);
-        match rejected {
-            // The token leaves `chatgpt` only once it's listed or counted unknown.
-            Some((client, token)) => self.discard(&client, &token, ended.into_iter().collect()),
-            None => self.jobs.extend(ended),
-        }
+        self.end_session(effects);
     }
 
-    /// A successor Kumochi can't keep: the list owns it and its request ends once it's listed.
-    /// The token it replaced is never sent again, so the session ends.
-    fn reject_successor(
-        &mut self,
-        client: &Zeroizing<String>,
-        token: &Zeroizing<String>,
-        ended: Option<Queued>,
-    ) {
-        let mut then = vec![Queued::Finished {
-            outcome_unknown: false,
-        }];
-        then.extend(ended);
-        self.discard(client, token, then);
-    }
-
-    /// Hands a refresh token to the revocation list once the lane is free, as an exchange's set;
-    /// `then` runs once it's listed or counted unknown.
-    fn discard(
-        &mut self,
-        client: &Zeroizing<String>,
-        token: &Zeroizing<String>,
-        then: Vec<Queued>,
-    ) {
+    /// A successor Kumochi can't keep goes to the list, as an exchange's set, once the lane is
+    /// free, and its request ends then; with no entry or slot for it, its outcome is unknown. The
+    /// token it replaced stays in `chatgpt`, marked as sent, so it's never sent again.
+    fn reject_successor(&mut self, client: &Zeroizing<String>, token: &Zeroizing<String>) {
         let entry = entry_fits(client, token).then(|| {
             Secret::new(Revocable {
                 client_id: client.clone(),
@@ -576,7 +547,7 @@ impl AccountState {
                 origin: Origin::Exchange,
             })
         });
-        self.waiting.push_front(Waiting::Discard { entry, then });
+        self.waiting.push_front(Waiting::Discard(entry));
     }
 
     /// The account's token set is replaced or removed: anything for the old one is stale, and
@@ -584,6 +555,7 @@ impl AccountState {
     pub(super) fn moved(&mut self, effects: &mut Vec<Effect>) {
         self.generation += 1;
         self.validating = None;
+        self.unavailable = false;
         self.answer(&Err(Denied::Unusable), effects);
     }
 
