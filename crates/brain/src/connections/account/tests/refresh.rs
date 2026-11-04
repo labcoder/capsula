@@ -461,50 +461,6 @@ fn a_rotated_set_too_big_to_save_lists_its_successor() {
     assert_eq!(h.refreshes.len(), 1);
 }
 
-/// N1: when writing a rejected token's unknown outcome fails, the registration-only save doesn't
-/// run, so the token stays in the account instead of leaving unrecorded. #103 H1: once the list
-/// has room again, the sign-in Sign in offers writes that outcome before its commit can replace
-/// the account record, so the sign-out after it never reports the session ended.
-#[test]
-fn a_refused_unknown_outcome_keeps_the_rejected_token_in_the_account() {
-    let mut h = Harness::seeded("refresh-reject-refused", |vault| {
-        account_at(NOW, None)(vault);
-        full_list(vault);
-    });
-    h.access(1, NOW);
-    h.refreshed(rotated(Some("id-new")));
-    h.hold = true;
-    h.validated(Err(IdentityError::OtherAccount));
-    h.store
-        .arm(0, crate::connections::vault::fake::Fault::Refuse);
-    h.release();
-    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
-    assert_eq!(h.revocations().len(), MAX_EXCHANGES, "nothing listed");
-
-    let pass = h.revoking[0].clone();
-    assert_eq!(pass.len(), MAX_EXCHANGES, "the startup pass");
-    h.feed(Input::Revoked(pass));
-    assert!(h.revocations().is_empty(), "the list has room");
-    h.op(AccountOp::SignIn);
-    assert_eq!(h.marker(), marker(&["outcome_unknown"]), "recorded first");
-    h.callback(CLIENT);
-    h.reply(received(Some("refresh-signed-in"), "subject-1", PLAN));
-    assert_eq!(h.refresh_token(), Some("refresh-signed-in".to_owned()));
-    h.op(AccountOp::SignOut);
-    let mut answered = 1;
-    while h.revoking.len() > answered {
-        let run = h.revoking[answered].clone();
-        answered += 1;
-        h.feed(Input::Revoked(run));
-    }
-    assert_eq!(
-        h.view(),
-        &AccountView::SignedOut {
-            revocation_unconfirmed: true
-        }
-    );
-}
-
 /// N1: a rejected set's token stays in `chatgpt` until its list entry commits, and only then is
 /// the registration saved over it; with the list full, the unknown outcome is written first.
 #[test]

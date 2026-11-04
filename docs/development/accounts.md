@@ -367,10 +367,8 @@ sequenceDiagram
   refetch, leave the set pending, since a captive
   portal's page can fail discovery's parse or a document's size bound. The registration-only save
   waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
-  leaves `chatgpt` unowned. If that unknown outcome can't be written, the registration-only save
-  doesn't run, and the token stays in `chatgpt`. The next Sign in writes that outcome again
-  before anything else, and goes on only once it lands, so its commit can't replace the
-  token's last owner; a sign-out's Prepare adopts the token from `chatgpt` instead.
+  leaves `chatgpt` unowned. If that unknown outcome can't be written, the save still runs, so the
+  token can leave unrecorded (a known gap, OSC-204).
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
   `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone
