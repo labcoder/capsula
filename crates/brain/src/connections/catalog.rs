@@ -65,15 +65,22 @@ impl CatalogError {
     pub(crate) fn failure(self) -> UserError {
         let (key, retry) = match self {
             Self::Http(HttpError::TrustStoreUnavailable) => (ErrorKey::TrustStoreUnavailable, true),
-            // shortcut: a rejected bearer only offers Retry, not a refresh; PR 11's request path
-            // handles a 401 properly.
-            Self::Refused { status: 401, .. } | Self::Http(_) | Self::Response => {
-                (ErrorKey::AccountOffline, true)
+            // The only unavailable plan, which arms Erase on sign-out.
+            Self::Refused {
+                status: 403,
+                code: OAuthCode::NotEligible,
+            } => (ErrorKey::PlanUnavailable, false),
+            // A busy or failing server offers Retry whatever code it sent. shortcut: a rejected
+            // bearer only offers Retry, not a refresh; PR 11's request path handles a 401 properly.
+            Self::Refused {
+                status: 401 | 429 | 500..,
+                ..
             }
+            | Self::Http(_)
+            | Self::Response => (ErrorKey::AccountOffline, true),
             Self::Refused { status, code } => match code.recovery(status) {
                 Recovery::RetryLater => (ErrorKey::AccountOffline, true),
-                Recovery::Unavailable => (ErrorKey::PlanUnavailable, false),
-                Recovery::SignInAgain | Recovery::FixRequest => {
+                Recovery::Unavailable | Recovery::SignInAgain | Recovery::FixRequest => {
                     (ErrorKey::AccountMisconfigured, false)
                 }
             },

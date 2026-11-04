@@ -28,7 +28,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::{SessionLock, SessionLockError};
-use crate::runtime::account::{Access, Accounts, Event, Net, exchange_task};
+use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
@@ -542,6 +542,16 @@ fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accoun
 /// Saves an account whose bearer expires at `expires_at`, then starts the account system on it
 /// with `http` at 1,800,000,000.
 fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u64) -> Accounts {
+    seeded_on(
+        scratch,
+        store,
+        Arc::new(move || Ok(http.clone())),
+        expires_at,
+    )
+}
+
+/// [`seeded`], building each client with `http`.
+fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at: u64) -> Accounts {
     let seed = scratch.db().with_file_name("seed.lock");
     let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
         .expect("vault")
@@ -568,7 +578,7 @@ fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u6
         Arc::new(FixedClock(1_800_000_000)),
     );
     let net = Net {
-        http: Arc::new(move || Ok(http.clone())),
+        http,
         ..test_support::net()
     };
     Accounts::spawn(worker, net).expect("accounts")
@@ -847,6 +857,130 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
         "a read from before the sign-out is dropped"
     );
     accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Signs out and runs the account system until the view says so.
+async fn sign_out(accounts: &mut Accounts) {
+    let mut frames = accounts.handle(Input::Op(AccountOp::SignOut));
+    let signed_out = |frames: &[ControlToShell]| {
+        frames.iter().any(|frame| {
+            matches!(
+                frame,
+                ControlToShell::Account(AccountView::SignedOut { .. })
+            )
+        })
+    };
+    timeout(PATIENCE, async {
+        while !signed_out(&frames) {
+            let event = accounts.next().await;
+            frames = accounts.handle(event);
+        }
+    })
+    .await
+    .expect("in time");
+}
+
+/// Counts model-list requests, answers everything 503 and says when it's dropped.
+struct Probe {
+    models: Arc<AtomicU64>,
+    dropped: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.dropped.take() {
+            dropped.send(()).ok();
+        }
+    }
+}
+
+impl Http for Probe {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        if matches!(request.endpoint, Endpoint::Models(_)) {
+            self.models.fetch_add(1, Ordering::SeqCst);
+        }
+        std::future::ready(Ok(Response {
+            status: 503,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(Vec::new())),
+        }))
+    }
+}
+
+/// P106-M2: a sign-out cancels the catalog read it outdates, here once the read holds the bearer
+/// and is building its client, so the old account's bearer never goes out after it.
+#[tokio::test]
+async fn a_sign_out_cancels_a_catalog_read_before_its_request_goes_out() {
+    let scratch = Scratch::new("account-catalog-cancelled");
+    let store = FakeStore::default();
+    let (entered_tx, entered) = oneshot::channel();
+    let (release, held) = std_mpsc::channel::<()>();
+    let (dropped_tx, dropped) = oneshot::channel();
+    let models = Arc::new(AtomicU64::new(0));
+    let probe = SharedHttp::new(Probe {
+        models: Arc::clone(&models),
+        dropped: Some(dropped_tx),
+    });
+    // Holds only the first client built, the catalog's; the sign-out's revocation gets its own.
+    let gate = Mutex::new(Some((entered_tx, held, probe)));
+    let factory: HttpFactory = Arc::new(move || {
+        let Some((entered, held, probe)) = gate.lock().expect("gate").take() else {
+            return Ok(Catalog::answering([]));
+        };
+        entered.send(()).ok();
+        held.recv().ok();
+        Ok(probe)
+    });
+    let mut accounts = seeded_on(&scratch, &store, factory, LATER);
+    timeout(PATIENCE, entered)
+        .await
+        .expect("in time")
+        .expect("the read builds its client");
+    sign_out(&mut accounts).await;
+    release.send(()).expect("the catalog's client is held");
+    timeout(PATIENCE, dropped)
+        .await
+        .expect("in time")
+        .expect("the catalog's client is dropped");
+    assert_eq!(models.load(Ordering::SeqCst), 0, "no model list request");
+    assert_eq!(accounts.models(), None);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// The saved registration's client id, if there's one.
+fn registration(scratch: &Scratch, store: &FakeStore) -> Option<String> {
+    let lock = scratch.db().with_file_name("reader.lock");
+    Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &lock)
+        .expect("vault")
+        .load_account()
+        .expect("readable")
+        .map(|account| account.expose().client_id.to_string())
+}
+
+/// P106-M1: a server error offers Retry whatever code it carries, so the plan stays Enabled and
+/// an ordinary sign-out keeps the registration.
+#[tokio::test]
+async fn a_server_error_naming_the_plan_offers_retry_and_its_sign_out_keeps_the_registration() {
+    let scratch = Scratch::new("account-catalog-server-error");
+    let store = FakeStore::default();
+    let refused = json!({ "error": { "code": "subscription_sharing_user_not_eligible" } });
+    let http = Catalog::answering([(503, refused.to_string())]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]);
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline.expect("valid"))],
+        "no Unavailable view: the plan stays Enabled"
+    );
+    sign_out(&mut accounts).await;
+    accounts.close(Instant::now(), Instant::now()).await;
+    assert_eq!(
+        registration(&scratch, &store),
+        Some("client-saved".to_owned())
+    );
 }
 
 /// Pick 2: a catalog that refuses the plan shows the account Unavailable, with no action.

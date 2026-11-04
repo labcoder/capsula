@@ -81,10 +81,10 @@ fn pair(slug: &str, name: &str) -> (String, String) {
 async fn the_listed_models_come_in_the_servers_order_with_the_bearer_sent_only_there() {
     let http = answering(
         200,
-        &json!({ "models": [
+        &json!({ "object": "list", "models": [
             model("gpt-6.1-sol", "GPT-6.1 Sol"),
             { "slug": "hidden-model", "display_name": "Hidden", "visibility": "hide", "extra": 1 },
-            model("gpt-6-luna", "GPT-6 Luna"),
+            { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "extra": [] },
         ]})
         .to_string(),
     );
@@ -231,6 +231,24 @@ async fn refusals_keep_only_status_and_code_and_say_what_to_do() {
             None,
             OAuthCode::Other,
             error(ErrorKey::AccountOffline, &retry),
+        ),
+        (
+            503,
+            Some("subscription_sharing_user_not_eligible"),
+            OAuthCode::NotEligible,
+            error(ErrorKey::AccountOffline, &retry),
+        ),
+        (
+            503,
+            Some("invalid_client"),
+            OAuthCode::InvalidClient,
+            error(ErrorKey::AccountOffline, &retry),
+        ),
+        (
+            400,
+            Some("subscription_sharing_user_not_eligible"),
+            OAuthCode::NotEligible,
+            error(ErrorKey::AccountMisconfigured, &[]),
         ),
     ];
     for (status, code, parsed, told) in cases {

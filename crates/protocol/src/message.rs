@@ -442,8 +442,9 @@ pub enum DataToShell {
         /// False after malformed, truncated, invalid or differing final arguments.
         complete: bool,
     },
-    /// The account's model catalog, whole: sent when a shell connects and whenever it changes,
-    /// and empty while there's no usable account or before its first read.
+    /// The account's model catalog, whole: sent when a read succeeds and to each shell that
+    /// connects after one, and empty once the account stops being usable. Nothing is sent before a
+    /// read succeeds.
     Models {
         /// At most [`MAX_MODELS`], in the catalog's order.
         models: Vec<ModelInfo>,
@@ -618,13 +619,13 @@ mod tests {
     fn the_longest_catalog_fits_a_data_frame() {
         let model = ModelInfo {
             slug: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
-            display_name: ModelName::new(&"界".repeat(MAX_MODEL_NAME_CHARS)).expect("valid"),
+            display_name: ModelName::new(&"\u{1F600}".repeat(MAX_MODEL_NAME_CHARS)).expect("valid"),
         };
         let models = DataToShell::Models {
             models: vec![model; MAX_MODELS],
         };
-        // Tag and a two-byte count, then each slug and its three-byte characters with lengths.
-        let each = 1 + MAX_SLUG_BYTES + 2 + 3 * MAX_MODEL_NAME_CHARS;
-        assert_eq!(payload(&models, Pipe::Data), 1 + 2 + MAX_MODELS * each);
+        // Tag and a two-byte count, then 200 times a one-byte slug length, 64 bytes of slug, a
+        // two-byte name length and 80 four-byte characters.
+        assert_eq!(payload(&models, Pipe::Data), 77_403);
     }
 }

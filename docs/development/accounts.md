@@ -472,15 +472,18 @@ treated as tool-capable (`LISTED_MODELS_CALL_TOOLS`, a local policy).
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
 while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
-account stops being usable, so a read started before is dropped and the list is cleared; the
-shell then hears an empty `Models`. It's keyed by that epoch rather than the machine's
+account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
+its client or awaits the answer, and the list is cleared; the shell then hears an empty
+`Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
+wait started. It's keyed by that epoch rather than the machine's
 generation, which moves on every rotation and would clear the list hourly.
 
 | Answer | Shown |
 | --- | --- |
 | 200 with a model list | `Models` on the data pipe, once per change and per connection |
-| 200 that isn't a model list, a failed request, 401 | `AccountOffline`, Retry |
-| 403 `subscription_sharing_user_not_eligible` | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
+| 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
+| 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
+| `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
 | other codes | as the refresh table above maps them |
 
 `Unavailable` lasts in memory until the account moves, and that account's sign-out erases the

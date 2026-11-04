@@ -151,7 +151,7 @@ flowchart LR
 |---|---|---|
 | `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
 | `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
-| `Models` | Data, brain to shell | at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list is 61,403 bytes, under the data frame cap |
+| `Models` | Data, brain to shell | at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,403 bytes, under the data frame cap |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.

@@ -14,7 +14,7 @@ use kumochi_protocol::message::{
     PlanState, SettingsOp, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
@@ -79,7 +79,8 @@ struct Catalog {
     /// Moves whenever the account stops being usable; a read started before is dropped.
     epoch: u64,
     usable: bool,
-    reading: bool,
+    /// The read out, while it waits for the bearer, its client or the answer.
+    read: Option<AbortHandle>,
     /// The last read's models; `None` until one succeeds in this epoch.
     models: Option<Vec<ModelInfo>>,
     /// The shell hasn't heard the current list.
@@ -98,10 +99,18 @@ impl Catalog {
         );
         if self.usable && !usable {
             self.epoch += 1;
-            self.reading = false;
+            self.cancel();
             self.unsent |= self.models.take().is_some();
         }
         self.usable = usable;
+    }
+
+    /// Stops the read out, so it sends nothing more; a refresh its bearer wait started still
+    /// runs to its end and is saved.
+    fn cancel(&mut self) {
+        if let Some(read) = self.read.take() {
+            read.abort();
+        }
     }
 }
 
@@ -199,14 +208,18 @@ impl Accounts {
         let effects = self.state.handle(input);
         let mut frames = self.apply(effects);
         let catalog = &self.catalog;
-        if catalog.usable && !catalog.reading && catalog.models.is_none() && (ask || !was_usable) {
-            self.catalog.reading = true;
+        if catalog.usable
+            && catalog.read.is_none()
+            && catalog.models.is_none()
+            && (ask || !was_usable)
+        {
             let (wait, access) = self.access();
             frames.extend(access);
+            let task = tokio::spawn(read_catalog(wait, Arc::clone(&self.net.http)));
+            self.catalog.read = Some(task.abort_handle());
             drop(tokio::spawn(catalog_task(
                 self.catalog.epoch,
-                wait,
-                Arc::clone(&self.net.http),
+                task,
                 self.reads_tx.clone(),
             )));
         }
@@ -222,7 +235,7 @@ impl Accounts {
         if epoch != self.catalog.epoch {
             return Vec::new();
         }
-        self.catalog.reading = false;
+        self.catalog.read = None;
         match result {
             Ok(models) => {
                 self.catalog.models = Some(models);
@@ -342,7 +355,7 @@ impl Accounts {
         frames
     }
 
-    /// Stops taking work. A refresh already out runs to its end, and its result's save, until
+    /// Stops taking work and cancels the catalog read. A refresh already out runs to its end, and its result's save, until
     /// `refresh_by`, so a rotated set the provider issued isn't lost; past that its token stays
     /// marked as sent, and the next start never sends it again. Then it waits for the credential
     /// job already dispatched, past `deadline` if it must, so it never overlaps the instance
@@ -353,6 +366,7 @@ impl Accounts {
         if let Some(listener) = self.listener.take() {
             listener.abort();
         }
+        self.catalog.cancel();
         let settled = tokio::time::timeout_at(refresh_by, async {
             while self.state.refresh_out() {
                 let input = self.next().await;
@@ -364,6 +378,8 @@ impl Accounts {
         if settled.is_err() {
             tracing::warn!("a refresh is still out at shutdown; its token stays marked as sent");
         }
+        // One the settling started.
+        self.catalog.cancel();
         self.jobs = None;
         let Some(mut released) = self.released.take() else {
             return;
@@ -488,33 +504,43 @@ async fn revoke_task(
     events.send(Input::Revoked(confirmed)).ok();
 }
 
-async fn catalog_task(
-    epoch: u64,
+/// Reads the catalog with the bearer `wait` brings. Aborting it drops only that wait, never a
+/// refresh it started.
+async fn read_catalog(
     wait: oneshot::Receiver<Access>,
     http: HttpFactory,
+) -> Result<Vec<ModelInfo>, Option<UserError>> {
+    let bearer = match wait.await {
+        Ok(Ok(bearer)) => bearer,
+        Ok(Err(Denied::Failed(error))) => return Err(Some(error)),
+        Ok(Err(Denied::Unusable)) | Err(_) => return Err(None),
+    };
+    let failed = |error: HttpError| Some(CatalogError::Http(error).failure());
+    let http = tokio::task::spawn_blocking(move || http())
+        .await
+        .map_err(|_| failed(HttpError::Configuration))?
+        .map_err(failed)?;
+    read(&http, bearer)
+        .await
+        .map_err(|error| Some(error.failure()))
+}
+
+/// Reports the end of `task`, a read in its own task so one that panics still ends; a cancelled
+/// one reports nothing.
+async fn catalog_task(
+    epoch: u64,
+    task: JoinHandle<Result<Vec<ModelInfo>, Option<UserError>>>,
     reads: mpsc::UnboundedSender<Event>,
 ) {
-    // Its own task, so one that panics still ends the read; the payload isn't logged.
-    let result = tokio::spawn(async move {
-        let bearer = match wait.await {
-            Ok(Ok(bearer)) => bearer,
-            Ok(Err(Denied::Failed(error))) => return Err(Some(error)),
-            Ok(Err(Denied::Unusable)) | Err(_) => return Err(None),
-        };
-        let failed = |error: HttpError| Some(CatalogError::Http(error).failure());
-        let http = tokio::task::spawn_blocking(move || http())
-            .await
-            .map_err(|_| failed(HttpError::Configuration))?
-            .map_err(failed)?;
-        read(&http, bearer)
-            .await
-            .map_err(|error| Some(error.failure()))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        tracing::error!("a catalog read stopped before it reported");
-        Err(Some(CatalogError::Http(HttpError::Transport).failure()))
-    });
+    let result = match task.await {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() => return,
+        Err(_) => {
+            // The payload isn't logged.
+            tracing::error!("a catalog read stopped before it reported");
+            Err(Some(CatalogError::Http(HttpError::Transport).failure()))
+        }
+    };
     reads.send(Event::Read { epoch, result }).ok();
 }
 
