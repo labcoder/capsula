@@ -162,7 +162,9 @@ pub async fn stream<C: Connect, L>(
     let mut progress = match head.media {
         Media::EventStream => Progress::More,
         Media::Absent => {
-            let fed = events.feed(&sniff(conn, &mut body).await?, &mut |event| out.event(event))?;
+            let fed = events.feed(&sniff(conn, &mut body).await?, &mut |event| {
+                out.event(event)
+            })?;
             if out.taken().await.is_break() {
                 return Err(Failure::Protocol);
             }
