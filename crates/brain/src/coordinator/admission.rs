@@ -85,11 +85,31 @@ pub(super) struct Build {
     /// A voided build's rebuild waits until these deletes are answered.
     blocked: BTreeSet<ThreadId>,
     admitted: bool,
+    /// The admitted request's sources, checked again before each send.
+    sources: Vec<ThreadId>,
 }
 
 impl Build {
     pub(super) fn admitted(&self) -> bool {
         self.admitted
+    }
+
+    pub(super) fn key(&self) -> BuildKey {
+        self.key
+    }
+
+    pub(super) fn sources(&self) -> &[ThreadId] {
+        &self.sources
+    }
+
+    /// The `sources` a delete reached. Every pending delete is exposed, since exposure starts
+    /// from the deletes pending when the build began and adds each one accepted after.
+    pub(super) fn voided(&self, sources: &[ThreadId]) -> BTreeSet<ThreadId> {
+        sources
+            .iter()
+            .copied()
+            .filter(|source| self.exposed.contains(source))
+            .collect()
     }
 }
 
@@ -112,6 +132,7 @@ impl Coordinator {
             exposed,
             blocked: BTreeSet::new(),
             admitted: false,
+            sources: Vec::new(),
         });
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             key,
@@ -176,29 +197,43 @@ impl Coordinator {
         }
         let thread = current.thread;
         let build = current.build.as_mut().expect("the build was just matched");
-        let voided: BTreeSet<ThreadId> = made
-            .sources
-            .iter()
-            .copied()
-            .filter(|source| build.exposed.contains(source) || pending.contains(source))
-            .collect();
-        if voided.is_empty() {
-            build.admitted = true;
-            effects.push(Effect::StartEngine {
-                request: RunRequest {
-                    run: key.run,
-                    thread,
-                    origin: origin(thread, main),
-                    request: made.request,
-                },
-            });
+        let voided = build.voided(&made.sources);
+        if !voided.is_empty() {
+            self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.blocked = &voided & &pending;
+        build.admitted = true;
+        build.sources = made.sources;
+        effects.push(Effect::StartEngine {
+            request: RunRequest {
+                key,
+                run: key.run,
+                thread,
+                origin: origin(thread, main),
+                request: made.request,
+            },
+        });
+        Ok(())
+    }
+
+    /// Drops the current build, whose request a delete reached. Its rebuild waits for the
+    /// answers of the deletes still pending among them, so its read sees them; with none, it
+    /// starts now.
+    pub(super) fn rebuild(
+        &mut self,
+        key: BuildKey,
+        voided: &BTreeSet<ThreadId>,
+        pending: &BTreeSet<ThreadId>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) else {
+            return;
+        };
+        build.admitted = false;
+        build.blocked = voided & pending;
         if build.blocked.is_empty() {
             self.build(key.run, key.round, effects);
         }
-        Ok(())
     }
 }
 

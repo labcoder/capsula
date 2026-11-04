@@ -149,6 +149,22 @@ pub enum Failure {
     /// Bytes that aren't a Responses stream, or a cap passed.
     #[error("the response couldn't be read")]
     Protocol,
+    /// The coordinator answered Rebuild, or is gone; nothing was sent.
+    #[error("the request must be built again")]
+    Rebuild,
+    /// The live-check request budget is spent; nothing was sent.
+    #[error("the request budget is spent")]
+    Spent,
+    /// The connection failed or stalled. Once a byte was written the request may have arrived,
+    /// so it's never sent again on its own.
+    #[error("the model connection failed")]
+    Transport,
+    /// The body isn't a streamed request with storage off, or is too large; nothing was sent.
+    #[error("the request body was refused")]
+    Request,
+    /// The bearer isn't a valid header value; nothing was sent.
+    #[error("the credential can't be sent")]
+    Credential,
 }
 
 impl Failure {
@@ -160,8 +176,13 @@ impl Failure {
     pub fn user_error(self) -> UserError {
         let (key, action) = match self {
             Self::Provider(error) => error.recovery(),
-            Self::Incomplete | Self::Truncated => (ErrorKey::AccountOffline, Some(Action::Retry)),
+            Self::Incomplete | Self::Truncated | Self::Rebuild | Self::Transport => {
+                (ErrorKey::AccountOffline, Some(Action::Retry))
+            }
             Self::Protocol => (ErrorKey::ResponseUnreadable, Some(Action::Retry)),
+            // shortcut: a spent live-check budget reads as a refused request; it's debug-only
+            Self::Spent | Self::Request => (ErrorKey::RequestRefused, None),
+            Self::Credential => (ErrorKey::AccountRefused, Some(Action::SignIn)),
         };
         UserError::new(key, Vec::new(), action.into_iter().collect())
             .expect("one action is within the limit")

@@ -36,9 +36,10 @@ fn kumo_built(attempt: u64, sources: &[ThreadId]) -> Input {
     built(R, attempt, sources)
 }
 
-fn kumo_start() -> Effect {
+fn kumo_start(attempt: u64) -> Effect {
     Effect::StartEngine {
         request: RunRequest {
+            key: key(attempt),
             run: R,
             thread: MAIN,
             origin: Origin::Kumo,
@@ -104,7 +105,7 @@ fn a_build_that_read_a_thread_deleted_since_it_began_waits_for_the_delete_and_bu
     );
     assert_eq!(
         core.handle(kumo_built(2, &[MAIN])).expect("current"),
-        vec![kumo_start()]
+        vec![kumo_start(2)]
     );
 }
 
@@ -150,7 +151,7 @@ fn a_result_of_an_older_attempt_is_stale() {
     assert_eq!(core.handle(kumo_built(1, &[MAIN])), Err(Stale));
     assert_eq!(
         core.handle(kumo_built(2, &[MAIN])).expect("current"),
-        vec![kumo_start()]
+        vec![kumo_start(2)]
     );
     assert_eq!(
         core.handle(kumo_built(2, &[MAIN])),
@@ -178,7 +179,7 @@ fn a_delete_of_a_thread_the_build_didnt_read_changes_nothing() {
     core.handle(delete(C)).expect("accepted");
     assert_eq!(
         core.handle(kumo_built(1, &[MAIN, B])).expect("current"),
-        vec![kumo_start()]
+        vec![kumo_start(1)]
     );
 }
 
