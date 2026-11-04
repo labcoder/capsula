@@ -13,8 +13,8 @@ pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 pub use three::{
-    Camera, Fov, Geometry, Length, Light, Pitch, Segments, ShapeError, Size, Solid, SolidShape,
-    Spin, Unit, View3d,
+    Camera, Fov, Geometry, Length, Light, LightDir, Pitch, Segments, ShapeError, Size, Solid,
+    SolidShape, Spin, Unit, View3d,
 };
 
 /// One externally tagged scene record.

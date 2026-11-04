@@ -223,6 +223,39 @@ mod three {
                 code,
             );
         }
+        for raw in [json!([0, 0, 0]), json!([-0.0, 0.0, 0.0])] {
+            check(
+                &json!({"view3d":{"id":"v","light":{"dir":raw.clone()}}}),
+                "view3d.light.dir",
+                raw,
+                Some(ErrorCode::OutOfRange),
+            );
+        }
+        for (raw, expected) in [
+            (json!([0, 0, 0.5]), json!([0.0, 0.0, 0.5])),
+            (json!([0, -1, 0]), json!([0.0, -1.0, 0.0])),
+        ] {
+            let input =
+                json!({"step":{"id":"s","put":[{"view3d":{"id":"v","light":{"dir":raw}}}]}});
+            let record = parse(&input).expect("nonzero direction");
+            let output = serde_json::to_value(&record).expect("serialized record");
+            assert_eq!(output["step"]["put"][0]["view3d"]["light"]["dir"], expected);
+        }
+        let zero = postcard::to_allocvec(&[0.0_f32; 3]).expect("raw direction");
+        assert_eq!(
+            postcard::from_bytes::<kumochi_scene::record::LightDir>(&zero)
+                .expect_err("binary direction check"),
+            postcard::Error::SerdeDeCustom,
+            "postcard cannot bypass the zero-direction check"
+        );
+        let up = postcard::to_allocvec(&[0.0_f32, 1.0, 0.0]).expect("raw direction");
+        assert_eq!(
+            postcard::from_bytes::<kumochi_scene::record::LightDir>(&up)
+                .expect("nonzero binary direction")
+                .get()
+                .map(|c| c.get().to_bits()),
+            [0.0_f32, 1.0, 0.0].map(f32::to_bits)
+        );
     }
 
     #[test]

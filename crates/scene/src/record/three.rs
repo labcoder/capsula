@@ -65,6 +65,36 @@ scalar!(
     |v| (-360.0..=360.0).contains(&v)
 );
 
+/// A light direction: three finite components, not all zero.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "[Finite; 3]", into = "[Finite; 3]")]
+pub struct LightDir([Finite; 3]);
+impl LightDir {
+    /// Returns the checked components.
+    pub fn get(self) -> [Finite; 3] {
+        self.0
+    }
+}
+impl TryFrom<[Finite; 3]> for LightDir {
+    type Error = ErrorCode;
+    fn try_from(value: [Finite; 3]) -> Result<Self, Self::Error> {
+        if value.iter().all(|c| c.get() == 0.0) {
+            return Err(ErrorCode::OutOfRange);
+        }
+        Ok(Self(value))
+    }
+}
+impl From<LightDir> for [Finite; 3] {
+    fn from(value: LightDir) -> Self {
+        value.0
+    }
+}
+impl fmt::Debug for LightDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LightDir(..)")
+    }
+}
+
 /// An integer subdivision count in 3..=48.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
@@ -145,7 +175,7 @@ pub struct Camera {
 #[serde(deny_unknown_fields)]
 pub struct Light {
     /// World-space light direction.
-    pub dir: Option<[Finite; 3]>,
+    pub dir: Option<LightDir>,
     /// Ambient intensity.
     pub ambient: Option<Unit>,
 }
@@ -203,7 +233,7 @@ pub struct Solid {
     pub rot: Option<[Finite; 3]>,
     /// Uniform scale.
     pub scale: Option<Size>,
-    /// Curved subdivision count, invalid on a box.
+    /// Curved subdivision count, invalid on a box or an extrusion.
     pub segments: Option<Segments>,
     /// Optional attachment identity.
     pub attach: Option<WireId>,
@@ -331,7 +361,7 @@ impl Solid {
         for (field, present) in fields {
             let used = required.contains(&field)
                 || (field == "r2" && self.shape == Cone)
-                || (field == "segments" && self.shape != Box);
+                || (field == "segments" && !matches!(self.shape, Box | Extrude));
             if present && !used {
                 return Err(fail(field, ErrorCode::UnknownField));
             }

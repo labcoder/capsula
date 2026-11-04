@@ -384,7 +384,7 @@ mod three {
                 "pos":[1,2,3],"rot":[4,5,6],"scale":2,"attach":"a",
                 "label":"private-label-sentinel","info":"private-info-sentinel","color":"accent","opacity":0.5
             }).as_object().expect("object").clone());
-            if index != 0 {
+            if !matches!(index, 0 | 5) {
                 value["segments"] = json!(12);
             }
             let solid = solid(&value);
@@ -510,6 +510,40 @@ mod three {
             solid(&sphere).geometry().expect("unused empty lists"),
             Geometry::Sphere { r: 1.0 }
         );
+    }
+
+    #[test]
+    fn every_shape_refuses_each_field_it_does_not_use() {
+        let all = [
+            ("size", json!([1, 1, 1])),
+            ("r", json!(1)),
+            ("r2", json!(0.5)),
+            ("h", json!(1)),
+            ("depth", json!(1)),
+            ("points", json!([[0, 0], [1, 0], [0, 1]])),
+            ("path", json!([[0, 0, 0], [1, 1, 1]])),
+            ("segments", json!(3)),
+        ];
+        let used: [&[&str]; 8] = [
+            &["size"],
+            &["r", "segments"],
+            &["r", "h", "segments"],
+            &["r", "r2", "h", "segments"],
+            &["r", "r2", "segments"],
+            &["points", "depth"],
+            &["points", "segments"],
+            &["path", "r2", "segments"],
+        ];
+        for (fields, used) in fields().into_iter().zip(used) {
+            for (field, value) in &all {
+                if used.contains(field) {
+                    continue;
+                }
+                let mut solid = fixture(fields.clone());
+                solid[*field] = value.clone();
+                shape_error(&solid, field, ErrorCode::UnknownField);
+            }
+        }
     }
 
     #[test]

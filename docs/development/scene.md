@@ -67,7 +67,7 @@ use three-component keys; existing tracks retain their existing key types.
 |---|---|
 | `view3d` | Required `id`; optional `box`, `camera`, `light`, `spin`; `orbit` defaults to true. |
 | `camera` | Optional `yaw`, `pitch` (−85..=85°), `dist` (0.001..=20,000), `fov` (10..=120°), `target` (three coordinates). No camera defaults are applied here. |
-| `light` | Optional `dir` (three coordinates), `ambient` (0..=1). |
+| `light` | Optional `dir` (three coordinates, not all zero), `ambient` (0..=1). |
 | `solid` | Required `in`, `id`, `shape`; shape fields below; optional `pos`, `rot`, `scale`, `segments`, `attach`, `label`, `info`, `color`, `opacity`. Sizes and scale are 0.001..=20,000; `r2` also allows zero on decode; integer `segments` is 3..=48; `opacity` is 0..=1; `label` and `info` allow 400 Unicode scalars. |
 
 `spin` is −360..=360°/s. Every numeric input must be finite; free coordinates,
@@ -75,7 +75,7 @@ including rotations, targets, directions, outlines and paths, use the existing
 ±20,000 coordinate bound. Decode bounds apply in JSON and postcard, regardless of shape.
 
 A decoded solid is not yet valid geometry. `Solid::geometry()` checks required
-fields first, then rejects unused shape fields (including `segments` on a box),
+fields first, then rejects unused shape fields (including `segments` on a box or an extrusion),
 then checks counts and radius relations:
 
 | Shape | Used geometry fields |
@@ -361,7 +361,8 @@ Prepared residency remains the preparation layer's separate limit.
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
 24,000 triangles per scene/globally, 48 curved segments, and BSP limits of
 4,000,000 classifications, depth 64 and twice the input triangle count in
-fragments. No 3D vocabulary or geometry is implemented here.
+fragments. The 3D records exist (see Records), but admission refuses them as `Unsupported`
+and no 3D geometry is built yet.
 
 ## Preparation
 
