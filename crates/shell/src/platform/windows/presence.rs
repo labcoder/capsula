@@ -543,23 +543,18 @@ pub(crate) fn place_presence_window(
     Ok(place(hwnd_of(window)?, bounds)?)
 }
 
-/// Positions and sizes a hidden presence window without showing or activating it.
-/// Call `window.bounds_changed(cx)` afterwards so GPUI observes the resize.
+/// Hides a presence window in place, without activating another window.
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses.
-pub(crate) fn place_hidden_presence_window(
-    window: &mut Window,
-    bounds: [i32; 4],
-) -> Result<(), PresenceError> {
-    place_hidden(hwnd_of(window)?, bounds)?;
-    Ok(())
+pub(crate) fn hide_presence_window(window: &mut Window) -> Result<(), PresenceError> {
+    Ok(hide(hwnd_of(window)?)?)
 }
 
-fn place_hidden(hwnd: HWND, [x, y, width, height]: [i32; 4]) -> windows::core::Result<()> {
-    let flags = SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE;
-    // SAFETY: `hwnd` is live; it is sized and positioned without being shown or activated.
-    unsafe { SetWindowPos(hwnd, None, x, y, width, height, flags) }
+fn hide(hwnd: HWND) -> windows::core::Result<()> {
+    let flags = SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    // SAFETY: `hwnd` is live; it is hidden without being moved, sized or activated.
+    unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, flags) }
 }
 
 /// Whether screenshots and recordings may show a presence window.
@@ -974,7 +969,7 @@ unsafe extern "system" fn hover_subclass(
 
 #[cfg(test)]
 mod tests {
-    use super::{focus_input, place_hidden, proxy_proc, signed_words};
+    use super::{focus_input, hide, proxy_proc, signed_words};
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT_MOUSE, MOUSE_EVENT_FLAGS};
@@ -1014,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_panel_is_sized_without_becoming_visible_or_taking_focus() {
+    fn hiding_a_panel_keeps_its_bounds_and_the_foreground() {
         // SAFETY: reads the foreground without changing it.
         let foreground = unsafe { GetForegroundWindow() };
         // SAFETY: STATIC is a built-in class; no borrowed data or parent, and no show style.
@@ -1037,7 +1032,7 @@ mod tests {
             }
             .unwrap(),
         );
-        place_hidden(window.0, [80, 90, 300, 140]).unwrap();
+        hide(window.0).unwrap();
         let mut rect = RECT::default();
         // SAFETY: the window is live and rect is writable.
         unsafe { GetWindowRect(window.0, &raw mut rect) }.unwrap();
@@ -1048,7 +1043,7 @@ mod tests {
                 rect.right - rect.left,
                 rect.bottom - rect.top
             ],
-            [80, 90, 300, 140]
+            [0, 0, 1600, 900]
         );
         // SAFETY: reads visibility of the live test window.
         assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());

@@ -20,7 +20,7 @@ pub(crate) use pipe::{PipeClient, session_id};
 pub(crate) use presence::{
     Capture, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,
     PresenceSurface, activate_presence_window, configure_presence_window, cursor_position,
-    performance_counter, place_hidden_presence_window, place_presence_window, restore_foreground,
+    hide_presence_window, performance_counter, place_presence_window, restore_foreground,
     set_capture, work_area,
 };
 pub(crate) use process::launch_detached;

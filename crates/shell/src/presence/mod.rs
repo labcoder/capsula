@@ -174,7 +174,7 @@ impl Presence {
                 if visibility == PanelVisibility::Visible {
                     platform::place_presence_window(window, self.layout.panel)?;
                 } else {
-                    platform::place_hidden_presence_window(window, self.layout.panel)?;
+                    platform::hide_presence_window(window)?;
                 }
                 window.bounds_changed(cx);
                 Ok::<_, platform::PresenceError>(())
