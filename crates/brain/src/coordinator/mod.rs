@@ -12,6 +12,7 @@
 mod admission;
 mod delete;
 mod drawing;
+mod lease;
 mod run;
 mod scenes;
 mod store_op;
@@ -30,6 +31,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub use lease::{LeaseId, SEND_DEADLINE};
 pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -101,6 +103,21 @@ pub enum Input {
     },
     /// A round's context was built, or failed to be.
     ContextBuilt(ContextBuilt),
+    /// The transport is about to send this build's body and waits for `Grant` or `Rebuild`.
+    SendReady {
+        /// The build.
+        key: BuildKey,
+    },
+    /// A granted send stopped: it finished, failed, or was dropped.
+    SendSettled {
+        /// Its lease.
+        lease: LeaseId,
+    },
+    /// A granted send's deadline passed.
+    SendDeadline {
+        /// Its lease.
+        lease: LeaseId,
+    },
     /// The store committed a turn.
     TurnStored {
         /// The run the turn started.
@@ -197,6 +214,17 @@ pub enum Effect {
     StartEngine {
         /// What the engine answers.
         request: RunRequest,
+    },
+    /// Let the transport send this lease's body; its guard reports `SendSettled` when dropped.
+    Grant(LeaseId),
+    /// Tell the transport to drop this build's body unsent.
+    Rebuild(BuildKey),
+    /// Report `SendDeadline` for `lease` after `after`.
+    ArmSendDeadline {
+        /// The lease.
+        lease: LeaseId,
+        /// How long from now.
+        after: Duration,
     },
     /// Stop the engine for `run` and drop whatever it still produces.
     CancelEngine {
@@ -352,10 +380,16 @@ pub struct Coordinator {
     crossed: Vec<ThreadId>,
     /// The turns taken on this connection.
     turns_read: u32,
-    /// A delete on this connection was refused for capacity, so its thread wasn't hidden.
+    /// A delete on this connection was refused, so its thread wasn't hidden.
     refused_delete: bool,
     /// Build attempts started, so each has its own serial.
     attempts: u64,
+    /// Granted sends that haven't settled, and failed ones, which fence their sources for good.
+    leases: Vec<lease::Lease>,
+    /// Grants made, so each lease has its own serial.
+    sends: u64,
+    /// A lease failed closed: nothing is granted again until the brain restarts.
+    transport_failed: bool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -403,6 +437,9 @@ impl Coordinator {
             turns_read: 0,
             refused_delete: false,
             attempts: 0,
+            leases: Vec::new(),
+            sends: 0,
+            transport_failed: false,
         }
     }
 
@@ -476,6 +513,9 @@ impl Coordinator {
             }
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
+            Input::SendReady { key } => self.send_ready(key, &mut effects),
+            Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
+            Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
             Input::StepStored {
                 run,
