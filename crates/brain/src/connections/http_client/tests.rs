@@ -14,8 +14,8 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, body_buffer, from_roots,
-    read_response,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, body_buffer,
+    connecting_within, from_roots, read_response,
 };
 use crate::platform::{TrustRoots, TrustRootsError};
 use crate::test_support::{Captured, SENTINEL};
@@ -396,6 +396,36 @@ async fn exact_body_limit_is_accepted_and_missing_length_grows() {
         .expect("body without a length");
     assert_eq!(response.body.expose().as_slice(), b"small");
     server.finish().expect("complete request");
+}
+
+/// A TLS handshake that never finishes fails at the connect deadline. reqwest reports that as a
+/// timeout too, but nothing was sent, so it's `Connect`.
+#[tokio::test]
+async fn a_handshake_past_its_connect_deadline_is_a_connect_failure() {
+    let ca = Server::start(Vec::new());
+    let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback port 0");
+    let url = format!("https://{}/fixture", silent.local_addr().expect("address"));
+    let client = Client(
+        connecting_within(
+            Ok(TrustRoots {
+                certificates: vec![ca.root.clone()],
+                skipped: 0,
+                unreadable: 0,
+            }),
+            Duration::from_millis(200),
+        )
+        .expect("supplied test CA"),
+    );
+    let error = client.0.get(&url).send().await.expect_err("no handshake");
+    assert!(error.is_connect() && error.is_timeout(), "{error:?}");
+    assert_eq!(
+        client
+            .send_to(&url, request(Endpoint::Discovery))
+            .await
+            .unwrap_err(),
+        HttpError::Connect
+    );
+    drop(silent);
 }
 
 #[tokio::test]

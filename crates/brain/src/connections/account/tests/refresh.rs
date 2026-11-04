@@ -762,11 +762,64 @@ fn access_during_a_retried_rotated_save_joins_it() {
     assert_eq!(h.answers[1..], [(2, bearer("access-new"))]);
     assert_eq!(h.refreshes.len(), 1);
     assert_eq!(h.validations.len(), 1, "one check for the one set");
+
+    // With no caller waiting, Retry's commit starts the check alone; its flight lasts through
+    // the check's save, so Access then joins it.
+    let mut h = Harness::seeded("refresh-retried-check", account_at(NOW, None));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.refreshed(rotated(Some("id-new")));
+    h.store.0.lock().expect("fake lock").refusing = false;
+    h.op(AccountOp::Retry);
+    h.hold = true;
+    h.validated(identity("subject-1"));
+    assert!(matches!(h.held, Some(Job::Rotate { .. })), "{:?}", h.held);
+    h.access(2, NOW);
+    assert_eq!(h.validations.len(), 1, "no second check");
+    h.release();
+    assert_eq!(h.answers[1..], [(2, bearer("access-new"))]);
 }
 
-/// The bearer's expiry is checked again once a pending set is verified: one that expired before
-/// or during the check is renewed first, and a renewal that comes back already due is handed
-/// out rather than renewed in a loop.
+/// R3-1, in the order a second check could once take: a check's save is built when it's
+/// dispatched, so a late one never undoes a sent mark saved first, and a token sent without a
+/// committed successor is never refreshable after a restart.
+#[test]
+fn a_late_check_never_unmarks_a_sent_token() {
+    let mut h = Harness::seeded("refresh-late-check", account_at(NOW, None));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.refreshed(rotated(Some("id-new")));
+    h.store.0.lock().expect("fake lock").refusing = false;
+    h.op(AccountOp::Retry);
+    h.hold = true;
+    h.validated(identity("subject-1"));
+    h.jump(3600);
+    h.access(2, NOW + 3600);
+    h.hold = true;
+    h.release();
+    assert!(matches!(h.held, Some(Job::Marker(_))), "{:?}", h.held);
+    h.hold = true;
+    h.release();
+    assert!(
+        matches!(h.held, Some(Job::Rotate { .. })),
+        "the mark's save is held"
+    );
+    h.validated(identity("subject-1"));
+    h.release();
+    assert_eq!(
+        h.refreshes[1..],
+        [(1, CLIENT.to_owned(), "refresh-new".to_owned())]
+    );
+    assert!(h.tokens().refresh_sent, "the mark is still on disk");
+    let mut h = h.restart();
+    h.access(3, NOW + 3600);
+    assert_eq!(h.answers, [(3, Err(Denied::Unusable))]);
+    assert!(h.refreshes.is_empty(), "never sent again");
+}
+
+/// The bearer's expiry is checked again, at the time its save ends, once a pending set is
+/// verified: one that expired before or during the check, or while its save was held, is
+/// renewed first. A renewal that is already expired is neither handed out nor renewed again.
 #[test]
 fn a_verified_set_that_is_due_is_renewed_once_before_it_is_handed_out() {
     let mut h = Harness::seeded(
@@ -798,8 +851,42 @@ fn a_verified_set_that_is_due_is_renewed_once_before_it_is_handed_out() {
         ..rotated(Some("id-new")).expect("a set")
     }));
     h.validated(identity("subject-1"));
-    assert_eq!(h.answers, [(1, bearer("access-new"))]);
+    assert_eq!(
+        h.answers,
+        [(1, failed(ErrorKey::SignInFailed, &[Action::Retry]))]
+    );
     assert_eq!(h.refreshes.len(), 1, "renewed once");
+    assert_eq!(
+        (h.tokens().refresh_token.as_str(), h.tokens().refresh_sent),
+        ("refresh-new", false),
+        "the newest token stays saved"
+    );
+
+    let mut h = Harness::seeded("refresh-expires-in-check", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(Ok(TokenSet {
+        expires_in: 100,
+        ..rotated(Some("id-new")).expect("a set")
+    }));
+    h.jump(200);
+    h.validated(identity("subject-1"));
+    assert_eq!(
+        h.answers,
+        [(1, failed(ErrorKey::SignInFailed, &[Action::Retry]))]
+    );
+    assert_eq!(h.refreshes.len(), 1);
+
+    let mut h = Harness::seeded(
+        "refresh-held-verified",
+        account_at(NOW + 120, Some("id-old")),
+    );
+    h.access(1, NOW);
+    h.hold = true;
+    h.validated(identity("subject-1"));
+    h.jump(180);
+    h.release();
+    assert!(h.answers.is_empty(), "no expired bearer");
+    assert_eq!(h.refreshes.len(), 1, "renewed instead");
 }
 
 /// A pending flag the last run left is uncertainty from the next start on, and a rejected set's

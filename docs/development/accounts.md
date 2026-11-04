@@ -327,7 +327,8 @@ sequenceDiagram
 - The refresh token is marked as sent (`refresh_sent`, in the account record) after
   `request_pending` is written and before the request goes out. The successor's save replaces the
   whole set, so the mark clears in the same commit that makes the successor durable. A typed
-  refusal, a local error or a connection that never opened (`HttpError::Connect`) issued nothing:
+  refusal, a local error or a connection that never opened (`HttpError::Connect`, which includes
+  a connection or TLS handshake past its 15 s deadline, though reqwest also calls that a timeout) issued nothing:
   the mark is cleared and the token may go again. Any other ending may have consumed it, and so
   may a refresh a start finds still marked: the session ends with `SessionEnded` and Sign in, and
   the token stays for sign-out to revoke but is never sent again. An answer that names a
@@ -340,14 +341,18 @@ sequenceDiagram
   meant for the set it replaced is dropped, and a check never verifies a set it didn't check.
 - The identity check's save and an ended session's save run off the lane. They never clear the
   lane's pending flag, and one queued for a generation that has since moved is dropped, so it
-  can't overwrite a newer sign-in.
+  can't overwrite a newer sign-in. A check's flight lasts until its save ends, after a Retry with
+  no caller too, so `access` joins that save instead of checking again. The check's save is
+  built when it's dispatched, from the account as it is then with only the verification added,
+  so it can never undo a sent mark saved after the check began.
 - `pending_identity_validation` is durable, so a set left pending by a crash is checked before
   its first use after the restart. A failed check leaves it pending and blocks access; the next
   `access` checks again without a second refresh, and joins a check already out. A refresh that
   leaves out the identity token or the refresh token keeps the saved one and isn't pending.
-- Once a verified or held set is saved, its expiry is checked again against the latest wall time
-  an input carried. A bearer that's due is renewed first, once per flight, so a renewal that comes
-  back already due (a zero lifetime, say) is handed out rather than renewed in a loop.
+- Once a verified or held set is saved, its expiry is checked again against the wall time the save
+  ended. A bearer that's due is renewed first, once per flight. A renewal that is already expired
+  (a zero lifetime, say) is neither handed out nor renewed again: callers get `SignInFailed` with
+  Retry, and the newest refresh token stays saved for the next `access`.
 - `verify_refreshed` binds the token to the subject this account already verified, with no
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
   Another subject or an invalid token, like a pending set with nothing to check, ends the session
