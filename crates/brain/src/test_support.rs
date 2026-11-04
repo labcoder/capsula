@@ -89,7 +89,7 @@ pub(crate) fn brain_with(scratch: &Scratch, script: &str, accounts: Accounts) ->
         main_thread,
         high_water,
         scenes,
-        Box::new(fixture),
+        crate::runtime::Selected::Fixture(Box::new(fixture)),
         config,
         accounts,
     )

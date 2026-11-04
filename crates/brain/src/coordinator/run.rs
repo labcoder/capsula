@@ -9,7 +9,8 @@ use kumochi_protocol::message::{
 };
 
 use super::{
-    Coordinator, Effect, MAX_DELTA, MAX_TEXT, Notify, Run, Stale, StoreOp, run_state, unstored,
+    Coordinator, Effect, MAX_DELTA, MAX_TEXT, Notify, Run, Stale, StoreOp, admission, run_state,
+    unstored,
 };
 use crate::engines::{CallId, Finish, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
@@ -50,10 +51,16 @@ impl Coordinator {
         }
         match event {
             TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
+            // A draw the request didn't offer has no effect (D13-H2).
             TurnEvent::ToolCallStarted {
                 call,
                 name: ToolName::Draw,
-            } if current.draw.is_none() => {
+            } if current.draw.is_none()
+                && current
+                    .build
+                    .as_ref()
+                    .is_some_and(admission::Build::offers_draw) =>
+            {
                 current.draw = Some(DrawArgs {
                     call,
                     streamed: String::new(),
@@ -70,8 +77,9 @@ impl Coordinator {
             TurnEvent::ToolCallReady { call, args } => {
                 self.draw_ready(run, &call, &args, effects)?;
             }
-            // Native items have no reader until the tool loop stores them for replay.
-            TurnEvent::OutputItem { .. } => {}
+            // Native items have no reader until the tool loop stores them, and nothing records
+            // usage yet.
+            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
             // shortcut: a completed round ends the run, draw call and all, which only the fixture
             // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
             TurnEvent::Finished(Finish::Completed)

@@ -32,6 +32,7 @@ fn signed_in() -> Coordinator {
 /// stored outcome did.
 fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec<Effect> {
     core.handle(Input::Turn {
+        turn: 1,
         thread,
         text: "Plan a trip".to_owned(),
     })
@@ -302,6 +303,7 @@ fn a_new_run_cancels_the_job_and_its_late_answers_are_stale() {
     );
     let effects = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "More".to_owned(),
         })
@@ -387,6 +389,7 @@ fn an_older_sign_out_leaves_a_newer_accounts_job_running() {
 fn a_done_whose_write_failed_starts_no_job() {
     let mut core = signed_in();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "Plan a trip".to_owned(),
     })

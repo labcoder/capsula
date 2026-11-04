@@ -150,6 +150,37 @@ tangent dot product strictly below `−1 + REL` is refused. These failures are t
 original typed field and code. `ErrorCode::Degenerate` is appended for the later
 admission boundary, which alone will convert these errors into sanitized paths.
 
+### 3D tessellation
+
+`three::Transform` composes f64 affine transforms. Each canonical local vertex has
+one expression and one narrowing path to world-space f32. Periodic indices wrap
+before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
+endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
+extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
+frames, initially using the axis least aligned with the first tangent.
+
+Generation refuses non-finite world vertices, distinct local vertices that narrow
+to the same world point, and retained triangles whose narrowed points have zero
+area. It never rebases coordinates. Any source triangle with area below `dist_eps²`
+is refused too, except coincident-vertex candidates at lathe axis bands, which are
+dropped and counted. A successful result satisfies `written + dropped == triangles`.
+A thin solid can therefore be refused rather than rendered with missing caps.
+Representability does not guarantee analytic area accuracy: the world f32 lattice
+can change lengths substantially near large translations. Sub-ulp distortion is accepted
+because the camera's near-plane precision floor bounds its screen size.
+
+The caller owns the output and cancellation flag. `Full` means the candidate count
+does not fit beyond the existing prefix and appends nothing. `Cancelled` and
+`Degenerate` can leave appended triangles; callers save the original length and
+truncate back after failure. Cancellation is checked at entry, throughout vertex
+checks, during ear clipping, per emitted triangle and before success.
+
+Large scratch buffers belong to the caller's `MeshScratch`. `MeshScratch::new()` allocates
+collision keys (384 KiB), tube frames and tangents (36 KiB), and sphere vertices/faces
+(about 23 KiB) once. `build` borrows that scratch and never grows its private boxed buffers.
+Only small retained-index and ear-clipping arrays remain on the stack. No build allocates
+once the caller has constructed scratch and reserved its output.
+
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
 

@@ -474,6 +474,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::AccountRefused => "error-account-refused",
         ErrorKey::RequestRefused => "error-request-refused",
         ErrorKey::ResponseUnreadable => "error-response-unreadable",
+        ErrorKey::SignInNeeded => "error-sign-in-needed",
+        ErrorKey::ModelUnavailable => "error-model-unavailable",
     }
 }
 
