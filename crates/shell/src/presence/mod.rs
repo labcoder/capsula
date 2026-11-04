@@ -104,8 +104,6 @@ struct Presence {
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
     layout: Layout,
-    /// Where the typing panel opens: the peek's place, at the typing panel's own height.
-    typing_bounds: [i32; 4],
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
@@ -135,21 +133,13 @@ impl Presence {
         let area = platform::work_area()?;
         let physical = |value: f32| scaled(value, self.scale);
         // Kumo and its gap sit beside the 300 px the details had before the peek; the peek is
-        // only as tall as its content, and the typing panel keeps the taller rect it had.
+        // only as tall as its content.
         let layout = position.layout(
             area,
             line::slot(self.scale),
             [physical(380.0), physical(PEEK_HEIGHT)],
             0,
         );
-        self.typing_bounds = position
-            .layout(
-                area,
-                line::slot(self.scale),
-                [physical(380.0), physical(140.0)],
-                0,
-            )
-            .panel;
         let index = Position::ALL
             .iter()
             .position(|candidate| *candidate == position)
@@ -578,7 +568,8 @@ impl Render for Panel {
             )
         });
         let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
-        // Kumo, the name and the status read as one identity; the status and notice are quieter.
+        // Kumo, the name and the status read as one identity; size and weight carry the
+        // hierarchy, since muted text fails AA contrast over the glass.
         let identity = div()
             .flex()
             .items_center()
@@ -595,12 +586,7 @@ impl Render for Panel {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(constants::DISPLAY_NAME),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(strings.get(status_text(self.state))),
-                    )
+                    .child(div().text_sm().child(strings.get(status_text(self.state))))
                     .children(
                         self.notice
                             .map(|notice| div().text_sm().child(strings.get(notice))),
@@ -872,7 +858,6 @@ pub(crate) fn open(
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout::default(),
-            typing_bounds: [0; 4],
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,
