@@ -1,6 +1,8 @@
 //! The resting dock line, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
+#[cfg(debug_assertions)]
+mod accounts_fixture;
 mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
@@ -55,6 +57,8 @@ use crate::runs::Runs;
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
+#[cfg(debug_assertions)]
+pub(crate) use accounts_fixture::run as run_accounts_fixture;
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
@@ -696,6 +700,8 @@ pub(crate) enum OpenError {
     ObserverDeadline,
     #[error("--receipt-fixture needs --gate-observer and comes at most once")]
     ReceiptFixture,
+    #[error("--accounts-fixture needs a debug build, one fixed state and a quit deadline")]
+    AccountsFixture,
     #[error("the scene dropper thread couldn't start")]
     Dropper(#[source] std::io::Error),
 }
