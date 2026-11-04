@@ -120,9 +120,12 @@ flowchart LR
   retried the same way. Each attempt carries on from what Windows holds, at the dock window's
   next frame and with that frame's own window, at most three times in a row. A new position
   choice replaces the request and gets three more. If the last attempt fails with the surfaces
-  apart, or with the proxy never shown, the dock fails closed: the overlay and the proxy are
-  hidden together, so no line shows without its band and no band takes clicks without its
-  line, until the next position choice. The surfaces sit behind a small `Surfaces` trait, so
+  apart, or with the proxy never shown, the dock fails closed: its line is cleared and the
+  overlay and the proxy are hidden, so no line shows without its band and no band takes clicks
+  without its line. An overlay that won't hide is left empty. A proxy that won't hide has its
+  mask emptied instead, and if that's refused too the shell quits with a logged error rather
+  than leave a band taking clicks. The dock comes back on the next position choice; a display
+  change doesn't bring it back yet, under the display limitation (OSC-188). The surfaces sit behind a small `Surfaces` trait, so
   the tests run every failure against a fake desktop. Windows may not report the mask moving
   under a still pointer, so the owner rechecks hover after the dock moves.
 - **Painting.** The dock window is the click-through overlay, placed once per accepted
