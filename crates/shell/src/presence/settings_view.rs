@@ -179,7 +179,7 @@ impl SettingsView {
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
 
-    /// Automatic, then each cap, with the rate the stretch draws at now.
+    /// Automatic, then each cap, with the rate a paced animation draws at now.
     fn frame_rate(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let view = self.model.read(cx).view();

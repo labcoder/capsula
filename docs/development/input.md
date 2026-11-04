@@ -31,7 +31,7 @@ sequenceDiagram
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
   and the owner. The callback reduces it before anything else, so Listening is true by the time
-  the callback returns. The dock's label then changes through `AsyncApp::update_window`, which
+  the callback returns. The line's fill then changes through `AsyncApp::update_window`, which
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
@@ -166,7 +166,7 @@ creates no file.
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the
   native callback's entry. Lines carry no keys and no text:
-  - `listening applied_us=N start_qpc=Q` and `listening painted_us=N`: the dock's label change,
+  - `listening applied_us=N start_qpc=Q` and `listening painted_us=N`: the line's fill change,
     with `Q` the counter read when the `WM_INPUT` callback began, before parsing, then the
     GPUI paint phase of the frame that shows it (a paint closure, not a present). Both appear
     only while the gesture is still Listening; a press that rests first logs neither.
@@ -191,12 +191,12 @@ A paint isn't a present. The gate harness joins its exact Canvas QPC to the sepa
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
 passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-Click gates the pill's native button-down QPC → panel present at p95 ≤8ms. A single native
+Click gates the line band's native button-down QPC → panel present at p95 ≤8ms. A single native
 timestamp supplies both the tagged click receipt and the resulting panel-show `click_qpc`;
 only an exact origin match is eligible. The panel record's own `qpc` stays the monotonic
 state-entry timestamp, separate from that native origin. Legacy observer `hover`/paint IDs identify panel
 changes, not a hover-to-open interaction. Programmatic or Stop-fallback shows cannot substitute
-for a click sample. Hover only drives the stretch.
+for a click sample. Hover does nothing until the peek.
 Both reports retain display latency separately: missing display feedback is unmeasured there,
 not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
 coverage and motion pacing still require displayed frames. The UI thread only
@@ -274,10 +274,11 @@ display/background-process metadata identify the measurement environment.
 
 One owned EDIT/Ready fixture remains alive throughout the session. Injection starts disabled.
 The initial release shell is bounded to 120 seconds while the owner has about 90 seconds to try
-the 300ms hold, double tap and stretch by hand and choose independent categorical feel verdicts.
-The dock is at top center by default, and Listening is its label, not a separate test window.
+the 300ms hold and double tap by hand and choose independent categorical feel verdicts.
+The dock is a short line at top center by default, and Listening turns it the accent colour,
+not a separate test window.
 The test window is only for verdicts and Ready. Ready stays disabled until the owner explicitly
-selects all three verdicts, including Unrated if that is the owner's choice.
+selects both verdicts, including Unrated if that is the owner's choice.
 The feel product writes `feel/milestones.log`; after its graceful exit, `feel/summary.txt`
 reports recognized holds, exclusion/restoration, double-tap openings and focused/unfocused
 opens, plus apply/Canvas timings. These contain no text or keys, are not present timings,
@@ -285,7 +286,7 @@ and do not replace the owner's verdicts or any automated gate.
 Missing or truncated feel diagnostics are reported as `summary=unmeasured`, without blocking
 otherwise authorized automated phases; failure to retain the summary itself still stops safely.
 During feel the owner also presses Alt-Tab once and separately reports whether a product window
-appears; this verdict may be an external owner reply, not a fourth GUI feel field. The nine
+appears; this verdict may be an external owner reply, not a third GUI feel field. The nine
 placements remain runtime-unmeasured; this session adds no placement sweep or flag.
 The owner then physically clicks Ready, releases the button and stays hands-off until the
 fixture window closes (allow about 10 minutes, at most one hour). The first quiet second
@@ -328,34 +329,27 @@ with its input cutoff at least 13 seconds before cleanup (77 seconds for instrum
 The whole session has a one-hour limit and reserves another 30 seconds for final
 cleanup; a phase cannot begin without its complete budget.
 
-1. The idle CPU row and three separate stretch CPU rows each calibrate three saturated 2-second
-   trials and settle for 30 seconds. Idle samples for 60 seconds; each stretch samples for 30.
-   These phases send no motion or input
-   and omit the gate observer. Calibrated cycles are the CPU gate, with GetProcessTimes alongside;
-   limits are 1% of one core at idle and 10% during stretch. DWM and private bytes are retained too.
+1. The idle CPU row calibrates three saturated 2-second trials, settles for 30 seconds and
+   samples for 60. It sends no motion or input and omits the gate observer. Calibrated cycles
+   are the CPU gate, with GetProcessTimes alongside; the limit is 1% of one core. DWM and private
+   bytes are retained too. The stretch CPU rows left with the stretch and return with the pull
+   (C2a).
 2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Click runs 100 guarded pill clicks, first checking that pointer entry alone did not open
+3. Click runs 100 guarded line clicks, first checking that pointer entry alone did not open
    the panel. Leaving both surfaces must hide it; HWND hide observation polls for at most 300ms
    and is not a display timestamp. Exact native button-down origins and panel paint IDs feed
    `click-display.txt`, with independent present and display endpoints. The gated button-down
    QPC is captured at dispatch, excluding OS routing and time waiting in the UI thread's queue.
    Non-gating SendInput → present samples include that queue wait and are reported beside it.
    Every native click stays in the denominator; missing or unmatched panel shows cannot pass.
-4. Resting receipts run for 20 seconds, then motion/retraction receipts for 30 seconds in a fresh
-   product. The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
+4. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
-   needs displayed-body receipts at the center and edge; motion needs them on the body and
-   retracting edge. Dropped-only or otherwise unavailable display evidence makes the phase
+   needs displayed-body receipts at the line's center and edge. Dropped-only or otherwise unavailable display evidence makes the phase
    incomplete even when native routing succeeded.
-   The left-edge resting points keep the bulb inside the pill on the middle-left fixture.
    Body clicks now toggle the status panel; candidate points exclude its rectangle so that
    later receipt trials cannot target the panel instead of the proxy or covering EDIT.
-   Motion frame gaps use exact current-row changes to delimit drawing demand; warmup, capture
-   edges and unchanged-pixel gaps are not missed frames. Every displayed gap and undisplayed
-   dock row is retained; a missing demanded-frame join stays unmeasured, not a zero-duration pass.
-   An undisplayed present during drawing demand also fails, even if p99 gaps remain ≤7.7ms.
 5. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
    through local Esc, reopens, double-taps again while active, then clicks a second top-level
    fixture window, distinct from the previous foreground. After the Dismissed mark, typing must

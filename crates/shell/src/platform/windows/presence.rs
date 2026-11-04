@@ -72,8 +72,6 @@ pub(crate) enum PresenceEvent {
     },
     /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
     PointerChanged,
-    /// The pointer moved over the proxy after `PresenceNative::watch_pointer`; sent once.
-    PointerMoved,
     /// The user picked a dock position in the tray menu, an index into `positions`.
     Position(usize),
     /// The user picked Retry in the tray menu.
@@ -190,14 +188,12 @@ struct ProxyState {
     taskbar_created: u32,
     position: Cell<usize>,
     retry_enabled: Cell<bool>,
-    /// Set by `watch_pointer`; the next pointer move over the proxy sends `PointerMoved`.
-    watch: Cell<bool>,
     /// Set only by `--gate-observer`.
     observe: OnceCell<Observe>,
 }
 
 /// The tray icon and the dock's hit-test proxy: an invisible, non-activating per-pixel-alpha
-/// window that takes the pointer only over the presence's outline, so the dock window itself
+/// window that takes the pointer only over the presence's hit band, so the dock window itself
 /// can stay click-through. Owned by the UI thread that created it; dropping it removes both.
 #[derive(Debug)]
 pub(crate) struct PresenceNative {
@@ -239,7 +235,6 @@ impl PresenceNative {
             taskbar_created,
             position: Cell::new(1),
             retry_enabled: Cell::new(false),
-            watch: Cell::new(false),
             observe: OnceCell::new(),
         });
         // Every field Drop cleans up starts empty, so a failure below undoes only what was done.
@@ -323,11 +318,6 @@ impl PresenceNative {
         unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) }?;
         self.state().position.set(position);
         Ok(())
-    }
-
-    /// Sends one `PointerMoved` on the next pointer move over the proxy.
-    pub(crate) fn watch_pointer(&self) {
-        self.state().watch.set(true);
     }
 
     /// Sends every left Ctrl, left Alt and other key, from any app, to `deliver` on this
@@ -917,9 +907,6 @@ unsafe extern "system" fn proxy_proc(
                 return LRESULT(0);
             }
             WM_MOUSEMOVE | WM_MOUSELEAVE => {
-                if message == WM_MOUSEMOVE && state.watch.replace(false) {
-                    send(&state.hover.events, PresenceEvent::PointerMoved);
-                }
                 state.hover.on_pointer(hwnd, message);
             }
             _ if message == state.taskbar_created && message != 0 => {

@@ -21,6 +21,7 @@ use super::present::{Join, PresentRows};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     Rest,
+    /// Unused until C2a's pull brings the motion trial back.
     Motion,
 }
 

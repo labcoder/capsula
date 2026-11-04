@@ -4,13 +4,11 @@ status-connecting = Starting…
 status-connected = Ready
 status-reconnecting = Reconnecting…
 status-failed = Can't reach the background process.
-status-listening = Listening…
 
 action-retry = Retry
 action-stop = Stop
 action-quit = Quit
 
-dock-offline = Offline
 dock-position = Dock position
 position-top-left = Top left
 position-top-center = Top center

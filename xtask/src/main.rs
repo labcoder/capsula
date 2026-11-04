@@ -48,10 +48,7 @@ tasks:
                     before launch; cycles CPU is the gate, GetProcessTimes stays beside it
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
-  bench stretch [--duration 1..60] [--baseline <release-directory>]
-                    input-free continuous stretch, default 30s after 30s warmup;
-                    baseline runs without stretch; raw cycles and bounded DWM CSV,
-                    fixture totals cover its whole lifetime, not just sampling
+                    the current shell must paint no dock frame from the settle to Quit
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs

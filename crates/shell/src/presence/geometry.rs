@@ -1,4 +1,4 @@
-//! Physical work-area geometry shared by the dock, its stretch overlay and its panel.
+//! Physical work-area geometry shared by the dock, its overlay and its panel.
 
 /// One of the nine work-area anchors, in row-major order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,8 +42,8 @@ impl Position {
         }
     }
 
-    /// Places the dock's slot, its panel, and the overlay the stretch draws in: the slot grown
-    /// by `extent` on every side, inside the work area.
+    /// Places the dock's slot, its panel, and the overlay the dock draws in: the slot grown by
+    /// `extent` on every side, inside the work area.
     pub(crate) fn layout(
         self,
         area: [i32; 4],
@@ -84,10 +84,10 @@ pub(crate) enum PanelVisibility {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
-    /// The resting dock's slot; its pill is the outline's resting shape.
+    /// The resting dock's slot, which holds the line and its trigger band.
     pub(crate) dock: [i32; 4],
     pub(crate) panel: [i32; 4],
-    /// The click-through dock window, room for the stretched outline.
+    /// The click-through dock window: the slot, plus any room something drawn from it needs.
     pub(crate) overlay: [i32; 4],
 }
 
@@ -97,7 +97,7 @@ impl Layout {
         anchored_panel(self.dock, area, panel)
     }
 
-    /// Whether the pointer is over the panel. Over the dock is the outline's question.
+    /// Whether the pointer is over the panel. Over the dock is the line's question.
     pub(crate) fn panel_contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
         panel == PanelVisibility::Visible && contains(self.panel, point)
     }
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stretch_overlay_grows_the_slot_inside_the_work_area() {
+    fn the_overlay_grows_the_slot_inside_the_work_area() {
         let top = Position::TopCenter.layout([0, 0, 900, 600], [100, 40], [300, 120], 110);
         assert_eq!(top.dock, [400, 0, 100, 40]);
         assert_eq!(top.overlay, [290, 0, 320, 150]);

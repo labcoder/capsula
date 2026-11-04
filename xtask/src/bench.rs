@@ -1,4 +1,5 @@
-//! Bounded release idle/stretch CPU, cycles, DWM and private-memory measurements on Rez.
+//! Bounded release idle CPU, cycles, DWM, private-memory and settled dock-paint measurements on
+//! Rez.
 #![expect(
     clippy::print_stdout,
     reason = "benchmark results are command-line output"
@@ -103,15 +104,14 @@ fn guarded_wait(duration: Duration, guard: &impl Fn() -> Result<()>) -> Result<(
 enum Workload {
     Idle,
     Panel,
-    Stretch,
 }
 
 fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, Workload)> {
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
-        Some("stretch") => Workload::Stretch,
+        Some("stretch") => bail!("motion trials return with the pull (C2a)"),
         _ => bail!(
-            "use cargo xtask bench <idle|stretch> [--duration 1..60] [--baseline <release-directory> | --panel]"
+            "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory> | --panel]"
         ),
     };
     let mut duration = None;
@@ -143,12 +143,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
         !(workload == Workload::Panel && baseline.is_some()),
         "--panel requires the current shell"
     );
-    let default_seconds = if workload == Workload::Stretch {
-        30
-    } else {
-        60
-    };
-    Ok((duration.unwrap_or(default_seconds), baseline, workload))
+    Ok((duration.unwrap_or(60), baseline, workload))
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
@@ -172,12 +167,12 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
     );
 
-    let metrics = if workload == Workload::Stretch {
+    // A baseline shell may predate the settled-interval count, so only the current one is checked.
+    let paints = if baseline.is_none() {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path =
-            std::env::temp_dir().join(format!("stretch-bench-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).context("creating private benchmark output directory")?;
-        println!("raw benchmark output: {}", path.display());
+            std::env::temp_dir().join(format!("idle-bench-{}-{nonce}.txt", std::process::id()));
+        println!("dock paint diagnostics: {}", path.display());
         Some(path)
     } else {
         None
@@ -185,33 +180,20 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let mut extra: Vec<OsString> = Vec::new();
     if workload == Workload::Panel {
         extra.push("--smoke".into());
-    } else if workload == Workload::Stretch && baseline.is_none() {
-        extra.push("--stretch-fixture".into());
-        let mut diagnostics = OsString::from("--input-diagnostics=");
-        diagnostics.push(
-            metrics
-                .as_ref()
-                .context("missing stretch output directory")?
-                .join("stretch.txt"),
-        );
-        extra.push(diagnostics);
     }
-    println!(
-        "workload: {workload:?}; baseline has no scripted stretch: {}",
-        baseline.is_some()
-    );
+    if let Some(path) = &paints {
+        let mut diagnostics = OsString::from("--input-diagnostics=");
+        diagnostics.push(path);
+        extra.push(diagnostics);
+        extra.push(format!("--settle-after-ms={}", SETTLE.as_millis()).into());
+    }
+    println!("workload: {workload:?}; baseline: {}", baseline.is_some());
     let cycle_rate = calibrate_rate()?;
     let mut child = platform::launch(&shell, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
-    let measurement = measure(
-        child.id(),
-        seconds,
-        &mut tracked,
-        metrics.as_deref(),
-        cycle_rate,
-    );
+    let measurement = measure(child.id(), seconds, &mut tracked, None, cycle_rate);
     let close = if baseline.is_some() {
         platform::close_shell_window(&mut child).context("closing baseline shell window")
     } else {
@@ -224,39 +206,38 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(|error| format!("{error:#}"))
         .collect::<Vec<_>>();
     ensure!(errors.is_empty(), "{}", errors.join("; "));
-    if workload == Workload::Stretch && baseline.is_none() {
-        let diagnostics = fs::read_to_string(
-            metrics
-                .context("missing stretch output directory")?
-                .join("stretch.txt"),
-        )?;
-        let totals = stretch_totals(&diagnostics)?;
-        println!("whole-lifetime fixture counters (not sample-window frame counts): {totals}");
+    if let Some(path) = paints {
+        let diagnostics = fs::read_to_string(&path)?;
+        fs::remove_file(&path)?;
+        let settled = settled_paints(&diagnostics)?;
+        println!(
+            "dock paints after the {}s settle, until Quit: {settled}",
+            SETTLE.as_secs()
+        );
+        ensure!(settled == 0, "the dock painted {settled} frames at rest");
     }
     Ok(())
 }
 
-fn stretch_totals(diagnostics: &str) -> Result<&str> {
-    let totals = diagnostics
+/// The shell's settled interval starts with the sample, after the same settle `measure` waits.
+const SETTLE: Duration = Duration::from_secs(30);
+
+/// The dock frames the shell counted from the settled interval's start until Quit.
+fn settled_paints(diagnostics: &str) -> Result<u64> {
+    ensure!(
+        diagnostics
+            .lines()
+            .any(|line| line.ends_with(" dock settled")),
+        "the shell never started its settled interval"
+    );
+    Ok(diagnostics
         .lines()
-        .find(|line| line.contains("stretch totals ticks="))
-        .context("fixture did not report stretch totals")?;
-    for name in ["ticks=", "shape=", "failed="] {
-        let value = totals
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix(name))
-            .with_context(|| format!("stretch totals lack {name}"))?
-            .parse::<u64>()?;
-        ensure!(
-            if name == "failed=" {
-                value == 0
-            } else {
-                value > 0
-            },
-            "fixture did not produce successful continuous mask changes: {totals}"
-        );
-    }
-    Ok(totals)
+        .find_map(|line| {
+            line.split_once(" dock paints settled=")
+                .map(|(_, count)| count)
+        })
+        .context("the shell did not report its settled dock paints")?
+        .parse::<u64>()?)
 }
 
 fn measure(
@@ -513,7 +494,7 @@ fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workload, cycle_percent, options, percent, stretch_totals};
+    use super::{Workload, cycle_percent, options, percent, settled_paints};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -553,38 +534,30 @@ mod tests {
     }
 
     #[test]
-    fn stretch_accepts_a_non_stretch_baseline_but_not_panel_mode() {
+    fn a_motion_trial_waits_for_the_pull() {
+        let error = options(["stretch"].into_iter().map(str::to_owned)).unwrap_err();
         assert_eq!(
-            options(["stretch"].into_iter().map(str::to_owned)).unwrap(),
-            (30, None, Workload::Stretch)
+            error.to_string(),
+            "motion trials return with the pull (C2a)"
         );
-        assert_eq!(
-            options(
-                ["stretch", "--baseline", "release"]
-                    .into_iter()
-                    .map(str::to_owned)
-            )
-            .unwrap(),
-            (30, Some(PathBuf::from("release")), Workload::Stretch)
-        );
-        assert!(options(["stretch", "--panel"].into_iter().map(str::to_owned)).is_err());
     }
 
     #[test]
-    fn stretch_requires_motion_totals_and_no_mask_failure() {
-        let totals = "qpc=1 stretch totals ticks=12 shape=8 moves=1 unchanged=3 failed=0";
-        assert_eq!(stretch_totals(totals).unwrap(), totals);
+    fn the_settled_count_needs_the_interval_and_the_quit_line() {
+        let log = "qpc=1 resting\nqpc=2 dock settled\nqpc=9 dock paints settled=0\n";
+        assert_eq!(settled_paints(log).unwrap(), 0);
+        assert_eq!(
+            settled_paints("qpc=2 dock settled\nqpc=9 dock paints settled=3").unwrap(),
+            3
+        );
         for invalid in [
             "",
-            "qpc=1 stretch totals ticks=0 shape=0 failed=0",
-            "qpc=1 stretch totals ticks=12 shape=8 failed=1",
-            "qpc=1 stretch totals ticks=12 shape=8",
-            "qpc=1 stretch totals ticks=12 shape=oops failed=0",
+            "qpc=9 dock paints settled=0",
+            "qpc=2 dock settled",
+            "qpc=2 dock settled\nqpc=9 dock paints settled=",
+            "qpc=2 dock settled\nqpc=9 dock paints settled=-1",
         ] {
-            assert!(
-                stretch_totals(invalid).is_err(),
-                "invalid totals: {invalid}"
-            );
+            assert!(settled_paints(invalid).is_err(), "{invalid:?}");
         }
     }
 

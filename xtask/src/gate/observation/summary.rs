@@ -167,7 +167,7 @@ pub(in crate::gate) fn summarize_click(
     let (observation, validation) = load(path, pid);
     let frequency = observation.startup.map_or(0, |value| value.frequency);
     let mut report = String::from(
-        "pill button-down dispatch QPC-to-present gate; excludes OS routing and UI-thread queue wait; SendInput-to-present and display reported separately, not gated\n",
+        "line button-down dispatch QPC-to-present gate; excludes OS routing and UI-thread queue wait; SendInput-to-present and display reported separately, not gated\n",
     );
     seed_report(&mut report, rows, frequency)?;
     if let Err(error) = &validation {

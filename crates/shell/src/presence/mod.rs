@@ -1,4 +1,4 @@
-//! The resting dock, its stretch, transient status panel, typing panel and native tray share one
+//! The resting dock line, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
 mod deletes;
@@ -10,14 +10,13 @@ mod geometry;
 mod gesture;
 mod kumo;
 mod launch;
+mod line;
 mod link;
 pub(crate) mod observer;
-mod outline;
 mod paint;
 mod panels;
 mod settings;
 mod settings_view;
-mod stretch;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -35,8 +34,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, point, px,
-    size,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
 
@@ -55,12 +53,11 @@ pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use geometry::{Layout, PanelVisibility, Position};
 pub(crate) use launch::Launch;
+use line::{Dock, Line};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
-use outline::Outline;
-use paint::{OutlinePaint, PanelStamp, Target};
+use paint::{Stamp, Target};
 use settings::SettingsPanel;
-use stretch::Stretch;
 use text::TextPanel;
 use threads::ThreadsPanel;
 
@@ -102,7 +99,8 @@ struct Presence {
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
-    stretch: Stretch,
+    /// The dock's line as Windows accepted its mask.
+    line: Line,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -122,9 +120,9 @@ impl Presence {
         let physical = |value: f32| scaled(value, self.scale);
         self.layout = position.layout(
             area,
-            [physical(112.0), physical(48.0)],
+            line::slot(self.scale),
             [physical(300.0), physical(140.0)],
-            self.stretch.extent(),
+            0,
         );
         self.dock_window
             .update(cx, |_, window, cx| {
@@ -137,12 +135,7 @@ impl Presence {
             .iter()
             .position(|candidate| *candidate == position)
             .expect("every dock position has a menu entry");
-        self.stretch.reposition();
-        let proposal = outline::Ownership::only(self.outline());
-        if !self.reshape(proposal, cx) {
-            // Frames retry the upload until the mask takes it.
-            self.start_ticking(cx);
-        }
+        self.place_line(cx);
         self.native.show(index)?;
         self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
@@ -230,25 +223,28 @@ impl Presence {
         self.text.as_ref().is_some_and(|text| text.typing.visible)
     }
 
-    /// Whether the pointer is over the presence's outline, where the hit proxy takes it, or
-    /// over the panel when it's shown.
+    /// Whether the pointer is over the line's band, where the hit proxy takes it, or over the
+    /// panel when it's shown.
     fn hovered(&self, point: [i32; 2], panel: PanelVisibility) -> bool {
-        self.owned().contains(point) || self.layout.panel_contains(point, panel)
+        self.line.contains(point) || self.layout.panel_contains(point, panel)
     }
 
+    /// Shows Listening on the line, and the settings notice in the status panel.
+    // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
-        let label: SharedString = if self.gesture.get().listening() {
-            cx.global::<Strings>().get(Text::Listening).into()
-        } else if let Some(notice) = self.settings.read(cx).dock_notice().filter(|notice| {
-            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
-        }) {
-            cx.global::<Strings>().get(notice).into()
-        } else {
-            dock_label(self.state, cx)
-        };
+        let listening = self.gesture.get().listening();
         self.dock.update(cx, |dock, cx| {
-            dock.label = label;
+            dock.listening = listening;
             cx.notify();
+        });
+        let notice = self.settings.read(cx).dock_notice().filter(|notice| {
+            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
+        });
+        self.panel.update(cx, |panel, cx| {
+            if panel.notice != notice {
+                panel.notice = notice;
+                cx.notify();
+            }
         });
     }
 
@@ -458,7 +454,7 @@ impl Presence {
         self.scene_timer = None;
         self.scene_deadline = None;
         let link = self.link.clone();
-        diagnostics::record(cx, format_args!("stretch totals {}", self.stretch.totals()));
+        diagnostics::settled_paints(cx);
         let diagnostics = diagnostics::release(cx);
         let observer = observer::release(cx);
         let told = cx.background_executor().spawn(async move {
@@ -488,76 +484,10 @@ fn scaled(value: f32, scale: f32) -> i32 {
     (value * scale).round() as i32
 }
 
-struct Dock {
-    label: SharedString,
-    /// Used only with `--input-diagnostics`; the next render takes it into a paint-phase marker.
-    pending_paint: PendingPaint,
-    /// The body to paint, in physical screen pixels.
-    outline: Outline,
-    /// The dock window's top-left on screen, in physical pixels.
-    origin: [i32; 2],
-    /// The accepted mask state `outline` came from, for `--gate-observer`.
-    drawn: Drawn,
-}
-
-impl Render for Dock {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Recorded in GPUI's paint phase, not at present: PresentMon must join it to the screen.
-        let marker = self.pending_paint.take().map(|at| {
-            canvas(
-                |_, _, _| (),
-                move |_, (), _, cx| {
-                    let painted_us = at.elapsed().as_micros();
-                    diagnostics::record(cx, format_args!("listening painted_us={painted_us}"));
-                },
-            )
-            .absolute()
-            .size_full()
-        });
-        let scale = window.scale_factor();
-        let [x, y, width, height] = self.outline.pill;
-        let [origin_x, origin_y] = self.origin.map(f64::from);
-        div()
-            .size_full()
-            .relative()
-            .child(OutlinePaint {
-                outline: self.outline,
-                origin: self.origin,
-                drawn: self.drawn,
-                fill: cx.theme().background,
-                border: cx.theme().border,
-            })
-            .child(
-                div()
-                    .absolute()
-                    .left(logical(x - origin_x, scale))
-                    .top(logical(y - origin_y, scale))
-                    .w(logical(width, scale))
-                    .h(logical(height, scale))
-                    .text_color(cx.theme().foreground)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .child(self.label.clone()),
-            )
-            // After the frame's stamp, so the paint qpc it logs falls inside that frame.
-            .children(marker)
-    }
-}
-
-/// Physical pixels as GPUI's logical pixels.
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "screen coordinates fit f32"
-)]
-fn logical(physical: f64, scale: f32) -> gpui_kit::Pixels {
-    px(physical as f32 / scale)
-}
-
 struct Panel {
     state: LinkState,
+    /// A settings notice the dock line can't show.
+    notice: Option<Text>,
     /// Shown only when Esc is wanted globally but Windows refused it.
     stop: bool,
     events: Sender<PresenceEvent>,
@@ -602,9 +532,12 @@ impl Render for Panel {
             .flex()
             .flex_col()
             .gap_2()
-            .children(cx.has_global::<Observer>().then_some(PanelStamp))
+            .children(
+                cx.has_global::<Observer>().then_some(Stamp(Surface::Panel, Drawn::default())),
+            )
             .child(constants::DISPLAY_NAME)
             .child(strings.get(status_text(self.state)))
+            .children(self.notice.map(|notice| strings.get(notice)))
             .child(
                 div()
                     .flex()
@@ -661,16 +594,6 @@ fn status_text(state: LinkState) -> Text {
     }
 }
 
-fn dock_label(state: LinkState, cx: &App) -> SharedString {
-    cx.global::<Strings>()
-        .get(if state == LinkState::Failed {
-            Text::DockOffline
-        } else {
-            status_text(state)
-        })
-        .into()
-}
-
 /// A native surface or GPUI window couldn't be initialized or placed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OpenError {
@@ -682,8 +605,6 @@ pub(crate) enum OpenError {
     QuitDelay,
     #[error("--esc-fixture needs --quit-after-ms or --smoke, so global Esc is always given back")]
     EscFixtureDeadline,
-    #[error("--stretch-fixture needs --quit-after-ms or --smoke, so its frames always stop")]
-    StretchFixtureDeadline,
     #[error("--gate-observer and --receipt-fixture need --quit-after-ms or --smoke")]
     ObserverDeadline,
     #[error("--receipt-fixture needs --gate-observer and comes at most once")]
@@ -748,6 +669,7 @@ fn status_window(
         });
         cx.new(|_| Panel {
             state: LinkState::Connecting,
+            notice: None,
             stop: false,
             events: panel_events,
             threads: None,
@@ -782,16 +704,15 @@ pub(crate) fn open(
     let (events, event_changes) = async_channel::unbounded();
     let labels = presence_labels(cx);
     let dock_events = events.clone();
-    let initial_label = dock_label(LinkState::Connecting, cx);
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, |_, _| false);
         cx.new(|_| Dock {
-            label: initial_label,
             pending_paint: PendingPaint::default(),
-            outline: Outline::default(),
+            paint: None,
             origin: [0; 2],
             drawn: Drawn::default(),
+            listening: false,
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -801,9 +722,7 @@ pub(crate) fn open(
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
-    let stretch = Stretch::new(scale);
-    let slot = [scaled(112.0, scale), scaled(48.0, scale)];
-    let native = PresenceNative::new(labels, events.clone(), stretch.mask_size(slot))?;
+    let native = PresenceNative::new(labels, events.clone(), line::slot(scale))?;
     let (panel_window, panel) = status_window(&events, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
@@ -853,7 +772,7 @@ pub(crate) fn open(
             delete_retry: None,
             error: None,
             refusal: None,
-            stretch,
+            line: Line::default(),
         }
     });
     let status_panel = owner.read(cx).panel.clone();
@@ -869,11 +788,15 @@ pub(crate) fn open(
     Ok(())
 }
 
-/// `--stretch-fixture` starts stretching now; `--smoke` shows the panel after a second;
-/// `--smoke` and `--quit-after-ms` then quit.
+/// `--settle-after-ms` starts the settled interval then; `--smoke` shows the panel after a
+/// second; `--smoke` and `--quit-after-ms` then quit.
 fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut App) {
-    if flags.stretch_fixture {
-        owner.update(cx, Presence::start_fixture);
+    if let Some(delay) = diagnostics::settle_delay(cx) {
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(delay).await;
+            cx.update(diagnostics::settle);
+        })
+        .detach();
     }
     if std::env::args().any(|arg| arg == "--smoke") {
         let weak = owner.downgrade();
@@ -917,11 +840,7 @@ fn listen(
                             this.set_panel_from(visibility, Some(qpc), cx)?;
                         }
                     }
-                    PresenceEvent::PointerChanged => {
-                        this.follow_pointer(cx);
-                        this.pointer_changed(cx)?;
-                    }
-                    PresenceEvent::PointerMoved => this.follow_pointer(cx),
+                    PresenceEvent::PointerChanged => this.pointer_changed(cx)?,
                     PresenceEvent::Position(index) => {
                         if let Some(position) = Position::ALL.get(index) {
                             this.position(*position, cx)?;
