@@ -488,17 +488,15 @@ struct Gated {
     release: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
-impl Gated {
-    /// The client, the signal that the request went out, and its release.
-    fn new() -> (SharedHttp, oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (sent_tx, sent) = oneshot::channel();
-        let (release, released) = oneshot::channel();
-        let http = SharedHttp::new(Self {
-            sent: Mutex::new(Some(sent_tx)),
-            release: Mutex::new(Some(released)),
-        });
-        (http, sent, release)
-    }
+/// A gated client, the signal that its request went out, and its release.
+fn gated() -> (SharedHttp, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (sent_tx, sent) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let http = SharedHttp::new(Gated {
+        sent: Mutex::new(Some(sent_tx)),
+        release: Mutex::new(Some(released)),
+    });
+    (http, sent, release)
 }
 
 impl Http for Gated {
@@ -593,7 +591,7 @@ fn saved_refresh(scratch: &Scratch, store: &FakeStore) -> (String, bool) {
 async fn closing_saves_a_refresh_that_answers_in_time() {
     let scratch = Scratch::new("account-close-refresh");
     let store = FakeStore::default();
-    let (http, sent, release) = Gated::new();
+    let (http, sent, release) = gated();
     let mut accounts = due_account(&scratch, &store, http);
     send_refresh(&mut accounts, sent).await;
     let lock = scratch.db().with_file_name(SESSION_LOCK);
@@ -625,7 +623,7 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
 async fn closing_past_the_refresh_deadline_leaves_the_token_marked() {
     let scratch = Scratch::new("account-close-refresh-late");
     let store = FakeStore::default();
-    let (http, sent, release) = Gated::new();
+    let (http, sent, release) = gated();
     let mut accounts = due_account(&scratch, &store, http);
     send_refresh(&mut accounts, sent).await;
     accounts.close(Instant::now(), Instant::now()).await;
