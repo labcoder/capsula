@@ -42,6 +42,8 @@ flowchart LR
 
 - **Load:** one load at a time from `models\spoken-replies`, CPU and Q8 weights, seed 42, then a
   short warm-up. A failed load leaves voice output unloaded; nothing retries on its own.
+- **A Speak during a load** waits for it, as the one waiting request: it's spoken if the load
+  succeeds and gets `NotLoaded` if the load fails. Unload rejects it, and a cancel makes it stale.
 - **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame gets a fixed +5.5 dB
   gain, is clipped and converted to `i16`. A NaN or infinity fails the segment, and so does
   passing 30 seconds. `Done` carries the total sample count.
@@ -58,6 +60,14 @@ flowchart LR
   `xn::set_num_threads`, which writes the process environment. A pool that comes up short or
   loses a worker keeps voice output unavailable for the rest of the process. The pool's seven
   workers live as long as the process; unload frees the model, not them.
+- **Environment:** Kumochi never reads, sets or unsets the process environment for voice. Its
+  dependencies read five nonsecret numeric tuning variables themselves: `XN_SPIN_BUDGET`,
+  `XN_Q8_REPACK` (xn), `GEMM_PACKED_LHS_CACHE`, `GEMM_PACKED_LHS_CACHE_MB` (xn-gemm) and
+  `TOKENIZERS_PARALLELISM` (tokenizers). That's a granted exception until upstream takes explicit
+  configuration. Nothing else is allowed: no network, no model hub or cache, and no other app's
+  tokens or config.
+- **Worker threads:** each stream's two Phonon workers start with `std::thread::spawn`, so a
+  refused thread aborts a release brain. Fallible spawns are a follow-up before release.
 - **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
   their messages can carry paths or text. Errors map to content-free `TtsError` values.
 

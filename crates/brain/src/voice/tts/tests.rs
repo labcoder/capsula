@@ -20,12 +20,15 @@ type Frame = Result<Vec<f32>, TtsError>;
 /// A scripted stream: the test hands it frames one at a time and sees when it's dropped.
 struct FakeStream {
     frames: std_mpsc::Receiver<Frame>,
+    entered: std_mpsc::Sender<()>,
     dropped: std_mpsc::Sender<()>,
 }
 
 impl Iterator for FakeStream {
     type Item = Frame;
+    /// Tells the test the owner is inside `next` before waiting for the frame.
     fn next(&mut self) -> Option<Frame> {
+        self.entered.send(()).ok();
         self.frames.recv().ok()
     }
 }
@@ -68,9 +71,16 @@ struct Harness {
     runtime: tokio::runtime::Runtime,
 }
 
+/// The loader's side of a load the test holds open.
+struct Gate {
+    started: std_mpsc::Sender<()>,
+    release: std_mpsc::Receiver<()>,
+}
+
 /// What a test holds for one scripted stream.
 struct Script {
     frames: std_mpsc::SyncSender<Frame>,
+    entered: std_mpsc::Receiver<()>,
     dropped: std_mpsc::Receiver<()>,
 }
 
@@ -78,6 +88,16 @@ impl Script {
     /// Returns once the owner has taken the frame, since the channel holds nothing.
     fn send(&self, frame: Frame) {
         self.frames.send(frame).expect("the stream is still alive");
+    }
+
+    /// Waits until the owner has called `next` this many times in all, so a cancel that follows
+    /// lands while it waits for a frame.
+    fn wait_in_next(&self, calls: usize) {
+        for _ in 0..calls {
+            self.entered
+                .recv_timeout(WAIT)
+                .expect("the owner asks for the next frame");
+        }
     }
 
     fn assert_dropped(&self) {
@@ -89,6 +109,11 @@ impl Script {
 
 impl Harness {
     fn new(load: Result<(), TtsError>) -> Self {
+        Self::gated(load, None)
+    }
+
+    /// With a gate, each load signals that it started, then waits to be released.
+    fn gated(load: Result<(), TtsError>, gate: Option<Gate>) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -100,6 +125,12 @@ impl Harness {
         let (live_in, loads_in) = (Arc::clone(&live), Arc::clone(&loads));
         let handle = TtsHandle::spawn_with(runtime.handle().clone(), move |_dir: &Path| {
             loads_in.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &gate {
+                gate.started.send(()).expect("the test watches the load");
+                gate.release
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the load");
+            }
             load?;
             live_in.fetch_add(1, Ordering::SeqCst);
             Ok(Fake {
@@ -126,14 +157,20 @@ impl Harness {
 
     fn script(&self) -> Script {
         let (frames, frames_rx) = std_mpsc::sync_channel(0);
+        let (entered_tx, entered) = std_mpsc::channel();
         let (dropped_tx, dropped) = std_mpsc::channel();
         self.streams
             .send(FakeStream {
                 frames: frames_rx,
+                entered: entered_tx,
                 dropped: dropped_tx,
             })
             .expect("the engine holds the queue");
-        Script { frames, dropped }
+        Script {
+            frames,
+            entered,
+            dropped,
+        }
     }
 
     fn speak(&self, text: &str, capacity: usize) -> mpsc::Receiver<TtsEvent> {
@@ -207,6 +244,7 @@ fn a_bump_between_frames_drops_the_stream_and_sends_nothing_more() {
     script.send(Ok(vec![0.0; 3]));
     assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 2])));
     assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 3])));
+    script.wait_in_next(3);
     harness.handle.cancel();
     script.send(Ok(vec![0.0; 4]));
     script.assert_dropped();
@@ -242,6 +280,7 @@ fn dropping_the_consumer_releases_the_owner() {
     let mut events = harness.speak("hello", 8);
     between.send(Ok(vec![0.0; 1]));
     assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 1])));
+    between.wait_in_next(2);
     drop(events);
     between.send(Ok(vec![0.0; 1]));
     between.assert_dropped();
@@ -348,6 +387,54 @@ fn nothing_speaks_before_a_successful_load() {
     let mut events = failing.speak("hello", 4);
     assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
     assert_eq!(failing.loads.load(Ordering::SeqCst), 1, "no retry loop");
+}
+
+#[test]
+fn a_speak_that_arrives_during_a_load_waits_for_its_outcome() {
+    let (started, loading) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let harness = Harness::gated(
+        Ok(()),
+        Some(Gate {
+            started,
+            release: released,
+        }),
+    );
+    harness.handle.load("models".into());
+    loading
+        .recv_timeout(WAIT)
+        .expect("the owner is inside the load");
+    let script = harness.script();
+    let mut events = harness.speak("hello", 4);
+    release.send(()).expect("the load is waiting");
+    script.send(Ok(vec![0.0; 2]));
+    drop(script.frames);
+    assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 2])));
+    assert_eq!(
+        harness.next(&mut events),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 2
+        })
+    );
+
+    let (started, loading) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let failing = Harness::gated(
+        Err(TtsError::Load),
+        Some(Gate {
+            started,
+            release: released,
+        }),
+    );
+    failing.handle.load("models".into());
+    loading
+        .recv_timeout(WAIT)
+        .expect("the owner is inside the load");
+    let mut events = failing.speak("hello", 4);
+    release.send(()).expect("the load is waiting");
+    assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
+    assert_eq!(failing.next(&mut events), None);
 }
 
 #[test]
@@ -525,26 +612,31 @@ fn measure_phonon() {
     }
 
     let paragraph = std::fs::read_to_string(texts.join("paragraph.txt")).expect("S5's text");
-    let (mut between, mut computing) = (Vec::new(), Vec::new());
+    let (mut immediate, mut delayed) = (Vec::new(), Vec::new());
     for trial in 0..20u64 {
         let mut events = speak(paragraph.trim());
         assert!(matches!(next(&mut events), Some(TtsEvent::Pcm { .. })));
-        let mid = trial % 2 == 1;
-        if mid {
+        let delay = trial % 2 == 1;
+        if delay {
             std::thread::sleep(Duration::from_millis(5 + trial * 7));
         }
         let bumped = Instant::now();
         handle.cancel();
         while next(&mut events).is_some() {}
-        if mid {
-            computing.push(ms(bumped));
+        if delay {
+            delayed.push(ms(bumped));
         } else {
-            between.push(ms(bumped));
+            immediate.push(ms(bumped));
         }
     }
-    println!("bump to idle ms, right after a frame: {}", summary(between));
+    // Which phase Phonon's workers are in at the bump isn't observed: these are cancellation
+    // schedules relative to receiving the first PCM, nothing more.
     println!(
-        "bump to idle ms, during computation: {}",
-        summary(computing)
+        "bump to idle ms, bump on receiving the first PCM: {}",
+        summary(immediate)
+    );
+    println!(
+        "bump to idle ms, bump 12-138 ms after receiving the first PCM: {}",
+        summary(delayed)
     );
 }

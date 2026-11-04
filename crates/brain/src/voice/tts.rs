@@ -171,13 +171,14 @@ impl TtsHandle {
         self.control.update(|state| state.want = Want::Loaded(dir));
     }
 
-    /// Never waits on a channel: it cancels, rejects the waiting Speak and wakes the owner.
+    /// Never waits on a channel: it rejects the waiting Speak, cancels and wakes the owner.
+    /// Taking the Speak before the cancel keeps the owner from dropping it as stale unanswered.
     pub(crate) fn unload(&self) {
-        self.cancel();
         let waiting = self.control.update(|state| {
             state.want = Want::Unloaded;
             state.waiting.take()
         });
+        self.cancel();
         if let Some(speak) = waiting {
             speak.fail(TtsError::NotLoaded);
         }

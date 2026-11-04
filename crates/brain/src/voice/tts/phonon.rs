@@ -1,4 +1,9 @@
 //! The real engine: Phonon on xn's CPU pool. CI never loads it; tests use a fake engine.
+//!
+//! shortcut: xn, xn-gemm and tokenizers read the nonsecret numeric tuning variables
+//! `XN_SPIN_BUDGET`, `XN_Q8_REPACK`, `GEMM_PACKED_LHS_CACHE`, `GEMM_PACKED_LHS_CACHE_MB` and
+//! `TOKENIZERS_PARALLELISM` from the process environment (an exception the Captain granted).
+//! Kumochi never sets or unsets them. Upgrade when upstream takes explicit configuration for each.
 
 use std::cell::Cell;
 use std::io;
@@ -94,6 +99,9 @@ impl Engine for Phonon {
         std::iter::Map<SpeechStream, fn(ptts::Result<Vec<f32>>) -> Result<Vec<f32>, TtsError>>;
 
     fn stream(&self, text: &str) -> Result<Self::Stream, TtsError> {
+        // shortcut: ptts starts this stream's two workers with std::thread::spawn, which panics,
+        // and so aborts a release brain, if the OS refuses a thread. Upgrade to fallible spawns
+        // that clean up the first worker, upstream or as a vendored patch, before release.
         let stream = self.0.stream(text).map_err(|_| TtsError::Synthesis)?;
         Ok(stream.map(|frame| frame.map_err(|_| TtsError::Synthesis)))
     }
