@@ -9,6 +9,11 @@
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
 pub(crate) mod fixture;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "13a's wiring sends it once 11b lands")
+)]
+mod responses;
 
 use std::fmt;
 use std::future::Future;
@@ -207,8 +212,13 @@ pub enum TurnEvent {
         /// Its whole arguments.
         args: String,
     },
-    /// A native output item, such as reasoning, kept in order for replay.
-    OutputItem(Opaque),
+    /// A completed native output item, such as reasoning or a call, kept for replay.
+    OutputItem {
+        /// Its place in the response's output, which replay follows.
+        index: u32,
+        /// The provider's item as JSON: the same value it sent, though not always the same bytes.
+        item: Opaque,
+    },
     /// The round ended.
     Finished(Finish),
 }
@@ -232,7 +242,11 @@ impl fmt::Debug for TurnEvent {
                 .field("call", call)
                 .field("args_bytes", &args.len())
                 .finish(),
-            Self::OutputItem(item) => f.debug_tuple("OutputItem").field(item).finish(),
+            Self::OutputItem { index, item } => f
+                .debug_struct("OutputItem")
+                .field("index", index)
+                .field("item", item)
+                .finish(),
             Self::Finished(finish) => f.debug_tuple("Finished").field(finish).finish(),
         }
     }
@@ -257,6 +271,8 @@ pub enum Finish {
 pub enum EngineFailure {
     /// The engine's provider reported the round failed.
     Provider,
+    /// The Responses stream failed, was refused, or broke its rules.
+    Stream(crate::connections::model::error::Failure),
 }
 
 /// A provider's id for one tool call: ASCII and at most [`CallId::MAX`] bytes.
@@ -315,6 +331,11 @@ impl Opaque {
     /// How many bytes it holds.
     pub fn size(&self) -> usize {
         self.0.len()
+    }
+
+    /// Its bytes, to send back as the same JSON value.
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -645,14 +666,14 @@ mod tests {
                 call: call.clone(),
                 args: "secret words".to_owned()
             },
-            TurnEvent::OutputItem(item),
+            TurnEvent::OutputItem { index: 3, item },
         );
         assert_eq!(
             printed,
             "RunRequest { key: BuildKey { run: RunId(7), round: 1, attempt: 1 }, run: RunId(7), \
              thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
              choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
-             ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem(Opaque(16))"
+             ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
         );
         assert_eq!(
             format!(
