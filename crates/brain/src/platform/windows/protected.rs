@@ -22,13 +22,13 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING,
-    GetAce, GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount,
-    INHERIT_ONLY_ACE, LABEL_SECURITY_INFORMATION, MapGenericMask, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, INHERIT_ONLY_ACE,
+    LABEL_SECURITY_INFORMATION, MapGenericMask, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -43,7 +43,7 @@ use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID,
-    SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
 use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
@@ -141,9 +141,9 @@ pub(crate) fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
 }
 
 /// Creates `path` when it's missing as an owner-only folder whose files inherit that DACL, then
-/// opens and checks it. An existing folder owned by a trusted owner is given the owner-only DACL;
-/// one owned by anyone else, labelled below medium or a reparse point is refused. Its parent must
-/// be held.
+/// opens and checks it. An existing folder is used only if it passes the same checks: one others
+/// could change is refused, never re-secured, because a new DACL doesn't take back rights already
+/// granted to open handles. Its parent must be held.
 pub(crate) fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
     let user = user_sid().map_err(|_| Untrusted::Io)?;
     let descriptor = Descriptor::new(&format!("D:P(A;OICI;FA;;;{user})"))?;
@@ -159,32 +159,7 @@ pub(crate) fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
     {
         return Err(Untrusted::Io);
     }
-    let trusted = Trusted::new()?;
-    let folder = open(path, Kind::Folder, WRITE_DAC)?;
-    check_not_reparse(&folder)?;
-    let security = Security::read(&folder)?;
-    if !trusted.contains(security.owner) || security.below_medium()? {
-        return Err(Untrusted::Unsafe);
-    }
-    drop(security);
-    let dacl = descriptor.dacl()?;
-    // SAFETY: the handle is open with WRITE_DAC and `dacl` lives in `descriptor` for the call.
-    let set = unsafe {
-        SetSecurityInfo(
-            folder.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            dacl,
-            std::ptr::null(),
-        )
-    };
-    if set != ERROR_SUCCESS {
-        return Err(Untrusted::Io);
-    }
-    check(&folder, path, Kind::Folder, &trusted)?;
-    Ok(folder)
+    open_checked(path, Kind::Folder, &Trusted::new()?)
 }
 
 /// Opens the file at `path` for reading, refusing writers and deleters while it's open, and
@@ -228,7 +203,7 @@ fn check(opened: &File, path: &Path, kind: Kind, trusted: &Trusted) -> Result<()
         return Err(Untrusted::Reparse);
     }
     let security = Security::read(opened)?;
-    if !trusted.contains(security.owner) || security.below_medium()? {
+    if !trusted.contains(security.owner) || security.writable_from_below()? {
         return Err(Untrusted::Unsafe);
     }
     let changes = match kind {
@@ -398,20 +373,6 @@ impl Descriptor {
         }
         Ok(Self(descriptor))
     }
-
-    /// The DACL inside, valid while `self` lives.
-    fn dacl(&self) -> Result<*const ACL, Untrusted> {
-        let (mut present, mut defaulted) = (0, 0);
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        // SAFETY: the descriptor is valid and every output is a writable local.
-        let read = unsafe {
-            GetSecurityDescriptorDacl(self.0, &raw mut present, &raw mut dacl, &raw mut defaulted)
-        };
-        if read == 0 || present == 0 || dacl.is_null() {
-            return Err(Untrusted::Io);
-        }
-        Ok(dacl)
-    }
 }
 
 impl Drop for Descriptor {
@@ -485,16 +446,22 @@ impl Security {
         Ok(false)
     }
 
-    /// Whether a mandatory label puts this object below medium integrity. No label is medium.
-    fn below_medium(&self) -> Result<bool, Untrusted> {
+    /// Whether lower-integrity code may write to this object: a label that applies to it is below
+    /// medium or lacks no-write-up. With no such label, Windows applies medium and no-write-up.
+    fn writable_from_below(&self) -> Result<bool, Untrusted> {
         if self.sacl.is_null() {
             return Ok(false);
         }
         for (header, ace) in aces(self.sacl)? {
-            if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
+                || u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0
+            {
                 continue;
             }
-            let (_, sid) = mask_and_sid(ace);
+            let (mask, sid) = mask_and_sid(ace);
+            if mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP == 0 {
+                return Ok(true);
+            }
             // SAFETY: `sid` is a valid SID inside the live descriptor.
             let count = unsafe { GetSidSubAuthorityCount(sid) };
             // SAFETY: it points to the SID's subauthority count.
