@@ -215,8 +215,8 @@ is one line:
   and leaves both.
 - `hover id=H qpc= visible=true|false click_qpc=`, on every status panel show or hide. The
   legacy name and paint IDs are unchanged. `qpc` is state entry, before native placement;
-  `click_qpc` is zero: clicks no longer change the panel, and the hover phase that follows B2b
-  carries the proxy's native pointer-entry counter here instead.
+  `click_qpc` keeps its legacy name but carries the native pointer-entry counter when a pointer
+  entry opened the panel, and zero otherwise; older builds always log zero.
 - `paint frame=F qpc= kind=dock|panel hover= drawn_epoch= drawn_geometry= mask_epoch=`. A dock
   frame is stamped by the dock's zero-size `Stamp` element with `hover=0`; `drawn_geometry`'s `drawn` spans
   are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size

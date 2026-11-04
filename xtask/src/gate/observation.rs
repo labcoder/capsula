@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
 mod summary;
-pub(super) use summary::{summarize_click, summarize_keyboard};
+pub(super) use summary::{summarize_hover, summarize_keyboard};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Startup {

@@ -43,11 +43,11 @@ enum Trial {
 }
 
 // shortcut: the motion trials (three stretch CPU rows and the motion receipts) left with the stretch; C2a brings them back with the pull.
-// shortcut: hover opens the peek, so the click phase can't run; the hover phase (entry QPC to peek present) replaces it in the PR after B2b.
-const TRIALS: [Trial; 8] = [
+const TRIALS: [Trial; 9] = [
     Trial::Idle,
     Trial::Input(Phase::Keyboard, FixtureEscMode::Free),
     Trial::ReceiptRest,
+    Trial::Input(Phase::Hover, FixtureEscMode::Free),
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
     Trial::Input(Phase::Layouts, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Free),
@@ -59,7 +59,7 @@ impl Trial {
     fn trace_bound(self) -> Option<Duration> {
         let seconds = match self {
             Self::Input(Phase::Keyboard, _) => 50,
-            Self::Input(Phase::Click, _) | Self::ReceiptRest => 30,
+            Self::Input(Phase::Hover, _) | Self::ReceiptRest => 30,
             Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
             Self::Idle => return None,
@@ -79,7 +79,7 @@ impl Trial {
         match self {
             Self::Idle => "cpu-idle",
             Self::Input(Phase::Keyboard, _) => "keyboard",
-            Self::Input(Phase::Click, _) => "click",
+            Self::Input(Phase::Hover, _) => "hover",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
             Self::Input(Phase::Layouts, _) => "layouts",
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
@@ -692,13 +692,13 @@ fn summarize(
                 dock,
                 output,
             ),
-            Trial::Input(Phase::Click, _) => observation::summarize_click(
+            Trial::Input(Phase::Hover, _) => observation::summarize_hover(
                 observer,
                 pid,
                 &mut rows,
                 dock,
                 output,
-                &diagnostics.click_injections.borrow(),
+                &diagnostics.hover_injections.borrow(),
             ),
             Trial::ReceiptRest => {
                 receipts::summarize(observer, pid, &mut rows, dock, output, receipts::Mode::Rest)
@@ -816,14 +816,14 @@ mod tests {
 
     #[test]
     fn receipts_follow_keyboard_and_esc_conflict_is_last() {
-        assert!(!TRIALS.contains(&Trial::Input(Phase::Click, FixtureEscMode::Free)));
+        assert!(TRIALS.contains(&Trial::Input(Phase::Hover, FixtureEscMode::Free)));
         let keyboard = TRIALS
             .iter()
             .position(|trial| *trial == Trial::Input(Phase::Keyboard, FixtureEscMode::Free))
             .unwrap();
         assert_eq!(TRIALS[keyboard + 1], Trial::ReceiptRest);
         assert_eq!(
-            &TRIALS[6..],
+            &TRIALS[7..],
             &[
                 Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
                 Trial::StopButton

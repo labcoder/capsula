@@ -191,9 +191,11 @@ A paint isn't a present. The gate harness joins its exact Canvas QPC to the sepa
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
 passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-Hover opens the peek, so the click gate left with B2b. The hover phase that replaces it gates the
-proxy's native pointer-entry QPC → peek present at p95 ≤8ms and lands in the next PR, before the
-desk session runs the input gate.
+hover gates the native pointer-entry QPC → the peek's first present at p95 ≤8ms. That QPC is read
+when the entering `WM_MOUSEMOVE` is dispatched, so it excludes OS routing and includes the
+UI thread's queue wait. A change whose entry is missing or no later than the previous change
+stays in the denominator as `MissingEntry`; SendInput → present and state entry → present are
+reported beside it, not gated, so a build without entry counters still gives those two.
 Both reports retain display latency separately: missing display feedback is unmeasured there,
 not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
 coverage and motion pacing still require displayed frames. The UI thread only
@@ -333,8 +335,8 @@ cleanup; a phase cannot begin without its complete budget.
    (C2a).
 2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Click left with B2b, since pointer entry now opens the peek; the hover phase replaces it in
-   the next PR.
+3. Hover runs after the resting receipts: 100 pointer entries onto the dock, 1–8ms apart in a
+   fixed jitter, each waiting up to 100ms for the peek and then leaving until it hides.
 4. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
