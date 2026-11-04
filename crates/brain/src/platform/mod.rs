@@ -16,6 +16,10 @@ pub use trust_roots::{TrustRoots, TrustRootsError};
 mod windows;
 
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "calls into the pinned sherpa-onnx C API")]
+pub(crate) mod sherpa;
+
+#[cfg(windows)]
 pub use windows::{
     Helper, Instance, Job, PipeServer, client_image, config_dir, create_owner_only, data_dir,
     free_space, launch_detached, links_unsupported, replace_file, session_id, session_lock_path,

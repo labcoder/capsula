@@ -19,6 +19,8 @@ pub mod store;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg_attr(not(test), expect(dead_code, reason = "PR 5 wires speech input"))]
+mod voice;
 
 use std::io;
 use std::path::PathBuf;

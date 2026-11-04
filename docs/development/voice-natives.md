@@ -28,9 +28,12 @@ Read with `dumpbin /dependents` on Rez, 2026-11-04:
 | `onnxruntime.dll` | `MSVCP140.dll`, `MSVCP140_1.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, UCRT; Windows' `dbghelp.dll`, `SETUPAPI.dll`, `dxgi.dll` |
 
 The VC++ 2015–2022 runtime is a prerequisite, and slice 10's clean-machine rehearsal proves it.
-Import tables don't show libraries loaded with `LoadLibrary`, so the speech-input binding test
-on Rez also records the brain's module list after load, warm-up and one decode, and anything new
-there joins this page before it ships.
+Import tables don't show libraries loaded with `LoadLibrary`, so `measure_parakeet` records the
+modules that appear after load, warm-up and decodes. On Rez (2026-11-04) every one besides the two
+pins came from `System32`: `combase`, `msvcp_win`, `win32u`, `gdi32`, `gdi32full`, `USER32`, `IMM32`,
+`DEVOBJ`, `cfgmgr32`, `WINTRUST`, `MSASN1`, `dxcore`, `kernel.appcore`, `SETUPAPI`, `MSVCP140`,
+`MSVCP140_1`, `dbghelp`, `OLEAUT32`, `VCRUNTIME140_1`, `dxgi`, `powrprof`, `UMPDC` and
+`directxdatabasehelper`.
 
 ## Licenses
 
