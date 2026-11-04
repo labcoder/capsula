@@ -47,13 +47,6 @@ impl Input {
     }
 
     /// The stamp of the press being forwarded.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the peek's press handler reads it in C2a's next layer"
-        )
-    )]
     pub(crate) fn pressed(&self) -> Option<u64> {
         self.press.get()
     }

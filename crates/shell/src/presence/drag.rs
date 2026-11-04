@@ -2,10 +2,6 @@
 //! terminal outcome. GPUI's mouse events, Esc and the native bridge's capture losses come in;
 //! moves and the ending go out. Nothing here has effects: only a `Released` ending may, and
 //! the caller validates it first. How it fits: docs/development/kumo.md, "The pull".
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "C2a wires the drag to the peek's Kumo")
-)]
 
 use gpui_kit::{MouseButton, Pixels, Point};
 

@@ -8,10 +8,14 @@ use kumochi_protocol::constants;
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some(kumochi_brain::SCREEN_WORKER) {
-        // shortcut: the fake screen worker only waits for its job to end it; slice 6 builds it.
-        loop {
-            std::thread::park();
+        if logging::init(constants::SCREEN_LOG).is_err() {
+            return ExitCode::FAILURE;
         }
+        if kumochi_brain::screen::serve().is_err() {
+            tracing::error!(code = 1, "screen transport failed");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
     }
     if logging::init(constants::BRAIN_LOG).is_err() {
         return ExitCode::FAILURE;
