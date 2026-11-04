@@ -608,16 +608,19 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
-Inside the crate, admission keeps its candidate map and change records protected, so
-an early error, a stale commit or a discarded `Admitted` retires them. `commit`,
-`stop`, `clear` and step retirement swap out the replaced object map and undo records
-and retire them. `LayoutState::cut` builds the kept prefix directly and retires a
-partial one on error. `PrepareInput::new` retires a rejected predecessor, and
-`SceneView::activate` retires a stale step or the outgoing layout, nodes and paint
-order. `SceneState::attributed_bytes()` estimates what a whole semantic state owns, for
-the host's attribution. The host wraps everything it holds or discards itself, and
-clears a paint frame before discarding the view it sampled, since the frame shares that
-view's geometry.
+The allocation regressions exercise clear with track undo records, successful and stale
+commit, rejection of a late invalid track, and Stop both at rest and when dropping a
+step with removals and cell changes. They also measure outgoing activation over 256
+untracked rectangles; the paint frame is created outside that measurement. Each fixture
+waits for the live dropper's pending values and bytes to drain after its assertions.
+These are caller-side allocation checks, not latency measurements.
+
+They do not prove every admission error, compiled-candidate rejection, rejected
+predecessor, stale activation, layout-cut error or undo-release path. Settled and
+superseded animation tracks still need retirement or measurement in the consuming
+layer's activation gate. `SceneState::attributed_bytes()` estimates whole-state ownership
+for the host's queue meter, not a heap bound. The host must protect its own held values
+and clear a paint frame before retiring the view whose geometry it shares.
 
 ### Tables
 

@@ -7,14 +7,15 @@ mod allocation;
 mod scene_support;
 
 use kumochi_scene::{
-    Admission, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut, StopOutcome,
+    Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, Step, StopCut,
+    StopOutcome,
     deferred::{self, Deferred, Pending},
     layout::{LayoutState, PreparedStep},
     parse_record,
     text::Bounded,
 };
 use scene_support::{id, new_scene, prepared};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -82,14 +83,7 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
         Ok(dropper),
         "the nested value drops in place on the dropper"
     );
-    let deadline = Instant::now() + wait;
-    while deferred::pending() != Pending::default() {
-        assert!(
-            Instant::now() < deadline,
-            "the destructor's return clears the count"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    drain();
     assert_eq!(deferred::take_peak(), 64, "the high water since start");
     assert_eq!(
         deferred::take_peak(),
@@ -98,6 +92,23 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     );
     retirement_sites_leave_large_destruction_to_the_dropper();
     stale_candidate_retires_its_original_source();
+    stop_retires_dropped_removals_and_cell_changes();
+    rejected_tracks_retire_the_partial_predecessor_map();
+}
+
+fn drain() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while deferred::pending() != Pending::default() {
+        assert!(
+            Instant::now() < deadline,
+            "the destructor's return clears the count"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        deferred::running(),
+        "the dropper remains live after destruction"
+    );
 }
 
 fn populated() -> (SceneState, GlobalBudget, PreparedStep) {
@@ -124,13 +135,20 @@ fn populated() -> (SceneState, GlobalBudget, PreparedStep) {
 fn retirement_sites_leave_large_destruction_to_the_dropper() {
     let (mut scene, mut budget, first) = populated();
     let changes: Vec<_> = (0..256)
-        .map(|i| json!({"target":format!("s{i}"),"color":"green"}))
+        .map(
+            |i| json!({"anim":{"target":format!("s{i}"),"track":"opacity","keys":[[0,0],[100,1]]}}),
+        )
         .collect();
     let _changed = prepared(
         &mut scene,
         &mut budget,
         &first.after,
-        json!({"id":"changes","set":changes}),
+        json!({"id":"changes","put":changes}),
+    );
+    assert_eq!(
+        scene.usage().tracks,
+        256,
+        "all tracks own change undo records"
     );
     let ((), [_, deallocations]) =
         allocation::activity(|| scene.clear(&mut budget).expect("clear"));
@@ -138,6 +156,7 @@ fn retirement_sites_leave_large_destruction_to_the_dropper() {
         deallocations, 0,
         "clear retires both the object map and its undo records"
     );
+    drain();
 
     let (mut scene, mut budget, first) = populated();
     let cut = StopCut {
@@ -156,6 +175,7 @@ fn retirement_sites_leave_large_destruction_to_the_dropper() {
         "Stop may free its small borrowed scratch nodes, but not semantic object nodes; total {released}, largest {}",
         allocation::largest_release()
     );
+    drain();
 
     let (mut scene, mut budget, first) = populated();
     let mut view = SceneView::new(&first.after, 1);
@@ -181,6 +201,7 @@ fn retirement_sites_leave_large_destruction_to_the_dropper() {
         Vec::new(),
         "all objects were removed"
     );
+    drain();
 
     let (mut scene, mut budget, _) = populated();
     let Record::Step(step) = parse_record(br#"{"step":{"id":"next"}}"#).expect("step") else {
@@ -196,6 +217,7 @@ fn retirement_sites_leave_large_destruction_to_the_dropper() {
         released < 256,
         "commit retires the replaced map, freeing only its small payload box: {released}"
     );
+    drain();
 }
 
 fn stale_candidate_retires_its_original_source() {
@@ -233,4 +255,113 @@ fn stale_candidate_retires_its_original_source() {
         allocations <= 4,
         "clear hands off bounded payloads, not one allocation per object"
     );
+    drain();
+}
+
+fn typed_step(value: &Value) -> Step {
+    let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
+    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+        panic!("step fixture");
+    };
+    step
+}
+
+fn rejected_tracks_retire_the_partial_predecessor_map() {
+    let (scene, budget, _) = populated();
+    let tracks: Vec<_> = (0..256)
+        .map(|i| {
+            json!({"anim":{"target":format!("s{i}"),"track":"opacity","keys":[[0,0],[100,1]],
+            "repeat":if i == 255 { 30_000 } else { 0 }}})
+        })
+        .collect();
+    let step = typed_step(&json!({"id":"invalid-last-track","put":tracks}));
+    let (result, _, [_, released]) = allocation::usage(|| scene.admit(&step, &budget));
+    let error = result.expect_err("the last repeat exceeds the motion deadline");
+    assert_eq!(
+        error.code,
+        ErrorCode::OutOfRange,
+        "the last track is rejected"
+    );
+    assert_eq!(
+        error.path.as_str(),
+        "put[255].anim.repeat",
+        "255 valid predecessors are collected before this failure"
+    );
+    assert!(
+        released < 96 * 1024,
+        "the rejected predecessor map leaves the caller, retaining only bounded scratch destruction: {released}"
+    );
+    assert_eq!(
+        (scene.object_count(), scene.revision(), scene.usage().tracks),
+        (256, 1, 0),
+        "rejection leaves the authoritative scene unchanged"
+    );
+    drain();
+}
+
+fn stop_retires_dropped_removals_and_cell_changes() {
+    let mut scene = new_scene("dropped-undo");
+    let mut budget = GlobalBudget::default();
+    let mut put: Vec<_> = (0..8)
+        .map(|i| json!({"table":{"id":format!("t{i}"),"cols":["A","B"],"box":[0,0,300,300]}}))
+        .collect();
+    put.extend(
+        (0..256).map(
+            |i| json!({"row":{"id":format!("r{i}"),"in":format!("t{}",i / 32),"cells":["old"]}}),
+        ),
+    );
+    let remove: Vec<_> = (0..128).map(|i| format!("r{i}")).collect();
+    let changes: Vec<_> = (128..256)
+        .map(|i| json!({"target":format!("r{i}"),"cells":["new","value"]}))
+        .collect();
+    for step in [
+        typed_step(&json!({"id":"rows","put":put})),
+        typed_step(&json!({"id":"remove-and-set","remove":remove,"set":changes})),
+    ] {
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted fixture")
+        else {
+            panic!("new step");
+        };
+        scene
+            .commit(candidate, &mut budget)
+            .expect("committed fixture");
+    }
+    assert_eq!(
+        scene.object_count(),
+        136,
+        "the second step removes 128 of 256 rows beside eight tables"
+    );
+    let revealed = (0..264)
+        .map(|i| kumochi_scene::Handle::new(1, i).expect("table or row handle"))
+        .collect();
+    let cut = StopCut {
+        activated: 1,
+        revealed: Bounded::new(revealed).expect("kept rows"),
+    };
+    let (outcome, _, [_, released]) = allocation::usage(|| scene.stop(&cut, &mut budget));
+    assert_eq!(
+        outcome.expect("valid cut"),
+        StopOutcome::Kept,
+        "the first step survives"
+    );
+    assert_eq!(
+        (scene.object_count(), scene.committed(), scene.revision()),
+        (264, 1, 2),
+        "Stop restores the removed rows and drops the second step without inventing a revision"
+    );
+    assert_eq!(
+        scene.step(1),
+        None,
+        "the removed-and-set step is no longer kept"
+    );
+    assert_eq!(
+        scene.recovery_log().len(),
+        3,
+        "both original steps and the cut remain in history"
+    );
+    assert!(
+        released < 128 * 1024,
+        "the dropped-step fixture frees bounded scratch, not its large maps and undo records: {released}"
+    );
+    drain();
 }

@@ -19,8 +19,8 @@ pub(crate) const ARC_HEADER: usize = 2 * size_of::<usize>();
 /// `len` entries, pinned to Rust 1.98's B-tree: a node holds 11 entries, every node but the
 /// root keeps at least 5, an internal node adds 12 edges, and up to 10 entries share one root
 /// leaf. A map that removals emptied keeps a root leaf this does not count.
-// shortcut: std's node layout is private; the allocation-counter tests recheck this bound on
-// each toolchain bump.
+// shortcut: std's node layout is private; btree_node_allowance_bounds_requested_allocations
+// rechecks the bound on each toolchain bump.
 pub(crate) fn btree<K, V>(len: usize) -> usize {
     const CAPACITY: usize = 11;
     const MIN_LEN: usize = 5;
@@ -192,12 +192,84 @@ fn anchor(value: &Anchor) -> usize {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/allocation.rs"]
+mod allocation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         Finite, Record, WireId, parse_record,
         record::{Change, Point},
+        state::{
+            object::{Kind, Object},
+            work::Work,
+        },
     };
+
+    #[derive(Debug, Clone, Copy)]
+    enum Construction {
+        Insert,
+        Collect,
+    }
+
+    fn check_nodes<K: Ord, V>(mut entries: Vec<(K, V)>, construction: Construction) {
+        let len = entries.len();
+        let (map, _, [allocated, released]) = allocation::usage(|| match construction {
+            Construction::Collect => entries.drain(..).collect::<BTreeMap<_, _>>(),
+            Construction::Insert => {
+                let mut map = BTreeMap::new();
+                for (key, value) in entries.drain(..) {
+                    map.insert(key, value);
+                }
+                map
+            }
+        });
+        assert_eq!(map.len(), len, "construction retains every fixture entry");
+        let held = allocated
+            .checked_sub(released)
+            .expect("only measured node storage remains");
+        let allowance = btree::<K, V>(len);
+        assert!(
+            held <= allowance,
+            "{len} entries, {construction:?}: {held} requested node bytes exceed {allowance}"
+        );
+        if len <= 10 {
+            assert_eq!(
+                held, allowance,
+                "an empty map or one root leaf has an exact charge"
+            );
+        }
+    }
+
+    #[test]
+    fn btree_node_allowance_bounds_requested_allocations() {
+        let (empty, allocations) = allocation::count(BTreeMap::<usize, usize>::new);
+        assert_eq!(
+            (empty.len(), allocations),
+            (0, 0),
+            "a fresh empty map allocates nothing"
+        );
+        for len in [0, 1, 10, 11, 12, 100, 256] {
+            for construction in [Construction::Insert, Construction::Collect] {
+                check_nodes((0..len).map(|i| (i, i)).collect(), construction);
+                let entries = (0..len)
+                    .map(|i| {
+                        let id: WireId = format!("r{i}").try_into().expect("bounded id");
+                        let object = Object {
+                            work: Work::default(),
+                            handle: crate::Handle::new(1, i).expect("bounded handle"),
+                            kind: Kind::Shape,
+                            parent: None,
+                            references: Vec::new(),
+                        };
+                        (id, object)
+                    })
+                    .collect();
+                check_nodes(entries, construction);
+            }
+        }
+    }
 
     fn op(json: &str) -> Op {
         let record = format!(r#"{{"step":{{"id":"s","put":[{json}]}}}}"#);
