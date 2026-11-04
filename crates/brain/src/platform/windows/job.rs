@@ -68,7 +68,7 @@ impl Job {
         Ok(job)
     }
 
-    fn raw(&self) -> HANDLE {
+    pub(super) fn raw(&self) -> HANDLE {
         self.0.as_raw_handle()
     }
 
@@ -238,6 +238,10 @@ pub struct Helper {
 }
 
 impl Helper {
+    pub(super) const fn new(process: OwnedHandle, pid: u32) -> Self {
+        Self { process, pid }
+    }
+
     /// The helper's process id.
     pub const fn pid(&self) -> u32 {
         self.pid
@@ -276,10 +280,10 @@ impl Helper {
 
 /// A process-creation attribute list holding job and optional inherited-handle lists. The buffer is
 /// `u64`s so it's aligned for the pointers the OS writes into it.
-struct AttributeList(Vec<u64>);
+pub(super) struct AttributeList(pub(super) Vec<u64>);
 
 impl AttributeList {
-    fn with_jobs(jobs: &[HANDLE], inherited: &[HANDLE]) -> io::Result<Self> {
+    pub(super) fn with_jobs(jobs: &[HANDLE], inherited: &[HANDLE]) -> io::Result<Self> {
         let mut size = 0;
         let count = 1 + u32::from(!inherited.is_empty());
         // SAFETY: the sizing call takes a null list and only writes `size`; it reports
@@ -296,7 +300,7 @@ impl AttributeList {
         // Only an initialized list gets the destructor.
         let mut list = Self(buffer);
         // SAFETY: `jobs` holds open job handles and outlives every use of the list, which only
-        // lives inside `Job::spawn_inner`.
+        // lives inside one spawn call.
         let updated = unsafe {
             UpdateProcThreadAttribute(
                 list.ptr(),
@@ -345,6 +349,6 @@ impl Drop for AttributeList {
     }
 }
 
-fn size_u32<T>() -> u32 {
+pub(super) fn size_u32<T>() -> u32 {
     u32::try_from(size_of::<T>()).expect("Win32 structs are far smaller than 4 GiB")
 }

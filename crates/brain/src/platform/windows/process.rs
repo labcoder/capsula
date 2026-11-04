@@ -18,6 +18,8 @@ use windows_sys::Win32::System::Threading::{
 pub fn launch_detached(exe: &Path) -> io::Result<Child> {
     let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     let spawn = |flags: u32| {
+        // std passes bInheritHandles = TRUE, so a helper's pipe ends must not be inheritable now.
+        let _spawning = super::spawn::lock_spawns();
         Command::new(exe)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

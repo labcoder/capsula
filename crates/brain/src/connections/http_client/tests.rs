@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -696,7 +696,8 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port 0");
     let proxy_address = proxy.local_addr().expect("proxy address");
     drop(proxy);
-    let output = Command::new(std::env::current_exe().expect("test executable"))
+    let spawning = crate::platform::lock_spawns();
+    let child = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
             "connections::http_client::tests::proxy_probe_child",
@@ -708,8 +709,12 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
         .env_remove("NO_PROXY")
         .env_remove("no_proxy")
         .env("ACCOUNT_HTTP_TEST_CHILD", target.url())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("child test process");
+    drop(spawning);
+    let output = child.wait_with_output().expect("child test output");
     assert!(
         output.status.success(),
         "child reports a closed transport result"
