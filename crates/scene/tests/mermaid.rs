@@ -566,13 +566,16 @@ fn nested_title_bands_have_the_recorded_literal_geometry() {
         &graph("flowchart TB\nsubgraph outer[Outer]\nsubgraph inner[Inner]\nA\nend\nend\n"),
     );
     assert!(prepared.glides.is_empty());
-    assert_rect(bounds(&prepared.after, "outer"), [140.0, 32.0, 80.0, 92.0]);
-    assert_rect(bounds(&prepared.after, "inner"), [140.0, 58.0, 80.0, 66.0]);
-    assert_rect(bounds(&prepared.after, "A"), [140.0, 84.0, 80.0, 40.0]);
+    assert_rect(
+        bounds(&prepared.after, "outer"),
+        [124.0, 32.0, 112.0, 124.0],
+    );
+    assert_rect(bounds(&prepared.after, "inner"), [132.0, 66.0, 96.0, 82.0]);
+    assert_rect(bounds(&prepared.after, "A"), [140.0, 100.0, 80.0, 40.0]);
     let items = prepared.after.items();
     for (name, title, expected) in [
-        ("outer", "Outer", [90.0_f32, 32.0]),
-        ("inner", "Inner", [90.0, 58.0]),
+        ("outer", "Outer", [90.0_f32, 40.0]),
+        ("inner", "Inner", [90.0, 74.0]),
     ] {
         assert_eq!(
             labelled(&items, title).handle,
@@ -599,8 +602,8 @@ fn a_long_private_title_widens_its_group_without_a_text_child() {
         &graph(&format!("flowchart TB\nsubgraph wide[{title}]\nA\nend\n")),
     );
     assert!(prepared.glides.is_empty());
-    assert_rect(bounds(&prepared.after, "wide"), [90.0, 32.0, 180.0, 66.0]);
-    assert_rect(bounds(&prepared.after, "A"), [140.0, 58.0, 80.0, 40.0]);
+    assert_rect(bounds(&prepared.after, "wide"), [82.0, 32.0, 196.0, 82.0]);
+    assert_rect(bounds(&prepared.after, "A"), [140.0, 66.0, 80.0, 40.0]);
     assert_eq!(
         labelled(&prepared.after.items(), title).handle,
         scene.handle(&id("wide")).expect("group")
@@ -608,7 +611,7 @@ fn a_long_private_title_widens_its_group_without_a_text_child() {
     let origin = title_origin(&prepared.after, title);
     assert_eq!(
         [origin.x, origin.y].map(f32::to_bits),
-        [90.0_f32, 32.0].map(f32::to_bits)
+        [90.0_f32, 40.0].map(f32::to_bits)
     );
     assert_eq!(scene.object_count(), 4);
 }
@@ -1130,17 +1133,23 @@ fn a_titled_group_recomputes_its_band_after_a_later_node() {
             {"edge":{"id":"next","in":"g","from":"A","to":"B"}}
         ]})),
     );
-    assert_rect(bounds(&next.after, "A"), [140.0, 58.0, 80.0, 40.0]);
-    assert_rect(bounds(&next.after, "B"), [16.0, 170.0, 80.0, 40.0]);
-    assert_rect(bounds(&next.after, "g"), [16.0, 32.0, 204.0, 178.0]);
-    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(28.0, 32.0));
+    assert_rect(bounds(&next.after, "A"), [140.0, 66.0, 80.0, 40.0]);
+    assert_rect(bounds(&next.after, "B"), [16.0, 178.0, 80.0, 40.0]);
+    assert_rect(bounds(&next.after, "g"), [8.0, 32.0, 220.0, 194.0]);
+    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(28.0, 40.0));
+    let items = next.after.items();
+    let group = labelled(&items, "Group");
+    let Prim::Rect { rect, .. } = &group.primitives[0] else {
+        panic!("group frame")
+    };
+    assert_rect(*rect, [8.0, -18.0, 220.0, 194.0]);
 }
 
 #[test]
 fn later_nodes_take_the_next_rank_in_reversed_groups() {
     for (direction, expected) in [
-        ("RL", [-88.0, 58.0, 80.0, 40.0]),
-        ("BT", [16.0, -54.0, 80.0, 40.0]),
+        ("RL", [-88.0, 66.0, 80.0, 40.0]),
+        ("BT", [16.0, -46.0, 80.0, 40.0]),
     ] {
         let mut scene = scene();
         let mut budget = GlobalBudget::default();
@@ -1177,8 +1186,8 @@ fn a_title_only_subgraph_has_a_single_literal_band() {
         &graph("flowchart TB\nsubgraph g[T]\nend\n"),
     );
     assert_eq!(scene.object_count(), 3);
-    assert_rect(bounds(&prepared.after, "g"), [176.0, 32.0, 8.0, 26.0]);
-    assert_eq!(title_origin(&prepared.after, "T"), Vec2::new(90.0, 32.0));
+    assert_rect(bounds(&prepared.after, "g"), [168.0, 32.0, 24.0, 42.0]);
+    assert_eq!(title_origin(&prepared.after, "T"), Vec2::new(90.0, 40.0));
 }
 
 #[test]

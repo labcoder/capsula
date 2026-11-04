@@ -13,6 +13,306 @@ use serde_json::json;
 mod scene_support;
 use scene_support::{id, new_scene, prepared, prepared_on};
 
+#[test]
+fn a_titled_group_frames_its_title_band_and_member_with_eight_pixel_padding() {
+    let mut scene = new_scene("group_frame");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"frame","put":[
+            {"diagram":{"id":"diagram"}},
+            {"mermaid":{"in":"diagram","src":"flowchart TB\nsubgraph g[Group]\nA\nend\n"}}
+        ]}),
+    );
+    let handle = scene.handle(&id("g")).expect("group");
+    let items = picture.after.items();
+    let group = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("group item");
+    let Prim::Rect {
+        rect,
+        radius,
+        fill,
+        border,
+    } = &group.primitives[0]
+    else {
+        panic!("group frame precedes its title");
+    };
+    assert_eq!(
+        *rect,
+        Rect {
+            origin: Vec2::new(132.0, -18.0),
+            size: Vec2::new(96.0, 82.0)
+        }
+    );
+    assert_eq!(radius.to_bits(), 8.0_f32.to_bits());
+    assert_eq!(*fill, None);
+    assert_eq!(
+        *border,
+        Some((kumochi_scene::theme::Theme::default().line.into(), 1.0))
+    );
+    assert_eq!(group.bounds, *rect);
+    assert_eq!(
+        picture.after.bounds(&id("g")).expect("world frame"),
+        Some(Rect {
+            origin: Vec2::new(132.0, 32.0),
+            size: Vec2::new(96.0, 82.0)
+        })
+    );
+}
+
+fn labelled_pair(labels: [&str; 2]) -> serde_json::Value {
+    json!({"id":"labels","put":[
+        {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
+        {"node":{"id":"a","in":"diagram","label":"A"}},
+        {"node":{"id":"b","in":"diagram","label":"B"}},
+        {"edge":{"id":"e1","in":"diagram","from":"a","to":"b","label":labels[0]}},
+        {"edge":{"id":"e2","in":"diagram","from":"a","to":"b","label":labels[1]}}
+    ]})
+}
+
+fn chip(layout: &LayoutState, handle: kumochi_scene::Handle) -> Rect {
+    let items = layout.items();
+    let item = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("edge item");
+    item.primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .expect("label chip")
+}
+
+#[test]
+fn an_edge_label_chip_has_four_by_two_pixel_padding() {
+    let mut scene = new_scene("label_chip");
+    let before = LayoutState::new(&scene);
+    let mut value = labelled_pair(["abc", "x"]);
+    value["put"].as_array_mut().expect("put").pop();
+    let picture = prepared(&mut scene, &mut GlobalBudget::default(), &before, value);
+    let handle = scene.handle(&id("e1")).expect("edge");
+    assert_eq!(
+        chip(&picture.after, handle),
+        Rect {
+            origin: Vec2::new(164.0, 29.0),
+            size: Vec2::new(32.0, 14.0)
+        }
+    );
+    let items = picture.after.items();
+    let item = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("edge item");
+    assert!(
+        matches!(&item.primitives[2], Prim::Rect { radius: 4.0, fill: Some(fill), border: None, .. }
+        if *fill == kumochi_scene::theme::Theme::default().surface.into())
+    );
+    assert!(
+        matches!(&item.primitives[3], Prim::Text { origin, max_width: Some(180.0), .. }
+        if *origin == Vec2::new(90.0, 31.0))
+    );
+}
+
+#[test]
+fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
+    let mut scene = new_scene("label_nudge");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let picture = prepared(&mut scene, &mut budget, &before, labelled_pair(["x", "y"]));
+    let first = scene.handle(&id("e1")).expect("first edge");
+    let second = scene.handle(&id("e2")).expect("second edge");
+    let items = picture.after.items();
+    let item = items
+        .iter()
+        .find(|item| item.handle == second)
+        .expect("second item");
+    let origin = item
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Text { origin, .. } => Some(*origin),
+            _ => None,
+        })
+        .expect("second label");
+    assert_eq!(origin, Vec2::new(72.0, 31.0));
+    assert_eq!(
+        chip(&picture.after, first),
+        Rect {
+            origin: Vec2::new(172.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+    assert_eq!(
+        chip(&picture.after, second),
+        Rect {
+            origin: Vec2::new(154.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+    let updated = prepared(
+        &mut scene,
+        &mut budget,
+        &picture.after,
+        json!({"id":"color","set":[{"target":"e2","color":"red"}]}),
+    );
+    assert_eq!(chip(&updated.after, second), chip(&picture.after, second));
+    let removed = prepared(
+        &mut scene,
+        &mut budget,
+        &updated.after,
+        json!({"id":"remove","remove":["e1"]}),
+    );
+    assert_eq!(
+        chip(&removed.after, second),
+        Rect {
+            origin: Vec2::new(172.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+}
+
+#[test]
+fn label_collisions_use_world_bounds_across_transformed_parents() {
+    let mut scene = new_scene("world_chips");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"parents","put":[
+            {"diagram":{"id":"d1","dir":"right","box":[0,0,360,300]}},
+            {"diagram":{"id":"d2","dir":"right","box":[0,0,360,300]}},
+            {"node":{"id":"a","in":"d1","label":"A"}},
+            {"node":{"id":"b","in":"d1","label":"B"}},
+            {"node":{"id":"c","in":"d2","label":"C"}},
+            {"node":{"id":"d","in":"d2","label":"D"}},
+            {"edge":{"id":"e1","in":"d1","from":"a","to":"b","label":"x"}},
+            {"edge":{"id":"e2","in":"d2","from":"c","to":"d","label":"y"}},
+            {"anim":{"target":"d2","track":"scale","keys":[[0,2]]}},
+            {"anim":{"target":"d2","track":"pos","keys":[[0,[-240,-36]]]}},
+            {"anim":{"target":"b","track":"pos","keys":[[0,[120,0]]]}},
+            {"anim":{"target":"d","track":"pos","keys":[[0,[120,0]]]}}
+        ]}),
+    );
+    assert_eq!(
+        chip(&picture.after, scene.handle(&id("e1")).expect("first edge")),
+        Rect {
+            origin: Vec2::new(232.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+    assert_eq!(
+        chip(
+            &picture.after,
+            scene.handle(&id("e2")).expect("second edge")
+        ),
+        Rect {
+            origin: Vec2::new(220.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+}
+
+#[test]
+fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
+    let mut scene = new_scene("full_edge");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        labelled_pair(["abc", "def"]),
+    );
+    for name in ["e1", "e2"] {
+        assert_eq!(
+            chip(&picture.after, scene.handle(&id(name)).expect("edge")),
+            Rect {
+                origin: Vec2::new(164.0, 29.0),
+                size: Vec2::new(32.0, 14.0)
+            }
+        );
+    }
+}
+
+#[test]
+fn edge_label_chips_paint_after_every_edge_stroke() {
+    use kumochi_scene::motion::{Frame, SceneView};
+    let mut scene = new_scene("chip_layers");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        labelled_pair(["x", "y"]),
+    );
+    let mut view = SceneView::new(&before, scene.activated());
+    let mut frame = Frame::new();
+    view.activate(picture, 0, 800, &mut frame)
+        .expect("activate");
+    view.frame(u64::MAX, &mut frame).expect("settled frame");
+    let kinds: Vec<_> = frame
+        .paint_items()
+        .flat_map(|(_, primitives)| primitives)
+        .map(|primitive| match primitive {
+            Prim::Rect { .. } => "rect",
+            Prim::Text { .. } => "text",
+            Prim::Line { .. } => "line",
+            Prim::Fill { .. } => "fill",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "rect", "text", "rect", "text", "line", "fill", "line", "fill", "rect", "text", "rect",
+            "text"
+        ]
+    );
+    assert_eq!(frame.items().len(), 4);
+}
+
+#[test]
+fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
+    let mut scene = new_scene("chip_node");
+    let before = LayoutState::new(&scene);
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"skip","put":[
+            {"diagram":{"id":"diagram","dir":"right","box":[0,0,600,300]}},
+            {"node":{"id":"a","in":"diagram","label":"A"}},
+            {"node":{"id":"b","in":"diagram","label":"B"}},
+            {"node":{"id":"c","in":"diagram","label":"C"}},
+            {"edge":{"id":"ab","in":"diagram","from":"a","to":"b"}},
+            {"edge":{"id":"bc","in":"diagram","from":"b","to":"c"}},
+            {"edge":{"id":"skip","in":"diagram","from":"a","to":"c","label":"x"}}
+        ]}),
+    );
+    let handle = scene.handle(&id("skip")).expect("skip edge");
+    assert_eq!(
+        chip(&picture.after, handle),
+        Rect {
+            origin: Vec2::new(236.0, 29.0),
+            size: Vec2::new(16.0, 14.0)
+        }
+    );
+    let items = picture.after.items();
+    let item = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("skip item");
+    let Prim::Line { points, .. } = &item.primitives[0] else {
+        panic!("curve")
+    };
+    assert_eq!(points[8], Vec2::new(300.0, 36.0));
+}
+
 fn rightward_chain() -> serde_json::Value {
     json!({"id":"chain","put":[
         {"diagram":{"id":"diagram","dir":"right"}},

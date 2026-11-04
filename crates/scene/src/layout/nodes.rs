@@ -499,17 +499,24 @@ pub(super) fn place(
                 group.item.transform = Affine::pose(scale, 0.0, offset);
             }
             if let Some((text, size)) = title {
-                // shortcut: groups stay frameless pending P3 check 8's membership verdict; add frames if it rejects headings.
                 let (bounds, origin) = compound::banded(contents.unwrap_or_default(), size);
                 group.item.bounds = bounds;
-                group.item.primitives = Arc::from([Prim::Text {
-                    origin,
-                    text,
-                    style,
-                    color: build.theme.fg.into(),
-                    max_width: Some(180.0),
-                    align: Align::Center,
-                }]);
+                group.item.primitives = Arc::from([
+                    Prim::Rect {
+                        rect: bounds,
+                        radius: 8.0,
+                        fill: None,
+                        border: Some((build.theme.line.into(), 1.0)),
+                    },
+                    Prim::Text {
+                        origin,
+                        text,
+                        style,
+                        color: build.theme.fg.into(),
+                        max_width: Some(180.0),
+                        align: Align::Center,
+                    },
+                ]);
                 group.title = Some(size);
             } else if let Some(contents) = contents {
                 group.item.bounds = contents;
@@ -857,7 +864,7 @@ pub(super) fn edge(
         ]
     };
     let middle = (a + b) * 0.5;
-    // shortcut: curves can obscure skipped-rank and back links; P3 check 8 decides whether detour routing is required.
+    // shortcut: curves can cross nodes and title bands; add detour routing after D1.
     let control = if direction == Direction::Right {
         Vec2::new(middle.x, a.y)
     } else {
@@ -882,6 +889,7 @@ pub(super) fn edge(
     if matches!(head, Head::Start | Head::Both) {
         heads.push(arrow_head(points[1], points[0]));
     }
+    let label_middle = points[usize::from(pieces) / 2];
     let mut bounds = point_bounds(&points)?;
     for head in &heads {
         bounds = bounds.union(point_bounds(head)?);
@@ -904,8 +912,18 @@ pub(super) fn edge(
             bold: false,
         };
         let size = build.measure(label, style, Some(180.0))?;
-        let origin = middle - size * 0.5;
-        bounds = bounds.union(Rect { origin, size });
+        let origin = label_middle - size * 0.5;
+        let chip = Rect {
+            origin: origin - Vec2::new(4.0, 2.0),
+            size: size + Vec2::new(8.0, 4.0),
+        };
+        bounds = bounds.union(chip);
+        primitives.push(Prim::Rect {
+            rect: chip,
+            radius: 4.0,
+            fill: Some(build.theme.surface.into()),
+            border: None,
+        });
         primitives.push(Prim::Text {
             origin: text_origin(Rect { origin, size }, Some(180.0), Align::Center),
             text: label.clone(),
