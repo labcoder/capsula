@@ -180,6 +180,9 @@ creates no file.
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
   - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
+  - status lines that aren't input: `link state=`, `run phase=`, `submit sent=`, `dock settled`,
+    `dock paints settled=`, `kumo baked`, `kumo frame shade_us=` and `kumo reshades=`. The
+    harness reads them as status and still refuses any other unknown event.
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process
@@ -191,9 +194,12 @@ A paint isn't a present. The gate harness joins its exact Canvas QPC to the sepa
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
 passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-Hover opens the peek, so the click gate left with B2b. The hover phase that replaces it gates the
-proxy's native pointer-entry QPC → peek present at p95 ≤8ms and lands in the next PR, before the
-desk session runs the input gate.
+hover gates the native pointer-entry QPC → the peek's first present at p95 ≤8ms. That QPC is read
+when the entering `WM_MOUSEMOVE` is dispatched to the proxy's window procedure. So it excludes
+OS routing and the message's wait in the UI thread's Win32 message queue before dispatch, and
+includes the wait from dispatch, through the presence event channel, to the presence handler. A change whose entry is missing or no later than the previous change
+stays in the denominator as `MissingEntry`; SendInput → present and state entry → present are
+reported beside it, not gated, so a build without entry counters still gives those two.
 Both reports retain display latency separately: missing display feedback is unmeasured there,
 not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
 coverage and motion pacing still require displayed frames. The UI thread only
@@ -333,8 +339,9 @@ cleanup; a phase cannot begin without its complete budget.
    (C2a).
 2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Click left with B2b, since pointer entry now opens the peek; the hover phase replaces it in
-   the next PR.
+3. Hover runs after the resting receipts: 100 pointer entries onto the dock. Before each entry,
+   once the previous cycle has hidden the peek, it waits 1–8ms in a fixed jitter. After the entry
+   it waits a fixed 100ms, checks that the peek is visible, then leaves and waits until it hides.
 4. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
@@ -405,3 +412,16 @@ restores owned fixture layout state, closes only owned windows/processes gracefu
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
 Actual Alt-Tab into owner applications remains manual or unmeasured.
+
+### The hover-only idle session
+
+`hover-gate <path-session.txt>` runs the hover phase alone, with the same transcript, evidence
+directory, fixture, guards and PresentMon bounds as `gate-session`. Only the opener differs.
+Nobody presses Ready. Once a second, sending nothing else, the task asks the fixture to arm
+itself (`ARM_IDLE`). The fixture's handler is the only idle check: on its own thread it reads
+`GetLastInputInfo`, and until Rez has had no input for ten minutes it declines. Then it takes
+the foreground (allowed once the foreground lock timeout has passed), focuses its EDIT,
+registers the physical-input and session guards, and publishes Ready with no feel verdicts. From there the unchanged quiet second opens injection,
+and the first input the harness didn't send stops the run. A physical Ready press during this
+task is refused: the task opens only on idle. `gate-session` keeps its Ready press, and no
+other task arms on idle.

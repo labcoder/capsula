@@ -38,14 +38,7 @@ pub(crate) struct PhaseContext<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Keyboard,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "shortcut: hover opens the peek, so no trial runs the click phase; the hover phase replaces it in the PR after B2b"
-        )
-    )]
-    Click,
+    Hover,
     Focus,
     Layouts,
     Esc,
@@ -63,14 +56,14 @@ pub(crate) struct Counts {
 #[derive(Debug)]
 pub(crate) struct Diagnostics {
     path: PathBuf,
-    pub(crate) click_injections: RefCell<Vec<i64>>,
+    pub(crate) hover_injections: RefCell<Vec<i64>>,
 }
 
 impl Diagnostics {
     pub(crate) fn in_directory(directory: &Path) -> Self {
         Self {
             path: directory.join("milestones.log"),
-            click_injections: RefCell::default(),
+            hover_injections: RefCell::default(),
         }
     }
 
@@ -483,7 +476,7 @@ pub(crate) fn exercise(
         }
         match phase {
             Phase::Keyboard => keyboard(session, counts, diagnostics),
-            Phase::Click => click_panel(session, counts, context, diagnostics),
+            Phase::Hover => hover_panel(session, counts, context, diagnostics),
             Phase::Focus => focus(session, counts, diagnostics),
             Phase::Layouts => layouts(session, counts, diagnostics),
             Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
@@ -583,7 +576,7 @@ fn keyboard(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostic
     Ok(())
 }
 
-fn click_panel(
+fn hover_panel(
     session: &mut Session,
     counts: &mut Counts,
     context: &PhaseContext<'_>,
@@ -594,23 +587,17 @@ fn click_panel(
         session.wait(Duration::from_micros(1000 + (index * 997) % 6944))?;
         counts.attempts += 1;
         session.move_pointer(enter, Target::Product)?;
-        session.wait(Duration::from_millis(10))?;
-        ensure!(
-            !session.panel_visible()?,
-            "hover alone opened the status panel"
-        );
-        session.click(enter, Target::Product)?;
-        let click_qpc = session.last_qpc;
+        let enter_qpc = session.last_qpc;
         diagnostics
-            .click_injections
+            .hover_injections
             .borrow_mut()
-            .push(click_qpc.context("click SendInput QPC missing")?);
+            .push(enter_qpc.context("enter SendInput QPC missing")?);
         session.wait(Duration::from_millis(100))?;
         let entered = session.panel_visible()?;
         counts.behavior_fail += u32::from(!entered);
         ensure!(
             entered,
-            "line click did not make an owned panel HWND visible"
+            "pointer entry did not make an owned panel HWND visible"
         );
         session.move_pointer(leave, Target::Edit)?;
         let leave_qpc = session.last_qpc;
@@ -626,7 +613,7 @@ fn click_panel(
         counts.sent += 1;
         counts.behavior_pass += 1;
         println!(
-            "click attempt={} injection_click_qpc={click_qpc:?} injection_leave_qpc={leave_qpc:?} observed_hwnd_leave_ms={:.3}; NOT button-down/present latency",
+            "hover attempt={} injection_enter_qpc={enter_qpc:?} injection_leave_qpc={leave_qpc:?} observed_hwnd_leave_ms={:.3}; NOT entry/present latency",
             counts.attempts,
             observed_leave.as_secs_f64() * 1000.0
         );

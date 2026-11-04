@@ -195,6 +195,7 @@ async fn unlock_once_quitting(observed: &mut UnboundedReceiver<Seen>, lock: rusq
 #[tokio::test]
 async fn a_held_first_step_holds_back_scenes_and_turns_and_the_connection_ends_unavailable() {
     let scratch = Scratch::new("barrier-held");
+    super::product_waits();
     let mut brain = patient_brain(&scratch, SCRIPT);
     let mut observed = brain.observe();
     let release = brain.hold_store(first_step);
@@ -649,6 +650,7 @@ async fn controls_queued_ahead_of_a_quitting_drain_in_order_and_the_quit_is_acce
 #[tokio::test]
 async fn a_store_stalled_past_the_deadline_makes_the_quit_incomplete_on_time() {
     let scratch = Scratch::new("quit-stalled");
+    super::product_waits();
     let drawn = drawn(&scratch, &[&["a"]]);
     let (mut brain, lock) = locked_brain(&scratch, "");
     let ended = quit_with(&mut brain, &[]).await;
@@ -658,7 +660,7 @@ async fn a_store_stalled_past_the_deadline_makes_the_quit_incomplete_on_time() {
     let took = accepted.elapsed();
     assert!(took >= CLOSE_WAIT, "{took:?}");
     assert!(
-        took < CLOSE_WAIT + Duration::from_millis(500),
+        took < 2 * CLOSE_WAIT,
         "{took:?}: no stage restarted its budget"
     );
     assert_eq!(

@@ -8,11 +8,14 @@
 //!   overtakes recovery. Their credit is withheld meanwhile, so the data window bounds them.
 //! - Each `StepCommit` goes through the mirror's `admit` and `commit` under one shell budget,
 //!   and its lifetime index must match before anything is prepared.
-//! - A scene prepares one step at a time, on the tip the previous step left. A result is checked
-//!   again when it comes back: job, scene, cut and layout base. A step has 250 ms from its start;
-//!   the watchdog fails it then, whether or not its worker has answered.
-//! - Nothing activates before B6, so a fresh scene's prepared steps are held and charged, and a
-//!   cut or failure names the activated bound: the recovered resting layout, or zero.
+//! - A scene prepares one step at a time, on the tip the previous step left, and holds at most
+//!   [`scene::WINDOW`] prepared or running steps. A result is checked again when it comes back:
+//!   job, scene, cut and layout base. A step has 250 ms from when its predecessor was ready and
+//!   the window had room, waiting for a worker slot included; the watchdog fails it then, whether
+//!   or not its worker has answered. A step the window holds back is untimed.
+//! - Only the oldest prepared step is consumed, and its layout becomes the rest. Before B6 nothing
+//!   consumes in production, so a cut or failure names the activated bound: the recovered resting
+//!   layout, or zero.
 //! - A scene with a cut outstanding prepares nothing until the brain acknowledges the cut, and a
 //!   scene gets at most one cut between commits.
 //! - Scene frames, jobs, answers and scenes are held in [`Deferred`] from the moment the
@@ -24,12 +27,13 @@ mod prepare;
 mod recovery;
 mod scene;
 mod snapshot;
+mod window;
 
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -50,14 +54,14 @@ use kumochi_scene::{
 pub(crate) use measure::Measure;
 pub(crate) use prepare::{Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
-use scene::{Cut, Out, Running, Scene, Ticket};
+use scene::{Cut, Out, Ready, Running, Scene, Ticket};
 use snapshot::Assembler;
 
 /// The layout algorithm this shell prepares with; the brain stores it with each scene.
 const LAYOUT_VERSION: u32 = 1;
 /// A step's preparation should take no longer; missing it is only logged.
 const TARGET: Duration = Duration::from_millis(50);
-/// A step's preparation fails this long after it started, and a later answer is dropped.
+/// A step's preparation fails this long after it became eligible, and a later answer is dropped.
 const DEADLINE: Duration = Duration::from_millis(250);
 // shortcut: margin over measured core recovery; B9 must measure real-font cap scenes.
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(2);
@@ -129,6 +133,8 @@ pub(crate) struct Presenter {
     slots: Arc<()>,
     /// The dropper stopped and intake was refused; logged once.
     refused: bool,
+    /// Consumed steps their owners still hold, charged until each is dropped, across connections.
+    returned: Arc<AtomicUsize>,
     /// This presenter's dropper liveness in tests; `None` asks the process-wide dropper.
     #[cfg(test)]
     dropper: Option<bool>,
@@ -152,6 +158,7 @@ impl Presenter {
             next_job: 0,
             slots: Arc::new(()),
             refused: false,
+            returned: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             dropper: None,
         }
@@ -287,18 +294,16 @@ impl Presenter {
                 id,
                 scene,
                 result,
+                full_after,
                 slot,
             } => {
                 drop(slot);
-                let running = self.scenes.get_mut(&scene).and_then(|state| {
-                    let running = state.running.take_if(|running| running.id == id)?;
-                    if let Some(next) = state.queue.front_mut() {
-                        next.queued = now;
-                    }
-                    Some(running)
-                });
+                let running = self
+                    .scenes
+                    .get_mut(&scene)
+                    .and_then(|state| state.running.take_if(|running| running.id == id));
                 if let Some(running) = running {
-                    self.prepared(scene, &running, result, now, &mut out);
+                    self.prepared(scene, &running, result, full_after, now, &mut out);
                 }
             }
             Completion::Recovered {
@@ -356,7 +361,7 @@ impl Presenter {
         Ok(out.finish())
     }
 
-    /// The earliest deadline the watchdog must check, if any work is running.
+    /// The earliest deadline the watchdog must check, if any work is timed.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         let recovering = match &self.phase {
             Phase::Recovering(recovery) => Some(recovery.started + RECOVERY_DEADLINE),
@@ -433,10 +438,13 @@ impl Presenter {
             || self.assembler.described() && self.assembler.pending()
     }
 
-    /// Prepared geometry charged against [`MAX_RESIDENT_BYTES`]: what each scene retains plus its
-    /// prepared steps.
+    /// Prepared geometry charged against [`MAX_RESIDENT_BYTES`]: what each scene retains, its
+    /// prepared steps, and every consumed step still held.
     pub(crate) fn residency(&self) -> usize {
-        self.scenes.values().map(Scene::residency).sum()
+        self.scenes
+            .values()
+            .map(Scene::residency)
+            .fold(self.returned.load(Ordering::Relaxed), usize::saturating_add)
     }
 }
 
@@ -492,6 +500,12 @@ impl Presenter {
                 let state = SceneState::begin(header.begin.clone()).map_err(|_| Broken::Header)?;
                 let rest = LayoutState::new(&state);
                 let retained = rest.resident_bytes();
+                if self.residency().saturating_add(retained) > MAX_RESIDENT_BYTES {
+                    let bytes = state.attributed_bytes().saturating_add(retained);
+                    drop(Deferred::new((state, rest), bytes));
+                    self.forget(*scene, out);
+                    return Ok(());
+                }
                 self.scenes
                     .insert(*scene, Scene::new(state, rest, retained));
                 Ok(())
@@ -572,7 +586,7 @@ impl Presenter {
         scene.queue.push_back(Ticket {
             run,
             index,
-            queued: now,
+            eligible_at: None,
             preparation,
         });
         self.pump(id, now, out)
@@ -628,9 +642,16 @@ impl Presenter {
         Ok(())
     }
 
-    /// Starts a scene's next queued step on the tip its previous step left.
+    /// Stamps a scene's next step eligible once its predecessor is ready and the window has room,
+    /// then starts it on the tip its previous step left when a worker slot is free.
     #[expect(clippy::result_large_err, reason = "preserve rejected ownership")]
     fn pump(&mut self, id: SceneId, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        if let Some(scene) = self.scenes.get_mut(&id)
+            && scene.open()
+            && let Some(ticket) = scene.queue.front_mut()
+        {
+            ticket.eligible_at.get_or_insert(now);
+        }
         if self.workers() >= MAX_WORKERS || !self.dropper_running() {
             return Ok(());
         }
@@ -641,11 +662,15 @@ impl Presenter {
         if scene.running.is_some() || scene.cut == Cut::Outstanding {
             return Ok(());
         }
-        let Some(ticket) = scene.queue.pop_front() else {
+        let Some(eligible_at) = scene.queue.front().and_then(|ticket| ticket.eligible_at) else {
             return Ok(());
         };
+        let ticket = scene
+            .queue
+            .pop_front()
+            .expect("the front ticket was just read");
         let (run, index) = (ticket.run, ticket.index);
-        if now >= ticket.queued + DEADLINE {
+        if now >= eligible_at + DEADLINE {
             self.fail(id, run, index, SceneFailure::Timeout, out);
             return Ok(());
         }
@@ -668,7 +693,7 @@ impl Presenter {
                     id: job,
                     run,
                     index,
-                    started: now,
+                    eligible_at,
                     cancel: Arc::clone(&cancel),
                 });
                 self.next_job += 1;
@@ -692,10 +717,11 @@ impl Presenter {
         id: SceneId,
         running: &Running,
         result: Deferred<Result<PreparedStep, PrepareError>>,
+        full_after: usize,
         now: Instant,
         out: &mut Out,
     ) {
-        let elapsed = now.saturating_duration_since(running.started);
+        let elapsed = now.saturating_duration_since(running.eligible_at);
         let total = self.residency();
         let Some(scene) = self.scenes.get_mut(&id) else {
             return;
@@ -722,7 +748,10 @@ impl Presenter {
                     let elapsed_ms = elapsed.as_millis();
                     tracing::warn!(elapsed_ms, "a scene step's preparation missed its target");
                 }
-                scene.ready.push(prepared);
+                scene.ready.push_back(Ready {
+                    step: prepared,
+                    full_after,
+                });
             }
             Err(reason) => self.fail(id, running.run, running.index, reason, out),
         }

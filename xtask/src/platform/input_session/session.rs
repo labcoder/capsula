@@ -22,8 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use super::fixture::{
-    ABORT, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN, OPEN_GATE, READY,
-    REARM, UNCOVER,
+    ABORT, ARM_IDLE, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN,
+    OPEN_GATE, READY, REARM, UNCOVER,
 };
 use super::gate::{Feel, Gate, Lease, Quiet};
 use super::guard::{self, StopMetadata};
@@ -284,6 +284,44 @@ impl Session {
         lease.ready(armed.unwrap_or(0), Instant::now());
         self.lease.set(lease);
         self.or_abort(armed.map_err(anyhow::Error::from).and(feel))
+    }
+
+    /// Waits, sending nothing, until Rez has had no input for `away`, then has the fixture arm
+    /// itself as Ready would; the quiet second that follows is unchanged.
+    pub(crate) fn await_idle(&self, deadline: Instant, away: Duration) -> Result<()> {
+        ensure!(
+            self.gate() == Gate::Waiting,
+            "the session was already armed"
+        );
+        let result = (|| {
+            loop {
+                ensure!(
+                    Instant::now() < deadline.min(self.end),
+                    "no idle window before the deadline"
+                );
+                ensure!(
+                    property(self.fixture.hwnd, ABORT) == 0,
+                    "fixture guard aborted before the idle arm"
+                );
+                ensure!(
+                    property(self.fixture.hwnd, READY) == 0,
+                    "Ready was pressed; this task opens only on idle"
+                );
+                let away_ms = WPARAM(usize::try_from(away.as_millis())?);
+                match request(self.fixture, ARM_IDLE, away_ms, LPARAM(0))? {
+                    1 => break,
+                    2 => sleep(Duration::from_secs(1)),
+                    3 => bail!("the fixture could not take the foreground"),
+                    _ => bail!("the fixture refused the idle arm"),
+                }
+            }
+            u32::try_from(property(self.fixture.hwnd, ARMED_INPUT)).map_err(anyhow::Error::from)
+        })();
+        let armed = self.or_abort(result)?;
+        let mut lease = self.lease.get();
+        lease.ready(armed, Instant::now());
+        self.lease.set(lease);
+        Ok(())
     }
 
     /// True after one guarded quiet second opens injection; false after rearming for a new Ready.

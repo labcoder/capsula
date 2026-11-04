@@ -178,7 +178,7 @@ impl Presenter {
                 self.forget(scene, out);
             }
         }
-        let mut total = 0_usize;
+        let mut total = self.returned.load(Ordering::Relaxed);
         let over: Vec<_> = self
             .scenes
             .iter()
