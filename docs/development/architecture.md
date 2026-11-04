@@ -47,6 +47,12 @@ flowchart LR
 
 The shell keeps no state on disk, only its log, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
 
+Each crate resolves its data folder behind its own `platform` interface. The Windows
+implementations read `LOCALAPPDATA` and require an absolute path before appending the product
+folder, so missing, empty or relative values never put logs or brain data under the working
+directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
+respected. The brain's session lock uses the same local data root.
+
 ## Crates
 
 ```mermaid
