@@ -5,6 +5,7 @@ mod credential;
 mod drawing;
 mod escape;
 mod input;
+mod instance;
 mod link;
 mod logging;
 mod platform;
@@ -24,7 +25,19 @@ fn main() -> ExitCode {
     if logging::init(constants::SHELL_LOG).is_err() {
         return ExitCode::FAILURE;
     }
-    let _instance = match platform::lock_single_instance(constants::SHELL_MUTEX) {
+    let Some(data_dir) = platform::data_dir() else {
+        tracing::error!("can't find the data folder for the single-instance lock");
+        return ExitCode::FAILURE;
+    };
+    let session = match platform::session_id() {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!(%error, "can't read the session for the single-instance lock");
+            return ExitCode::FAILURE;
+        }
+    };
+    let lock = data_dir.join(format!("{}-{session}.lock", constants::SHELL_LOCK));
+    let _instance = match instance::InstanceLock::try_acquire(&lock) {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::info!("another shell is running in this session");

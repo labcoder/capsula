@@ -45,7 +45,7 @@ flowchart LR
 | Screen worker | Screen capture, UI Automation, OCR and image encoding. It's killable, because a stuck UIA provider can't be stopped any other way |
 | Claude Code | The user's own Claude Code, started fresh for each question in its own nested run job, restricted to Kumochi's tools. Ending a question terminates that run job only |
 
-The shell keeps no state on disk, only its log, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
+The shell keeps no state on disk, only its log and an empty single-instance lock file, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
 
 Each crate resolves its data folder behind its own `platform` interface. The Windows
 implementations read `LOCALAPPDATA` and require an absolute path before appending the product
