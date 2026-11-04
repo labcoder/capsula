@@ -31,6 +31,8 @@ mod accounts;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "page_tests.rs"]
@@ -396,7 +398,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
         main_thread,
         high_water,
         scenes,
-        engine,
+        crate::runtime::Selected::Fixture(engine),
         scratch.config(),
         crate::test_support::accounts(scratch),
     )
@@ -465,6 +467,7 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
                 run: RunId(1),
                 thread: ThreadId(2),
                 phase: Phase::Thinking,
+                error: None,
                 origin: Some(RunOrigin::Typed { turn: 91 }),
             })
         );
@@ -475,6 +478,7 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
                 run: RunId(1),
                 thread: ThreadId(2),
                 phase: Phase::Interrupted,
+                error: None,
                 origin: None,
             })
         );

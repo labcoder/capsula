@@ -5,7 +5,7 @@ use kumochi_protocol::message::{ControlToShell, DataToShell, Deleted, Phase, Run
 
 use super::{R, T, build_context, built, ends_failed, fresh, start_engine};
 use crate::coordinator::{
-    BuildKey, Coordinator, Effect, Input, LeaseId, SEND_DEADLINE, Stale, StoreOp,
+    BuildKey, Coordinator, Effect, Input, LeaseId, SEND_DEADLINE, SendKey, Stale, StoreOp,
 };
 use crate::store::{Failure, Interruption, RunEnd};
 
@@ -14,12 +14,12 @@ const C: ThreadId = ThreadId(3);
 /// The run that replaces run 10 in task 4.
 const R2: RunId = RunId(11);
 
-fn key(run: RunId, attempt: u64) -> BuildKey {
-    BuildKey {
+fn key(run: RunId, attempt: u64) -> SendKey {
+    SendKey::Build(BuildKey {
         run,
         round: 1,
         attempt,
-    }
+    })
 }
 
 fn lease(run: RunId, attempt: u64, send: u64) -> LeaseId {
@@ -341,6 +341,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
                 run: R2,
                 thread: T,
                 phase: Phase::Failed,
+                error: None,
             }),
             Effect::Data(DataToShell::RunEnd { run: R2 }),
             Effect::Store(StoreOp::EndRun {
@@ -368,6 +369,7 @@ fn deleting_the_sending_runs_own_task_settles_without_a_cycle() {
                 run: R,
                 thread: T,
                 phase: Phase::Interrupted,
+                error: None,
             }),
             Effect::Data(DataToShell::RunEnd { run: R }),
             Effect::Store(StoreOp::EndRun {

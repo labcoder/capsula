@@ -52,6 +52,8 @@ pub(crate) struct Applied {
     pub(crate) stop: Option<ControlToBrain>,
     /// Credit for held data frames this state classified.
     pub(crate) credit: u32,
+    /// The run isn't fenced off, by Esc or a delete, so its feedback may show.
+    pub(crate) visible: bool,
 }
 
 /// The newest named run, until both its terminal `RunState` and its `RunEnd` have been applied.
@@ -453,6 +455,7 @@ impl Runs {
             self.end(run, |live| live.state_ended = true);
         }
         applied.credit = self.release();
+        applied.visible = run > self.fence;
         applied
     }
 

@@ -68,7 +68,8 @@ fn exhausted_queue() -> RefCell<DataQueue> {
 
 #[test]
 fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
-    let mut coordinator = Coordinator::new(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
+    let mut coordinator =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
     coordinator
         .handle(Input::Turn {
             turn: 1,
@@ -174,6 +175,10 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one connection's credit, stop and reply sequence"
+)]
 async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let scratch = Scratch::new("page-credit");
     let mut brain = test_support::brain(&scratch, "5000 text later");
@@ -230,7 +235,8 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
                 origin: Some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
                 run: RunId(1),
                 thread: ThreadId(2),
-                phase: Phase::Thinking
+                phase: Phase::Thinking,
+                ..
             }
         ));
         controls_tx
@@ -517,7 +523,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         ThreadId(1),
         (ThreadId(1), RunId(0)),
         Vec::new(),
-        Box::new(Fixture::parse("").expect("fixture")),
+        crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
     )

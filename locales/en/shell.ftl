@@ -138,3 +138,5 @@ error-usage-limit = You've reached a ChatGPT usage limit for this app. Check you
 error-account-refused = ChatGPT didn't accept this account for that request. Signing in again may help.
 error-request-refused = ChatGPT couldn't take that request. Trying again won't help.
 error-response-unreadable = ChatGPT's answer couldn't be read. Try again.
+error-sign-in-needed = Sign in to ChatGPT to get an answer.
+error-model-unavailable = This thread's model isn't available on your account. Pick another in Settings.

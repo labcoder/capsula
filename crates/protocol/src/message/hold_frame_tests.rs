@@ -156,10 +156,11 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 run: RunId(u64::MAX),
                 thread: ThreadId(u64::MAX),
                 phase: Phase::Listening,
+                error: None,
                 origin: Some(origin),
             },
             Pipe::Control,
-            29,
+            30,
         );
     }
     round_trip(
@@ -167,10 +168,11 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             run: RunId(u64::MAX),
             thread: ThreadId(u64::MAX),
             phase: Phase::Answering,
+            error: None,
             origin: None,
         },
         Pipe::Control,
-        23,
+        24,
     );
     round_trip(
         &ControlToShell::TurnRefused {

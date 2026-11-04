@@ -161,6 +161,7 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
             Applied {
                 stop: Some(stop(run)),
                 credit: 0,
+                visible: false,
             }
         );
         assert_eq!(runs.target(), Target::New);
@@ -329,7 +330,7 @@ fn typed(runs: &mut Runs, typed: &str) -> Input {
 fn restarted(store: &Store) -> Coordinator {
     let (thread, run) = store.high_water().expect("ids");
     let main = store.main_thread().expect("recovered");
-    Coordinator::new(main, thread, run, store.scenes().expect("scenes"))
+    Coordinator::ready_for_tests(main, thread, run, store.scenes().expect("scenes"))
 }
 
 #[test]
@@ -492,6 +493,33 @@ fn data(runs: &mut Runs, message: DataToShell) -> u32 {
     runs.apply_data(message, BYTES)
 }
 
+/// M143-2: a failure queued before Esc but applied after it shows no notice, whether Esc
+/// stopped a named run or cancelled a turn not yet named; an unfenced failure still shows.
+#[test]
+fn a_failure_applied_after_esc_is_not_shown() {
+    let mut runs = answering(1);
+    assert_eq!(runs.stop(), Some(stop(1)));
+    assert!(!state(&mut runs, 1, Phase::Failed).visible);
+
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    runs.apply_scenes(&[]).expect("valid");
+    submit(&mut runs, "unnamed");
+    assert_eq!(runs.stop(), None);
+    assert_eq!(
+        state(&mut runs, 1, Phase::Failed),
+        Applied {
+            stop: Some(stop(1)),
+            credit: 0,
+            visible: false,
+        }
+    );
+
+    let mut runs = answering(1);
+    assert!(state(&mut runs, 1, Phase::Failed).visible);
+}
+
 fn submit(runs: &mut Runs, typed: &str) {
     runs.submit(typed, |_| true).expect("sent");
 }
@@ -610,7 +638,8 @@ fn data_before_its_run_state_is_held_until_the_state_names_it() {
         applied,
         Applied {
             stop: None,
-            credit: BYTES
+            credit: BYTES,
+            visible: true,
         }
     );
     assert_eq!(shown_text(&runs), Some((RunId(3), "early")));
@@ -634,7 +663,8 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
         applied,
         Applied {
             stop: Some(stop(1)),
-            credit: BYTES
+            credit: BYTES,
+            visible: false,
         }
     );
     assert!(runs.shown().is_none(), "nothing of a shows");
@@ -643,7 +673,14 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
     data(&mut runs, step(1, 0));
     assert_eq!(state(&mut runs, 1, Phase::Interrupted), Applied::default());
     assert!(runs.shown().is_none());
-    assert_eq!(state(&mut runs, 2, Phase::Thinking), Applied::default());
+    assert_eq!(
+        state(&mut runs, 2, Phase::Thinking),
+        Applied {
+            stop: None,
+            credit: 0,
+            visible: true,
+        }
+    );
     data(&mut runs, text(2, "b runs"));
     assert_eq!(shown_text(&runs), Some((RunId(2), "b runs")));
     assert!(runs.working());
@@ -666,7 +703,8 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
         state(&mut runs, 5, Phase::Thinking),
         Applied {
             stop: Some(stop(5)),
-            credit: BYTES
+            credit: BYTES,
+            visible: false,
         },
         "exactly one Stop names a's run"
     );
@@ -736,7 +774,8 @@ fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
         state(&mut runs, 2, Phase::Answering),
         Applied {
             stop: None,
-            credit: 0
+            credit: 0,
+            visible: true,
         },
         "b isn't cancelled, and a's held frame is gone"
     );
@@ -785,7 +824,8 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
         state(&mut runs, 5, Phase::Thinking),
         Applied {
             stop: Some(stop(5)),
-            credit: 0
+            credit: 0,
+            visible: false,
         },
         "a's run is stopped once it's named"
     );

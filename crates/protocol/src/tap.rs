@@ -102,6 +102,7 @@ impl Tapped for ControlToShell {
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
+            Self::ThreadsChanged => "ThreadsChanged",
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
         }
@@ -117,6 +118,7 @@ impl Tapped for ControlToShell {
                     run: _,
                     thread: _,
                     phase: _,
+                    error: _,
                     origin: _
                 }
                 | Self::Ping
@@ -128,6 +130,7 @@ impl Tapped for ControlToShell {
                 }
                 | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
+                | Self::ThreadsChanged
         )
     }
 }

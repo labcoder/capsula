@@ -47,6 +47,7 @@ fn account(label: &str) -> Secret<Account> {
             expires_at: 1_900_000_000,
             pending_identity_validation: true,
             refresh_sent: false,
+            connection: 0,
         }),
     })
 }

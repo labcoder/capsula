@@ -484,6 +484,7 @@ fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
         run: RunId(run),
         thread,
         phase,
+        error: None,
     }
 }
 

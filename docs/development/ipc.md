@@ -60,7 +60,7 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused`, `ThreadsChanged` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
 | Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
@@ -131,6 +131,9 @@ flowchart LR
 
 - Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
+  Every committed title, a rename or a model's (see [engines](engines.md#background-jobs)), sends
+  `ThreadsChanged` on the control pipe. It carries nothing, so it's on the tap's content-free
+  list, and the shell reads its list again.
   The shell confirms a task's displayed title by an authoritative page reread, not by sending
   the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the

@@ -3,8 +3,8 @@ use kumochi_protocol::message::{
 };
 
 use super::{
-    BuildContext, BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, Stale,
-    StoreOp, WALL_CLOCK,
+    BuildContext, BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_DELTA, MAX_TEXT, SendKey,
+    Stale, StoreOp, WALL_CLOCK,
 };
 use crate::context::{Built, ModelRequest, Origin};
 use crate::engines::{CallId, Finish, RunRequest, ToolName, TurnEvent};
@@ -12,12 +12,16 @@ use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
 #[path = "admission_tests.rs"]
 mod admission;
+#[path = "availability_tests.rs"]
+mod availability;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "scene_tests.rs"]
@@ -38,11 +42,12 @@ fn step(label: &str) -> Step {
 
 fn state(run: RunId, thread: ThreadId, phase: Phase) -> Effect {
     Effect::Control(ControlToShell::RunState {
-        origin: (phase == Phase::Thinking)
-            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
         run,
         thread,
         phase,
+        error: None,
+        origin: (phase == Phase::Thinking)
+            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
     })
 }
 
@@ -128,11 +133,11 @@ fn built(run: RunId, attempt: u64, sources: &[ThreadId]) -> Input {
 fn start_engine(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::StartEngine {
         request: RunRequest {
-            key: BuildKey {
+            key: SendKey::Build(BuildKey {
                 run,
                 round: 1,
                 attempt,
-            },
+            }),
             run,
             thread,
             origin: Origin::Task(thread),
@@ -188,7 +193,7 @@ fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
 
 /// A coordinator whose last ids were thread 3 and run 9, with nothing visible.
 fn fresh() -> Coordinator {
-    Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new())
+    Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), Vec::new())
 }
 
 fn run_end(run: RunId) -> Effect {
