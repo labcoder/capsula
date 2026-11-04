@@ -179,6 +179,28 @@ fn chunk() -> RawChunk {
 }
 
 #[test]
+fn borrowed_chunk_validation_retains_payload_when_shape_is_invalid() {
+    let mut value = decode::<SceneSnapshotChunk>(&chunk()).expect("valid chunk");
+    let SceneEvent::Step { step, .. } = &value.events[0] else {
+        panic!("one step");
+    };
+    let owner = Arc::clone(step);
+    assert_eq!(Arc::strong_count(&owner), 2);
+    value.header = None;
+    assert_eq!(value.validate(), Err(SceneDataError::Chunk));
+    assert_eq!(value.events.len(), 1);
+    let SceneEvent::Step { step, .. } = &value.events[0] else {
+        panic!("the step stays owned");
+    };
+    assert!(Arc::ptr_eq(step, &owner));
+    assert_eq!(Arc::strong_count(&owner), 2);
+    value.header = Some(header());
+    assert_eq!(value.validate(), Ok(()));
+    drop(value);
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
+
+#[test]
 fn chunks_validate_local_shape_without_cross_chunk_replay() {
     let mut raw = chunk();
     raw.revision = 1;

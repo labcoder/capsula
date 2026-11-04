@@ -24,6 +24,8 @@ use kumochi_protocol::message::{
     SettingsView, ThreadId, UserError,
 };
 
+use kumochi_scene::deferred::Deferred;
+
 use crate::credential::{self, CredentialError};
 use crate::platform::{self, PipeClient};
 
@@ -83,6 +85,12 @@ pub(crate) enum LinkEvent {
         message: DataToShell,
         bytes: u32,
     },
+    /// A scene/removal frame protected from intake through final disposal.
+    SceneData {
+        generation: u64,
+        frame: Deferred<DataToShell>,
+        bytes: u32,
+    },
     /// The connection's visible scenes, from the control pipe.
     Scenes(Vec<SceneDescriptor>),
     ScenesV1 {
@@ -99,6 +107,31 @@ pub(crate) enum LinkEvent {
     TurnRefused,
     /// Something the user should be told, from the control pipe.
     Error(UserError),
+}
+
+/// Link events applied in one update at most [guess]: a fast stream is applied in batches
+/// rather than one UI update per frame.
+const EVENT_BATCH: usize = 256;
+
+/// Protects a UI batch of at most [`EVENT_BATCH`] events through lost delivery.
+pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Deferred<Vec<LinkEvent>> {
+    let mut events = vec![first];
+    while events.len() < EVENT_BATCH
+        && let Ok(event) = rest.try_recv()
+    {
+        events.push(event);
+    }
+    let payload = events
+        .iter()
+        .map(|event| match event {
+            LinkEvent::Data { bytes, .. } | LinkEvent::SceneData { bytes, .. } => {
+                usize::try_from(*bytes).unwrap_or(usize::MAX)
+            }
+            _ => 0,
+        })
+        .fold(0, usize::saturating_add);
+    let bytes = (events.capacity() * size_of::<LinkEvent>()).saturating_add(payload);
+    Deferred::new(events, bytes)
 }
 
 /// One connection as the UI sees it, from its `Connected` on. Sends and grants through the
@@ -847,14 +880,28 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);
-                if events
-                    .send_blocking(LinkEvent::Data {
+                let event = if matches!(
+                    &message,
+                    DataToShell::SceneSnapshotV1 { .. }
+                        | DataToShell::SceneBegin { .. }
+                        | DataToShell::SceneStepCommit { .. }
+                        | DataToShell::SceneCutApplied { .. }
+                        | DataToShell::SceneEnd { .. }
+                        | DataToShell::ScenesRemoved { .. }
+                ) {
+                    LinkEvent::SceneData {
+                        generation,
+                        frame: Deferred::new(message, reader.bytes),
+                        bytes,
+                    }
+                } else {
+                    LinkEvent::Data {
                         generation,
                         message,
                         bytes,
-                    })
-                    .is_err()
-                {
+                    }
+                };
+                if events.send_blocking(event).is_err() {
                     break;
                 }
             }
@@ -915,3 +962,7 @@ mod tests;
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
 mod delete_tests;
+
+#[cfg(all(test, windows))]
+#[path = "link_measure_tests.rs"]
+mod measure_tests;

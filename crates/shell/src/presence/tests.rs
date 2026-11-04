@@ -1,12 +1,20 @@
 use std::{sync::Arc, time::Instant};
 
 use kumochi_protocol::message::{DataToShell, RunId, SceneHeader, SceneId};
-use kumochi_scene::{Record, layout::SurfaceGeometry, parse_record, text::Bounded, theme::Theme};
+use kumochi_scene::{
+    Record,
+    deferred::{self, Deferred},
+    layout::SurfaceGeometry,
+    parse_record,
+    text::Bounded,
+    theme::Theme,
+};
 
 use super::{EscapePanel, Presence, Runs};
 use crate::presenter::Presenter;
 
 fn mirrored_presenter() -> Presenter {
+    deferred::start().expect("the dropper starts before intake");
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
             logical_size: [1920.0, 1080.0],
@@ -27,13 +35,16 @@ fn mirrored_presenter() -> Presenter {
     presenter
         .data(
             1,
-            DataToShell::SceneBegin {
-                scene: SceneId(1),
-                header: SceneHeader {
-                    begin,
-                    layout_version: 1,
+            Deferred::new(
+                DataToShell::SceneBegin {
+                    scene: SceneId(1),
+                    header: SceneHeader {
+                        begin,
+                        layout_version: 1,
+                    },
                 },
-            },
+                100,
+            ),
             100,
             now,
         )
@@ -44,12 +55,15 @@ fn mirrored_presenter() -> Presenter {
     presenter
         .data(
             1,
-            DataToShell::SceneStepCommit {
-                run: RunId(1),
-                scene: SceneId(1),
-                index: 0,
-                step,
-            },
+            Deferred::new(
+                DataToShell::SceneStepCommit {
+                    run: RunId(1),
+                    scene: SceneId(1),
+                    index: 0,
+                    step,
+                },
+                100,
+            ),
             100,
             now,
         )

@@ -100,6 +100,10 @@ struct Candidate {
     created: Vec<(WireId, Handle)>,
     removed: Vec<(WireId, Object)>,
     changed: Vec<(WireId, Object)>,
+    /// `map_bytes(&after)`, accumulated while admission built it.
+    after_bytes: usize,
+    /// What commit adds to `SceneState::history_bytes`.
+    history_bytes: usize,
 }
 impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -174,6 +178,10 @@ pub struct SceneState {
     last_cut_revision: u32,
     activated: u32,
     cleared: bool,
+    /// Always `map_bytes(&objects)`.
+    objects_bytes: usize,
+    /// Owned bytes of reserved and step ids, undo records and log events.
+    history_bytes: usize,
 }
 impl fmt::Debug for SceneState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -245,6 +253,8 @@ impl SceneState {
             last_cut_revision: 0,
             activated: 0,
             cleared: false,
+            objects_bytes: 0,
+            history_bytes: 0,
         })
     }
 
@@ -421,6 +431,7 @@ impl SceneState {
 
     /// Validates and charges the compiled step as one atomic candidate. Its paths name compiled
     /// slots until `Expansion::blame` moves them onto the original step.
+    #[expect(clippy::too_many_lines, reason = "one atomic admission transaction")]
     fn candidate(
         &self,
         original: &Arc<Step>,
@@ -439,7 +450,8 @@ impl SceneState {
                 ));
             }
         }
-        let mut after = Deferred::new(self.objects.clone(), map_bytes(&self.objects));
+        let mut after = Deferred::new(self.objects.clone(), self.objects_bytes);
+        let mut owned = self.objects_bytes - heap::btree::<WireId, Object>(self.objects.len());
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
             if let Some(v) = object::visual(op) {
@@ -459,7 +471,9 @@ impl SceneState {
                 {
                     object.work.usage.segments = segments;
                 }
+                owned += retire::owned((v.id, &object));
                 after.insert(v.id.clone(), object);
+                retire::attribute(&mut after, owned);
                 created.push((v.id.clone(), handle));
             }
         }
@@ -469,9 +483,7 @@ impl SceneState {
         }
         object::acyclic(step, &after)?;
         object::validate_changes(step, &after, &removal_ids)?;
-        let changed = work::changes(step, &mut after, revision)?;
-        let changed_bytes = map_bytes(&changed);
-        let mut changed = Deferred::new(changed, changed_bytes);
+        let mut changed = work::changes(step, &mut after, &mut owned, revision)?;
         metrics::validate(step, &mut after, |handle| {
             expansion.source_slot(handle, revision)
         })?;
@@ -496,6 +508,11 @@ impl SceneState {
             .check(self.bound_usage(), usage)
             .map_err(|code| fail(FieldPath::default(), code))?;
         let removed = object::removals(step, &mut after, &removal_ids)?;
+        owned -= removed
+            .iter()
+            .map(|(id, object)| retire::owned((id, object)))
+            .sum::<usize>();
+        retire::attribute(&mut after, owned);
         let removed_bytes = records_bytes(&removed);
         let mut removed = Deferred::new(removed, removed_bytes);
         for object in after
@@ -507,14 +524,26 @@ impl SceneState {
             }
         }
         let mut candidate = after
-            .map(|after| Candidate {
-                step: Arc::clone(original),
-                run: Arc::clone(&expansion.run),
-                extras: Arc::clone(&expansion.extras),
-                after,
-                created,
-                removed: removed.into_inner(),
-                changed: changed.into_inner().into_iter().collect(),
+            .map(|after| {
+                let removed = removed.into_inner();
+                let changed: Vec<_> = changed.into_inner().into_iter().collect();
+                let ids: usize = created.iter().map(|(id, _)| id.as_str().len()).sum();
+                Candidate {
+                    after_bytes: heap::btree::<WireId, Object>(after.len()) + owned,
+                    history_bytes: original.id.as_str().len()
+                        + ids
+                        + records_bytes(&removed)
+                        + records_bytes(&changed)
+                        + heap::ARC_HEADER
+                        + heap::step_bytes(original),
+                    step: Arc::clone(original),
+                    run: Arc::clone(&expansion.run),
+                    extras: Arc::clone(&expansion.extras),
+                    after,
+                    created,
+                    removed,
+                    changed,
+                }
             })
             .map(Box::new);
         candidate.attribute(candidate.attributed_bytes());
@@ -588,6 +617,8 @@ impl SceneState {
             created,
             removed,
             changed,
+            after_bytes,
+            history_bytes,
         } = *admitted.candidate.into_inner();
         self.reserved
             .extend(created.iter().map(|(id, _)| id.clone()));
@@ -604,8 +635,9 @@ impl SceneState {
         );
         self.log.push(SceneEvent::Step { revision, step });
         let replaced = std::mem::replace(&mut self.objects, after);
-        let bytes = map_bytes(&replaced);
+        let bytes = std::mem::replace(&mut self.objects_bytes, after_bytes);
         drop(Deferred::new(replaced, bytes));
+        self.history_bytes += history_bytes;
         self.revision = revision;
         self.apply_usage(global, admitted.usage);
         Ok(Committed {
@@ -650,7 +682,7 @@ impl SceneState {
     }
 
     fn forget_activated(&mut self) {
-        retire_undo(
+        self.history_bytes -= retire_undo(
             self.steps
                 .range_mut(..=self.activated)
                 .flat_map(|(_, stored)| [take(&mut stored.removed), take(&mut stored.changed)]),
@@ -688,7 +720,8 @@ impl SceneState {
         {
             return Err(at("activated", ErrorCode::OutOfRange));
         }
-        let mut after = Deferred::new(self.objects.clone(), map_bytes(&self.objects));
+        let mut after = Deferred::new(self.objects.clone(), self.objects_bytes);
+        let mut owned = self.objects_bytes - heap::btree::<WireId, Object>(self.objects.len());
         let mut discarded = Deferred::new(Vec::new(), 0);
         let dropped: Vec<u32> = self
             .steps
@@ -698,12 +731,19 @@ impl SceneState {
         for revision in dropped.iter().rev() {
             let stored = &self.steps[revision];
             for (id, object) in stored.removed.iter().chain(&stored.changed) {
+                owned += retire::owned((id, object));
                 if let Some(replaced) = after.insert(id.clone(), object.clone()) {
+                    owned -= retire::owned((id, &replaced));
                     discarded.push((id.clone(), replaced));
                 }
+                retire::attribute(&mut after, owned);
             }
-            discarded
-                .extend(after.extract_if(.., |_, object| object.handle.revision() == *revision));
+            discarded.extend(
+                after
+                    .extract_if(.., |_, object| object.handle.revision() == *revision)
+                    .inspect(|entry| owned -= retire::owned((&entry.0, &entry.1))),
+            );
+            retire::attribute(&mut after, owned);
         }
         let discarded_bytes = records_bytes(&discarded);
         discarded.attribute(discarded_bytes);
@@ -759,7 +799,11 @@ impl SceneState {
         }
         let surviving: BTreeSet<WireId> = after.keys().cloned().collect();
         for object in after.values_mut() {
-            object.references.retain(|id| surviving.contains(id));
+            object.references = take(&mut object.references)
+                .into_vec()
+                .into_iter()
+                .filter(|id| surviving.contains(id))
+                .collect();
             if object
                 .parent
                 .as_ref()
@@ -768,27 +812,30 @@ impl SceneState {
                 object.parent = None;
             }
         }
-        retire_undo(
-            self.steps
-                .range_mut(cut.activated + 1..)
-                .flat_map(|(_, stored)| {
-                    stored.kept = false;
-                    [take(&mut stored.removed), take(&mut stored.changed)]
-                }),
-        );
-        let replaced = std::mem::replace(&mut self.objects, after.into_inner());
-        let bytes = map_bytes(&replaced);
-        drop(Deferred::new(replaced, bytes));
+        self.history_bytes -= retire_undo(self.steps.range_mut(cut.activated + 1..).flat_map(
+            |(_, stored)| {
+                stored.kept = false;
+                [take(&mut stored.removed), take(&mut stored.changed)]
+            },
+        ));
+        let after = after.into_inner();
+        let bytes = map_bytes(&after);
+        let replaced = std::mem::replace(&mut self.objects, after);
+        drop(Deferred::new(
+            replaced,
+            std::mem::replace(&mut self.objects_bytes, bytes),
+        ));
         self.activated = cut.activated;
         self.retire_through(cut.activated);
         self.forget_activated();
         if self.revision > 0 {
             self.log.push(SceneEvent::Stop(cut.clone()));
+            self.history_bytes += size_of_val(&*cut.revealed);
             self.last_cut_revision = self.revision;
         }
         if cut.activated == 0 {
             self.cleared = true;
-            retire_undo(self.steps.values_mut().map(|stored| {
+            self.history_bytes -= retire_undo(self.steps.values_mut().map(|stored| {
                 stored.kept = false;
                 take(&mut stored.removed)
             }));
@@ -810,9 +857,8 @@ impl SceneState {
             return Ok(());
         }
         let objects = take(&mut self.objects);
-        let bytes = map_bytes(&objects);
-        drop(Deferred::new(objects, bytes));
-        retire_undo(self.steps.values_mut().flat_map(|step| {
+        drop(Deferred::new(objects, take(&mut self.objects_bytes)));
+        self.history_bytes -= retire_undo(self.steps.values_mut().flat_map(|step| {
             step.kept = false;
             [take(&mut step.removed), take(&mut step.changed)]
         }));

@@ -1,4 +1,6 @@
 //! Bounded wire-log assembly; semantic replay and presentation belong to the caller.
+//!
+//! Chunks, logs and batches drop on the dropper thread, whichever path discards them.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -12,7 +14,9 @@ use kumochi_protocol::{
         MAX_VISIBLE_SCENES, SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk,
     },
 };
-use kumochi_scene::{SceneEvent, limits, text::Bounded};
+use kumochi_scene::{SceneEvent, deferred::Deferred, limits, text::Bounded};
+
+use super::wire_bytes;
 
 const CLEARED_KEPT: usize = 64;
 const MAX_FRAME_BYTES: usize = Pipe::Data.max_payload() + HEADER_LEN;
@@ -65,11 +69,20 @@ impl fmt::Debug for Source {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct Effect {
     pub(crate) credit: u32,
     pub(crate) clear: Vec<SceneId>,
-    pub(crate) batch: Option<Vec<Source>>,
+    pub(crate) batch: Option<Deferred<Vec<Source>>>,
+}
+
+#[cfg(test)]
+impl PartialEq for Effect {
+    fn eq(&self, other: &Self) -> bool {
+        self.credit == other.credit
+            && self.clear == other.clear
+            && self.batch.as_deref() == other.batch.as_deref()
+    }
 }
 
 struct Pending {
@@ -87,7 +100,7 @@ struct Pending {
 pub(crate) struct Assembler {
     generation: Option<u64>,
     described: bool,
-    held: Vec<(SceneSnapshotChunk, u32)>,
+    held: VecDeque<(Deferred<SceneSnapshotChunk>, u32)>,
     held_bytes: u32,
     scenes: BTreeMap<SceneId, Pending>,
     bytes: usize,
@@ -117,9 +130,8 @@ impl Assembler {
     pub(crate) fn disconnected(&mut self) {
         self.generation = None;
         self.described = false;
-        self.held.clear();
-        self.held_bytes = 0;
-        self.scenes.clear();
+        self.retire_held();
+        drop(Deferred::new(std::mem::take(&mut self.scenes), self.bytes));
         self.bytes = 0;
         self.delivered = false;
     }
@@ -186,9 +198,9 @@ impl Assembler {
         }
         self.clear_intent = false;
         self.described = true;
-        let held = std::mem::take(&mut self.held);
+        let mut held = Deferred::new(std::mem::take(&mut self.held), wire_bytes(self.held_bytes));
         self.held_bytes = 0;
-        for (chunk, bytes) in held {
+        while let Some((chunk, bytes)) = held.pop_front() {
             self.accept(chunk, bytes)?;
             effect.credit = effect.credit.checked_add(bytes).ok_or(Broken::Window)?;
         }
@@ -200,7 +212,7 @@ impl Assembler {
     pub(crate) fn chunk(
         &mut self,
         generation: u64,
-        chunk: SceneSnapshotChunk,
+        chunk: Deferred<SceneSnapshotChunk>,
         bytes: u32,
     ) -> Result<Effect, Broken> {
         if self.generation != Some(generation) {
@@ -210,13 +222,13 @@ impl Assembler {
         if !(HEADER_LEN + 1..=MAX_FRAME_BYTES).contains(&size) {
             return Err(Broken::Frame);
         }
-        let chunk = chunk.checked().map_err(|_| Broken::Sequence)?;
+        chunk.validate().map_err(|_| Broken::Sequence)?;
         if !self.described && !self.clear_intent && !self.cleared.contains(&chunk.scene) {
             let held_bytes = self.held_bytes.checked_add(bytes).ok_or(Broken::Window)?;
             if held_bytes > DATA_WINDOW {
                 return Err(Broken::Window);
             }
-            self.held.push((chunk, bytes));
+            self.held.push_back((chunk, bytes));
             self.held_bytes = held_bytes;
             return Ok(Effect::default());
         }
@@ -230,7 +242,11 @@ impl Assembler {
         })
     }
 
-    fn accept(&mut self, chunk: SceneSnapshotChunk, bytes: u32) -> Result<(), Broken> {
+    fn accept(
+        &mut self,
+        mut chunk: Deferred<SceneSnapshotChunk>,
+        bytes: u32,
+    ) -> Result<(), Broken> {
         if self.cleared.contains(&chunk.scene) {
             return Ok(());
         }
@@ -294,19 +310,19 @@ impl Assembler {
         self.bytes = total_bytes;
         pending.ordinal += 1;
         pending.done = chunk.last;
-        if let Some(header) = chunk.header {
+        if let Some(header) = chunk.header.take() {
             pending.header = Some(header);
         }
         pending.log.extend(chunk.events.iter().cloned());
         Ok(())
     }
 
-    fn finish(&mut self) -> Option<Vec<Source>> {
+    fn finish(&mut self) -> Option<Deferred<Vec<Source>>> {
         if !self.described || self.delivered || self.scenes.values().any(|pending| !pending.done) {
             return None;
         }
         self.delivered = true;
-        Some(
+        Some(Deferred::new(
             self.scenes
                 .iter_mut()
                 .map(|(scene, pending)| Source {
@@ -320,7 +336,8 @@ impl Assembler {
                     log: std::mem::take(&mut pending.log),
                 })
                 .collect(),
-        )
+            self.bytes,
+        ))
     }
 
     pub(crate) fn remove(&mut self, scenes: &[SceneId]) -> Effect {
@@ -331,17 +348,22 @@ impl Assembler {
             self.remember(*scene);
             if let Some(pending) = self.scenes.remove(scene) {
                 self.bytes -= pending.bytes;
+                drop(Deferred::new(pending.log, pending.bytes));
             }
         }
-        let mut credit = 0;
-        self.held.retain(|(chunk, bytes)| {
-            if clear.contains(&chunk.scene) {
-                credit += *bytes;
-                false
+        let mut removed = Vec::new();
+        for _ in 0..self.held.len() {
+            let chunk = self.held.pop_front().expect("a counted chunk remains");
+            if clear.contains(&chunk.0.scene) {
+                removed.push(chunk);
             } else {
-                true
+                self.held.push_back(chunk);
             }
-        });
+        }
+        let credit = removed.iter().map(|(_, bytes)| *bytes).sum();
+        let bytes = wire_bytes(credit)
+            + removed.capacity() * std::mem::size_of::<(Deferred<SceneSnapshotChunk>, u32)>();
+        drop(Deferred::new(removed, bytes));
         self.held_bytes -= credit;
         Effect {
             credit,
@@ -357,8 +379,7 @@ impl Assembler {
         let ids: Vec<_> = self.scenes.keys().copied().collect();
         let mut effect = self.remove(&ids);
         effect.credit += self.held_bytes;
-        self.held.clear();
-        self.held_bytes = 0;
+        self.retire_held();
         self.delivered = self.described;
         effect.batch = None;
         effect
@@ -371,6 +392,21 @@ impl Assembler {
         if self.cleared.len() > CLEARED_KEPT {
             self.cleared.pop_front();
         }
+    }
+
+    /// Hands every held chunk to the dropper in one send.
+    fn retire_held(&mut self) {
+        drop(Deferred::new(
+            std::mem::take(&mut self.held),
+            wire_bytes(self.held_bytes),
+        ));
+        self.held_bytes = 0;
+    }
+}
+
+impl Drop for Assembler {
+    fn drop(&mut self) {
+        self.disconnected();
     }
 }
 

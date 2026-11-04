@@ -106,16 +106,16 @@ fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
     ];
     for sent in frames {
         frame::write(&mut &*link.data, &sent, Pipe::Data).expect("typed frame written");
-        let LinkEvent::Data {
+        let LinkEvent::SceneData {
             generation,
-            message,
+            frame: message,
             bytes,
         } = next(&events)
         else {
-            panic!("typed data")
+            panic!("typed scene data, protected from its read")
         };
         assert_eq!(generation, session.generation());
-        assert_eq!(message, sent);
+        assert_eq!(*message, sent);
         assert_eq!(
             usize::try_from(bytes).expect("frame size"),
             frame::encode(&sent, Pipe::Data).expect("frame").len()
@@ -329,6 +329,136 @@ fn attended(label: &str) -> Attended {
         data: Arc::new(data),
         link,
     }
+}
+
+#[test]
+fn scene_frames_lost_in_a_batch_or_the_queue_drop_on_the_dropper() {
+    use crate::presenter::tests::{drained, hold_dropper};
+    use kumochi_protocol::message::{SceneHeader, SceneId, SceneSnapshotChunk};
+    use kumochi_scene::{Record, SceneEvent, deferred::Deferred, parse_record, text::Bounded};
+
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"private-step"}}"#).expect("step")
+    else {
+        panic!("a step record");
+    };
+    let link = attended("lost-scene-owner");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let Record::Begin(begin) = parse_record(
+        br#"{"begin":{"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"}}"#,
+    )
+    .expect("header") else {
+        panic!("begin record");
+    };
+    let sent = DataToShell::SceneSnapshotV1 {
+        chunk: SceneSnapshotChunk {
+            scene: SceneId(7),
+            revision: 1,
+            ordinal: 0,
+            header: Some(SceneHeader {
+                begin,
+                layout_version: 1,
+            }),
+            events: Bounded::new(vec![SceneEvent::Step {
+                revision: 1,
+                step: Arc::new(step),
+            }])
+            .expect("one event"),
+            last: true,
+        },
+    };
+    frame::write(&mut &*link.data, &sent, Pipe::Data).expect("snapshot written");
+    let event = next(&events);
+    let LinkEvent::SceneData { frame, .. } = &event else {
+        panic!("the data reader protects the scene frame");
+    };
+    let DataToShell::SceneSnapshotV1 { chunk } = &**frame else {
+        panic!("snapshot data");
+    };
+    let SceneEvent::Step { step, .. } = &chunk.events[0] else {
+        panic!("one step");
+    };
+    let step = Arc::clone(step);
+    let queue = |frames: u16| {
+        let (sender, receiver) = async_channel::unbounded();
+        for ordinal in 0..frames {
+            let chunk = SceneSnapshotChunk {
+                scene: SceneId(7),
+                revision: 1,
+                ordinal,
+                header: None,
+                events: Bounded::new(vec![SceneEvent::Step {
+                    revision: 1,
+                    step: Arc::clone(&step),
+                }])
+                .expect("one event"),
+                last: false,
+            };
+            let frame = DataToShell::SceneSnapshotV1 { chunk };
+            sender
+                .send_blocking(LinkEvent::SceneData {
+                    generation: 1,
+                    frame: Deferred::new(frame, 40),
+                    bytes: 40,
+                })
+                .expect("queued");
+        }
+        (sender, receiver)
+    };
+    let release = hold_dropper();
+    let (sender, receiver) = queue(1);
+    sender
+        .send_blocking(event)
+        .expect("the actual producer's event");
+    let first = receiver.recv_blocking().expect("an event");
+    let batch = super::batch(first, &receiver);
+    assert_eq!(batch.len(), 2, "the batch takes what was already queued");
+    drop(batch);
+    assert_eq!(
+        Arc::strong_count(&step),
+        3,
+        "a batch whose update failed waits for the dropper"
+    );
+    let (sender, receiver) = queue(1);
+    drop(sender);
+    drop(receiver);
+    assert_eq!(
+        Arc::strong_count(&step),
+        4,
+        "a frame still queued when the channel's last handle goes waits for the dropper"
+    );
+    drop(release);
+    assert!(drained(&step, 1), "the dropper destroys them");
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn a_lost_batch_moves_its_container_allocation_off_the_caller() {
+    let release = crate::presenter::tests::hold_dropper();
+    let batch = || {
+        let (sender, receiver) = async_channel::unbounded();
+        for _ in 1..super::EVENT_BATCH {
+            sender
+                .send_blocking(LinkEvent::Scenes(Vec::new()))
+                .expect("queued metadata");
+        }
+        super::batch(LinkEvent::Scenes(Vec::new()), &receiver)
+    };
+    let guarded = batch();
+    let ((), _, [_, released]) = crate::allocation::usage(|| drop(guarded));
+    assert_eq!(released, 0, "even the outer vector stays off the caller");
+
+    let bare: Vec<_> = (0..super::EVENT_BATCH)
+        .map(|_| LinkEvent::Scenes(Vec::new()))
+        .collect();
+    let bytes = bare.capacity() * size_of::<LinkEvent>();
+    let ((), _, [_, released]) = crate::allocation::usage(|| drop(bare));
+    assert_eq!(
+        released, bytes,
+        "the pre-wrapper control frees its vector on the caller"
+    );
+    drop(release);
 }
 
 /// The link's events with a timeout on each.

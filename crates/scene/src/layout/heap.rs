@@ -224,10 +224,16 @@ mod tests {
     enum Construction {
         Insert,
         Collect,
+        /// Bulk-builds every entry, then removes from the front down to this many.
+        Shrink(usize),
     }
 
     fn check_nodes<K: Ord, V>(mut entries: Vec<(K, V)>, construction: Construction) {
-        let len = entries.len();
+        let len = match construction {
+            Construction::Shrink(keep) => keep,
+            Construction::Insert | Construction::Collect => entries.len(),
+        };
+        let mut removed = Vec::with_capacity(entries.len());
         let (map, _, [allocated, released]) = allocation::usage(|| match construction {
             Construction::Collect => entries.drain(..).collect::<BTreeMap<_, _>>(),
             Construction::Insert => {
@@ -237,11 +243,26 @@ mod tests {
                 }
                 map
             }
+            Construction::Shrink(keep) => {
+                let mut map = entries.drain(..).collect::<BTreeMap<_, _>>();
+                while map.len() > keep {
+                    removed.extend(map.pop_first());
+                }
+                map
+            }
         });
-        assert_eq!(map.len(), len, "construction retains every fixture entry");
+        assert_eq!(map.len(), len, "construction retains the fixture's entries");
         let held = allocated
             .checked_sub(released)
             .expect("only measured node storage remains");
+        if len == 0 && matches!(construction, Construction::Shrink(_)) {
+            assert_eq!(
+                held,
+                btree::<K, V>(1),
+                "a map that removals emptied keeps one uncharged root leaf"
+            );
+            return;
+        }
         let allowance = btree::<K, V>(len);
         assert!(
             held <= allowance,
@@ -255,6 +276,18 @@ mod tests {
         }
     }
 
+    /// Grown trees at each root boundary, then trees removals shrank back to them.
+    fn check_shapes<K: Ord, V>(entry: impl Fn(usize) -> (K, V)) {
+        for len in [0, 1, 10, 11, 12, 100, 256] {
+            for construction in [Construction::Insert, Construction::Collect] {
+                check_nodes((0..len).map(&entry).collect(), construction);
+            }
+        }
+        for keep in [0, 1, 10, 11, 100] {
+            check_nodes((0..256).map(&entry).collect(), Construction::Shrink(keep));
+        }
+    }
+
     #[test]
     fn btree_node_allowance_bounds_requested_allocations() {
         let (empty, allocations) = allocation::count(BTreeMap::<usize, usize>::new);
@@ -263,25 +296,49 @@ mod tests {
             (0, 0),
             "a fresh empty map allocates nothing"
         );
-        for len in [0, 1, 10, 11, 12, 100, 256] {
-            for construction in [Construction::Insert, Construction::Collect] {
-                check_nodes((0..len).map(|i| (i, i)).collect(), construction);
-                let entries = (0..len)
-                    .map(|i| {
-                        let id: WireId = format!("r{i}").try_into().expect("bounded id");
-                        let object = Object {
-                            work: Work::default(),
-                            handle: crate::Handle::new(1, i).expect("bounded handle"),
-                            kind: Kind::Shape,
-                            parent: None,
-                            references: Vec::new(),
-                        };
-                        (id, object)
-                    })
-                    .collect();
-                check_nodes(entries, construction);
-            }
-        }
+        let id = |i: usize| -> WireId { format!("r{i}").try_into().expect("bounded id") };
+        let handle = |i| crate::Handle::new(1, i).expect("bounded handle");
+        check_shapes(|i| (i, i));
+        check_shapes(|i| {
+            let object = Object {
+                work: Work::default(),
+                handle: handle(i),
+                kind: Kind::Shape,
+                parent: None,
+                references: Box::default(),
+            };
+            (id(i), object)
+        });
+        let source = Arc::new(op(r#"{"shape":{"id":"s","kind":"rect","box":[0,0,1,1]}}"#));
+        let primitives: Arc<[crate::display::Prim]> = Arc::new([]);
+        check_shapes(|i| {
+            let item = crate::display::Item {
+                handle: handle(i),
+                parent: None,
+                primitives: Arc::clone(&primitives),
+                bounds: crate::geom::Rect::default(),
+                transform: crate::geom::Affine::default(),
+                opacity: 1.0,
+            };
+            (id(i), Placed::new(item, Arc::clone(&source), None))
+        });
+        check_shapes(|i| (handle(i), id(i)));
+        let facts: Arc<BTreeMap<usize, Extra>> = Arc::new(BTreeMap::new());
+        check_shapes(|i| (u32::try_from(i).expect("small key"), Arc::clone(&facts)));
+        check_shapes(|i| {
+            let link = Extra::Link {
+                head: crate::record::Head::Both,
+                thick: true,
+            };
+            (i, link)
+        });
+        let names: Vec<String> = (0..256).map(|i| format!("p{i}")).collect();
+        let motion = crate::state::work::Motion {
+            keys: 2,
+            min: [0.0; 2],
+            max: [1.0; 2],
+        };
+        check_shapes(|i| (names[i].as_str(), motion));
     }
 
     fn op(json: &str) -> Op {

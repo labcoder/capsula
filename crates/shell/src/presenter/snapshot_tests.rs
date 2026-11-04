@@ -56,7 +56,7 @@ fn measure_four_dense_lifetime_logs_before_semantic_recovery() {
                 panic!("step record")
             };
             let value = DataToShell::SceneSnapshotV1 {
-                chunk: chunk(
+                chunk: snapshot_chunk(
                     scene,
                     64,
                     u16::try_from(revision - 1).expect("ordinal"),
@@ -75,7 +75,11 @@ fn measure_four_dense_lifetime_logs_before_semantic_recovery() {
                 panic!("snapshot frame")
             };
             let effect = assembler
-                .chunk(1, chunk, u32::try_from(bytes.len()).expect("frame size"))
+                .chunk(
+                    1,
+                    Deferred::new(chunk, 0),
+                    u32::try_from(bytes.len()).expect("frame size"),
+                )
                 .expect("bounded staging");
             assert_eq!(
                 effect.credit,
@@ -94,7 +98,7 @@ fn measure_four_dense_lifetime_logs_before_semantic_recovery() {
         std::process::id()
     );
     std::thread::sleep(Duration::from_secs(3));
-    for source in &batch {
+    for source in batch.iter() {
         assert_eq!(source.log.len(), 64);
         SceneState::replay(source.header.begin.clone(), &source.log)
             .expect("each scene is legal in isolation");
@@ -157,6 +161,20 @@ fn chunk(
     ordinal: u16,
     events: Vec<SceneEvent>,
     last: bool,
+) -> Deferred<SceneSnapshotChunk> {
+    Deferred::new(snapshot_chunk(scene, revision, ordinal, events, last), 0)
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture mirrors the snapshot's last wire bit"
+)]
+fn snapshot_chunk(
+    scene: u64,
+    revision: u32,
+    ordinal: u16,
+    events: Vec<SceneEvent>,
+    last: bool,
 ) -> SceneSnapshotChunk {
     SceneSnapshotChunk {
         scene: SceneId(scene),
@@ -205,10 +223,10 @@ fn pre_membership_chunks_withhold_credit_and_return_one_full_batch() {
         Ok(Effect {
             credit: 300,
             clear: Vec::new(),
-            batch: Some(vec![
-                source(1, 1, vec![event(1)]),
-                source(2, 1, vec![event(1)])
-            ]),
+            batch: Some(Deferred::new(
+                vec![source(1, 1, vec![event(1)]), source(2, 1, vec![event(1)])],
+                0
+            )),
         })
     );
     assert!(assembler.described());
@@ -242,7 +260,7 @@ fn stale_generations_and_offline_chunks_never_receive_credit() {
     assert_eq!(
         assembler.describe(2, &Bounded::default()),
         Ok(Effect {
-            batch: Some(Vec::new()),
+            batch: Some(Deferred::new(Vec::new(), 0)),
             ..Effect::default()
         })
     );
@@ -301,7 +319,10 @@ fn ordinals_are_consecutive_and_finished_scenes_cannot_append() {
         assembler.chunk(1, chunk(1, 2, 1, vec![event(2)], true), 100),
         Ok(Effect {
             credit: 100,
-            batch: Some(vec![source(1, 2, vec![event(1), event(2)])]),
+            batch: Some(Deferred::new(
+                vec![source(1, 2, vec![event(1), event(2)])],
+                0
+            )),
             ..Effect::default()
         })
     );
@@ -475,7 +496,7 @@ fn staging_counters_enforce_scene_and_aggregate_caps_without_large_allocations()
         assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 100),
         Ok(Effect {
             credit: 100,
-            batch: Some(vec![source(1, 1, vec![event(1)])]),
+            batch: Some(Deferred::new(vec![source(1, 1, vec![event(1)])], 0)),
             ..Effect::default()
         })
     );
@@ -504,7 +525,7 @@ fn clear_intent_survives_disconnect_and_cancels_future_membership() {
         ),
         Ok(Effect {
             clear: vec![SceneId(1), SceneId(2)],
-            batch: Some(Vec::new()),
+            batch: Some(Deferred::new(Vec::new(), 0)),
             credit: 0
         })
     );
@@ -537,7 +558,7 @@ fn removing_one_member_releases_the_other_completed_sources() {
         Effect {
             clear: vec![SceneId(2)],
             credit: 0,
-            batch: Some(vec![source(1, 1, vec![event(1)])])
+            batch: Some(Deferred::new(vec![source(1, 1, vec![event(1)])], 0))
         }
     );
     assert_eq!(
@@ -603,7 +624,7 @@ fn removing_held_chunks_returns_only_their_credit_and_remembers_a_bounded_tombst
         Ok(Effect {
             credit: 200,
             clear: vec![SceneId(1)],
-            batch: Some(vec![source(2, 1, vec![event(1)])])
+            batch: Some(Deferred::new(vec![source(2, 1, vec![event(1)])], 0))
         })
     );
     for id in 3..=100 {
@@ -638,7 +659,10 @@ fn four_scenes_install_together_once_and_debug_omits_all_content() {
         Effect {
             credit: 100,
             clear: Vec::new(),
-            batch: Some((1..=4).map(|id| source(id, 1, vec![event(1)])).collect())
+            batch: Some(Deferred::new(
+                (1..=4).map(|id| source(id, 1, vec![event(1)])).collect(),
+                0
+            ))
         }
     );
     let debug = format!("{effect:?} {assembler:?}");
@@ -655,28 +679,35 @@ fn four_scenes_install_together_once_and_debug_omits_all_content() {
 fn retained_counts_follow_cuts_across_chunks_without_semantic_replay() {
     let mut assembler = connected();
     describe(&mut assembler, vec![descriptor(1, 3, 4)]).expect("describe");
-    let first = chunk(1, 3, 0, vec![event(1), event(2)], false);
+    let first = snapshot_chunk(1, 3, 0, vec![event(1), event(2)], false);
     let stop = SceneEvent::Stop(StopCut {
         activated: 1,
         revealed: Bounded::default(),
     });
-    let last = chunk(1, 3, 1, vec![stop.clone(), event(3)], true);
-    assembler.chunk(1, first.clone(), 100).expect("first chunk");
-    assert_eq!(assembler.chunk(1, last.clone(), 100), Err(Broken::Counts));
+    let last = snapshot_chunk(1, 3, 1, vec![stop.clone(), event(3)], true);
+    assembler
+        .chunk(1, Deferred::new(first.clone(), 0), 100)
+        .expect("first chunk");
+    assert_eq!(
+        assembler.chunk(1, Deferred::new(last.clone(), 0), 100),
+        Err(Broken::Counts)
+    );
 
     let mut matching = connected();
     let mut named = descriptor(1, 3, 4);
     named.committed = 2;
     describe(&mut matching, vec![named]).expect("matching descriptor");
-    matching.chunk(1, first, 100).expect("first chunk");
+    matching
+        .chunk(1, Deferred::new(first, 0), 100)
+        .expect("first chunk");
     let mut expected = source(1, 3, vec![event(1), event(2), stop, event(3)]);
     expected.committed = 2;
     assert_eq!(
-        matching.chunk(1, last, 100),
+        matching.chunk(1, Deferred::new(last, 0), 100),
         Ok(Effect {
             credit: 100,
             clear: Vec::new(),
-            batch: Some(vec![expected]),
+            batch: Some(Deferred::new(vec![expected], 0)),
         })
     );
 }
@@ -706,7 +737,10 @@ fn per_chunk_credit_flows_before_a_snapshot_larger_than_the_window_finishes() {
         Ok(Effect {
             credit: bytes,
             clear: Vec::new(),
-            batch: Some(vec![source(1, 3, vec![event(1), event(2), event(3)])]),
+            batch: Some(Deferred::new(
+                vec![source(1, 3, vec![event(1), event(2), event(3)])],
+                0
+            )),
         })
     );
 }
@@ -715,7 +749,7 @@ fn per_chunk_credit_flows_before_a_snapshot_larger_than_the_window_finishes() {
 fn actual_snapshot_frame_headers_count_toward_staging_limits() {
     use kumochi_protocol::{frame, message::DataToShell};
 
-    let snapshot = chunk(1, 1, 0, vec![event(1)], true);
+    let snapshot = snapshot_chunk(1, 1, 0, vec![event(1)], true);
     let frame = frame::encode(
         &DataToShell::SceneSnapshotV1 {
             chunk: snapshot.clone(),
@@ -733,5 +767,59 @@ fn actual_snapshot_frame_headers_count_toward_staging_limits() {
         .expect("pending")
         .bytes = MAX_SCENE_SNAPSHOT_BYTES - payload_bytes;
     assembler.bytes = MAX_SCENE_SNAPSHOT_BYTES - payload_bytes;
-    assert_eq!(assembler.chunk(1, snapshot, bytes), Err(Broken::Bytes));
+    assert_eq!(
+        assembler.chunk(1, Deferred::new(snapshot, 0), bytes),
+        Err(Broken::Bytes)
+    );
+}
+
+#[test]
+fn rejected_staged_and_undelivered_snapshot_owners_retire_off_thread() {
+    use crate::presenter::tests::{drained, hold_dropper};
+
+    for case in 0..4 {
+        let mut assembler = connected();
+        let entry = event(1);
+        let SceneEvent::Step { step, .. } = &entry else {
+            panic!("one step");
+        };
+        let probe = Arc::clone(step);
+        let release = hold_dropper();
+        if case == 0 {
+            let mut malformed = chunk(1, 1, 0, vec![entry], true);
+            malformed.header = None;
+            assert_eq!(assembler.chunk(1, malformed, 100), Err(Broken::Sequence));
+        } else if case == 1 {
+            describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("membership");
+            assert_eq!(
+                assembler.chunk(1, chunk(1, 2, 0, vec![entry], false), 100),
+                Ok(Effect {
+                    credit: 100,
+                    ..Effect::default()
+                })
+            );
+            assert_eq!(assembler.remove(&[SceneId(1)]).clear, [SceneId(1)]);
+        } else {
+            assert_eq!(
+                assembler.chunk(1, chunk(1, 1, 0, vec![entry], true), 100),
+                Ok(Effect::default())
+            );
+            if case == 3 {
+                let effect = describe(&mut assembler, vec![descriptor(1, 1, 1)])
+                    .expect("the held chunk finishes assembly");
+                assert_eq!(effect.credit, 100);
+                assert_eq!(effect.batch.as_ref().expect("one batch").len(), 1);
+                drop(effect);
+            }
+        }
+        drop(assembler);
+        let expected = if case == 1 || case == 3 { 3 } else { 2 };
+        assert_eq!(
+            Arc::strong_count(&probe),
+            expected,
+            "all payload owners stay protected"
+        );
+        drop(release);
+        assert!(drained(&probe, 1));
+    }
 }

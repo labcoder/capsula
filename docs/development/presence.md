@@ -5,6 +5,12 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure changes its label to Offline; Retry never sends
 the previous input again.
 
+Before the link starts, the shell starts the scene dropper or fails startup. Typed scene frames
+are protected at the pipe reader, including stale frames and queued or undelivered event batches.
+Preparation and recovery inputs and answers keep that protection through cancellation, rejected
+results and lost recipients. Clear, Stop and disconnect swap out their owned containers; the UI
+does not destroy their scene payloads. A dead dropper stops scene intake and new preparation.
+
 ```mermaid
 flowchart LR
     Link["Brain link thread"] -->|status| Owner["Presence owner, UI thread"]

@@ -3,6 +3,9 @@
 Kumochi runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
 nothing it started can outlive it.
 
+Each process starts its scene dropper before accepting scene data and fails startup if the
+thread cannot start. Retirement never joins that thread from the shell's UI.
+
 ```mermaid
 flowchart LR
   Shell["kumochi.exe (no job)"]

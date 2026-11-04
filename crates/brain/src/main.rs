@@ -16,6 +16,10 @@ fn main() -> ExitCode {
     if logging::init(constants::BRAIN_LOG).is_err() {
         return ExitCode::FAILURE;
     }
+    if let Err(error) = kumochi_scene::deferred::start() {
+        tracing::error!(%error, "can't start scene destruction");
+        return ExitCode::FAILURE;
+    }
     tracing::info!(build = kumochi_protocol::BUILD_ID, "brain started");
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

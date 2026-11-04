@@ -15,6 +15,9 @@
 //!   cut or failure names the activated bound: the recovered resting layout, or zero.
 //! - A scene with a cut outstanding prepares nothing until the brain acknowledges the cut, and a
 //!   scene gets at most one cut between commits.
+//! - Scene frames, jobs, answers and scenes are held in [`Deferred`] from the moment the
+//!   presenter owns them, so whichever path discards them, they drop on the dropper thread. Once the
+//!   dropper has stopped, intake and new work stop with it, and the watchdog fails what waits.
 
 mod measure;
 mod prepare;
@@ -34,8 +37,8 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    Admission, GlobalBudget, Preparation, SceneEvent, SceneState, SceneView, Step, StopCut,
-    StopOutcome,
+    Admission, GlobalBudget, Preparation, SceneEvent, SceneState, Step, StopCut, StopOutcome,
+    deferred::{self, Deferred},
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry,
     },
@@ -110,7 +113,7 @@ pub(crate) struct Presenter {
     global: GlobalBudget,
     scenes: BTreeMap<SceneId, Scene>,
     /// Live frames that arrived before recovery was installed, with their withheld credit.
-    held: VecDeque<(DataToShell, u32)>,
+    held: VecDeque<(Deferred<DataToShell>, u32)>,
     held_bytes: u32,
     /// A clear came before recovery was described, so the held live scenes clear once applied.
     clear_after_recovery: bool,
@@ -122,6 +125,8 @@ pub(crate) struct Presenter {
     next_job: u64,
     /// One reference per job or answer alive, so dropping either frees its slot.
     slots: Arc<()>,
+    /// The dropper stopped and intake was refused; logged once.
+    refused: bool,
 }
 
 impl Presenter {
@@ -141,6 +146,7 @@ impl Presenter {
             cleared: VecDeque::new(),
             next_job: 0,
             slots: Arc::new(()),
+            refused: false,
         }
     }
 
@@ -160,9 +166,13 @@ impl Presenter {
         for scene in self.scenes.values_mut() {
             scene.halt();
         }
-        self.scenes.clear();
+        let bytes = self.scenes.values().map(Scene::attributed).sum();
+        drop(Deferred::new(std::mem::take(&mut self.scenes), bytes));
         self.global = GlobalBudget::default();
-        self.held.clear();
+        drop(Deferred::new(
+            std::mem::take(&mut self.held),
+            wire_bytes(self.held_bytes),
+        ));
         self.held_bytes = 0;
         self.clear_after_recovery = false;
         self.fenced = None;
@@ -198,36 +208,51 @@ impl Presenter {
     }
 
     /// A data frame of size `bytes`, header included. Only snapshot chunks, the v1 live frames
-    /// and `ScenesRemoved` are the presenter's; any other frame does nothing and earns no credit.
+    /// and `ScenesRemoved` are the presenter's; any other frame does nothing and earns no credit,
+    /// and so does every frame once the dropper has stopped. A stale frame is still the
+    /// presenter's to drop.
     /// # Errors
     /// [`Broken`] for a frame the mirror can't apply.
+    #[expect(clippy::result_large_err, reason = "preserve rejected ownership")]
     pub(crate) fn data(
         &mut self,
         generation: u64,
-        frame: DataToShell,
+        frame: Deferred<DataToShell>,
         bytes: u32,
         now: Instant,
     ) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
-        if self.generation != Some(generation) {
-            return Ok(out.finish());
-        }
-        match frame {
-            DataToShell::SceneSnapshotV1 { chunk } => {
+        let current = self.generation == Some(generation) && self.dropper_running();
+        let snapshot = frame
+            .map(|frame| match frame {
+                DataToShell::SceneSnapshotV1 { chunk } => Ok(chunk),
+                frame => Err(frame),
+            })
+            .transpose();
+        match snapshot {
+            Ok(chunk) if current => {
                 let effect = self.assembler.chunk(generation, chunk, bytes)?;
                 self.assembled(effect, now, &mut out)?;
             }
-            DataToShell::ScenesRemoved { scenes } => {
-                out.credit(bytes);
-                self.removed(&scenes, now, &mut out)?;
-            }
-            frame @ (DataToShell::SceneBegin { .. }
-            | DataToShell::SceneStepCommit { .. }
-            | DataToShell::SceneCutApplied { .. }
-            | DataToShell::SceneEnd { .. }) => {
-                if matches!(self.phase, Phase::Live) {
-                    self.live(frame, bytes, now, &mut out)?;
-                } else {
+            Ok(_) => {}
+            Err(frame) => {
+                if let DataToShell::ScenesRemoved { scenes } = &*frame
+                    && current
+                {
+                    out.credit(bytes);
+                    self.removed(scenes, now, &mut out)?;
+                }
+                let live = current
+                    && matches!(
+                        &*frame,
+                        DataToShell::SceneBegin { .. }
+                            | DataToShell::SceneStepCommit { .. }
+                            | DataToShell::SceneCutApplied { .. }
+                            | DataToShell::SceneEnd { .. }
+                    );
+                if live && matches!(self.phase, Phase::Live) {
+                    self.live(&frame, bytes, now, &mut out)?;
+                } else if live {
                     self.held_bytes = self
                         .held_bytes
                         .checked_add(bytes)
@@ -236,7 +261,6 @@ impl Presenter {
                     self.held.push_back((frame, bytes));
                 }
             }
-            _ => {}
         }
         Ok(out.finish())
     }
@@ -417,7 +441,7 @@ struct Scene {
     queue: VecDeque<Ticket>,
     running: Option<Running>,
     /// Prepared and not activated; nothing activates before B6.
-    ready: Vec<PreparedStep>,
+    ready: Vec<Deferred<PreparedStep>>,
     cut: Cut,
     /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
     skipping: bool,
@@ -428,7 +452,7 @@ struct Ticket {
     index: u32,
     /// When it could first start: its commit, or its predecessor's answer.
     queued: Instant,
-    preparation: Preparation,
+    preparation: Deferred<Preparation>,
 }
 
 struct Running {
@@ -466,8 +490,8 @@ struct Recovery {
     cancel: Arc<AtomicBool>,
     /// Each scene with its descriptor's revision and retained count.
     scenes: Vec<(SceneId, u32, u32)>,
-    /// The batch until a worker slot frees for it; empty once its job is sent.
-    waiting: Vec<Source>,
+    /// The batch until a worker slot frees for it; none once its job is sent.
+    waiting: Option<Deferred<Vec<Source>>>,
 }
 
 /// Effects in order, with the clears gathered into as few `ClearDrawing`s as possible.
@@ -502,14 +526,14 @@ impl Out {
 }
 
 impl Scene {
-    fn new(state: SceneState, rest: LayoutState) -> Self {
+    fn new(state: SceneState, rest: LayoutState, retained: usize) -> Self {
         let cut = if matches!(state.recovery_log().last(), Some(SceneEvent::Stop(_))) {
             Cut::Applied
         } else {
             Cut::Open
         };
         Self {
-            retained: rest.resident_bytes(),
+            retained,
             state,
             rest,
             queue: VecDeque::new(),
@@ -543,22 +567,31 @@ impl Scene {
         })
     }
 
+    /// What the dropper is told this scene owns: its prepared layouts and its semantic state.
+    fn attributed(&self) -> usize {
+        self.residency()
+            .saturating_add(self.state.attributed_bytes())
+    }
+
     /// Drops queued and prepared work, and asks a running job to stop.
     fn halt(&mut self) {
         if let Some(running) = self.running.take() {
             running.cancel.store(true, Ordering::Relaxed);
         }
-        self.queue.clear();
-        self.ready.clear();
+        drop(Deferred::new(
+            std::mem::take(&mut self.queue),
+            self.state.attributed_bytes(),
+        ));
+        let bytes = self.residency().saturating_sub(self.retained);
+        drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
     }
 
     /// The cut at the activated bound, keeping every object at rest there.
     fn cut_now(&self) -> StopCut {
-        let activated = self.state.activated();
-        let revealed = SceneView::new(&self.rest, activated).stop(0);
         StopCut {
-            activated,
-            revealed: Bounded::new(revealed).expect("a scene holds at most its object cap"),
+            activated: self.state.activated(),
+            revealed: Bounded::new(self.rest.revealed_at_rest())
+                .expect("a scene holds at most its object cap"),
         }
     }
 }
@@ -604,15 +637,31 @@ impl Presenter {
         }
     }
 
-    fn recover(&mut self, batch: Vec<Source>, now: Instant, out: &mut Out) -> Result<(), Broken> {
-        let mut sources = Vec::new();
-        for source in batch {
-            if source.header.layout_version == LAYOUT_VERSION {
-                sources.push(source);
-            } else {
-                self.forget(source.scene, out);
-            }
+    fn recover(
+        &mut self,
+        batch: Deferred<Vec<Source>>,
+        now: Instant,
+        out: &mut Out,
+    ) -> Result<(), Broken> {
+        let other: Vec<_> = batch
+            .iter()
+            .filter(|source| source.header.layout_version != LAYOUT_VERSION)
+            .map(|source| source.scene)
+            .collect();
+        for scene in other {
+            self.forget(scene, out);
         }
+        let sources = batch.map(|batch| {
+            let (sources, other): (Vec<_>, Vec<_>) = batch
+                .into_iter()
+                .partition(|source| source.header.layout_version == LAYOUT_VERSION);
+            let bytes = other
+                .iter()
+                .map(|source| source.log.len() * size_of::<SceneEvent>())
+                .sum();
+            drop(Deferred::new(other, bytes));
+            sources
+        });
         if sources.is_empty() {
             self.global = GlobalBudget::default();
             return self.go_live(now, out);
@@ -627,7 +676,7 @@ impl Presenter {
             started: now,
             cancel: Arc::new(AtomicBool::new(false)),
             scenes,
-            waiting: sources,
+            waiting: Some(sources),
         });
         self.dispatch_recovery(now, out)
     }
@@ -637,21 +686,24 @@ impl Presenter {
         let Phase::Recovering(recovery) = &self.phase else {
             return Ok(());
         };
-        if recovery.waiting.is_empty() {
+        if recovery.waiting.is_none() {
             return Ok(());
         }
         if now >= recovery.started + RECOVERY_DEADLINE {
             return self.abandon(now, out);
         }
-        if self.workers() >= MAX_WORKERS {
+        if self.workers() >= MAX_WORKERS || !self.dropper_running() {
             return Ok(());
         }
         let Phase::Recovering(recovery) = &mut self.phase else {
             return Ok(());
         };
+        let Some(sources) = recovery.waiting.take() else {
+            return Ok(());
+        };
         out.effects.push(Effect::Recover(RecoveryJob::new(
             recovery.id,
-            std::mem::take(&mut recovery.waiting),
+            sources,
             self.surface,
             Arc::clone(&self.theme),
             Arc::clone(&recovery.cancel),
@@ -663,29 +715,46 @@ impl Presenter {
     fn recovered(
         &mut self,
         recovery: Recovery,
-        scenes: Vec<(SceneId, SceneRecovery)>,
+        scenes: Deferred<Vec<(SceneId, SceneRecovery, usize)>>,
         global: GlobalBudget,
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
         self.global = global;
-        let mut results: BTreeMap<_, _> = scenes.into_iter().collect();
-        for (scene, revision, committed) in recovery.scenes {
-            // shortcut: a recovery failure clears the whole scene instead of cutting to its prepared prefix; add a scene-keyed RecoveryFailed cut if B9's recovery measurements show failures
-            match results.remove(&scene) {
-                Some(Ok((state, rest)))
-                    if !self.cleared.contains(&scene)
-                        && state.revision() == revision
-                        && usize::try_from(committed)
-                            .is_ok_and(|kept| kept == state.committed()) =>
-                {
-                    self.scenes.insert(scene, Scene::new(state, rest));
+        let mut adopted = Vec::new();
+        let rejected = scenes.map(|scenes| {
+            let mut results: BTreeMap<_, _> = scenes
+                .into_iter()
+                .map(|(scene, result, retained)| (scene, (result, retained)))
+                .collect();
+            let mut rejected = Vec::new();
+            for &(scene, revision, committed) in &recovery.scenes {
+                // shortcut: a recovery failure clears the whole scene instead of cutting to its prepared prefix; add a scene-keyed RecoveryFailed cut if B9's recovery measurements show failures
+                match results.remove(&scene) {
+                    Some((Ok((state, rest)), retained))
+                        if !self.cleared.contains(&scene)
+                            && state.revision() == revision
+                            && usize::try_from(committed)
+                                .is_ok_and(|kept| kept == state.committed()) =>
+                    {
+                        adopted.push((scene, state, rest, retained));
+                    }
+                    Some((Ok((mut state, rest)), _)) => {
+                        state.clear(&mut self.global).expect(BOUND);
+                        rejected.push((state, rest));
+                    }
+                    Some((Err(_), _)) | None => {}
                 }
-                Some(Ok((mut state, _))) => {
-                    state.clear(&mut self.global).expect(BOUND);
-                    self.forget(scene, out);
-                }
-                Some(Err(_)) | None => self.forget(scene, out),
+            }
+            (results, rejected)
+        });
+        drop(rejected);
+        for (scene, state, rest, retained) in adopted {
+            self.scenes.insert(scene, Scene::new(state, rest, retained));
+        }
+        for (scene, ..) in recovery.scenes {
+            if !self.scenes.contains_key(&scene) {
+                self.forget(scene, out);
             }
         }
         let mut total = 0_usize;
@@ -729,10 +798,10 @@ impl Presenter {
     /// Recovery is installed: the held live frames apply in arrival order.
     fn go_live(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         self.phase = Phase::Live;
-        let held = std::mem::take(&mut self.held);
+        let mut held = Deferred::new(std::mem::take(&mut self.held), wire_bytes(self.held_bytes));
         self.held_bytes = 0;
-        for (frame, bytes) in held {
-            self.live(frame, bytes, now, out)?;
+        while let Some((frame, bytes)) = held.pop_front() {
+            self.live(&frame, bytes, now, out)?;
         }
         if std::mem::take(&mut self.clear_after_recovery) {
             let ids: Vec<_> = self.scenes.keys().copied().collect();
@@ -768,7 +837,7 @@ impl Presenter {
 
     fn live(
         &mut self,
-        frame: DataToShell,
+        frame: &DataToShell,
         bytes: u32,
         now: Instant,
         out: &mut Out,
@@ -776,10 +845,10 @@ impl Presenter {
         out.credit(bytes);
         match frame {
             DataToShell::SceneBegin { scene, header } => {
-                if self.cleared.contains(&scene) {
+                if self.cleared.contains(scene) {
                     return Ok(());
                 }
-                if self.scenes.contains_key(&scene) {
+                if self.scenes.contains_key(scene) {
                     return Err(Broken::Order);
                 }
                 if header.layout_version != LAYOUT_VERSION {
@@ -788,9 +857,11 @@ impl Presenter {
                 if self.scenes.len() >= MAX_VISIBLE_SCENES {
                     return Err(Broken::Scenes);
                 }
-                let state = SceneState::begin(header.begin).map_err(|_| Broken::Header)?;
+                let state = SceneState::begin(header.begin.clone()).map_err(|_| Broken::Header)?;
                 let rest = LayoutState::new(&state);
-                self.scenes.insert(scene, Scene::new(state, rest));
+                let retained = rest.resident_bytes();
+                self.scenes
+                    .insert(*scene, Scene::new(state, rest, retained));
                 Ok(())
             }
             DataToShell::SceneStepCommit {
@@ -798,12 +869,12 @@ impl Presenter {
                 scene,
                 index,
                 step,
-            } => self.commit(run, scene, index, &step, now, out),
+            } => self.commit(*run, *scene, *index, step, now, out),
             DataToShell::SceneCutApplied {
                 scene,
                 revision,
                 cut,
-            } => self.cut_applied(scene, revision, &cut, out),
+            } => self.cut_applied(*scene, *revision, cut, out),
             _ => Ok(()),
         }
     }
@@ -832,6 +903,7 @@ impl Presenter {
             .state
             .commit(admitted, &mut self.global)
             .map_err(|_| Broken::Step)?;
+        let committed = Deferred::new(committed, scene.state.attributed_bytes());
         if committed.index != index {
             return Err(Broken::Index);
         }
@@ -859,11 +931,17 @@ impl Presenter {
         if scene.skipping {
             return Err(Broken::Order);
         }
+        let preparation = committed.map(|committed| {
+            let bytes = committed.handles.capacity()
+                * size_of::<(kumochi_scene::WireId, kumochi_scene::Handle)>();
+            drop(Deferred::new(committed.handles, bytes));
+            committed.preparation
+        });
         scene.queue.push_back(Ticket {
             run,
             index,
             queued: now,
-            preparation: committed.preparation,
+            preparation,
         });
         self.pump(id, now, out)
     }
@@ -895,8 +973,9 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
-            scene.retained = rest.resident_bytes();
-            scene.rest = rest;
+            let old = std::mem::replace(&mut scene.rest, rest);
+            drop(Deferred::new(old, scene.retained));
+            scene.retained = scene.rest.resident_bytes();
         } else {
             self.release(id);
             if outcome == StopOutcome::Kept {
@@ -918,8 +997,9 @@ impl Presenter {
     }
 
     /// Starts a scene's next queued step on the tip its previous step left.
+    #[expect(clippy::result_large_err, reason = "preserve rejected ownership")]
     fn pump(&mut self, id: SceneId, now: Instant, out: &mut Out) -> Result<(), Broken> {
-        if self.workers() >= MAX_WORKERS {
+        if self.workers() >= MAX_WORKERS || !self.dropper_running() {
             return Ok(());
         }
         let job = self.next_job;
@@ -937,14 +1017,20 @@ impl Presenter {
             self.fail(id, run, index, SceneFailure::Timeout, out);
             return Ok(());
         }
-        let input = PrepareInput::new(
-            ticket.preparation,
-            scene.tip().clone(),
-            self.surface,
-            Arc::clone(&self.theme),
-        );
+        let input = ticket
+            .preparation
+            .map(|preparation| {
+                PrepareInput::new(
+                    preparation,
+                    scene.tip().clone(),
+                    self.surface,
+                    Arc::clone(&self.theme),
+                )
+            })
+            .transpose();
         match input {
-            Ok(input) => {
+            Ok(mut input) => {
+                input.attribute(scene.attributed());
                 let cancel = Arc::new(AtomicBool::new(false));
                 scene.running = Some(Running {
                     id: job,
@@ -960,9 +1046,9 @@ impl Presenter {
                 )));
                 Ok(())
             }
-            Err((PrepareError::Stale, _)) => Err(Broken::Order),
-            Err((error, _)) => {
-                self.fail(id, run, index, failure(&error), out);
+            Err(error) if matches!(error.0, PrepareError::Stale) => Err(Broken::Order),
+            Err(error) => {
+                self.fail(id, run, index, failure(&error.0), out);
                 Ok(())
             }
         }
@@ -973,7 +1059,7 @@ impl Presenter {
         &mut self,
         id: SceneId,
         running: &Running,
-        result: Result<PreparedStep, PrepareError>,
+        result: Deferred<Result<PreparedStep, PrepareError>>,
         now: Instant,
         out: &mut Out,
     ) {
@@ -985,7 +1071,7 @@ impl Presenter {
         let accepted = if elapsed >= DEADLINE {
             Err(SceneFailure::Timeout)
         } else {
-            result.map_err(|error| failure(&error))
+            result.transpose().map_err(|error| failure(&error))
         }
         .and_then(|prepared| {
             if prepared.index != running.index
@@ -1037,6 +1123,8 @@ impl Presenter {
         if let Some(mut scene) = self.scenes.remove(&id) {
             scene.halt();
             scene.state.clear(&mut self.global).expect(BOUND);
+            let bytes = scene.attributed();
+            drop(Deferred::new(scene, bytes));
         }
     }
 
@@ -1061,11 +1149,32 @@ impl Presenter {
         Arc::strong_count(&self.slots) - 1
     }
 
+    /// Whether discarded values still leave the UI thread; logs once when they stopped.
+    fn dropper_running(&mut self) -> bool {
+        let running = deferred::running();
+        if !running && !self.refused {
+            self.refused = true;
+            tracing::error!("the scene dropper stopped; scene intake and preparation stop");
+        }
+        running
+    }
+
     fn job_id(&mut self) -> u64 {
         let id = self.next_job;
         self.next_job += 1;
         id
     }
+}
+
+impl Drop for Presenter {
+    fn drop(&mut self) {
+        self.disconnected();
+    }
+}
+
+/// A frame's wire size, as the bytes attributed to it while it waits for the dropper.
+fn wire_bytes(bytes: u32) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX)
 }
 
 fn failure(error: &PrepareError) -> SceneFailure {
@@ -1079,4 +1188,4 @@ fn failure(error: &PrepareError) -> SceneFailure {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

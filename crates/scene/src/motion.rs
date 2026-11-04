@@ -569,6 +569,7 @@ impl SceneView {
     /// # Errors
     /// Returns `Stale`, leaving the view and `out` untouched, unless the step was prepared
     /// on this view's layout.
+    #[expect(clippy::too_many_lines, reason = "atomic activation and retirement")]
     pub fn activate(
         &mut self,
         mut step: PreparedStep,
@@ -654,12 +655,18 @@ impl SceneView {
             // A surviving node already holds its visible start: ids cannot be re-put and parents cannot change.
             starts.push(node.timing.start);
         }
-        self.tracks = own(&mut nodes, candidates);
+        let (tracks, superseded) = own(&mut nodes, candidates);
+        let settled = std::mem::replace(&mut self.tracks, tracks);
         let paint = paint_order(&nodes);
+        let keys = |live: &Live| size_of_val(&*live.keys);
         // The outgoing layout may hold the last references to geometry this step removed.
         let bytes = self.layout.index_bytes()
             + self.nodes.capacity() * size_of::<Node>()
-            + self.paint.capacity() * size_of::<usize>();
+            + self.paint.capacity() * size_of::<usize>()
+            + settled.capacity() * size_of::<Live>()
+            + settled.iter().map(keys).sum::<usize>()
+            + superseded.capacity() * size_of::<Option<Live>>()
+            + superseded.iter().flatten().map(keys).sum::<usize>();
         let activated = step.index + 1;
         std::mem::swap(&mut self.layout, &mut step.after);
         drop(Deferred::new(
@@ -667,6 +674,8 @@ impl SceneView {
                 step,
                 std::mem::replace(&mut self.nodes, nodes),
                 std::mem::replace(&mut self.paint, paint),
+                settled,
+                superseded,
             ),
             bytes,
         ));
@@ -676,12 +685,12 @@ impl SceneView {
         Ok(())
     }
 
-    /// Running tracks that survive into the next activation; settled tracks rest in layout.
+    /// Moves out running tracks that survive into the next activation. Settled and recolored
+    /// tracks rest in layout and stay in `self.tracks` for activation to retire.
     fn carried(&mut self, now: u64, recolored: &BTreeSet<Handle>) -> Vec<Live> {
         let deadline = self.deadline;
-        std::mem::take(&mut self.tracks)
-            .into_iter()
-            .filter(|live| {
+        self.tracks
+            .extract_if(.., |live| {
                 live.end().min(deadline) > now
                     && (live.track != Track::Color || !recolored.contains(&live.target))
             })
@@ -905,8 +914,9 @@ fn births(
     born
 }
 
-/// Gives each (object, property) its newest candidate and keeps only owning tracks.
-fn own(nodes: &mut [Node], candidates: Vec<Live>) -> Vec<Live> {
+/// Gives each (object, property) its newest candidate and keeps only owning tracks, returning
+/// the superseded candidates for the caller to retire.
+fn own(nodes: &mut [Node], candidates: Vec<Live>) -> (Vec<Live>, Vec<Option<Live>>) {
     let index: BTreeMap<Handle, usize> = nodes
         .iter()
         .enumerate()
@@ -929,7 +939,7 @@ fn own(nodes: &mut [Node], candidates: Vec<Live>) -> Vec<Live> {
             *owner = tracks.len() - 1;
         }
     }
-    tracks
+    (tracks, candidates)
 }
 
 #[cfg(test)]

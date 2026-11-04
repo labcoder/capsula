@@ -688,6 +688,8 @@ pub(crate) enum OpenError {
     ObserverDeadline,
     #[error("--receipt-fixture needs --gate-observer and comes at most once")]
     ReceiptFixture,
+    #[error("the scene dropper thread couldn't start")]
+    Dropper(#[source] std::io::Error),
 }
 
 fn options() -> WindowOptions {
@@ -813,6 +815,7 @@ pub(crate) fn open(
         let display_size = display.bounds().size;
         [display_size.width.into(), display_size.height.into()]
     });
+    kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
     let presenter = crate::presenter::Presenter::new(
         kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
@@ -897,10 +900,6 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
     }
 }
 
-/// Link events applied in one update at most [guess]: a fast stream is applied in batches
-/// rather than one UI update per frame.
-const EVENT_BATCH: usize = 256;
-
 fn listen(
     states: Receiver<LinkEvent>,
     event_changes: Receiver<PresenceEvent>,
@@ -953,12 +952,7 @@ fn listen(
     .detach();
     cx.spawn(async move |this, cx| {
         while let Ok(first) = states.recv().await {
-            let mut events = vec![first];
-            while events.len() < EVENT_BATCH
-                && let Ok(event) = states.try_recv()
-            {
-                events.push(event);
-            }
+            let events = crate::link::batch(first, &states);
             match this.update(cx, |this: &mut Presence, cx| this.link_events(events, cx)) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::error!(%error, "presence update failed"),
