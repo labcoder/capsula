@@ -3,7 +3,8 @@
 The dock is a short line at the top center of your screen's work area. Move the pointer onto
 it to open the peek: Kumo beside a small status panel, which shows Starting, Ready,
 Reconnecting or Offline. Move away from both the dock and the peek to close it after a short
-grace period. Opening the peek doesn't take focus from your current app.
+grace period. Opening the peek doesn't take focus from your current app. Pressing the line
+does nothing for now.
 
 Only a thin band around the line takes the pointer: clicks beside it reach the app underneath.
 

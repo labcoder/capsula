@@ -55,7 +55,7 @@ pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
-use kumo::{Mood, Motion};
+use kumo::Mood;
 use kumo_view::KumoView;
 pub(crate) use launch::Launch;
 use line::{Dock, Line, LineFrame, Placement};
@@ -132,7 +132,8 @@ impl Presence {
         let layout = position.layout(
             area,
             line::slot(self.scale),
-            [physical(300.0), physical(140.0)],
+            // Kumo and its gap sit beside the 300 px the details had before the peek.
+            [physical(380.0), physical(140.0)],
             0,
         );
         let index = Position::ALL
@@ -185,11 +186,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         if visibility != self.panel_visibility {
-            let motion = if cx.reduce_motion() {
-                Motion::Reduced
-            } else {
-                Motion::Full
-            };
+            let motion = kumo_view::motion(cx);
             self.kumo.update(cx, |kumo, cx| match visibility {
                 PanelVisibility::Visible => kumo.show(motion, cx),
                 PanelVisibility::Hidden => kumo.hide(),
@@ -259,16 +256,20 @@ impl Presence {
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let listening = self.gesture.get().listening();
-        self.dock.update(cx, |dock, cx| {
-            dock.listening = listening;
+        let was_listening = self.dock.update(cx, |dock, cx| {
             cx.notify();
+            std::mem::replace(&mut dock.listening, listening)
         });
-        let mood = if listening {
-            Mood::Listening
-        } else {
-            Mood::Idle
-        };
-        self.kumo.update(cx, |kumo, cx| kumo.set_mood(mood, cx));
+        if listening != was_listening {
+            let mood = if listening {
+                Mood::Listening
+            } else {
+                Mood::Idle
+            };
+            let motion = kumo_view::motion(cx);
+            self.kumo
+                .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
+        }
         let notice = self.settings.read(cx).dock_notice().filter(|notice| {
             *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
         });

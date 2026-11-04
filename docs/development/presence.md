@@ -139,10 +139,13 @@ flowchart LR
   grace timer covers the gap between them. The panel's background is blurred where Windows
   allows it, with 85% opacity as the fallback. The stretch is gone with the old pill: motion
   trials return with the pull (C2a), and `cargo xtask bench stretch` says so.
-- **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked on the
-  background executor when the dock opens and again at a new scale; only the bake for the
-  current scale is kept. Opening the peek blinks once, or shows one still frame under reduced
-  motion, and Listening changes the mood. Frames come from the peek window's next-frame
+- **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
+  on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
+  change needs a restart (OSC-188 wires display changes). The panel is 380×140 so Kumo sits
+  beside the details without wrapping them. Opening the peek blinks once, or shows one still
+  frame under reduced motion, and Listening changes the mood. Each opening and each Listening
+  edge re-reads the system's reduced-motion preference through Kit's
+  `apply_system_reduce_motion`, since Windows posts no change Kit can follow. Frames come from the peek window's next-frame
   callback, paced by the frame-rate cap, and stop once nothing animates, so a settled peek
   shades nothing. Each animated frame is a new image and the one it replaced is dropped a
   frame later (OSC-175's exception until the images are pooled). Quit logs how many frames

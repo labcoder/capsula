@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _, Task,
-    Window, div, img, px,
+    App, Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
+    Task, Window, div, img, px,
 };
 
 use super::kumo::{Animator, Look, Mood, Motion, Renderer, Silhouette};
@@ -59,7 +59,12 @@ impl KumoView {
     }
 
     /// Bakes the body for `scale` on the background executor, unless that size is baked or
-    /// baking. Only a bake still wanted when it lands is kept.
+    /// baking. Only a bake still wanted when it lands is kept; one that lands while the peek is
+    /// hidden is kept too, as a prewarm.
+    // shortcut: only the launch scale is baked, so a scale change needs a restart. A second
+    // caller (OSC-188) must fix two hazards first: `self.size` changes before the matching bake
+    // lands, so a step wraps the old renderer's pixels at the new size, and a landing bake can
+    // overwrite a pending `retired` image without `drop_image`.
     pub(super) fn rebake(&mut self, scale: f32, cx: &mut Context<'_, Self>) {
         let size = device(scale);
         if size == self.size {
@@ -110,7 +115,9 @@ impl KumoView {
         self.animator.disengage();
     }
 
-    pub(super) fn set_mood(&mut self, mood: Mood, cx: &mut Context<'_, Self>) {
+    /// Listening began or ended, under the motion policy read at that edge.
+    pub(super) fn set_mood(&mut self, mood: Mood, motion: Motion, cx: &mut Context<'_, Self>) {
+        self.animator.set_motion(motion);
         self.animator.set_mood(mood);
         if self.wants_frame() {
             cx.emit(WantsFrames);
@@ -231,6 +238,17 @@ impl Presence {
     }
 }
 
+/// Kumo's motion policy now. Windows posts no change Kit can follow, so each edge that starts
+/// motion re-reads the system preference.
+pub(super) fn motion(cx: &mut App) -> Motion {
+    gpui_kit::base::apply_system_reduce_motion(cx);
+    if cx.reduce_motion() {
+        Motion::Reduced
+    } else {
+        Motion::Full
+    }
+}
+
 /// `SIZE` in device pixels at `scale`.
 #[expect(
     clippy::as_conversions,
@@ -252,7 +270,7 @@ mod tests {
         AppContext as _, Context, Entity, IntoElement, Render, Window, WindowOptions, div,
     };
 
-    use super::{KumoView, Motion};
+    use super::{KumoView, Mood, Motion};
 
     struct Blank;
 
@@ -278,23 +296,37 @@ mod tests {
         (view, asked)
     }
 
-    /// Steps at 72 fps until the view wants no more frames; returns how many it took.
-    fn settle(cx: &mut TestAppContext, view: &Entity<KumoView>) -> usize {
+    /// Steps at 72 fps until the view wants no more frames, or `limit` frames; returns how many
+    /// it stepped.
+    fn step_up_to(cx: &mut TestAppContext, view: &Entity<KumoView>, limit: usize) -> usize {
         let window = cx
             .update(|cx| cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Blank)))
             .expect("a window");
         let mut frames = 0;
-        while window
-            .update(cx, |_, window, cx| {
-                view.update(cx, |view, cx| view.step(1.0 / 72.0, window, cx))
-            })
-            .expect("the window")
+        while frames < limit
+            && window
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| view.step(1.0 / 72.0, window, cx))
+                })
+                .expect("the window")
         {
             frames += 1;
-            assert!(frames < 200, "the view never settled");
         }
         frames
     }
+
+    fn settle(cx: &mut TestAppContext, view: &Entity<KumoView>) -> usize {
+        let frames = step_up_to(cx, view, 200);
+        assert!(frames < 200, "the view never settled");
+        frames
+    }
+
+    fn shaded(cx: &mut TestAppContext, view: &Entity<KumoView>) -> u64 {
+        view.read_with(cx, |view, _| view.totals().0[0])
+    }
+
+    /// A full-motion blink at 72 fps: its 0.17 s close and open end on the 13th frame.
+    const BLINK: usize = 13;
 
     #[gpui::test]
     fn a_hover_blinks_once_then_shades_nothing_more(cx: &mut TestAppContext) {
@@ -302,12 +334,11 @@ mod tests {
         assert_eq!(asked.get(), 0, "a hidden view asks for no frames");
         view.update(cx, |view, cx| view.show(Motion::Full, cx));
         assert_eq!(asked.get(), 1);
-        let frames = settle(cx, &view);
+        assert_eq!(settle(cx, &view), BLINK);
         let ([reshades, unchanged], _) = view.read_with(cx, |view, _| view.totals());
-        assert!(frames > 2, "a blink takes several frames: {frames}");
         assert_eq!(unchanged, 0, "no frame repeated the one before");
         assert_eq!(settle(cx, &view), 0, "a settled peek wants no frames");
-        assert_eq!(view.read_with(cx, |view, _| view.totals()).0[0], reshades);
+        assert_eq!(shaded(cx, &view), reshades);
         assert!(view.read_with(cx, |view, _| view.image.is_some()));
     }
 
@@ -320,15 +351,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_show_before_the_bake_blinks_when_it_lands(cx: &mut TestAppContext) {
+    fn a_show_before_the_bake_blinks_when_its_wake_up_lands(cx: &mut TestAppContext) {
         let view = cx.new(|_| KumoView::new());
+        let asked = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&asked);
+        cx.update(|cx| {
+            cx.subscribe(&view, move |_, _: &super::WantsFrames, _| {
+                counter.set(counter.get() + 1);
+            })
+            .detach();
+        });
         view.update(cx, |view, cx| {
             view.rebake(1.0, cx);
             view.show(Motion::Full, cx);
             assert!(!view.wants_frame(), "nothing to shade before the bake");
         });
+        assert_eq!(asked.get(), 0);
         cx.run_until_parked();
-        assert!(settle(cx, &view) > 2);
+        assert_eq!(asked.get(), 1, "the landing bake asks for frames");
+        assert_eq!(settle(cx, &view), BLINK);
     }
 
     #[gpui::test]
@@ -346,13 +387,56 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_hidden_peek_cuts_the_blink(cx: &mut TestAppContext) {
+    fn hiding_mid_blink_shades_nothing_more(cx: &mut TestAppContext) {
         let (view, _) = baked(cx, 1.0);
-        view.update(cx, |view, cx| {
-            view.show(Motion::Full, cx);
-            view.hide();
-        });
-        assert_eq!(settle(cx, &view), 0);
-        assert_eq!(view.read_with(cx, |view, _| view.totals()).0, [0, 0]);
+        view.update(cx, |view, cx| view.show(Motion::Full, cx));
+        assert_eq!(step_up_to(cx, &view, 3), 3);
+        view.update(cx, |view, _| view.hide());
+        settle(cx, &view);
+        assert_eq!(shaded(cx, &view), 3);
+        assert!(!view.read_with(cx, |view, _| view.wants_frame()));
+    }
+
+    #[gpui::test]
+    fn a_preference_changed_after_the_first_opening_holds_at_the_next_edges(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, _) = baked(cx, 1.0);
+        view.update(cx, |view, cx| view.show(Motion::Full, cx));
+        assert_eq!(settle(cx, &view), BLINK);
+        view.update(cx, |view, _| view.hide());
+        settle(cx, &view);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let motion = cx.update(super::motion);
+        assert_eq!(motion, Motion::Reduced);
+        let opened = shaded(cx, &view);
+        view.update(cx, |view, cx| view.show(motion, cx));
+        assert_eq!(
+            settle(cx, &view),
+            1,
+            "reopening shades one still frame, no blink"
+        );
+        assert_eq!(shaded(cx, &view), opened + 1);
+        let before = shaded(cx, &view);
+        view.update(cx, |view, cx| view.set_mood(Mood::Listening, motion, cx));
+        assert_eq!(settle(cx, &view), 1, "Listening shows one still pose");
+        assert_eq!(shaded(cx, &view), before + 1);
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let motion = cx.update(super::motion);
+        assert_eq!(motion, Motion::Full);
+        view.update(cx, |view, cx| view.set_mood(Mood::Listening, motion, cx));
+        assert_eq!(
+            step_up_to(cx, &view, 10),
+            10,
+            "full-motion Listening keeps moving"
+        );
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let motion = cx.update(super::motion);
+        view.update(cx, |view, cx| view.set_mood(Mood::Idle, motion, cx));
+        assert_eq!(
+            settle(cx, &view),
+            1,
+            "a reduced edge while open stops at once"
+        );
     }
 }
