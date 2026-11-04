@@ -43,15 +43,30 @@ there joins this page before it ships.
 | ONNX Runtime | `onnxruntime.dll` | MIT | its `LICENSE` |
 | protobuf, re2, abseil, flatbuffers, cpuinfo, ONNX, PyTorch-derived kernels | `onnxruntime.dll` | BSD-3-Clause, BSD-3-Clause, Apache-2.0, Apache-2.0, BSD-2-Clause, Apache-2.0, BSD-3-Clause | ORT's `ThirdPartyNotices.txt`, and symbol strings |
 | Eigen | `onnxruntime.dll` | MPL-2.0 | ORT's notice; a named MPL-2.0 exception |
-| Boost (header-only parts) | `onnxruntime.dll` | BSL-1.0 | ORT's notice; outside the agreed list, a Captain call |
+| Boost (header-only parts) | `onnxruntime.dll` | BSL-1.0 | ORT's notice; outside the agreed list, an open owner decision (item 13 of the 2026-11-04 decisions) |
 
-**Checked absent** from this CPU build, by symbol and string search of both DLLs:
-- **espeak-ng** (GPL-3.0) and piper-phonemize. sherpa-onnx dropped espeak-ng in v2.0.0, and the
-  C API DLL carries no espeak API symbol, only the message saying it's no longer used.
-- **pthreads4w**, which Windows builds don't use.
-- **Intel MKL**, **oneDNN** and **XNNPACK**, which are execution providers this build doesn't
-  include. Only their names appear, in ORT's provider list.
+**What was checked**, on Rez, 2026-11-04:
+- **Direct imports** of both DLLs, with `dumpbin /dependents` (the table above).
+- **ORT's retained `ThirdPartyNotices.txt`**, which lists Eigen (MPL-2.0) and Boost (BSL-1.0). It's
+  a broad inventory: it also names MKL and XNNPACK, so a name there doesn't prove a component is
+  compiled into this CPU build.
+- **Symbol and string searches** of both DLLs, which found none of these:
+  - **espeak-ng** (GPL-3.0) and piper-phonemize. sherpa-onnx dropped espeak-ng in v2.0.0, and the
+    C API DLL carries no espeak API symbol, only the message saying it's no longer used.
+  - **pthreads4w**, which Windows builds don't use.
+  - **Intel MKL**, **oneDNN** and **XNNPACK**, execution providers this build doesn't include.
+    Only their names appear, in ORT's provider list.
 
-No GPL or LGPL code is in either DLL. ORT's full `ThirdPartyNotices.txt` ships beside the DLLs
-in the installer (slice 10), and [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md) lists each
-component.
+**What that doesn't prove:** an import table and the absence of recognizable strings don't
+establish that no other library is statically linked. These checks found no GPL or LGPL code, but
+they aren't a complete license closure for the two DLLs.
+
+**Owed before these DLLs ship** (slice 10's installer):
+- exact-build upstream dependency evidence for this release, or a matching SBOM;
+- the complete notice bundle: ORT's full `ThirdPartyNotices.txt` and every other required upstream
+  license and NOTICE text, beside the DLLs;
+- a pinned Eigen source version, for MPL-2.0 source availability, rather than the project URL alone;
+- the owner's decision on Boost's BSL-1.0 (item 13 of the 2026-11-04 owner decisions);
+- the module-list check after load, warm-up and decode, and the clean-machine prerequisite check.
+
+[THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md) lists each component.

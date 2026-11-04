@@ -61,8 +61,10 @@ loopback TLS fixtures; the ignored `measure_download_head` requires explicit per
   `0ee17205f254b5abc43b266c8a0f215565c352f7`, file `voices/NIWIOv5vTi5eRMj8.safetensors`. Both
   repositories are Apache-2.0.
 
-Each hash in the manifest equals the LFS SHA-256 Hugging Face reports for that file at that
-revision (`tokens.txt` is a plain Git blob, checked by its blob id).
+Each hash in the manifest is the SHA-256 of the file's bytes at that revision. For the LFS files
+(the three ONNX files, `model.q8.gguf` and Juniper) it equals the LFS SHA-256 Hugging Face reports.
+`tokens.txt`, `config.json` and `tokenizer.json` are plain Git blobs, so their hashes were checked
+by hashing the downloaded bytes, and their sizes against the blob metadata.
 
 The native runtime and its license audit are in [voice-natives.md](voice-natives.md).
 
@@ -80,4 +82,7 @@ The task checks every source's size and SHA-256 before it links anything, then h
 models into the dev models folder (`Kumochi Dev`) and the DLLs beside
 `target\debug\kumochid.exe` and `target\release\kumochid.exe`. Hardlinks take no space, and
 they need the sources and the destination on one NTFS volume. The task never copies and never
-downloads. Run it again after `cargo clean`.
+downloads. A destination that already matches the manifest is kept. Any other existing file there
+is a conflict: the task checks every destination before it links anything, and if one conflicts it
+links nothing, changes nothing and names the file, to be moved aside by hand. If a link fails
+partway, the links that run made are removed. Run it again after `cargo clean`.

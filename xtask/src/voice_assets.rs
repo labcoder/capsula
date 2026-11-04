@@ -103,8 +103,16 @@ fn s5_path(file: &ModelFile) -> Result<&'static str> {
         .with_context(|| format!("no S5 path for {}", file.name))
 }
 
-/// Verifies every source before linking anything, so a bad source changes nothing. Returns the
-/// linked paths.
+/// One destination to fill from a verified source.
+struct Placement<'a> {
+    source: PathBuf,
+    dest: PathBuf,
+    bytes: u64,
+    sha256: &'a str,
+}
+
+/// Verifies every source, then every existing destination, before linking anything, so a bad
+/// source or a conflicting destination changes nothing. Returns the destinations.
 fn link(
     models: &Path,
     natives: &Path,
@@ -115,22 +123,80 @@ fn link(
     for file in MODEL_FILES {
         let source = models.join(s5_path(file)?);
         verify(&source, file.bytes, file.sha256)?;
-        let dest = models_root.join(file.part.dir()).join(file.name);
-        plan.push((source, dest, file.bytes, file.sha256));
+        plan.push(Placement {
+            source,
+            dest: models_root.join(file.part.dir()).join(file.name),
+            bytes: file.bytes,
+            sha256: file.sha256,
+        });
     }
     for file in NATIVE_FILES {
         let source = natives.join(file.name);
         verify(&source, file.bytes, file.sha256)?;
         for bin in bins {
-            plan.push((source.clone(), bin.join(file.name), file.bytes, file.sha256));
+            plan.push(Placement {
+                source: source.clone(),
+                dest: bin.join(file.name),
+                bytes: file.bytes,
+                sha256: file.sha256,
+            });
         }
     }
-    let mut linked = Vec::with_capacity(plan.len());
-    for (source, dest, bytes, sha256) in plan {
-        place(&source, &dest, bytes, sha256)?;
-        linked.push(dest);
+    install(&plan)?;
+    Ok(plan.into_iter().map(|placement| placement.dest).collect())
+}
+
+/// Keeps every destination that already verifies and hardlinks the absent ones. Any other
+/// existing destination is a conflict: it's reported and left as it is, and nothing is linked.
+/// If a link fails partway, the links this run made are removed again.
+fn install(plan: &[Placement<'_>]) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut conflicts = Vec::new();
+    for placement in plan {
+        if fs::symlink_metadata(&placement.dest).is_err() {
+            missing.push(placement);
+        } else if let Err(error) = verify(&placement.dest, placement.bytes, placement.sha256) {
+            conflicts.push(format!("{error:#}"));
+        }
     }
-    Ok(linked)
+    ensure!(
+        conflicts.is_empty(),
+        "nothing was linked, because existing files don't match the manifest; move them aside \
+         and run this again:\n{}",
+        conflicts.join("\n")
+    );
+    let mut made: Vec<&Path> = Vec::with_capacity(missing.len());
+    for placement in missing {
+        if let Err(error) = hard_link(&placement.source, &placement.dest) {
+            let stranded: Vec<String> = made
+                .into_iter()
+                .filter(|dest| fs::remove_file(dest).is_err())
+                .map(|dest| dest.display().to_string())
+                .collect();
+            if stranded.is_empty() {
+                return Err(error);
+            }
+            return Err(error.context(format!(
+                "these links from this run couldn't be removed: {}",
+                stranded.join(", ")
+            )));
+        }
+        made.push(&placement.dest);
+    }
+    Ok(())
+}
+
+/// Hardlinks a new destination. It never replaces one: `fs::hard_link` fails if `dest` exists.
+fn hard_link(source: &Path, dest: &Path) -> Result<()> {
+    let parent = dest.parent().context("a destination has a folder")?;
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    fs::hard_link(source, dest).with_context(|| {
+        format!(
+            "hardlinking {} to {}: both must be on one NTFS volume, and nothing is copied",
+            source.display(),
+            dest.display()
+        )
+    })
 }
 
 fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<()> {
@@ -156,33 +222,14 @@ fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<()> {
     Ok(())
 }
 
-/// Leaves a destination that already verifies, and replaces any other with a hardlink.
-fn place(source: &Path, dest: &Path, bytes: u64, sha256: &str) -> Result<()> {
-    if fs::symlink_metadata(dest).is_ok() {
-        if verify(dest, bytes, sha256).is_ok() {
-            return Ok(());
-        }
-        fs::remove_file(dest).with_context(|| format!("removing stale {}", dest.display()))?;
-    }
-    let parent = dest.parent().context("a destination has a folder")?;
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    fs::hard_link(source, dest).with_context(|| {
-        format!(
-            "hardlinking {} to {}: both must be on one NTFS volume, and nothing is copied",
-            source.display(),
-            dest.display()
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use kumochi_protocol::voice::MODEL_FILES;
 
-    use super::{S5_LAYOUT, link, place, s5_path, verify};
+    use super::{Placement, S5_LAYOUT, install, link, s5_path, verify};
 
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -204,6 +251,15 @@ mod tests {
         let sha = crate::platform::gate_capture::file_sha256(&path).expect("hash");
         fs::remove_dir_all(dir).expect("cleanup");
         sha
+    }
+
+    fn placement<'a>(source: &Path, dest: &Path, sha: &'a str) -> Placement<'a> {
+        Placement {
+            source: source.to_path_buf(),
+            dest: dest.to_path_buf(),
+            bytes: 5,
+            sha256: sha,
+        }
     }
 
     #[test]
@@ -251,20 +307,71 @@ mod tests {
     }
 
     #[test]
-    fn place_links_keeps_a_good_copy_and_replaces_a_bad_one() {
-        let dir = scratch("place");
+    fn install_hardlinks_and_keeps_a_verified_destination() {
+        let dir = scratch("install");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
         let sha = voice_sha();
         let dest = dir.join("models").join("part").join("f");
-        place(&source, &dest, 5, &sha).expect("links into a new folder");
+        install(&[placement(&source, &dest, &sha)]).expect("links into a new folder");
         assert_eq!(fs::read(&dest).expect("read"), b"voice");
-        place(&dir.join("absent"), &dest, 5, &sha).expect("a verified copy is left alone");
 
-        let stale = dir.join("models").join("part").join("g");
-        fs::write(&stale, b"wrong").expect("write");
-        place(&source, &stale, 5, &sha).expect("replaces a mismatched copy");
-        assert_eq!(fs::read(&stale).expect("read"), b"voice");
+        fs::write(&source, b"VOICE").expect("rewrite the source in place");
+        assert_eq!(
+            fs::read(&dest).expect("read"),
+            b"VOICE",
+            "the destination is the same file as the source, not a copy"
+        );
+        fs::write(&source, b"voice").expect("restore");
+
+        install(&[placement(&dir.join("absent"), &dest, &sha)])
+            .expect("a verified destination is left alone");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_conflicting_destination_changes_nothing() {
+        let dir = scratch("conflict");
+        let source = dir.join("source");
+        fs::write(&source, b"voice").expect("write");
+        let sha = voice_sha();
+        let fresh = dir.join("models").join("a");
+        let conflicting = dir.join("models").join("b");
+        fs::create_dir_all(dir.join("models")).expect("models folder");
+        fs::write(&conflicting, b"wrong").expect("write");
+
+        let error = install(&[
+            placement(&source, &fresh, &sha),
+            placement(&source, &conflicting, &sha),
+        ])
+        .expect_err("a mismatched destination fails");
+        assert!(error.to_string().contains("nothing was linked"), "{error}");
+        assert_eq!(
+            fs::read(&conflicting).expect("read"),
+            b"wrong",
+            "the conflicting bytes survive"
+        );
+        assert!(!fresh.exists(), "nothing was linked before the conflict");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_failed_link_removes_the_links_this_run_made() {
+        let dir = scratch("rollback");
+        let source = dir.join("source");
+        fs::write(&source, b"voice").expect("write");
+        let sha = voice_sha();
+        let first = dir.join("models").join("a");
+        let second = dir.join("models").join("b");
+
+        install(&[
+            placement(&source, &first, &sha),
+            placement(&dir.join("absent"), &second, &sha),
+        ])
+        .expect_err("the second link has no source");
+        assert!(!first.exists(), "the first link was removed again");
+        assert!(!second.exists());
+        assert_eq!(fs::read(&source).expect("read"), b"voice");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
