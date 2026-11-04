@@ -103,8 +103,12 @@ pub(super) trait Surfaces {
     fn move_overlay(&mut self, overlay: [i32; 4]) -> Result<(), Self::Error>;
     /// Shows the proxy and checks `index` in the tray.
     fn show(&mut self, index: usize) -> Result<(), Self::Error>;
-    /// Hides the overlay and the proxy.
-    fn hide(&mut self);
+    /// Hides the overlay.
+    fn hide_overlay(&mut self) -> Result<(), Self::Error>;
+    /// Hides the proxy, so it takes no pointer input.
+    fn hide_proxy(&mut self) -> Result<(), Self::Error>;
+    /// Empties the proxy's mask over `hit`, so it takes no pointer input even while shown.
+    fn clear_mask(&mut self, hit: [i32; 4]) -> Result<(), Self::Error>;
 }
 
 /// What Windows holds now, as far as the surfaces' last successful calls say.
@@ -132,6 +136,9 @@ pub(super) enum Attempt<E> {
         retry: bool,
         closed: bool,
     },
+    /// The attempts ran out and the proxy could be neither hidden nor emptied, so it may still
+    /// take clicks over a line nobody sees.
+    Stranded(E),
 }
 
 /// The dock's placement as Windows accepted it, the one asked for since, and what Windows
@@ -173,9 +180,8 @@ impl Line {
             let first = self.failed == 1;
             let retry = self.failed < MAX_FAILED_UPLOADS;
             let closed = !retry && !self.coherent();
-            if closed {
-                surfaces.hide();
-                *self = Self::default();
+            if closed && let Err(stranded) = self.close(surfaces) {
+                return Attempt::Stranded(stranded);
             }
             return Attempt::Failed {
                 error,
@@ -219,6 +225,23 @@ impl Line {
             surfaces.show(target.index)?;
             self.held.shown = Some(target.index);
         }
+        Ok(())
+    }
+
+    /// Fails closed and starts fresh. The overlay hides if it can: one that can't shows nothing
+    /// once its line is cleared. The proxy must stop taking clicks, hidden or emptied; when
+    /// neither works, that's the error.
+    fn close<S: Surfaces>(&mut self, surfaces: &mut S) -> Result<(), S::Error> {
+        if let Err(error) = surfaces.hide_overlay() {
+            tracing::warn!(%error, "can't hide the dock; its line is cleared instead");
+        }
+        if let Err(error) = surfaces.hide_proxy() {
+            tracing::warn!(%error, "can't hide the dock's proxy; emptying its mask");
+            if let Some(mask) = self.held.mask {
+                surfaces.clear_mask(mask.hit)?;
+            }
+        }
+        *self = Self::default();
         Ok(())
     }
 
@@ -284,13 +307,16 @@ impl Surfaces for Desktop<'_> {
         self.native.show(index)
     }
 
-    fn hide(&mut self) {
-        if let Err(error) = platform::hide_presence_window(self.window) {
-            tracing::error!(%error, "can't hide the dock");
-        }
-        if let Err(error) = self.native.hide() {
-            tracing::error!(%error, "can't hide the dock's proxy");
-        }
+    fn hide_overlay(&mut self) -> Result<(), PresenceError> {
+        platform::hide_presence_window(self.window)
+    }
+
+    fn hide_proxy(&mut self) -> Result<(), PresenceError> {
+        self.native.hide()
+    }
+
+    fn clear_mask(&mut self, hit: [i32; 4]) -> Result<(), PresenceError> {
+        self.native.reshape(hit, |_| [None; 2]).map(drop)
     }
 }
 
@@ -368,6 +394,15 @@ impl Presence {
                 if retry {
                     on_next_frame(window, owner, Self::retry_line);
                 }
+                false
+            }
+            Attempt::Stranded(error) => {
+                tracing::error!(%error, "the dock's band may still take clicks, so the shell quits");
+                cx.defer(move |cx| {
+                    if owner.update(cx, Self::quit).is_err() {
+                        tracing::debug!("the presence closed before it could quit");
+                    }
+                });
                 false
             }
         }
@@ -550,6 +585,9 @@ mod tests {
         refuse_uploads: Vec<bool>,
         refuse_moves: Vec<bool>,
         refuse_shows: Vec<bool>,
+        refuse_overlay_hides: bool,
+        refuse_proxy_hides: bool,
+        refuse_clears: bool,
     }
 
     fn refused(script: &mut Vec<bool>) -> bool {
@@ -583,8 +621,31 @@ mod tests {
             Ok(())
         }
 
-        fn hide(&mut self) {
-            (self.overlay, self.shown) = (None, None);
+        fn hide_overlay(&mut self) -> Result<(), &'static str> {
+            if self.refuse_overlay_hides {
+                return Err("overlay hide refused");
+            }
+            self.overlay = None;
+            Ok(())
+        }
+
+        fn hide_proxy(&mut self) -> Result<(), &'static str> {
+            if self.refuse_proxy_hides {
+                return Err("proxy hide refused");
+            }
+            self.shown = None;
+            Ok(())
+        }
+
+        fn clear_mask(&mut self, hit: [i32; 4]) -> Result<(), &'static str> {
+            if self.refuse_clears {
+                return Err("clear refused");
+            }
+            if self.mask.map(|mask| mask.hit) != Some(hit) {
+                return Err("cleared a band it doesn't hold");
+            }
+            self.mask = None;
+            Ok(())
         }
     }
 
@@ -599,6 +660,11 @@ mod tests {
         /// Nothing on screen and nothing taking clicks.
         fn hidden(&self) -> bool {
             self.overlay.is_none() && self.shown.is_none()
+        }
+
+        /// A shown proxy with a band: it takes clicks.
+        fn takes_clicks(&self) -> bool {
+            self.shown.is_some() && self.mask.is_some()
         }
     }
 
@@ -703,6 +769,64 @@ mod tests {
         assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
         assert!(fake.holds(c));
         assert!(line.contains([801, 1]));
+    }
+
+    /// The dock at A asked to move to B, with a proxy that won't show there: the last
+    /// attempt fails closed.
+    fn run_out(line: &mut Line, fake: &mut Fake) -> Attempt<&'static str> {
+        fake.refuse_shows = vec![true; 3];
+        line.request(placement(400, 2));
+        assert!(failed([true, false])(&line.attempt(fake)));
+        assert!(failed([true, false])(&line.attempt(fake)));
+        line.attempt(fake)
+    }
+
+    #[test]
+    fn an_overlay_that_wont_hide_still_closes_the_band() {
+        let (mut line, mut fake) = at_a();
+        fake.refuse_overlay_hides = true;
+        assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
+        assert!(!fake.takes_clicks(), "the proxy is hidden");
+        assert_eq!(fake.overlay, Some(placement(400, 2).layout.overlay));
+        assert!(!line.contains([401, 1]) && !line.contains([1, 1]));
+    }
+
+    #[test]
+    fn a_proxy_that_wont_hide_is_emptied_and_the_next_choice_places_it() {
+        let c = placement(800, 5);
+        let (mut line, mut fake) = at_a();
+        fake.refuse_proxy_hides = true;
+        assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
+        assert_eq!(
+            (fake.shown, fake.mask),
+            (Some(0), None),
+            "shown with no band"
+        );
+        assert!(!fake.takes_clicks());
+        fake.refuse_proxy_hides = false;
+        line.request(c);
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
+        assert!(fake.holds(c) && line.contains([801, 1]));
+    }
+
+    #[test]
+    fn neither_surface_hiding_still_leaves_no_band_taking_clicks() {
+        let (mut line, mut fake) = at_a();
+        (fake.refuse_overlay_hides, fake.refuse_proxy_hides) = (true, true);
+        assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
+        assert!(!fake.takes_clicks());
+        assert!(fake.overlay.is_some());
+    }
+
+    #[test]
+    fn a_proxy_that_can_be_neither_hidden_nor_emptied_is_stranded() {
+        let (mut line, mut fake) = at_a();
+        (fake.refuse_proxy_hides, fake.refuse_clears) = (true, true);
+        assert_eq!(
+            run_out(&mut line, &mut fake),
+            Attempt::Stranded("clear refused")
+        );
+        assert!(fake.takes_clicks(), "only quitting removes this band");
     }
 
     #[test]
