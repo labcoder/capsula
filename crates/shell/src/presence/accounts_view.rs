@@ -102,11 +102,19 @@ impl SettingsView {
                 ..
             })
         ) {
+            #[cfg(debug_assertions)]
+            let fixture = self.fixture;
             actions = actions.child(
                 Link::new("account-usage")
                     .href(MANAGE_USAGE_URL)
                     .disabled(state.waiting.is_some())
-                    .open_with(|url, _, _, cx| cx.open_url(url))
+                    .open_with(move |url, _, _, cx| {
+                        #[cfg(debug_assertions)]
+                        if fixture {
+                            return;
+                        }
+                        cx.open_url(url);
+                    })
                     .text_color(cx.theme().link)
                     .underline()
                     .child(strings.get(Text::AccountManageUsage)),

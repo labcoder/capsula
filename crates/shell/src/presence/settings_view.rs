@@ -19,6 +19,8 @@ pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
     pub(super) confirmation: Option<u64>,
+    #[cfg(debug_assertions)]
+    pub(super) fixture: bool,
     events: async_channel::Sender<PresenceEvent>,
     inputs: [Entity<InputState>; 2],
     focus: FocusHandle,
@@ -111,6 +113,8 @@ impl SettingsView {
             model,
             owner,
             confirmation: None,
+            #[cfg(debug_assertions)]
+            fixture: false,
             events,
             inputs,
             focus: cx.focus_handle().tab_stop(true),
@@ -125,6 +129,12 @@ impl SettingsView {
 
     pub(super) fn editing(&self) -> Option<Field> {
         self.editing
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn fixture_accounts(&mut self) {
+        self.tab = 1;
+        self.fixture = true;
     }
 
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<'_, Self>) {

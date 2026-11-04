@@ -1,12 +1,16 @@
 //! What Esc does, decided locally before anything reaches the brain.
 //!
-//! The order is fixed: stop moving work first, clear an idle drawing second, otherwise
-//! dismiss the topmost local panel. Esc is held system-wide only while Kumochi speaks or
-//! shows a drawing, so an app in front keeps it otherwise.
+//! The order is fixed: cancel a live pull first, stop moving work second, clear an idle drawing
+//! third, otherwise dismiss the topmost local panel. Esc is held system-wide only while Kumochi
+//! speaks, shows a drawing or has Kumo pulled out, so an app in front keeps it otherwise.
 
 /// What the shell knows is moving or on screen. Speech arrives in slice 7, so `speaking` stays
 /// false until then.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a separate fact Esc's order reads"
+)]
 pub(crate) struct Activity {
     /// A run streams, speaks or acts.
     pub(crate) working: bool,
@@ -14,18 +18,22 @@ pub(crate) struct Activity {
     pub(crate) speaking: bool,
     /// A drawing is on screen.
     pub(crate) drawing: bool,
+    /// Kumo is being pulled out of the peek.
+    pub(crate) pulling: bool,
 }
 
 impl Activity {
-    /// Esc is held system-wide only for speech or a drawing, never for Listening or hover.
+    /// Esc is held system-wide only for speech, a drawing or a pull, never for Listening or
+    /// hover.
     pub(crate) fn holds_global_escape(self) -> bool {
-        self.speaking || self.drawing
+        self.speaking || self.drawing || self.pulling
     }
 }
 
 /// The one local effect of an Esc press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Escape {
+    CancelPull,
     Stop,
     Clear,
     Dismiss,
@@ -46,7 +54,9 @@ pub(crate) enum Panel {
 
 /// Decides one Esc press from what's moving and whether a local panel is open.
 pub(crate) fn decide(activity: Activity, panel: Panel) -> Escape {
-    if activity.working || activity.speaking {
+    if activity.pulling {
+        Escape::CancelPull
+    } else if activity.working || activity.speaking {
         Escape::Stop
     } else if activity.drawing {
         Escape::Clear
@@ -218,6 +228,7 @@ mod tests {
             working: true,
             speaking: true,
             drawing: true,
+            pulling: false,
         };
         assert_eq!(decide(all, Panel::Open), Escape::Stop);
         let speaking = Activity {
@@ -232,6 +243,23 @@ mod tests {
         assert_eq!(decide(drawing, Panel::Open), Escape::Clear);
         assert_eq!(decide(Activity::default(), Panel::Open), Escape::Dismiss);
         assert_eq!(decide(Activity::default(), Panel::Closed), Escape::Ignore);
+    }
+
+    #[test]
+    fn a_live_pull_cancels_before_anything_else_and_holds_global_escape() {
+        let all = Activity {
+            working: true,
+            speaking: true,
+            drawing: true,
+            pulling: true,
+        };
+        assert_eq!(decide(all, Panel::SettingsEdit), Escape::CancelPull);
+        let pulling = Activity {
+            pulling: true,
+            ..Activity::default()
+        };
+        assert_eq!(decide(pulling, Panel::Closed), Escape::CancelPull);
+        assert!(pulling.holds_global_escape());
     }
 
     #[test]
