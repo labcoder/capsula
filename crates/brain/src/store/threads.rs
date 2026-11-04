@@ -92,11 +92,11 @@ impl Store {
 
 fn effort_text(effort: Effort) -> &'static str {
     match effort {
-        Effort::Minimal => "minimal",
         Effort::Low => "low",
         Effort::Medium => "medium",
         Effort::High => "high",
         Effort::XHigh => "xhigh",
+        Effort::Max => "max",
     }
 }
 
@@ -109,8 +109,9 @@ pub(super) fn kind_of(text: &str) -> rusqlite::Result<ThreadKind> {
     }
 }
 
-/// A stored `model` and `effort`, which are both set or both null. A value no build wrote fails
-/// the read.
+/// A stored `model` and `effort`, which are both set or both null. A slug no build wrote fails the
+/// read. An effort this build doesn't know, an older or a newer build's, reads as no choice, so the
+/// thread falls back to the default model and the page still reads (CAPS-90 M1).
 pub(super) fn choice_of(
     model: Option<&str>,
     effort: Option<&str>,
@@ -118,10 +119,13 @@ pub(super) fn choice_of(
     let (Some(model), Some(effort)) = (model, effort) else {
         return Ok(None);
     };
-    let effort = Effort::ALL
+    let model = ModelSlug::new(model).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let Some(effort) = Effort::ALL
         .into_iter()
         .find(|known| effort_text(*known) == effort)
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    let model = ModelSlug::new(model).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    else {
+        tracing::warn!("a stored effort this build doesn't know reads as no choice");
+        return Ok(None);
+    };
     Ok(Some(ModelChoice { model, effort }))
 }

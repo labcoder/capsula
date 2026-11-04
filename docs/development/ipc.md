@@ -127,7 +127,7 @@ flowchart LR
 | Message | Pipe | Fields |
 |---|---|---|
 | `ThreadOp::Rename` | Control, shell to brain | `thread`, `title`: a `ThreadTitle`, trimmed, one line, 1–80 characters, checked on decode |
-| `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Minimal` to `XHigh`) |
+| `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Low` to `Max`, the documented vocabulary) |
 
 - Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
