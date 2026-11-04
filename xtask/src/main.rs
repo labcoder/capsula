@@ -21,6 +21,7 @@ mod platform;
 mod session;
 #[cfg(windows)]
 mod slice2;
+mod vendor;
 
 fn usage() -> String {
     format!(
@@ -54,6 +55,8 @@ tasks:
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
+  check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
+                    CI runs it so a GPUI bump can't silently drop a vendored patch
   pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
             println!("{}", usage());
             Ok(())
         }
+        Some("check-vendor") => vendor::run(),
         Some("pipe-dump") => pipe_dump(
             &args
                 .next()
