@@ -42,7 +42,8 @@ plus 256 tracks); `set` and `remove` each allow at most 600 entries. Other start
 the scene-state validator, not the typed parser.
 
 `put` accepts `line`, `arrow`, `path`, `shape`, `text`, `callout`, `highlight`,
-`diagram`, `node`, `edge`, `table`, `row`, `chart`, `series`, `anim` and `mermaid`.
+`diagram`, `node`, `edge`, `table`, `row`, `chart`, `series`, `anim`, `mermaid`,
+`view3d` and `solid`.
 Wire objects require model ids: there are no generated `_1` aliases. Mermaid
 compilation preserves source node and named-group ids and privately generates the
 root, anonymous-group and edge ids.
@@ -53,7 +54,47 @@ Points are logical pixels of the inline scene's `size` or the overlay display.
 Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
-Screen/capture anchors and all 3D operations are absent, not ignored.
+Screen/capture anchors are absent, not ignored.
+
+### 3D records
+
+The decoder accepts the following records, but admission refuses every `view3d`,
+`solid`, `pos3` track and `rot3` track as `Unsupported` at `put[i]` until slice 5's
+3D admission lands. No 3D objects commit, lay out or animate yet. `pos3` and `rot3`
+use three-component keys; existing tracks retain their existing key types.
+
+| Record | Fields and decode bounds |
+|---|---|
+| `view3d` | Required `id`; optional `box`, `camera`, `light`, `spin`; `orbit` defaults to true. |
+| `camera` | Optional `yaw`, `pitch` (−85..=85°), `dist` (0.001..=20,000), `fov` (10..=120°), `target` (three coordinates). No camera defaults are applied here. |
+| `light` | Optional `dir` (three coordinates), `ambient` (0..=1). |
+| `solid` | Required `in`, `id`, `shape`; shape fields below; optional `pos`, `rot`, `scale`, `segments`, `attach`, `label`, `info`, `color`, `opacity`. Sizes and scale are 0.001..=20,000; `r2` also allows zero on decode; integer `segments` is 3..=48; `opacity` is 0..=1; `label` and `info` allow 400 Unicode scalars. |
+
+`spin` is −360..=360°/s. Every numeric input must be finite; free coordinates,
+including rotations, targets, directions, outlines and paths, use the existing
+±20,000 coordinate bound. Decode bounds apply in JSON and postcard, regardless of shape.
+
+A decoded solid is not yet valid geometry. `Solid::geometry()` checks required
+fields first, then rejects unused shape fields (including `segments` on a box),
+then checks counts and radius relations:
+
+| Shape | Used geometry fields |
+|---|---|
+| `box` | Required three-component `size`. |
+| `sphere` | Required `r`. |
+| `cylinder` | Required `r`, `h`. |
+| `cone` | Required `r`, `h`; optional `r2` defaults to zero. |
+| `torus` | Required `r`, `r2`, with 0.001 ≤ `r2` < `r`. |
+| `extrude` | Required `points` (3..=128), `depth`. |
+| `lathe` | Required `points` (2..=512), with nonnegative radii in the first component. |
+| `tube` | Required `path` (2..=512), `r2` ≥ 0.001. |
+
+Empty and omitted lists are equivalent: a required empty list is `MissingField`,
+and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
+All lists decode at most 512 points; extrude counts above 128 are
+`OverBudget(PathPoints)`. Degeneracy checks belong to the future tessellator.
+The new enum tags are append-only; changing these positional postcard structs
+later requires an explicit wire-version decision, not rewritten goldens.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
