@@ -9,6 +9,7 @@
 //! store until its outcome is written, so a failed write is still reported. The streaming half,
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
+mod admission;
 mod delete;
 mod drawing;
 mod run;
@@ -28,6 +29,7 @@ use kumochi_protocol::message::{
 use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
+pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use store_op::StoreOp;
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -97,6 +99,8 @@ pub enum Input {
         /// What it produced.
         event: TurnEvent,
     },
+    /// A round's context was built, or failed to be.
+    ContextBuilt(ContextBuilt),
     /// The store committed a turn.
     TurnStored {
         /// The run the turn started.
@@ -189,7 +193,7 @@ pub enum Effect {
     Control(ControlToShell),
     /// Send on the data pipe.
     Data(DataToShell),
-    /// Start the engine's round for a stored turn.
+    /// Start the engine's round with an admitted build.
     StartEngine {
         /// What the engine answers.
         request: RunRequest,
@@ -244,8 +248,6 @@ enum Notify {
 struct Run {
     id: RunId,
     thread: ThreadId,
-    /// What the user typed, kept for the run's life.
-    turn: String,
     turn_stored: bool,
     /// The turn's write, held until every older run's outcome is queued.
     begin: Option<StoreOp>,
@@ -265,6 +267,10 @@ struct Run {
     /// One entry per pending step: the frames the engine produced after it, sent once it's
     /// acknowledged, so the shell sees the engine's order.
     held: VecDeque<Vec<DataToShell>>,
+    /// What the run read when its first build began, reused by every later build.
+    snapshot: Option<crate::context::RunSnapshot>,
+    /// The round's current build; the engine starts once it's admitted.
+    build: Option<admission::Build>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
@@ -298,6 +304,11 @@ impl Run {
     /// Steps sent to the store; the ones waiting for the scene's id aren't.
     fn sent(&self) -> u32 {
         self.steps - u32::try_from(self.waiting.len()).expect("at most MAX_STEPS wait")
+    }
+
+    /// The engine started: the round's build was admitted.
+    fn started(&self) -> bool {
+        self.build.as_ref().is_some_and(admission::Build::admitted)
     }
 
     fn outstanding(&self) -> bool {
@@ -343,6 +354,8 @@ pub struct Coordinator {
     turns_read: u32,
     /// A delete on this connection was refused for capacity, so its thread wasn't hidden.
     refused_delete: bool,
+    /// Build attempts started, so each has its own serial.
+    attempts: u64,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -389,6 +402,7 @@ impl Coordinator {
             crossed: Vec::new(),
             turns_read: 0,
             refused_delete: false,
+            attempts: 0,
         }
     }
 
@@ -461,6 +475,7 @@ impl Coordinator {
                 );
             }
             Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
+            Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
             Input::StepStored {
                 run,
@@ -522,8 +537,7 @@ impl Coordinator {
         Ok(effects)
     }
 
-    /// A run's turn is stored: its engine starts, unless it already ended. The run keeps its
-    /// request; the engine gets a copy.
+    /// A run's turn is stored: its first round's context is built, unless it already ended.
     fn turn_stored(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
         let found = self.find(run)?;
         if found.begin.is_some() || found.turn_stored {
@@ -534,12 +548,7 @@ impl Coordinator {
             self.settle(run, effects);
             return Ok(());
         }
-        let request = RunRequest {
-            run,
-            thread: found.thread,
-            turn: found.turn.clone(),
-        };
-        effects.push(Effect::StartEngine { request });
+        self.build(run, 1, effects);
         Ok(())
     }
 
@@ -583,12 +592,11 @@ impl Coordinator {
             thread,
             title,
             run,
-            text: text.clone(),
+            text,
         };
         self.current = Some(Run {
             id: run,
             thread,
-            turn: text,
             turn_stored: false,
             begin: Some(begin),
             answering: false,
@@ -600,6 +608,8 @@ impl Coordinator {
             evict: None,
             waiting: VecDeque::new(),
             held: VecDeque::new(),
+            snapshot: None,
+            build: None,
             draw: None,
             finishing: false,
             ending: None,

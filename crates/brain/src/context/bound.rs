@@ -1,7 +1,7 @@
 //! A request's size, counted as its JSON body would be: every string escaped, plus an allowance
 //! for each item's and the body's own fields [guess]. 13a checks the serialised body again.
 
-use super::{InputItem, ModelRequest, ToolSchema};
+use super::{InputItem, ToolSchema};
 
 /// The fields around each item.
 const ITEM_OVERHEAD: usize = 64;
@@ -40,7 +40,8 @@ pub(super) fn fixed_bytes(instructions: &str, tools: &[ToolSchema]) -> usize {
 }
 
 /// A whole request's size.
-pub(crate) fn request_bytes(request: &ModelRequest) -> usize {
+#[cfg(test)]
+pub(crate) fn request_bytes(request: &super::ModelRequest) -> usize {
     fixed_bytes(&request.instructions, &request.tools)
         + request.input.iter().map(item_bytes).sum::<usize>()
 }

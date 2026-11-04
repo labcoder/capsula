@@ -1,0 +1,212 @@
+//! Admitting a round's context. Every round's request is built from the store after every op
+//! sent to it before, and a build that rendered a thread with a delete pending or accepted since
+//! it began is thrown away, so text read before a delete is never sent after it commits
+//! (docs/development/engines.md, "Builds and deletes").
+
+use std::collections::BTreeSet;
+
+use kumochi_protocol::message::{RunId, ThreadId};
+
+use super::{Coordinator, Effect, Stale, StoreOp};
+use crate::context::{Built, Origin, RunSnapshot};
+use crate::engines::RunRequest;
+use crate::store::Failure;
+
+/// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
+/// an older one is stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildKey {
+    /// The run.
+    pub run: RunId,
+    /// The model round, from 1.
+    pub round: u32,
+    /// A serial across every build, never reused.
+    pub attempt: u64,
+}
+
+/// A build for the page reader, after every op sent to the store before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildContext {
+    pub(crate) key: BuildKey,
+    pub(crate) thread: ThreadId,
+    pub(crate) origin: Origin,
+    /// What the run read when it started. The runtime fills it in for the run's first build from
+    /// the settings, and that build reads the thread's model choice into it.
+    pub(crate) snapshot: Option<RunSnapshot>,
+    /// The run's first build.
+    pub(crate) first: bool,
+}
+
+/// A finished build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextBuilt {
+    pub(crate) key: BuildKey,
+    /// What the build ran with; `None` when it never reached the store.
+    pub(crate) snapshot: Option<RunSnapshot>,
+    pub(crate) result: Result<Built, Unbuilt>,
+}
+
+#[cfg(feature = "test-support")]
+impl ContextBuilt {
+    /// A clean result for `build` that rendered only its own thread, for tests in other crates.
+    pub fn own_thread(build: &BuildContext) -> Self {
+        Self {
+            key: build.key,
+            snapshot: None,
+            result: Ok(Built {
+                request: crate::context::ModelRequest {
+                    choice: None,
+                    instructions: String::new(),
+                    input: Vec::new(),
+                    tools: Vec::new(),
+                },
+                sources: vec![build.thread],
+            }),
+        }
+    }
+}
+
+/// Why a build made no request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unbuilt {
+    /// Even the current turn is over the request's bound.
+    TooLarge,
+    /// The read failed, or the stored thread couldn't be built.
+    Failed,
+}
+
+/// The current run's build.
+#[derive(Debug)]
+pub(super) struct Build {
+    key: BuildKey,
+    /// Threads whose delete was pending when the build began or was accepted since. Kept
+    /// through the deletes' answers, so one answered before the result arrives still voids it.
+    exposed: BTreeSet<ThreadId>,
+    /// A voided build's rebuild waits until these deletes are answered.
+    blocked: BTreeSet<ThreadId>,
+    admitted: bool,
+}
+
+impl Build {
+    pub(super) fn admitted(&self) -> bool {
+        self.admitted
+    }
+}
+
+impl Coordinator {
+    /// Starts a new build attempt of the current run's `round`.
+    pub(super) fn build(&mut self, run: RunId, round: u32, effects: &mut Vec<Effect>) {
+        self.attempts += 1;
+        let key = BuildKey {
+            run,
+            round,
+            attempt: self.attempts,
+        };
+        let exposed = self.pending_deletes();
+        let main = self.main_thread;
+        let Ok(current) = self.current(run) else {
+            return;
+        };
+        current.build = Some(Build {
+            key,
+            exposed,
+            blocked: BTreeSet::new(),
+            admitted: false,
+        });
+        effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
+            key,
+            thread: current.thread,
+            origin: origin(current.thread, main),
+            snapshot: current.snapshot.clone(),
+            first: current.snapshot.is_none(),
+        })));
+    }
+
+    /// A delete was accepted: the current build may have read its thread.
+    pub(super) fn expose(&mut self, thread: ThreadId) {
+        if let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) {
+            build.exposed.insert(thread);
+        }
+    }
+
+    /// A delete was answered: a build waiting on deletes starts again once none it waits on is
+    /// pending.
+    pub(super) fn unblock(&mut self, effects: &mut Vec<Effect>) {
+        let pending = self.pending_deletes();
+        let ready = self.current.as_ref().and_then(|run| {
+            let build = run.build.as_ref()?;
+            let ready = !build.blocked.is_empty() && build.blocked.is_disjoint(&pending);
+            ready.then_some(build.key)
+        });
+        if let Some(key) = ready {
+            self.build(key.run, key.round, effects);
+        }
+    }
+
+    /// A build finished. Only the current attempt counts. A request that rendered a thread
+    /// exposed to a delete is dropped and built again, once the delete is answered when it's
+    /// still pending; otherwise the engine starts with it.
+    pub(super) fn context_built(
+        &mut self,
+        done: ContextBuilt,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let ContextBuilt {
+            key,
+            snapshot,
+            result,
+        } = done;
+        let pending = self.pending_deletes();
+        let main = self.main_thread;
+        let current = self.current(key.run)?;
+        if !current
+            .build
+            .as_ref()
+            .is_some_and(|build| build.key == key && !build.admitted && build.blocked.is_empty())
+        {
+            return Err(Stale);
+        }
+        let made = match result {
+            Ok(made) => made,
+            Err(Unbuilt::TooLarge) => return self.fail(key.run, Failure::Budget, effects),
+            Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
+        };
+        if let Some(snapshot) = snapshot {
+            current.snapshot.get_or_insert(snapshot);
+        }
+        let thread = current.thread;
+        let build = current.build.as_mut().expect("the build was just matched");
+        let voided: BTreeSet<ThreadId> = made
+            .sources
+            .iter()
+            .copied()
+            .filter(|source| build.exposed.contains(source) || pending.contains(source))
+            .collect();
+        if voided.is_empty() {
+            build.admitted = true;
+            effects.push(Effect::StartEngine {
+                request: RunRequest {
+                    run: key.run,
+                    thread,
+                    origin: origin(thread, main),
+                    request: made.request,
+                },
+            });
+            return Ok(());
+        }
+        build.blocked = &voided & &pending;
+        if build.blocked.is_empty() {
+            self.build(key.run, key.round, effects);
+        }
+        Ok(())
+    }
+}
+
+/// A run's origin comes from its thread, never from anything a model produced.
+fn origin(thread: ThreadId, main: ThreadId) -> Origin {
+    if thread == main {
+        Origin::Kumo
+    } else {
+        Origin::Task(thread)
+    }
+}
