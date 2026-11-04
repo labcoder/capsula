@@ -4,6 +4,7 @@ mod chart;
 mod compound;
 mod diagram;
 mod edge_labels;
+mod edges;
 pub(crate) mod heap;
 mod nodes;
 mod path;

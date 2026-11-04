@@ -1,6 +1,6 @@
 use super::{
-    Glide, PrepareError, SurfaceGeometry, compound, diagram,
-    primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect, text_origin},
+    Glide, PrepareError, SurfaceGeometry, compound, diagram, edges,
+    primitives::{Build, ellipse, layout_error, rect, text_origin},
     state::{LayoutState, Placed, Rest},
 };
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
     mermaid::Extra,
-    record::{Align, Direction, Head, Node, NodeShape},
+    record::{Align, Direction, Node, NodeShape},
     state::object,
 };
 use std::{
@@ -129,7 +129,7 @@ pub(super) fn place(
     }
     // An edge ranks once, in its endpoints' least common group, between the two members there
     // that hold them; edges inside one member never count toward that group's edge cap.
-    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle, bool)>>::new();
+    let mut ranked = BTreeMap::<Option<Handle>, Vec<(Handle, Handle)>>::new();
     let mut labels = BTreeMap::<Option<Handle>, Vec2>::new();
     let mut edges = BTreeMap::new();
     for object in state.objects.values() {
@@ -158,10 +158,7 @@ pub(super) fn place(
         if let Some((group, from, to)) = common
             && from != to
         {
-            ranked
-                .entry(group)
-                .or_default()
-                .push((from, to, edge.label.is_some()));
+            ranked.entry(group).or_default().push((from, to));
             if let Some(label) = &edge.label
                 && groups.contains_key(&group)
             {
@@ -239,7 +236,7 @@ pub(super) fn place(
             })
             .unwrap_or(build.viewport);
         let direction = compound::direction(state, parent, surface);
-        let mut gap = labels.get(&parent).map_or(diagram::RANK_GAP, |label| {
+        let gap = labels.get(&parent).map_or(diagram::RANK_GAP, |label| {
             let along = if direction.0 == Direction::Right {
                 label.x
             } else {
@@ -300,25 +297,10 @@ pub(super) fn place(
             .get(&parent)
             .into_iter()
             .flatten()
-            .filter_map(|&(from, to, _)| Some((slot(from)?, slot(to)?)))
+            .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
             .collect();
         let initial = fresh.iter().all(|fresh| *fresh);
-        let mut placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
-        let links = ranked.get(&parent).map_or(&[][..], Vec::as_slice);
-        if initial
-            && direction.0 == Direction::Right
-            && gap < 2.0 * diagram::RANK_GAP
-            && links.iter().filter(|(_, _, labelled)| *labelled).count() > 1
-            && links.iter().any(|&(from, to, labelled)| {
-                labelled
-                    && slot(from).zip(slot(to)).is_some_and(|(from, to)| {
-                        placement.ranks[from].abs_diff(placement.ranks[to]) > 1
-                    })
-            })
-        {
-            gap = 2.0 * diagram::RANK_GAP;
-            placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
-        }
+        let placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
         let mut ranks = placement.ranks.clone();
         for (slot, (_, id, _)) in all.iter().enumerate() {
             if let Some(rank) = state.objects.get(id).and_then(|object| object.rank) {
@@ -471,7 +453,7 @@ pub(super) fn place(
                 let (id, _) = waiting.remove(index);
                 let (handle, source) = &sources[id];
                 let mut object = if matches!(&**source, Op::Edge(_)) {
-                    edge(source, *handle, parent, direction.0, state, build, None)?
+                    edges::build(source, *handle, parent, direction.0, state, build, None)?
                 } else {
                     build.primitive(source, *handle, parent, state, None)?
                 };
@@ -832,137 +814,4 @@ fn node_primitives(
         });
     }
     output
-}
-
-/// Where a ray from `rect`'s center toward `toward` leaves the outline of the node `id`: its
-/// diamond or ellipse inscribed in `rect`, else `rect` itself.
-fn port(state: &LayoutState, id: &crate::WireId, rect: Rect, toward: Vec2) -> Vec2 {
-    let shape = state
-        .objects
-        .get(id)
-        .and_then(|object| match &*object.source {
-            Op::Node(node) => Some(node.shape),
-            _ => None,
-        });
-    let center = rect.center();
-    let delta = toward - center;
-    let half = rect.size * 0.5;
-    let reach = match shape {
-        Some(NodeShape::Diamond) => (delta.x / half.x).abs() + (delta.y / half.y).abs(),
-        Some(NodeShape::Circle) => (delta.x / half.x).hypot(delta.y / half.y),
-        _ => return rect.edge_toward(toward),
-    };
-    if reach.is_normal() {
-        center + delta * reach.recip()
-    } else {
-        rect.edge_toward(toward)
-    }
-}
-
-pub(super) fn edge(
-    source: &Arc<Op>,
-    handle: Handle,
-    parent: Option<Handle>,
-    direction: Direction,
-    state: &LayoutState,
-    build: &mut Build<'_>,
-    cached: Option<&Placed>,
-) -> Result<Placed, PrepareError> {
-    let Op::Edge(edge) = &**source else {
-        unreachable!("edge builder receives an edge");
-    };
-    let [a, b] = if let Some(old) = cached {
-        old.anchors
-    } else {
-        let from = super::primitives::reference(state, &edge.from, parent)?;
-        let to = super::primitives::reference(state, &edge.to, parent)?;
-        [
-            port(state, &edge.from, from, to.center()),
-            port(state, &edge.to, to, from.center()),
-        ]
-    };
-    let middle = (a + b) * 0.5;
-    // shortcut: curves can cross nodes and title bands; add detour routing after D1.
-    let control = if direction == Direction::Right {
-        Vec2::new(middle.x, a.y)
-    } else {
-        Vec2::new(a.x, middle.y)
-    };
-    let mut points = Vec::new();
-    let pieces = u16::try_from(crate::path::PROCEDURAL_CURVE_PIECES)
-        .expect("procedural curve count fits u16");
-    for n in 0..=pieces {
-        let t = f32::from(n) / f32::from(pieces);
-        points.push(a * (1.0 - t).powi(2) + control * (2.0 * (1.0 - t) * t) + b * t.powi(2));
-    }
-    let (head, thick) = match state.extra(handle) {
-        Some(Extra::Link { head, thick }) => (*head, *thick),
-        _ => (Head::End, false),
-    };
-    let last = usize::from(pieces);
-    let mut heads = Vec::new();
-    if matches!(head, Head::End | Head::Both) {
-        heads.push(arrow_head(points[last - 1], points[last]));
-    }
-    if matches!(head, Head::Start | Head::Both) {
-        heads.push(arrow_head(points[1], points[0]));
-    }
-    let label_middle = points[usize::from(pieces) / 2];
-    let mut bounds = point_bounds(&points)?;
-    for head in &heads {
-        bounds = bounds.union(point_bounds(head)?);
-    }
-    let color = build.color(edge.color.as_ref());
-    let mut primitives = vec![Prim::Line {
-        points: points.into(),
-        closed: false,
-        color,
-        width: if thick { 3.5 } else { 2.0 },
-        dashed: edge.dash,
-    }];
-    primitives.extend(heads.into_iter().map(|head| Prim::Fill {
-        points: head.into(),
-        color,
-    }));
-    if let Some(label) = &edge.label {
-        let style = TextStyle {
-            size: build.theme.font_size - 1.0,
-            bold: false,
-        };
-        let size = build.measure(label, style, Some(180.0))?;
-        let origin = label_middle - size * 0.5;
-        let chip = Rect {
-            origin: origin - Vec2::new(4.0, 2.0),
-            size: size + Vec2::new(8.0, 4.0),
-        };
-        bounds = bounds.union(chip);
-        primitives.push(Prim::Rect {
-            rect: chip,
-            radius: 4.0,
-            fill: Some(build.theme.surface.into()),
-            border: None,
-        });
-        primitives.push(Prim::Text {
-            origin: text_origin(Rect { origin, size }, Some(180.0), Align::Center),
-            text: label.clone(),
-            style,
-            color: build.theme.fg.into(),
-            max_width: Some(180.0),
-            align: Align::Center,
-        });
-    }
-    let mut placed = Placed::new(
-        Item {
-            handle,
-            parent,
-            primitives: primitives.into(),
-            bounds,
-            transform: Affine::default(),
-            opacity: edge.opacity.map_or(1.0, crate::Finite::get),
-        },
-        Arc::clone(source),
-        cached,
-    );
-    placed.anchors = [a, b];
-    Ok(placed)
 }

@@ -162,6 +162,7 @@ fn approved_gates_prepare_and_recover_from_original_source() {
             16,
         ),
         (include_str!("fixtures/mermaid/gates/orientations.mmd"), 10),
+        (include_str!("fixtures/mermaid/gates/two-way.mmd"), 6),
         (
             include_str!("fixtures/mermaid/gates/labelled-edges.mmd"),
             12,

@@ -124,7 +124,16 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
     let mut scene = new_scene("label_nudge");
     let mut budget = GlobalBudget::default();
     let before = LayoutState::new(&scene);
-    let picture = prepared(&mut scene, &mut budget, &before, labelled_pair(["x", "y"]));
+    let mut value = labelled_pair(["x", "y"]);
+    value["put"][4]["edge"]["in"] = json!("other");
+    value["put"][4]["edge"]["from"] = json!("c");
+    value["put"][4]["edge"]["to"] = json!("d");
+    value["put"].as_array_mut().expect("put").extend([
+        json!({"diagram":{"id":"other","dir":"right","box":[0,0,360,300]}}),
+        json!({"node":{"id":"c","in":"other","label":"C"}}),
+        json!({"node":{"id":"d","in":"other","label":"D"}}),
+    ]);
+    let picture = prepared(&mut scene, &mut budget, &before, value);
     let first = scene.handle(&id("e1")).expect("first edge");
     let second = scene.handle(&id("e2")).expect("second edge");
     let items = picture.after.items();
@@ -140,7 +149,7 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
             _ => None,
         })
         .expect("second label");
-    assert_eq!(origin, Vec2::new(73.125, 31.0));
+    assert_eq!(origin, Vec2::new(69.75, 31.0));
     assert_eq!(
         chip(&picture.after, first),
         Rect {
@@ -151,7 +160,7 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
     assert_eq!(
         chip(&picture.after, second),
         Rect {
-            origin: Vec2::new(155.125, 29.0),
+            origin: Vec2::new(151.75, 29.0),
             size: Vec2::new(16.0, 14.0)
         }
     );
@@ -213,7 +222,7 @@ fn label_collisions_use_world_bounds_across_transformed_parents() {
             scene.handle(&id("e2")).expect("second edge")
         ),
         Rect {
-            origin: Vec2::new(220.0, 29.0),
+            origin: Vec2::new(217.0, 29.0),
             size: Vec2::new(16.0, 14.0)
         }
     );
@@ -223,12 +232,11 @@ fn label_collisions_use_world_bounds_across_transformed_parents() {
 fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
     let mut scene = new_scene("full_edge");
     let before = LayoutState::new(&scene);
-    let picture = prepared(
-        &mut scene,
-        &mut GlobalBudget::default(),
-        &before,
-        labelled_pair(["abc", "def"]),
-    );
+    let mut value = labelled_pair(["abc", "def"]);
+    for index in [3, 4] {
+        value["put"][index]["edge"]["to"] = json!("a");
+    }
+    let picture = prepared(&mut scene, &mut GlobalBudget::default(), &before, value);
     for name in ["e1", "e2"] {
         assert_eq!(
             chip(&picture.after, scene.handle(&id(name)).expect("edge")),
@@ -277,7 +285,7 @@ fn edge_label_chips_paint_after_every_edge_stroke() {
 }
 
 #[test]
-fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
+fn a_chip_follows_the_bow_over_a_skipped_node() {
     let mut scene = new_scene("chip_node");
     let before = LayoutState::new(&scene);
     let picture = prepared(
@@ -298,7 +306,7 @@ fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
     assert_eq!(
         chip(&picture.after, handle),
         Rect {
-            origin: Vec2::new(243.0, 29.0),
+            origin: Vec2::new(292.0, -3.0),
             size: Vec2::new(16.0, 14.0)
         }
     );
@@ -310,7 +318,7 @@ fn a_chip_avoids_a_skipped_node_without_rerouting_its_edge() {
     let Prim::Line { points, .. } = &item.primitives[0] else {
         panic!("curve")
     };
-    assert_eq!(points[8], Vec2::new(300.0, 36.0));
+    assert_eq!(points[8], Vec2::new(300.0, 4.0));
 }
 
 #[test]
@@ -334,19 +342,19 @@ fn labelled_skipped_ranks_leave_room_for_separate_chips() {
     assert_eq!(
         picture.after.bounds(&id("c")).expect("last rank"),
         Some(Rect {
-            origin: Vec2::new(484.0, 16.0),
+            origin: Vec2::new(412.0, 16.0),
             size: Vec2::new(80.0, 40.0)
         })
     );
-    for (name, x, width) in [
-        ("e1", 180.0, 16.0),
-        ("e2", 404.0, 16.0),
-        ("e3", 203.0, 56.0),
+    for (name, x, y, width) in [
+        ("e1", 216.0, 29.0, 16.0),
+        ("e2", 368.0, 29.0, 16.0),
+        ("e3", 272.0, -3.0, 56.0),
     ] {
         assert_eq!(
             chip(&picture.after, scene.handle(&id(name)).expect("edge")),
             Rect {
-                origin: Vec2::new(x, 29.0),
+                origin: Vec2::new(x, y),
                 size: Vec2::new(width, 14.0)
             }
         );
