@@ -13,7 +13,6 @@ use std::iter;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows_sys::Win32::Foundation::{
     FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE,
@@ -35,16 +34,6 @@ const BACKSLASH: u16 = 0x5C;
 const SPACE: u16 = 0x20;
 const TAB: u16 = 0x09;
 const EQUALS: u16 = 0x3D;
-
-/// Held from the moment a child's handle ends become inheritable until they're closed, and
-/// around every other process creation in the brain, so no other child inherits them.
-static SPAWNING: Mutex<()> = Mutex::new(());
-
-/// Takes the process-creation lock. Any code in the brain that starts a process with std's
-/// `Command` holds it across the spawn, because std passes `bInheritHandles = TRUE`.
-pub(crate) fn lock_spawns() -> MutexGuard<'static, ()> {
-    SPAWNING.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// What to start and how.
 pub struct Launch<'a> {
@@ -160,7 +149,7 @@ pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
     };
     let mut info = PROCESS_INFORMATION::default();
     let created = {
-        let _spawning = lock_spawns();
+        let _spawning = crate::platform::spawn_lock();
         let created = inherited
             .iter()
             .try_for_each(|&handle| set_inheritable(handle))

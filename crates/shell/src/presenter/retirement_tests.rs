@@ -181,7 +181,8 @@ fn a_removed_scene_drops_on_the_dropper() {
     presenter
         .completed(job.run(&mut Shaper), ms(now, 20))
         .expect("the batch");
-    let SceneEvent::Step { step, .. } = &presenter.scenes[&scene].state.recovery_log()[0] else {
+    let SceneEvent::Step { step, .. } = &presenter.scenes[&scene].state.view().recovery_log()[0]
+    else {
         panic!("the installed original step");
     };
     let probe = Arc::clone(step);
@@ -219,7 +220,7 @@ fn kept_cut_released(pad: &str) -> (usize, usize) {
     let stopped = presenter.stop(RUN, ms(now, 30)).expect("a stop");
     assert_eq!(controls(&stopped).len(), 1, "the recovered scene is cut");
     let cut = presenter.scenes[&scene].cut_now();
-    let revision = presenter.scenes[&scene].state.revision();
+    let revision = presenter.scenes[&scene].state.view().revision();
     let release = hold_dropper();
     let (applied, _, [_, applying]) =
         crate::allocation::usage(|| acknowledge(&mut presenter, scene, revision, cut, ms(now, 40)));
@@ -228,7 +229,7 @@ fn kept_cut_released(pad: &str) -> (usize, usize) {
         .scenes
         .get_mut(&scene)
         .expect("a kept cut keeps its scene");
-    let empty = LayoutState::new(&kept.state);
+    let empty = LayoutState::new(kept.state.view());
     let rest = std::mem::replace(&mut kept.rest, empty);
     let ((), _, [_, plain]) = crate::allocation::usage(|| drop(rest));
     drop(presenter);

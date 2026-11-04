@@ -1,6 +1,6 @@
 use super::{
-    Body, Failure, Framing, Head, MAX_CHUNK_LINE_BYTES, MAX_HEAD_BYTES, MAX_TRAILER_BYTES, Step,
-    head, request,
+    Body, Failure, Framing, Head, MAX_CHUNK_LINE_BYTES, MAX_HEAD_BYTES, MAX_TRAILER_BYTES, Media,
+    Step, head, request,
 };
 
 /// Decodes `wire` fed in chunks of `size`: the data, and the bytes left after the body or why it failed.
@@ -216,10 +216,20 @@ fn interim_heads_are_100_and_103_and_101_is_refused() {
 fn the_media_type_and_close_are_read_from_their_headers() {
     let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nContent-Length: 0\r\n\r\n";
     let head = parsed(bytes).expect("a head").expect("whole").0;
-    assert!(head.event_stream && !head.close);
+    assert!(head.media == Media::EventStream && !head.close);
     let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
     let head = parsed(bytes).expect("a head").expect("whole").0;
-    assert!(!head.event_stream && head.close);
+    assert!(head.media == Media::Other && head.close);
+    let bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        parsed(bytes).expect("a head").expect("whole").0.media,
+        Media::Absent
+    );
+    let bytes = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        parsed(bytes).expect("a head").expect("whole").0.media,
+        Media::Other
+    );
 }
 
 #[test]
@@ -275,6 +285,67 @@ fn malformed_chunks_are_refused() {
             end,
             "{}",
             String::from_utf8_lossy(wire)
+        );
+    }
+}
+
+#[test]
+fn chunk_extensions_follow_their_grammar() {
+    for (line, ok) in [
+        ("5;name=value", true),
+        ("5;a", true),
+        ("5;a;b=c", true),
+        ("5 ; a = b", true),
+        ("5;a=\"q \\\"x\\\" ;\"", true),
+        ("5;a=\"\"", true),
+        ("5;", false),
+        ("5;=x", false),
+        ("5;a=", false),
+        ("5;a=\"open", false),
+        ("5 ", false),
+        ("5;a ", false),
+        ("5;a b", false),
+        ("5;a=b c", false),
+        ("5;\0", false),
+        ("5;a=\"\x01\"", false),
+        ("5x", false),
+    ] {
+        let mut wire = line.as_bytes().to_vec();
+        wire.extend_from_slice(b"\r\nhello\r\n0\r\n\r\n");
+        let expected = if ok {
+            (b"hello".to_vec(), Ok(0))
+        } else {
+            (Vec::new(), Err(Failure::Protocol))
+        };
+        assert_eq!(
+            decode(Framing::Chunked, &wire, wire.len()),
+            expected,
+            "{line:?}"
+        );
+    }
+}
+
+#[test]
+fn trailer_lines_must_be_field_lines() {
+    for (line, ok) in [
+        ("X-T: v", true),
+        ("X:", true),
+        ("X: a\tb", true),
+        ("not-a-field", false),
+        (": v", false),
+        ("X T: v", false),
+        (" X: v", false),
+        ("X:\x01", false),
+        ("X: \x7f", false),
+    ] {
+        let mut wire = b"0\r\n".to_vec();
+        wire.extend_from_slice(line.as_bytes());
+        wire.extend_from_slice(b"\r\n\r\n");
+        let end = if ok { Ok(0) } else { Err(Failure::Protocol) };
+        assert_eq!(
+            decode(Framing::Chunked, &wire, wire.len()).1,
+            end,
+            "{line:?}"
         );
     }
 }

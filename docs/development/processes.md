@@ -37,7 +37,8 @@ flowchart LR
   `=`, or repeats another without regard to case, is refused before anything starts. The block
   is sorted by ordinal uppercase, and an empty environment is passed as an empty block, never a
   null pointer, which would inherit the brain's. A `Launch` prints counts, never argument or
-  environment values.
+  environment values. It holds `platform::spawn_lock()` from marking its handles inheritable
+  until they're closed, as every other process start in the brain does.
 - **Its standard handles** are one of three:
   - `Piped`: three anonymous pipes, no window. The brain gets blocking ends; the async bridge
     belongs to the supervisor that owns a run's lifetime.

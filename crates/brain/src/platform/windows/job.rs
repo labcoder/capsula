@@ -130,10 +130,13 @@ impl Job {
 
     /// Starts a helper with piped stdin and stdout; stderr is disconnected.
     /// Only the two child pipe ends are inherited, and their parent copies close before return.
+    /// [`crate::platform::spawn_lock`] is held from marking them inheritable until they close.
     ///
     /// # Errors
     /// Fails when pipes or the process can't be created or configured.
     pub fn spawn_piped(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<(Helper, ChildPipes)> {
+        // Taken first so it drops last, after the child ends, on every error path too.
+        let spawning = crate::platform::spawn_lock();
         let (child_stdin, stdin) = anonymous_pipe()?;
         let (stdout, child_stdout) = anonymous_pipe()?;
         let inherited = [child_stdin.as_raw_handle(), child_stdout.as_raw_handle()];
@@ -147,6 +150,7 @@ impl Job {
         }
         let helper = Self::spawn_inner(exe, arg, jobs, Some(inherited))?;
         drop((child_stdin, child_stdout));
+        drop(spawning);
         Ok((helper, ChildPipes { stdin, stdout }))
     }
 

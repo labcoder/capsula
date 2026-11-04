@@ -9,14 +9,14 @@ use std::{
 
 use kumochi_protocol::message::SceneId;
 use kumochi_scene::{
-    GlobalBudget, SceneEvent, deferred::Deferred, layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
+    GlobalBudget, SceneBinding, SceneEvent, deferred::Deferred, layout::SceneRecovery,
+    limits::MAX_RESIDENT_BYTES,
 };
 
 use super::{
     BOUND, Broken, Effect, LAYOUT_VERSION, MAX_WORKERS, Out, Presenter, RECOVERY_DEADLINE,
     RecoveryJob, Scene,
     snapshot::{self, Source},
-    wire_bytes,
 };
 
 #[derive(Debug)]
@@ -171,6 +171,9 @@ impl Presenter {
         });
         drop(rejected);
         for (scene, state, rest, retained) in adopted {
+            let bytes = state.attributed_bytes();
+            let state =
+                SceneBinding::bind(Deferred::new(state, bytes), &mut self.global).expect(BOUND);
             self.scenes.insert(scene, Scene::new(state, rest, retained));
         }
         for (scene, ..) in recovery.scenes {
@@ -216,20 +219,18 @@ impl Presenter {
         self.go_live(now, out)
     }
 
-    /// Recovery is installed: the held live frames apply in arrival order.
+    /// Recovery is installed: the held live frames apply in arrival order, or go with every
+    /// scene when a clear came first.
     pub(super) fn go_live(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         self.phase = Phase::Live;
-        let mut held = Deferred::new(std::mem::take(&mut self.held), wire_bytes(self.held_bytes));
-        self.held_bytes = 0;
-        while let Some((frame, bytes)) = held.pop_front() {
-            self.live(&frame, bytes, now, out)?;
+        if !std::mem::take(&mut self.clear_after_recovery) {
+            return self.drain(now, out);
         }
-        if std::mem::take(&mut self.clear_after_recovery) {
-            let ids: Vec<_> = self.scenes.keys().copied().collect();
-            for id in ids {
-                self.release(id);
-                self.forget(id, out);
-            }
+        self.discard_held(now, out)?;
+        let ids: Vec<_> = self.scenes.keys().copied().collect();
+        for id in ids {
+            self.release(id);
+            self.forget(id, out);
         }
         Ok(())
     }

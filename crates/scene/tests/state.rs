@@ -72,6 +72,68 @@ fn rejected(state: &SceneState, global: &GlobalBudget, json: &str, code: ErrorCo
 }
 
 #[test]
+fn three_dimensional_gate_precedes_validation_and_keeps_all_charges() {
+    let mut state = scene();
+    let mut global = GlobalBudget::default();
+    commit(&mut state, &mut global, &text("first", "t"));
+    let before = (
+        state.revision(),
+        state.usage(),
+        global.usage(),
+        global.generation(),
+        state.recovery_log().len(),
+    );
+    for op in [
+        r#"{"view3d":{"id":"v"}}"#,
+        r#"{"solid":{"id":"s","in":"missing","shape":"box"}}"#,
+        r#"{"anim":{"target":"missing","track":"pos3","keys":[[0,[0,0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"pos3","keys":[[0,[0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"rot3","keys":[[0,[0,0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"rot3","keys":[[0,1]]}}"#,
+    ] {
+        let input = format!(
+            r#"{{"id":"retry","put":[{{"text":{{"id":"new","text":"","at":[0,0]}}}},{op}]}}"#
+        );
+        rejected(&state, &global, &input, ErrorCode::Unsupported, "put[1]");
+        assert_eq!(
+            (
+                state.revision(),
+                state.usage(),
+                global.usage(),
+                global.generation(),
+                state.recovery_log().len()
+            ),
+            before
+        );
+    }
+    for track in ["x", "pos", "opacity"] {
+        let input = format!(
+            r#"{{"id":"retry","put":[{{"anim":{{"target":"t","track":"{track}","keys":[[0,[1,2,3]]]}}}}]}}"#
+        );
+        rejected(
+            &state,
+            &global,
+            &input,
+            ErrorCode::OutOfRange,
+            "put[0].anim.keys[0][1]",
+        );
+        assert_eq!(
+            (
+                state.revision(),
+                state.usage(),
+                global.usage(),
+                global.generation(),
+                state.recovery_log().len()
+            ),
+            before
+        );
+    }
+    let next = commit(&mut state, &mut global, &text("retry", "new"));
+    assert_eq!(next.revision, 2);
+    assert_eq!(state.object_count(), 2);
+}
+
+#[test]
 fn same_step_references_and_expanded_slots_are_deterministic() {
     let mut state = scene();
     let mut global = GlobalBudget::default();
