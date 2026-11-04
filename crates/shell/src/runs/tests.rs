@@ -207,12 +207,14 @@ fn selecting_and_starting_a_new_thread_only_change_the_next_turn() {
         sent,
         [
             DataToBrain::TextSubmit {
-                turn: 1, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(9)),
                 text: "continue".to_owned()
             },
             DataToBrain::TextSubmit {
-                turn: 2, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
                 text: "new".to_owned()
             },
@@ -290,7 +292,9 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                         .expect("the turn is stored");
                 }
             }
-            BrainEffect::Control(ControlToShell::RunState { run, thread, phase, .. }) => {
+            BrainEffect::Control(ControlToShell::RunState {
+                run, thread, phase, ..
+            }) => {
                 runs.apply_state(run, thread, phase);
             }
             BrainEffect::Data(message) => {
@@ -309,7 +313,13 @@ fn typed(runs: &mut Runs, typed: &str) -> Input {
         true
     })
     .expect("sent");
-    let Some(DataToBrain::TextSubmit { turn, screen: kumochi_protocol::message::ScreenChoice::None, thread, text }) = sent else {
+    let Some(DataToBrain::TextSubmit {
+        turn,
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        thread,
+        text,
+    }) = sent
+    else {
         panic!("a turn was sent")
     };
     Input::Turn { turn, thread, text }
@@ -430,12 +440,14 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
         sent,
         [
             DataToBrain::TextSubmit {
-                turn: 2, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
                 text: "new thread turn".to_owned()
             },
             DataToBrain::TextSubmit {
-                turn: 3, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 3,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
                 text: "continue new thread".to_owned()
             },
@@ -812,7 +824,8 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
     assert_eq!(
         sent,
         [DataToBrain::TextSubmit {
-            turn: 1, screen: kumochi_protocol::message::ScreenChoice::None,
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
             text: "one".to_owned(),
         }]
@@ -834,12 +847,14 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
         sent,
         [
             DataToBrain::TextSubmit {
-                turn: 1, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
                 text: "one".to_owned(),
             },
             DataToBrain::TextSubmit {
-                turn: 2, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(11)),
                 text: "two".to_owned(),
             },
@@ -873,17 +888,20 @@ fn only_a_newer_run_sets_the_next_turn_s_thread() {
         sent,
         [
             DataToBrain::TextSubmit {
-                turn: 1, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
                 text: "one".to_owned(),
             },
             DataToBrain::TextSubmit {
-                turn: 2, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
                 text: "two".to_owned(),
             },
             DataToBrain::TextSubmit {
-                turn: 3, screen: kumochi_protocol::message::ScreenChoice::None,
+                turn: 3,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
                 text: "third".to_owned(),
             },
@@ -913,7 +931,8 @@ fn a_fenced_older_run_s_late_failure_keeps_the_thread() {
     assert_eq!(
         sent,
         Some(DataToBrain::TextSubmit {
-            turn: 3, screen: kumochi_protocol::message::ScreenChoice::None,
+            turn: 3,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(22)),
             text: "third".to_owned(),
         })
@@ -948,22 +967,62 @@ fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapp
     assert_eq!(runs.submit("unsent", |_| false), Err(Refused::Offline));
     let mut sent = Vec::new();
     for text in ["first", "second"] {
-        assert_eq!(runs.submit(text, |message| { sent.push(message); true }), Ok(()));
+        assert_eq!(
+            runs.submit(text, |message| {
+                sent.push(message);
+                true
+            }),
+            Ok(())
+        );
     }
-    assert_eq!(sent, [
-        DataToBrain::TextSubmit { turn: 1, screen: kumochi_protocol::message::ScreenChoice::None, thread: Some(ThreadId(1)), text: "first".to_owned() },
-        DataToBrain::TextSubmit { turn: 2, screen: kumochi_protocol::message::ScreenChoice::None, thread: Some(ThreadId(1)), text: "second".to_owned() },
-    ]);
+    assert_eq!(
+        sent,
+        [
+            DataToBrain::TextSubmit {
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
+                thread: Some(ThreadId(1)),
+                text: "first".to_owned()
+            },
+            DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
+                thread: Some(ThreadId(1)),
+                text: "second".to_owned()
+            },
+        ]
+    );
     runs.turns_sent = u32::MAX - 1;
-    assert_eq!(runs.submit("last", |message| {
-        assert_eq!(message, DataToBrain::TextSubmit { turn: u32::MAX, screen: kumochi_protocol::message::ScreenChoice::None, thread: Some(ThreadId(1)), text: "last".to_owned() });
-        true
-    }), Ok(()));
-    assert_eq!(runs.submit("overflow", |_| panic!("overflow cannot reach sender")), Err(Refused::Busy));
+    assert_eq!(
+        runs.submit("last", |message| {
+            assert_eq!(
+                message,
+                DataToBrain::TextSubmit {
+                    turn: u32::MAX,
+                    screen: kumochi_protocol::message::ScreenChoice::None,
+                    thread: Some(ThreadId(1)),
+                    text: "last".to_owned()
+                }
+            );
+            true
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        runs.submit("overflow", |_| panic!("overflow cannot reach sender")),
+        Err(Refused::Busy)
+    );
     runs.disconnected();
     runs.connected(2);
     runs.settings(ThreadId(1));
-    assert_eq!(typed(&mut runs, "reset"), Input::Turn { turn: 1, thread: Some(ThreadId(1)), text: "reset".to_owned() });
+    assert_eq!(
+        typed(&mut runs, "reset"),
+        Input::Turn {
+            turn: 1,
+            thread: Some(ThreadId(1)),
+            text: "reset".to_owned()
+        }
+    );
 }
 
 #[test]

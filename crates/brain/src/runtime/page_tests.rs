@@ -22,6 +22,13 @@ fn threads() -> PageOf {
     }
 }
 
+async fn queue_turn(turns: &mpsc::Sender<crate::runtime::Turn>, turn: u32, text: &str) {
+    turns
+        .send((turn, None, text.to_owned()))
+        .await
+        .expect("turn");
+}
+
 /// The main thread a reply to request 7 lists as a fresh store's only row.
 fn only_kumo(reply: DataToShell) -> ThreadId {
     let DataToShell::ThreadList {
@@ -206,7 +213,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
             1,
             "without credit the reply stays queued"
         );
-        turns_tx.send((None, "go".to_owned())).await.expect("turn");
+        queue_turn(&turns_tx, 1, "go").await;
         let mut bytes = Vec::new();
         for _ in 0..4 {
             bytes = timeout(PATIENCE, control.recv())
@@ -344,7 +351,7 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
         })
         .await
         .expect("both pages queued without credit");
-        turns_tx.send((None, "go".to_owned())).await.expect("turn");
+        queue_turn(&turns_tx, 1, "go").await;
         let mut states = Vec::new();
         while states.len() < 3 {
             let bytes = timeout(PATIENCE, control.recv())
@@ -367,10 +374,7 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
         queue.borrow_mut().grant(DATA_WINDOW);
         ready.notify_one();
         read_pages_and_text(&mut client, &title, &history, &expected).await;
-        turns_tx
-            .send((None, "later".to_owned()))
-            .await
-            .expect("turn");
+        queue_turn(&turns_tx, 2, "later").await;
         let bytes = timeout(PATIENCE, control.recv())
             .await
             .expect("state arrives")

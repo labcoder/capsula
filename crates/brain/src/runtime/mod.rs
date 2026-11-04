@@ -964,9 +964,9 @@ async fn read_data(
                 }
             }
             // Never waits for the core, so credit behind a turn is always read.
-            Ok(Some(DataToBrain::TextSubmit { turn, thread, text, .. })) => match turns
-                .try_send((turn, thread, text))
-            {
+            Ok(Some(DataToBrain::TextSubmit {
+                turn, thread, text, ..
+            })) => match turns.try_send((turn, thread, text)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),
                 Err(TrySendError::Closed(_)) => return Ended::Lost,

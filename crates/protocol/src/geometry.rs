@@ -15,6 +15,6 @@ pub struct PhysicalRect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayRef(pub PhysicalRect);
 
-/// An opaque native window reference: an HWND on Windows or a CGWindowID on macOS.
+/// An opaque native window reference: an HWND on Windows or a `CGWindowID` on macOS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowRef(pub u64);

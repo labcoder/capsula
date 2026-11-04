@@ -110,9 +110,15 @@ pub enum CaptureFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunOrigin {
     /// A typed submit's connection-local number.
-    Typed { turn: u32 },
+    Typed {
+        /// The submit number.
+        turn: u32,
+    },
     /// A recognized hold's connection-local identifier.
-    Hold { gesture: GestureId },
+    Hold {
+        /// The recognized gesture.
+        gesture: GestureId,
+    },
 }
 
 /// Whether a typed submit requests screen context.
@@ -121,7 +127,10 @@ pub enum ScreenChoice {
     /// Text only.
     None,
     /// Include the screen under this exclusion lease.
-    Include { lease: LeaseGeneration },
+    Include {
+        /// The exclusion lease protecting capture.
+        lease: LeaseGeneration,
+    },
 }
 
 /// The shell's first frame on each pipe.
@@ -284,13 +293,27 @@ pub enum ControlToBrain {
         lease: LeaseGeneration,
     },
     /// The hold key was released.
-    KeyUp { gesture: GestureId },
+    KeyUp {
+        /// The released gesture.
+        gesture: GestureId,
+    },
     /// The shell cancelled the hold.
-    GestureCancel { gesture: GestureId },
+    GestureCancel {
+        /// The cancelled gesture.
+        gesture: GestureId,
+    },
     /// A region or window selected for this hold's context.
-    FocusHint { gesture: GestureId, hint: FocusHint },
+    FocusHint {
+        /// The gesture whose context is being refined.
+        gesture: GestureId,
+        /// The selected region or window.
+        hint: FocusHint,
+    },
     /// A capture exclusion lease stopped protecting the screen.
-    ExclusionLapsed { lease: LeaseGeneration },
+    ExclusionLapsed {
+        /// The lease that stopped protecting capture.
+        lease: LeaseGeneration,
+    },
 }
 
 /// What a thread's delete came to.
@@ -386,9 +409,17 @@ pub enum ControlToShell {
     /// the tap never records it.
     Account(AccountView),
     /// Capture finished; the shell may release the input's exclusion lease.
-    CaptureDone { capture_for: CaptureFor },
+    CaptureDone {
+        /// The input whose capture completed.
+        capture_for: CaptureFor,
+    },
     /// Capture failed; the shell may release the input's exclusion lease.
-    CaptureFailed { capture_for: CaptureFor, reason: CaptureFailure },
+    CaptureFailed {
+        /// The input whose capture failed.
+        capture_for: CaptureFor,
+        /// A content-free failure category.
+        reason: CaptureFailure,
+    },
 }
 
 /// Shell to brain, on the data pipe.

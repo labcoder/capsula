@@ -56,7 +56,10 @@ fn turn(thread: Option<ThreadId>) -> Input {
 }
 
 fn refused(thread: Option<ThreadId>) -> Vec<Effect> {
-    vec![Effect::Control(ControlToShell::TurnRefused { turn: 1,  thread })]
+    vec![Effect::Control(ControlToShell::TurnRefused {
+        turn: 1,
+        thread,
+    })]
 }
 
 fn store_delete(thread: ThreadId) -> Effect {

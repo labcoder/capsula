@@ -617,7 +617,13 @@ impl Coordinator {
         Ok(())
     }
 
-    fn turn(&mut self, turn: u32, thread: Option<ThreadId>, text: String, effects: &mut Vec<Effect>) {
+    fn turn(
+        &mut self,
+        turn: u32,
+        thread: Option<ThreadId>,
+        text: String,
+        effects: &mut Vec<Effect>,
+    ) {
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
             self.end(current, replaced, None, Notify::Shell, effects);

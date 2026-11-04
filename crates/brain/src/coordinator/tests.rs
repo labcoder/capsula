@@ -37,7 +37,13 @@ fn step(label: &str) -> Step {
 }
 
 fn state(run: RunId, thread: ThreadId, phase: Phase) -> Effect {
-    Effect::Control(ControlToShell::RunState { origin: (phase == Phase::Thinking).then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),  run, thread, phase })
+    Effect::Control(ControlToShell::RunState {
+        origin: (phase == Phase::Thinking)
+            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
+        run,
+        thread,
+        phase,
+    })
 }
 
 fn engine(run: RunId, event: TurnEvent) -> Input {

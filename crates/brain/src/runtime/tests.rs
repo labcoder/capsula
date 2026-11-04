@@ -49,10 +49,21 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
     let gesture = GestureId(9);
     let lease = LeaseGeneration(4);
     for message in [
-        ControlToBrain::HoldRecognized { gesture, pointer_display: DisplayRef(PhysicalRect { origin: [-1, 2], size: [3, 4] }), thread: Some(ThreadId(1)), lease },
+        ControlToBrain::HoldRecognized {
+            gesture,
+            pointer_display: DisplayRef(PhysicalRect {
+                origin: [-1, 2],
+                size: [3, 4],
+            }),
+            thread: Some(ThreadId(1)),
+            lease,
+        },
         ControlToBrain::KeyUp { gesture },
         ControlToBrain::GestureCancel { gesture },
-        ControlToBrain::FocusHint { gesture, hint: FocusHint::Window(WindowRef(17)) },
+        ControlToBrain::FocusHint {
+            gesture,
+            hint: FocusHint::Window(WindowRef(17)),
+        },
         ControlToBrain::ExclusionLapsed { lease },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));
@@ -166,7 +177,8 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
 
     async fn submit(&mut self, text: &str) {
         let message = DataToBrain::TextSubmit {
-            turn: 1, screen: kumochi_protocol::message::ScreenChoice::None,
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
             text: text.to_owned(),
         };
@@ -246,7 +258,9 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         loop {
             let message = self.next_control().await.expect("readable").expect("open");
             match message {
-                ControlToShell::RunState { run, thread, phase, .. } => {
+                ControlToShell::RunState {
+                    run, thread, phase, ..
+                } => {
                     self.thread = Some(thread);
                     return (run, phase);
                 }
@@ -432,17 +446,38 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
                 thread: None,
                 text: text.to_owned(),
             };
-            shell.data_out.write_all(&frame::encode(&message, Pipe::Data).expect("encodes")).await.expect("sent");
+            shell
+                .data_out
+                .write_all(&frame::encode(&message, Pipe::Data).expect("encodes"))
+                .await
+                .expect("sent");
         }
-        assert_eq!(shell.control().await, Some(ControlToShell::TurnRefused { turn: 73, thread: None }));
-        assert_eq!(shell.control().await, Some(ControlToShell::RunState {
-            run: RunId(1), thread: ThreadId(2), phase: Phase::Thinking,
-            origin: Some(RunOrigin::Typed { turn: 91 }),
-        }));
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 73,
+                thread: None
+            })
+        );
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::RunState {
+                run: RunId(1),
+                thread: ThreadId(2),
+                phase: Phase::Thinking,
+                origin: Some(RunOrigin::Typed { turn: 91 }),
+            })
+        );
         shell.stop(RunId(1)).await;
-        assert_eq!(shell.control().await, Some(ControlToShell::RunState {
-            run: RunId(1), thread: ThreadId(2), phase: Phase::Interrupted, origin: None,
-        }));
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::RunState {
+                run: RunId(1),
+                thread: ThreadId(2),
+                phase: Phase::Interrupted,
+                origin: None,
+            })
+        );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
