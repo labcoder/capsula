@@ -82,8 +82,10 @@ updates the displayed title only from that page; a send or an older in-flight re
 save acknowledgement. Kumo's displayed name changes only on the next `SettingsView`.
 The reread can race the rename across the two pipes and show the old title. The
 `ThreadsChanged` the brain sends after every committed title closes that gap: the list is read
-again, or the read in flight is marked stale and earns one more. A search shows it at its next
-read.
+again, or the read in flight is marked stale and earns one more, and the page of every rename no
+page has shown yet is read again too, whether the notification beats the stale reply or follows
+it. A rename stays unconfirmed until a page shows the title that was sent, or its task is
+deleted. A search shows it at its next read.
 If a delete invalidates an in-flight rename reread, its original page cursor is queued again
 before the first-page repair, so an offpage renamed task still gets confirmed without reviving
 the deleted row. A search change, refresh or hide discards these old-query rereads.
