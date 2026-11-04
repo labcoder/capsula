@@ -110,10 +110,10 @@ fn snapshot(origin: Origin, user: Option<&str>) -> RunSnapshot {
         origin,
         assistant: AssistantName::new("Kumo").expect("name"),
         user: user.map(|user| UserName::new(user).expect("name")),
-        choice: ModelChoice {
+        choice: Some(ModelChoice {
             model: ModelSlug::new("gpt-6-luna").expect("slug"),
             effort: Effort::Medium,
-        },
+        }),
         connection: ConnectionTag(7),
     }
 }
@@ -190,8 +190,13 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
             BOUND,
         )
         .expect("built");
-    assert_eq!(built.request.model.as_str(), "gpt-6-luna");
-    assert_eq!(built.request.effort, Effort::Medium);
+    assert_eq!(
+        built.request.choice,
+        Some(ModelChoice {
+            model: ModelSlug::new("gpt-6-luna").expect("slug"),
+            effort: Effort::Medium,
+        })
+    );
     assert_eq!(
         built.request.input,
         [

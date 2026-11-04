@@ -4,7 +4,9 @@ use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
-use kumochi_protocol::message::{ControlToBrain, DataToShell, SettingsView, UserError};
+use kumochi_protocol::message::{
+    AccountView, ControlToBrain, DataToShell, SettingsView, UserError,
+};
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
 
@@ -97,11 +99,31 @@ impl Presence {
                     self.runs.refused();
                     self.sync_deletes(cx);
                 }
-                LinkEvent::Error(error) => self.show_error(&error, cx),
+                LinkEvent::Account { generation, view } => {
+                    self.account_changed(generation, view, cx);
+                }
+                LinkEvent::Error { generation, error } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        self.show_error(&error, cx);
+                    }
+                }
             }
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.runs_changed(cx)
+    }
+
+    fn account_changed(&self, generation: u64, view: AccountView, cx: &mut Context<'_, Self>) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        self.settings.update(cx, |state, cx| {
+            if state.accounts.receive(current, generation, view) {
+                cx.notify();
+            }
+        });
     }
 
     /// Scene frames go to the presenter even when stale, so it drops them off the UI thread.
@@ -207,6 +229,7 @@ impl Presence {
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
         self.settings.update(cx, |state, cx| {
+            state.accounts.error(error);
             let _field = state.error(error.clone());
             cx.notify();
         });
@@ -274,6 +297,7 @@ impl Presence {
             self.scene_timer = None;
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {
+                state.accounts.disconnected();
                 state.disconnected();
                 cx.notify();
             });

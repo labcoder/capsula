@@ -3,10 +3,10 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
+use kumochi_protocol::message::{EventId, ModelChoice, RunId, ThreadId, ThreadKind};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
-use super::threads::kind_of;
+use super::threads::{choice_of, kind_of};
 use super::{StoreError, row_id, sql_id};
 
 /// A thread as a reference finds it.
@@ -221,6 +221,43 @@ impl Snapshot<'_> {
             excerpt.shown = Some((start, id));
         }
         Ok(excerpt)
+    }
+
+    /// A live thread's stored model choice.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails or the stored model isn't a slug.
+    pub(crate) fn choice(&self, thread: ThreadId) -> Result<Option<ModelChoice>, StoreError> {
+        let Ok(id) = sql_id(thread.0, StoreError::NoThread) else {
+            return Ok(None);
+        };
+        let choice = self
+            .0
+            .query_row(
+                "SELECT model, effort FROM threads WHERE id = ?1 AND state = 'live'",
+                params![id],
+                |row| {
+                    choice_of(
+                        row.get_ref(0)?.as_str_or_null()?,
+                        row.get_ref(1)?.as_str_or_null()?,
+                    )
+                },
+            )
+            .optional()?;
+        Ok(choice.flatten())
+    }
+
+    /// The local date and time to the minute, from the system's time zone.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn local_time(&self) -> Result<String, StoreError> {
+        let time = self.0.query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M', 'now', 'localtime')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(time)
     }
 
     /// Ends the transaction.

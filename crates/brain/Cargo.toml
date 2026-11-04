@@ -58,6 +58,10 @@ windows-sys = { version = "0.61", features = [
 [lints]
 workspace = true
 
+[features]
+# Lets another crate's tests drive a coordinator with no store behind it.
+test-support = []
+
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }

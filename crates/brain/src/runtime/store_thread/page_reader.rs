@@ -10,10 +10,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use kumochi_protocol::message::{DataToShell, PageOf};
+use kumochi_protocol::message::DataToShell;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::coordinator::Input;
+use crate::coordinator::{Input, StoreOp};
 use crate::store::{Pages, Side, StoreError};
 
 /// The helper's wait after a checkpoint that left frames behind, doubling up to `LAST_RETRY`
@@ -21,13 +21,12 @@ use crate::store::{Pages, Side, StoreError};
 const FIRST_RETRY: Duration = Duration::from_millis(50);
 const LAST_RETRY: Duration = Duration::from_secs(1);
 
-/// A page read, stamped with how many other ops were accepted before it.
+/// A page read or a context build, stamped with how many other ops were accepted before it.
 #[derive(Debug)]
 pub(super) struct Read {
     pub(super) stamp: u64,
-    pub(super) epoch: u64,
-    pub(super) request: u32,
-    pub(super) page: PageOf,
+    /// [`StoreOp::ReadPage`] or [`StoreOp::BuildContext`].
+    pub(super) op: StoreOp,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -178,20 +177,9 @@ pub(super) fn spawn_reader(
         .spawn(move || {
             #[cfg(test)]
             let mut gates = Vec::new();
-            for Read {
-                stamp,
-                epoch,
-                request,
-                page,
-            } in reads
-            {
+            for Read { stamp, op } in reads {
                 #[cfg(test)]
                 let gate = {
-                    let op = crate::coordinator::StoreOp::ReadPage {
-                        epoch,
-                        request,
-                        page: page.clone(),
-                    };
                     if let Some(observed) = &hooks.observed {
                         observed
                             .send(super::super::Seen::StoreOpStarted(op.clone()))
@@ -203,31 +191,58 @@ pub(super) fn spawn_reader(
                         .position(|gate: &super::Gate| (gate.matches)(&op));
                     at.map(|at| gates.remove(at))
                 };
-                let reply = if barrier.wait(stamp) {
-                    side.read(|conn| {
+                let open = barrier.wait(stamp);
+                let reply = match op {
+                    StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
+                        open.then_some(&*side),
+                        build,
                         #[cfg(test)]
-                        if let Some(gate) = gate {
-                            hold(conn, &gate, hooks.observed.as_ref())?;
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
+                    StoreOp::ReadPage {
+                        epoch,
+                        request,
+                        page,
+                    } => {
+                        let reply = if open {
+                            side.read(|conn| {
+                                #[cfg(test)]
+                                if let Some(gate) = gate {
+                                    hold(conn, &gate, hooks.observed.as_ref())?;
+                                }
+                                Pages(conn).read_page(request, page)
+                            })
+                        } else {
+                            Err(StoreError::Closed)
+                        };
+                        if let Err(error) = &reply {
+                            tracing::warn!(%error, "a page read failed");
                         }
-                        Pages(conn).read_page(request, page)
-                    })
-                } else {
-                    Err(StoreError::Closed)
+                        Input::PageRead {
+                            epoch,
+                            request,
+                            reply: reply.unwrap_or(DataToShell::PageFailed { request }),
+                        }
+                    }
+                    _ => unreachable!("StoreThread::send hands only reads to the reader"),
                 };
                 checkpoints.raise();
-                if let Err(error) = &reply {
-                    tracing::warn!(%error, "a page read failed");
-                }
-                let reply = Input::PageRead {
-                    epoch,
-                    request,
-                    reply: reply.unwrap_or(DataToShell::PageFailed { request }),
-                };
                 if acks.send(reply).is_err() {
                     tracing::debug!("a page had no listener");
                 }
             }
         })
+}
+
+/// Holds a build at its gate, its transaction open, until the gate releases it.
+#[cfg(test)]
+fn wait_at(gate: Option<super::Gate>, observed: Option<&UnboundedSender<super::super::Seen>>) {
+    if let Some(gate) = gate {
+        if let Some(observed) = observed {
+            observed.send(super::super::Seen::ReadHeld).ok();
+        }
+        gate.release.recv().ok();
+    }
 }
 
 /// Holds a read with a snapshot open on its connection until the gate releases it.
@@ -282,5 +297,6 @@ pub(super) fn spawn_helper(
         })
 }
 
+mod context;
 #[cfg(test)]
 mod tests;

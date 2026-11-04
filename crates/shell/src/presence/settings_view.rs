@@ -1,10 +1,10 @@
-//! General fields and the reserved Accounts tab, composed from retained Kit controls.
+//! General fields and the Accounts tab, composed from retained Kit controls.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, scroll::ScrollableElement as _};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, scroll::ScrollableElement as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div,
@@ -16,8 +16,9 @@ use crate::settings::{Error, Field, Settings};
 use crate::strings::{Strings, Text};
 
 pub(super) struct SettingsView {
-    model: Entity<Settings>,
-    owner: WeakEntity<Presence>,
+    pub(super) model: Entity<Settings>,
+    pub(super) owner: WeakEntity<Presence>,
+    pub(super) confirmation: Option<u64>,
     events: async_channel::Sender<PresenceEvent>,
     inputs: [Entity<InputState>; 2],
     focus: FocusHandle,
@@ -79,6 +80,18 @@ impl SettingsView {
             })
             .collect();
         let watch = cx.observe_in(&model, window, |view, _, window, cx| {
+            let account = &view.model.read(cx).accounts;
+            if view.confirmation.is_some_and(|generation| {
+                account.generation != Some(generation)
+                    || !matches!(
+                        account.view,
+                        Some(kumochi_protocol::message::AccountView::SignedIn { .. })
+                    )
+            }) {
+                view.confirmation = None;
+                window.close_dialog(cx);
+                window.focus(&view.focus, cx);
+            }
             for (field, input) in [Field::Assistant, Field::User]
                 .into_iter()
                 .zip(&view.inputs)
@@ -97,6 +110,7 @@ impl SettingsView {
         Self {
             model,
             owner,
+            confirmation: None,
             events,
             inputs,
             focus: cx.focus_handle().tab_stop(true),
@@ -118,6 +132,8 @@ impl SettingsView {
     }
 
     pub(super) fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.confirmation = None;
+        window.close_all_dialogs(cx);
         self.editing = None;
         window.focus(&self.focus, cx);
         cx.notify();
@@ -288,7 +304,9 @@ impl Render for SettingsView {
                         .selected_index(self.tab)
                         .child(Tab::new().label(strings.get(Text::General)))
                         .child(Tab::new().label(strings.get(Text::Accounts)))
-                        .on_click(cx.listener(|view, tab, _, cx| {
+                        .on_click(cx.listener(|view, tab, window, cx| {
+                            view.confirmation = None;
+                            window.close_all_dialogs(cx);
                             view.tab = *tab;
                             cx.notify();
                         })),
@@ -323,7 +341,8 @@ impl Render for SettingsView {
                                             .text_color(cx.theme().muted_foreground)
                                             .child(strings.get(Text::SettingsSaveHelp)),
                                     )
-                            })),
+                            }))
+                            .children((self.tab == 1).then(|| self.accounts(cx))),
                     ),
             )
             .children(self.stop.then(|| {
@@ -412,6 +431,56 @@ mod tests {
             .update_window(window, |_, window, cx| window.refresh_interval(cx))
             .expect("the window");
         assert_eq!(refresh, Some(hertz_144));
+    }
+
+    #[gpui::test]
+    fn account_confirmation_closes_on_disconnect_state_loss_or_new_session(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        use kumochi_protocol::message::{AccountView, PlanState};
+        let (window, view) = open(cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let model = cx.update(|cx| view.read(cx).model.clone());
+        let signed_in = AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: None,
+        };
+        for outcome in 0..3 {
+            cx.update(|cx| {
+                model.update(cx, |state, cx| {
+                    assert!(state.accounts.receive(Some(1), 1, signed_in.clone()));
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |view, cx| view.confirm_sign_out(window, cx));
+                assert!(window.has_active_dialog(cx));
+            })
+            .expect("settings window");
+            cx.update(|cx| {
+                model.update(cx, |state, cx| {
+                    match outcome {
+                        0 => state.accounts.disconnected(),
+                        1 => {
+                            assert!(state.accounts.receive(Some(1), 1, AccountView::Busy));
+                        }
+                        _ => {
+                            assert!(state.accounts.receive(Some(2), 2, signed_in.clone()));
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| {
+                assert!(!window.has_active_dialog(cx));
+                window.draw(cx).clear(cx);
+            })
+            .expect("settings window");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The resting dock line, transient status panel, typing panel and native tray share one
 //! UI-thread owner, which also applies keyboard gestures and Esc.
 
+mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
 mod drag;
@@ -17,6 +18,7 @@ mod link;
 pub(crate) mod observer;
 mod paint;
 mod panels;
+mod pulling;
 mod settings;
 mod settings_view;
 #[cfg(test)]

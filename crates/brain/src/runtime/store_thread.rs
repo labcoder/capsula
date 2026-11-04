@@ -479,24 +479,12 @@ impl StoreThread {
         })
     }
 
-    /// Queues an operation, a page read with the page reader. False when the thread has gone,
+    /// Queues an operation, a page read or a context build with the page reader. False when the thread has gone,
     /// which only a panic there causes.
     pub(crate) fn send(&self, op: StoreOp) -> bool {
-        if let StoreOp::ReadPage {
-            epoch,
-            request,
-            page,
-        } = op
-        {
+        if matches!(op, StoreOp::ReadPage { .. } | StoreOp::BuildContext(_)) {
             let stamp = self.accepted.load(Ordering::Relaxed);
-            return (self.reads)
-                .send(Read {
-                    stamp,
-                    epoch,
-                    request,
-                    page,
-                })
-                .is_ok();
+            return self.reads.send(Read { stamp, op }).is_ok();
         }
         let sent = self.ops.send(op).is_ok();
         if sent {
@@ -529,7 +517,9 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::DrawingWritten { serial, reply });
             purger.op_arrived(store);
         }
-        StoreOp::ReadPage { .. } => unreachable!("StoreThread::send hands reads to the reader"),
+        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) => {
+            unreachable!("StoreThread::send hands reads to the reader")
+        }
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();
             answer(acks, clear(store, scenes));
