@@ -1,5 +1,213 @@
-//! Model requests on the signed-in account's plan: the Responses event stream and what its
-//! failures mean. See docs/development/responses.md.
+//! Model requests on the signed-in account's plan: the transport that writes the request itself
+//! under the coordinator's send lease, the Responses event stream and what its failures mean.
+//! See docs/development/responses.md.
 
+pub mod budget;
+pub mod conn;
 pub mod error;
 pub mod sse;
+pub mod wire;
+
+#[cfg(test)]
+mod tests;
+
+use std::fmt;
+use std::time::Duration;
+
+use kumochi_protocol::Secret;
+use serde_json::Value;
+use tokio::time::{Instant, timeout, timeout_at};
+use zeroize::Zeroizing;
+
+use self::budget::Budget;
+use self::conn::{Connect, ModelClient, ModelConn, Upload};
+use self::error::{Failure, ProviderError};
+use self::sse::{Progress, Reader, SseEvent};
+use self::wire::{Body, Head, Media};
+use crate::connections::http_client::MAX_BODY_BYTES;
+
+/// The largest request body [guess].
+pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// From the grant to the request's last byte reaching the kernel, or to an early refusal being
+/// read. It's never reset, and it stays under the coordinator's 15 s send deadline [guess].
+pub const SEND_DEADLINE: Duration = Duration::from_secs(10);
+/// The longest wait for the next bytes once the request is sent.
+pub const IDLE: Duration = Duration::from_secs(60);
+/// The longest read of an error body once the request is sent [guess].
+pub const ERROR_BODY_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a completed stream may take to end its framing; after that its connection is closed
+/// instead of reused [guess].
+const DRAIN: Duration = Duration::from_secs(1);
+/// How much of a body with no Content-Type is checked for the start of an event stream.
+const SNIFF_BYTES: usize = 128;
+
+/// A Responses request's JSON, checked before any credential or connection is touched.
+pub struct ResponsesBody(Secret<Zeroizing<Vec<u8>>>);
+
+impl ResponsesBody {
+    /// The body for `request`.
+    ///
+    /// # Errors
+    /// [`Failure::Request`] unless it sets `"store": false` and `"stream": true` and fits
+    /// [`MAX_REQUEST_BYTES`].
+    pub fn new(request: &Value) -> Result<Self, Failure> {
+        if request["store"] != false || request["stream"] != true {
+            return Err(Failure::Request);
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(request).map_err(|_| Failure::Request)?);
+        if bytes.len() > MAX_REQUEST_BYTES {
+            return Err(Failure::Request);
+        }
+        Ok(Self(Secret::new(bytes)))
+    }
+}
+
+impl fmt::Debug for ResponsesBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponsesBody")
+            .field("bytes", &self.0.expose().len())
+            .finish()
+    }
+}
+
+/// One send's state. Fields drop in declaration order, so the connection always closes before
+/// the lease settles.
+struct Attempt<Io, L> {
+    conn: Option<ModelConn<Io>>,
+    lease: Option<L>,
+}
+
+/// Sends `body` once `ask` grants a lease, and hands each event to `on_event` until
+/// `response.completed`, which it hands out too. `ask` is the coordinator's gate for this one
+/// attempt: `None` means Rebuild, and the lease settles when it drops. A retry is another call,
+/// so it asks again.
+///
+/// The lease settles once the request's last byte is flushed to the kernel, or once the
+/// connection holding it is closed. Nothing is retried after a byte is written; an idle
+/// connection that turns out stale before the write is replaced under the same lease.
+///
+/// # Errors
+/// Why the request didn't complete; see [`Failure`].
+///
+/// # Panics
+/// Never: a flushed upload always holds its connection.
+pub async fn stream<C: Connect, L>(
+    client: &ModelClient<C>,
+    body: &ResponsesBody,
+    bearer: &Secret<Zeroizing<String>>,
+    ask: impl Future<Output = Option<L>>,
+    budget: &Budget,
+    mut on_event: impl FnMut(&SseEvent),
+) -> Result<(), Failure> {
+    let request = wire::request(bearer.expose(), body.0.expose())?;
+    let lease = ask.await.ok_or(Failure::Rebuild)?;
+    let deadline = Instant::now() + SEND_DEADLINE;
+    if !budget.reserve() {
+        return Err(Failure::Spent);
+    }
+    let mut attempt = Attempt {
+        conn: None,
+        lease: Some(lease),
+    };
+    let upload = timeout_at(deadline, async {
+        let io = match client.checkout() {
+            Some(io) => io,
+            None => client
+                .connect
+                .connect()
+                .await
+                .map_err(|_| Failure::Transport)?,
+        };
+        let conn = attempt.conn.insert(ModelConn::new(io));
+        match conn.upload(&request).await? {
+            Upload::Flushed => Ok(()),
+            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
+        }
+    });
+    upload.await.map_err(|_| Failure::Transport)??;
+    drop(attempt.lease.take());
+    let conn = attempt
+        .conn
+        .as_mut()
+        .expect("an upload that flushed holds its connection");
+    let head = conn.head(IDLE).await?;
+    if !(200..300).contains(&head.status) {
+        let refused = timeout(ERROR_BODY_DEADLINE, refusal(conn, head)).await;
+        return Err(Failure::Provider(refused.map_err(|_| Failure::Transport)??));
+    }
+    let mut events = Reader::default();
+    let mut body = Body::new(head.framing);
+    let mut progress = match head.media {
+        Media::EventStream => Progress::More,
+        Media::Absent => events.feed(&sniff(conn, &mut body).await?, &mut on_event)?,
+        Media::Other => return Err(Failure::Protocol),
+    };
+    while progress == Progress::More {
+        let length = conn
+            .next(&mut body, IDLE)
+            .await?
+            .ok_or(Failure::Truncated)?;
+        let fed = events.feed(&conn.buf[..length], &mut on_event);
+        conn.buf.drain(..length);
+        progress = fed?;
+    }
+    // `response.completed` isn't the body's end: reuse needs the framing read to its end.
+    let drained = timeout(DRAIN, async {
+        while let Some(length) = conn.next(&mut body, DRAIN).await? {
+            conn.buf.drain(..length);
+        }
+        Ok::<_, Failure>(())
+    })
+    .await;
+    if matches!(drained, Ok(Ok(())))
+        && !head.close
+        && conn.buf.is_empty()
+        && let Some(conn) = attempt.conn.take()
+    {
+        client.put(conn.io);
+    }
+    Ok(())
+}
+
+/// The first data of a body whose head names no type, once its first 128 bytes show an event
+/// stream: blank space, then `data:`, `event:` or a `:` comment.
+async fn sniff<Io>(conn: &mut ModelConn<Io>, body: &mut Body) -> Result<Vec<u8>, Failure>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    const FIELDS: [&[u8]; 3] = [b"data:", b"event:", b":"];
+    let mut prefix = Vec::new();
+    loop {
+        let window = &prefix[..prefix.len().min(SNIFF_BYTES)];
+        let start = window.trim_ascii_start();
+        if FIELDS.iter().any(|field| start.starts_with(field)) {
+            return Ok(prefix);
+        }
+        if window.len() == SNIFF_BYTES || !FIELDS.iter().any(|field| field.starts_with(start)) {
+            return Err(Failure::Protocol);
+        }
+        let length = conn.next(body, IDLE).await?.ok_or(Failure::Protocol)?;
+        prefix.extend_from_slice(&conn.buf[..length]);
+        conn.buf.drain(..length);
+    }
+}
+
+/// A refusal's bounded body, read to the end of its framing.
+async fn refusal<Io>(conn: &mut ModelConn<Io>, head: Head) -> Result<ProviderError, Failure>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if head.status < 400 {
+        return Err(Failure::Protocol);
+    }
+    let mut body = Body::new(head.framing);
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(length) = conn.next(&mut body, IDLE).await? {
+        if length > MAX_BODY_BYTES - bytes.len() {
+            return Err(Failure::Protocol);
+        }
+        bytes.extend_from_slice(&conn.buf[..length]);
+        conn.buf.drain(..length);
+    }
+    Ok(ProviderError::answered(head.status, &bytes))
+}
