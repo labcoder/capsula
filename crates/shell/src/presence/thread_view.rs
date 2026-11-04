@@ -12,7 +12,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, Sizable
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, list, px,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, list, px,
 };
 use kumochi_protocol::message::{
     AssistantName, ControlToBrain, EventId, NameError, PageEventKind, SettingsOp, ThreadId,
@@ -191,6 +191,8 @@ pub(super) struct ThreadsView {
     pub(super) list: Entity<ListState<ThreadsDelegate>>,
     pub(super) stop: bool,
     pub(super) target: Target,
+    /// Pushed by presence, never read from it: the first frame renders while presence is updating.
+    pub(super) error: Option<SharedString>,
     model: Entity<Threads>,
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
@@ -211,6 +213,7 @@ impl ThreadsView {
     pub(super) fn new(
         model: Entity<Threads>,
         owner: WeakEntity<Presence>,
+        error: Option<SharedString>,
         events: async_channel::Sender<PresenceEvent>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -269,6 +272,7 @@ impl ThreadsView {
             list,
             stop: false,
             target: Target::Kumo,
+            error,
             model,
             owner,
             events,
@@ -735,10 +739,7 @@ impl Render for ThreadsView {
             None
         }
         .map(|text| cx.global::<Strings>().get(text));
-        let error = self
-            .owner
-            .upgrade()
-            .and_then(|owner| owner.read(cx).error.clone());
+        let error = self.error.clone();
         let stop_label = cx.global::<Strings>().get(Text::Stop);
         let search = cx.global::<Strings>().get(Text::SearchThreads);
         let toolbar = self.toolbar(cx);
@@ -781,7 +782,13 @@ impl Render for ThreadsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(text)
             }))
-            .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
+            .children(error.map(|error| {
+                div()
+                    .debug_selector(|| format!("threads-error {error}"))
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(error)
+            }))
             .children(self.stop.then(|| {
                 Button::new("stop")
                     .small()
@@ -823,6 +830,45 @@ fn rename_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{AnyWindowHandle, TestAppContext, VisualTestContext, WindowOptions};
+
+    const UNSAVED: &str = "threads-error Couldn't save that setting. Try again.";
+    const OFFLINE: &str = "threads-error Kumo can't reach the brain.";
+
+    /// Which of the two errors the window's latest frame drew.
+    fn drawn(cx: &mut TestAppContext, window: AnyWindowHandle) -> [bool; 2] {
+        cx.run_until_parked();
+        let mut frame = VisualTestContext::from_window(window, cx);
+        [UNSAVED, OFFLINE].map(|error| frame.debug_bounds(error).is_some())
+    }
+
+    #[gpui::test]
+    fn the_threads_error_draws_from_its_pushed_copy(cx: &mut TestAppContext) {
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Strings::english());
+            let model = cx.new(|_| Threads::default());
+            let (events, _) = async_channel::unbounded();
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let error = Some("Couldn't save that setting. Try again.".into());
+                cx.new(|cx| {
+                    ThreadsView::new(model, WeakEntity::new_invalid(), error, events, window, cx)
+                })
+            })
+            .expect("a window")
+        });
+        assert_eq!(drawn(cx, window), [true, false]);
+        view.update(cx, |view, cx| {
+            view.error = Some("Kumo can't reach the brain.".into());
+            cx.notify();
+        });
+        assert_eq!(drawn(cx, window), [false, true]);
+        view.update(cx, |view, cx| {
+            view.error = None;
+            cx.notify();
+        });
+        assert_eq!(drawn(cx, window), [false, false]);
+    }
 
     fn changed_rename_message(
         thread: ThreadId,

@@ -8,6 +8,7 @@ status-failed = Can't reach the background process.
 action-retry = Retry
 action-stop = Stop
 action-quit = Quit
+action-chat = Chat…
 
 dock-position = Dock position
 position-top-left = Top left

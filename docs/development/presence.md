@@ -147,8 +147,14 @@ flowchart LR
   trials return with the pull (C2a), and `cargo xtask bench stretch` says so.
 - **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
   on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
-  change needs a restart (OSC-188 wires display changes). The panel is 380×140 so Kumo sits
-  beside the details without wrapping them. Opening the peek blinks once, or shows one still
+  change needs a restart (OSC-188 wires display changes). The peek is 380 wide and only as tall
+  as its content (124): Kumo, the name and the status form one row, with Chat…, Tasks… and
+  Settings… below; Quit lives in the tray. Size and weight carry the hierarchy, since muted
+  text fails AA contrast over the glass. Chat… opens the typing panel in its own 380×140
+  rect, anchored to the accepted dock like the threads and settings panels, so a refused
+  move never detaches it. The typing and threads panels get their notices pushed by
+  presence instead of reading presence when they draw, because a new window draws its first
+  frame while presence is still opening it. Opening the peek blinks once, or shows one still
   frame under reduced motion, and Listening changes the mood. Each opening and each Listening
   edge re-reads the system's reduced-motion preference through Kit's
   `apply_system_reduce_motion`, since Windows posts no change Kit can follow. Frames come from the peek window's next-frame

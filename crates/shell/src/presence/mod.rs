@@ -32,7 +32,10 @@ use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button};
+use gpui_kit::component::{
+    ActiveTheme as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
@@ -129,11 +132,12 @@ impl Presence {
         // shortcut: work-area changes need another position choice; slice 10 adds live settings updates.
         let area = platform::work_area()?;
         let physical = |value: f32| scaled(value, self.scale);
+        // Kumo and its gap sit beside the 300 px the details had before the peek; the peek is
+        // only as tall as its content.
         let layout = position.layout(
             area,
             line::slot(self.scale),
-            // Kumo and its gap sit beside the 300 px the details had before the peek.
-            [physical(380.0), physical(140.0)],
+            [physical(380.0), physical(PEEK_HEIGHT)],
             0,
         );
         let index = Position::ALL
@@ -539,7 +543,7 @@ struct Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
-        let quit_events = self.events.clone();
+        let chat_owner = self.threads.clone();
         let threads_owner = self.threads.clone();
         let settings_owner = self.threads.clone();
         let retry = (self.state == LinkState::Failed).then(|| {
@@ -564,51 +568,63 @@ impl Render for Panel {
             )
         });
         let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
-        let details = div()
+        // Kumo, the name and the status read as one identity; size and weight carry the
+        // hierarchy, since muted text fails AA contrast over the glass.
+        let identity = div()
             .flex()
-            .flex_col()
-            .gap_2()
-            .min_w_0()
-            .child(constants::DISPLAY_NAME)
-            .child(strings.get(status_text(self.state)))
-            .children(self.notice.map(|notice| strings.get(notice)))
+            .items_center()
+            .gap_3()
+            .child(self.kumo.clone())
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(stop)
-                    .children(retry)
+                    .flex_col()
+                    .gap_0p5()
+                    .min_w_0()
                     .child(
-                        Button::new("threads")
-                            .small()
-                            .label(strings.get(Text::OpenThreads))
-                            .on_click(move |_, _, cx| {
-                                if let Some(owner) = threads_owner.clone() {
-                                    cx.defer(move |cx| {
-                                        if let Ok(Err(error)) =
-                                            owner.update(cx, Presence::open_threads)
-                                        {
-                                            tracing::error!(%error, "can't open the threads panel");
-                                        }
-                                    });
-                                }
-                            }),
+                        div()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(constants::DISPLAY_NAME),
                     )
-                    .child(Button::new("settings").small().label(strings.get(Text::OpenSettings)).on_click(move |_, _, cx| {
-                        if let Some(owner) = settings_owner.clone() {
-                            cx.defer(move |cx| {
-                                if let Ok(Err(error)) = owner.update(cx, Presence::toggle_settings) {
-                                    tracing::error!(%error, "can't open the settings panel");
-                                }
-                            });
-                        }
-                    }))
-                    .child(Button::new("quit").small().label(strings.get(Text::Quit)).on_click(
-                        move |_, _, _| {
-                            send(&quit_events, PresenceEvent::Quit);
-                        },
-                    )),
+                    .child(div().text_sm().child(strings.get(status_text(self.state))))
+                    .children(
+                        self.notice
+                            .map(|notice| div().text_sm().child(strings.get(notice))),
+                    ),
+            );
+        // Chat leads; Tasks and Settings stay quiet. Quit lives in the tray.
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(stop)
+            .children(retry)
+            .child(
+                action(
+                    "chat",
+                    strings.get(Text::Chat),
+                    chat_owner,
+                    Presence::open_text,
+                )
+                .primary(),
+            )
+            .child(
+                action(
+                    "threads",
+                    strings.get(Text::OpenThreads),
+                    threads_owner,
+                    Presence::open_threads,
+                )
+                .ghost(),
+            )
+            .child(
+                action(
+                    "settings",
+                    strings.get(Text::OpenSettings),
+                    settings_owner,
+                    Presence::toggle_settings,
+                )
+                .ghost(),
             );
         // The theme fill over the blur, so the peek stays readable where glass isn't drawn.
         div()
@@ -620,11 +636,33 @@ impl Render for Panel {
             .bg(cx.theme().popover.opacity(0.85))
             .text_color(cx.theme().popover_foreground)
             .flex()
-            .gap_3()
+            .flex_col()
+            .gap_2()
             .children(stamped.then_some(Stamp(Surface::Panel, Drawn::default())))
-            .child(self.kumo.clone())
-            .child(details)
+            .child(identity)
+            .child(actions)
     }
+}
+
+/// A peek button that opens one of presence's panels on `owner` once the click is handled.
+fn action(
+    id: &'static str,
+    label: String,
+    owner: Option<WeakEntity<Presence>>,
+    open: fn(&mut Presence, &mut Context<'_, Presence>) -> Result<(), OpenError>,
+) -> Button {
+    Button::new(id)
+        .small()
+        .label(label)
+        .on_click(move |_, _, cx| {
+            if let Some(owner) = owner.clone() {
+                cx.defer(move |cx| {
+                    if let Ok(Err(error)) = owner.update(cx, open) {
+                        tracing::error!(%error, panel = id, "can't open a panel from the peek");
+                    }
+                });
+            }
+        })
 }
 
 fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
@@ -819,11 +857,7 @@ pub(crate) fn open(
             scene_deadline: None,
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
-            layout: Layout {
-                dock: [0; 4],
-                panel: [0; 4],
-                overlay: [0; 4],
-            },
+            layout: Layout::default(),
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,
@@ -885,6 +919,9 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
         .detach();
     }
 }
+
+/// The peek's height in logical pixels: Kumo's row, one row of actions and the insets.
+const PEEK_HEIGHT: f32 = 124.0;
 
 fn listen(
     states: Receiver<LinkEvent>,
