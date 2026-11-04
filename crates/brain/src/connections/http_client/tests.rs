@@ -574,7 +574,7 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         )
         .await
         .expect_err("the loopback listener was closed");
-    assert_eq!(error, HttpError::Transport);
+    assert_eq!(error, HttpError::Connect);
     assert!(
         captured.text().contains("capture-control"),
         "capture active"

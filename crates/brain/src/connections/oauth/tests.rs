@@ -511,6 +511,7 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
             scope: Zeroizing::new("openid".into()),
             expires_at: 1,
             pending_identity_validation: false,
+            refresh_sent: false,
         }),
     };
     let attempt = SignIn::bind("urn:uuid:synthetic-host", Some(&saved), Intent::SignIn)

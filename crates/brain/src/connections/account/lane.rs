@@ -50,6 +50,9 @@ pub(super) enum Lane {
 pub(super) enum Save {
     Account(Secret<Account>),
     List(Secret<Revocable>),
+    /// A refresh token for the list that no request on the lane owns: its save finishes no
+    /// request, so it can't clear another's pending flag.
+    Discard(Secret<Revocable>),
     /// A refresh's rotated set, for the generation it serves.
     Rotated {
         generation: u64,
@@ -115,8 +118,12 @@ pub(super) enum Waiting {
     Exchange(u64, Authorization),
     /// The refresh for a generation.
     Refresh(u64),
-    /// A refresh token for the list; none when no entry could hold it.
-    Discard(Option<Secret<Revocable>>),
+    /// A refresh token for the list, none when no entry could hold it, and the jobs that run
+    /// only once it's listed or counted unknown.
+    Discard {
+        entry: Option<Secret<Revocable>>,
+        then: Vec<Queued>,
+    },
 }
 
 impl AccountState {
@@ -206,6 +213,7 @@ impl AccountState {
                         }
                         self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
+                        self.jobs.extend(mem::take(&mut self.after_list));
                         // An entry was added: revoke it now (design §2).
                         self.revoke(entries, effects);
                     }
@@ -338,7 +346,7 @@ impl AccountState {
             let (attempt, authorization) = match self.waiting.pop_front() {
                 None => break,
                 Some(Waiting::Exchange(attempt, authorization)) => (attempt, authorization),
-                Some(Waiting::Discard(entry)) => {
+                Some(Waiting::Discard { entry, then }) => {
                     let Some(entry) = entry.filter(|_| self.loaded.exchanges < MAX_EXCHANGES)
                     else {
                         tracing::warn!(
@@ -347,11 +355,15 @@ impl AccountState {
                         self.jobs.push_back(Queued::Finished {
                             outcome_unknown: true,
                         });
+                        // shortcut: the save behind runs even if this write is refused, so the
+                        // token can leave unrecorded; give the write its own flight in 10b.
+                        self.jobs.extend(then);
                         continue;
                     };
+                    self.after_list = then;
                     self.lane = Lane::Owning {
                         attempt: self.attempt,
-                        save: Save::List(entry),
+                        save: Save::Discard(entry),
                         held: None,
                     };
                     self.jobs.push_back(Queued::Save);
@@ -409,9 +421,12 @@ impl AccountState {
                     Job::Marker(MarkerUpdate::RequestFinished { outcome_unknown }),
                 ),
                 // A save for a replaced account never overwrites its successor.
-                Queued::Rotate(_, Rotation::Verified(generation) | Rotation::Ended(generation))
-                    if generation != self.generation =>
-                {
+                Queued::Rotate(
+                    _,
+                    Rotation::Verified(generation)
+                    | Rotation::Ended(generation)
+                    | Rotation::Unmarked(generation),
+                ) if generation != self.generation => {
                     continue;
                 }
                 Queued::Rotate(account, why) => (
@@ -453,7 +468,20 @@ impl AccountState {
                     }
                     match save {
                         Save::Account(account) => (Flight::Commit, Job::Commit(account.clone())),
-                        Save::List(entry) => (Flight::List, Job::List(entry.clone())),
+                        Save::List(entry) => (
+                            Flight::List,
+                            Job::List {
+                                entry: entry.clone(),
+                                finish: true,
+                            },
+                        ),
+                        Save::Discard(entry) => (
+                            Flight::List,
+                            Job::List {
+                                entry: entry.clone(),
+                                finish: false,
+                            },
+                        ),
                         Save::Rotated {
                             generation,
                             account,

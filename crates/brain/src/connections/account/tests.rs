@@ -116,6 +116,7 @@ fn saved_account(subject: &str, refresh: &str) -> Secret<Account> {
             scope: Zeroizing::new(PLAN.to_owned()),
             expires_at: NOW + 60,
             pending_identity_validation: false,
+            refresh_sent: false,
         }),
     })
 }

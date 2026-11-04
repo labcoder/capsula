@@ -40,6 +40,9 @@ pub enum HttpError {
     /// A bounded request timed out.
     #[error("account request timed out")]
     Timeout,
+    /// The connection couldn't be opened, so nothing was sent.
+    #[error("account connection failed")]
+    Connect,
     /// The connection or response stream failed.
     #[error("account transport failed")]
     Transport,
@@ -302,6 +305,8 @@ async fn read_response(mut response: reqwest::Response) -> Result<Response, Http
 fn transport_error(error: &reqwest::Error) -> HttpError {
     if error.is_timeout() {
         HttpError::Timeout
+    } else if error.is_connect() {
+        HttpError::Connect
     } else {
         HttpError::Transport
     }

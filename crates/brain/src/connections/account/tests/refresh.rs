@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::connections::http_client::HttpError;
+use crate::connections::marker::MarkerUpdate;
 
 const CLIENT: &str = "client-saved";
 
@@ -106,7 +107,11 @@ impl Harness {
 
     fn validated(&mut self, result: Result<VerifiedIdentity, IdentityError>) {
         let generation = self.validations.last().expect("a check started").0;
-        self.feed(Input::Validated { generation, result });
+        self.feed(Input::Validated {
+            generation,
+            result,
+            now: self.wall.unix_seconds(),
+        });
     }
 
     fn tokens(&self) -> Tokens {
@@ -201,7 +206,7 @@ fn the_rotated_set_is_saved_before_its_identity_is_checked() {
     assert_eq!(h.marker(), None, "the saved set owns the request");
     assert_eq!(
         h.validations,
-        [(0, "subject-1".to_owned(), "id-new".to_owned())]
+        [(1, "subject-1".to_owned(), "id-new".to_owned())]
     );
     assert!(h.answers.is_empty());
     h.validated(identity("subject-1"));
@@ -335,6 +340,8 @@ fn other_refusals_keep_the_credentials() {
     }
 }
 
+/// A timeout after the request went out may have consumed the token: the session ends, and the
+/// token stays for sign-out to revoke but is never sent again, after a restart too.
 #[test]
 fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     let mut h = Harness::seeded("refresh-ambiguous", account_at(NOW, None));
@@ -342,10 +349,32 @@ fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     h.refreshed(Err(ExchangeError::Http(HttpError::Timeout)));
     assert_eq!(
         h.answers,
-        [(1, failed(ErrorKey::AccountOffline, &[Action::Retry]))]
+        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
     );
     assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+    let ended = signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain));
+    assert_eq!(h.view(), &ended);
+    h.access(2, NOW);
+    assert_eq!(h.answers[1..], [(2, Err(Denied::Unusable))]);
+    assert_eq!(h.refreshes.len(), 1);
+    let mut h = h.restart();
+    assert_eq!(h.view(), &ended);
+    h.access(3, NOW);
+    assert_eq!(h.answers, [(3, Err(Denied::Unusable))]);
+    assert!(h.refreshes.is_empty(), "never sent again");
+    h.op(AccountOp::SignOut);
+    h.sign_out_confirmed();
+    assert_eq!(
+        run(h.revoking.last().expect("a revocation run")),
+        [("refresh-old".to_owned(), Origin::Account)]
+    );
+    assert_eq!(
+        h.view(),
+        &AccountView::SignedOut {
+            revocation_unconfirmed: true
+        }
+    );
 }
 
 /// A set whose token is for another subject, or is no valid token, ends the session, and its
@@ -386,6 +415,55 @@ fn a_rotated_set_that_fails_its_check_is_listed_and_ends_the_session() {
     assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
 }
 
+/// N1: a rejected set's token stays in `chatgpt` until its list entry commits, and only then is
+/// the registration saved over it; with the list full, the unknown outcome is written first.
+#[test]
+fn a_rejected_set_is_listed_before_its_token_leaves_the_account() {
+    let mut h = Harness::seeded("refresh-reject-order", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(rotated(Some("id-new")));
+    let before = h.marker();
+    h.hold = true;
+    h.validated(Err(IdentityError::OtherAccount));
+    assert!(matches!(h.held, Some(Job::List { .. })), "{:?}", h.held);
+    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
+    assert_eq!(h.marker(), before);
+    h.release();
+    assert_eq!(
+        h.revocations(),
+        [(
+            CLIENT.to_owned(),
+            "refresh-new".to_owned(),
+            NOW,
+            Origin::Exchange
+        )]
+    );
+    assert_eq!(h.account(), Some(ended()));
+
+    let mut h = Harness::seeded("refresh-reject-order-full", |vault| {
+        account_at(NOW, None)(vault);
+        full_list(vault);
+    });
+    h.access(1, NOW);
+    h.refreshed(rotated(Some("id-new")));
+    h.hold = true;
+    h.validated(Err(IdentityError::OtherAccount));
+    assert!(
+        matches!(
+            h.held,
+            Some(Job::Marker(MarkerUpdate::RequestFinished {
+                outcome_unknown: true
+            }))
+        ),
+        "{:?}",
+        h.held
+    );
+    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
+    h.release();
+    assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
+    assert_eq!(h.account(), Some(ended()));
+}
+
 /// H1: a check that lands while a sign-in's commit runs never overwrites the new account.
 #[test]
 fn a_check_that_lands_during_a_sign_in_commit_never_overwrites_it() {
@@ -417,7 +495,8 @@ fn a_check_saved_while_a_sign_in_is_out_leaves_its_flag_set() {
     assert_eq!(h.marker(), marker(&["request_pending"]));
 }
 
-/// M1: a held list save goes again at the next use, which then refreshes as usual.
+/// M1: a held list save goes again at the next use. The token the listed successor replaced
+/// was consumed, so the session ended: that use is a sign-in, and the token is never sent again.
 #[test]
 fn a_held_list_save_is_saved_again_at_the_next_use() {
     let mut h = Harness::seeded("refresh-held-list", account_at(NOW, None));
@@ -427,15 +506,17 @@ fn a_held_list_save_is_saved_again_at_the_next_use() {
         refresh_token: Some(secret("refresh-unusable")),
     }));
     h.store.0.lock().expect("fake lock").refusing = false;
-    h.access(2, NOW);
     assert_eq!(
-        h.refreshes.len(),
-        2,
-        "the refresh goes once the list is saved"
+        h.view(),
+        &signed_in(PlanState::Declined, Some(AccountRecovery::SignInAgain))
     );
-    h.refreshed(rotated(None));
-    assert_eq!(h.answers[1..], [(2, bearer("access-new"))]);
+    h.access(2, NOW);
+    assert_eq!(h.answers[1..], [(2, Err(Denied::Unusable))]);
+    assert_eq!(h.refreshes.len(), 1, "the consumed token never goes again");
+    assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
+    h.op(AccountOp::SignIn);
     assert_eq!(h.revocations()[0].1, "refresh-unusable");
+    assert_eq!(h.account(), Some(ended()));
 }
 
 /// A refresh out at sign-out that didn't rotate left the old token in place: nothing's unknown.
@@ -552,6 +633,7 @@ fn a_check_out_at_sign_out_saves_nothing() {
 
 /// An unusable answer that named a successor lists it as an exchange's would be, so the rotated
 /// token is revoked; with the list's exchange slots full, it can't be owned and stays unknown.
+/// The token it replaced was consumed, so the session ends and that token is never sent again.
 #[test]
 fn an_unusable_refresh_that_named_a_successor_lists_it() {
     let unusable = || {
@@ -564,8 +646,11 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
     h.refreshed(unusable());
     assert_eq!(
         h.answers,
-        [(1, failed(ErrorKey::SignInFailed, &[Action::Retry]))]
+        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
     );
+    h.access(2, NOW);
+    assert_eq!(h.answers[1..], [(2, Err(Denied::Unusable))]);
+    assert_eq!(h.refreshes.len(), 1, "the consumed token never goes again");
     assert_eq!(
         h.revocations(),
         [(
@@ -575,7 +660,7 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
             Origin::Exchange
         )]
     );
-    assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
+    assert_eq!(h.account(), Some(ended()));
     assert_eq!(h.marker(), marker(&["sweep"]));
 
     let mut h = Harness::seeded("refresh-unusable-full", |vault| {
@@ -590,4 +675,153 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
         "nothing dropped, nothing added"
     );
     assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
+    assert_eq!(h.account(), Some(ended()));
+}
+
+/// The token is marked as sent before it goes out. A crash before its answer is saved, or with
+/// the rotated set held after a refused save, ends the session at the next start rather than
+/// sending it again; a successor saved before a crash is used as usual.
+#[test]
+fn a_refresh_unanswered_at_a_crash_is_never_sent_again() {
+    let ended = signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain));
+    let mut h = Harness::seeded("refresh-crash", account_at(NOW, None));
+    h.access(1, NOW);
+    assert_eq!(h.refreshes.len(), 1);
+    assert!(h.tokens().refresh_sent, "marked before it went out");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &ended);
+    assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+    h.access(2, NOW);
+    assert_eq!(h.answers, [(2, Err(Denied::Unusable))]);
+    assert!(h.refreshes.is_empty());
+
+    let mut h = Harness::seeded("refresh-crash-held", account_at(NOW, None));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.refreshed(rotated(None));
+    h.store.0.lock().expect("fake lock").refusing = false;
+    let mut h = h.restart();
+    assert_eq!(h.view(), &ended);
+    h.access(2, NOW);
+    assert_eq!(h.answers, [(2, Err(Denied::Unusable))]);
+    assert!(h.refreshes.is_empty());
+    assert_eq!(
+        h.refresh_token(),
+        Some("refresh-old".to_owned()),
+        "kept for sign-out"
+    );
+
+    let mut h = Harness::seeded("refresh-crash-saved", |vault| {
+        account_at(NOW + 3600, None)(vault);
+        vault
+            .update_marker(MarkerUpdate::RequestStarted)
+            .expect("pending flag");
+    });
+    h.access(1, NOW);
+    assert_eq!(h.answers, [(1, bearer("old-access"))]);
+    assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+}
+
+/// A connection that never opened sent nothing: the token's mark is cleared, and the next use
+/// sends it again.
+#[test]
+fn an_offline_refresh_stays_retryable() {
+    let mut h = Harness::seeded("refresh-offline", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(Err(ExchangeError::Http(HttpError::Connect)));
+    assert_eq!(
+        h.answers,
+        [(1, failed(ErrorKey::AccountOffline, &[Action::Retry]))]
+    );
+    assert!(!h.tokens().refresh_sent);
+    assert_eq!(h.marker(), None);
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    h.access(2, NOW);
+    assert_eq!(
+        h.refreshes[1..],
+        [(0, CLIENT.to_owned(), "refresh-old".to_owned())]
+    );
+}
+
+/// Access during a retried rotated save joins it: no second refresh goes out for the same
+/// account, and the one check answers.
+#[test]
+fn access_during_a_retried_rotated_save_joins_it() {
+    let mut h = Harness::seeded("refresh-retried", account_at(NOW, None));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.refreshed(rotated(Some("id-new")));
+    h.store.0.lock().expect("fake lock").refusing = false;
+    h.hold = true;
+    h.op(AccountOp::Retry);
+    assert!(matches!(h.held, Some(Job::Rotate { .. })), "{:?}", h.held);
+    h.access(2, NOW);
+    h.release();
+    assert_eq!(h.refreshes.len(), 1, "no second grant");
+    h.validated(identity("subject-1"));
+    assert_eq!(h.answers[1..], [(2, bearer("access-new"))]);
+    assert_eq!(h.refreshes.len(), 1);
+    assert_eq!(h.validations.len(), 1, "one check for the one set");
+}
+
+/// The bearer's expiry is checked again once a pending set is verified: one that expired before
+/// or during the check is renewed first, and a renewal that comes back already due is handed
+/// out rather than renewed in a loop.
+#[test]
+fn a_verified_set_that_is_due_is_renewed_once_before_it_is_handed_out() {
+    let mut h = Harness::seeded(
+        "refresh-pending-expired",
+        account_at(NOW - 10, Some("id-old")),
+    );
+    h.access(1, NOW);
+    h.validated(identity("subject-1"));
+    assert!(h.answers.is_empty(), "no expired bearer");
+    assert_eq!(
+        h.refreshes,
+        [(0, CLIENT.to_owned(), "refresh-old".to_owned())]
+    );
+    h.refreshed(rotated(None));
+    assert_eq!(h.answers, [(1, bearer("access-new"))]);
+
+    let mut h = Harness::seeded("refresh-pending-due", account_at(NOW + 120, Some("id-old")));
+    h.access(1, NOW);
+    h.jump(60);
+    h.validated(identity("subject-1"));
+    assert!(h.answers.is_empty(), "due by the time the check ended");
+    assert_eq!(h.refreshes.len(), 1);
+
+    let mut h = Harness::seeded("refresh-pending-zero", account_at(NOW - 10, Some("id-old")));
+    h.access(1, NOW);
+    h.validated(identity("subject-1"));
+    h.refreshed(Ok(TokenSet {
+        expires_in: 0,
+        ..rotated(Some("id-new")).expect("a set")
+    }));
+    h.validated(identity("subject-1"));
+    assert_eq!(h.answers, [(1, bearer("access-new"))]);
+    assert_eq!(h.refreshes.len(), 1, "renewed once");
+}
+
+/// A pending flag the last run left is uncertainty from the next start on, and a rejected set's
+/// list save ends no request: a sign-out after it stays unconfirmed.
+#[test]
+fn a_pending_flag_left_by_a_crash_outlives_a_rejected_set() {
+    let mut h = Harness::seeded("refresh-orphan", |vault| {
+        account_at(NOW + 3600, Some("id-new"))(vault);
+        vault
+            .update_marker(MarkerUpdate::RequestStarted)
+            .expect("pending flag");
+    });
+    assert_eq!(h.marker(), marker(&["outcome_unknown"]));
+    h.access(1, NOW);
+    h.validated(Err(IdentityError::OtherAccount));
+    assert_eq!(h.revocations()[0].1, "refresh-old");
+    h.op(AccountOp::SignOut);
+    h.sign_out_confirmed();
+    assert_eq!(
+        h.view(),
+        &AccountView::SignedOut {
+            revocation_unconfirmed: true
+        }
+    );
 }

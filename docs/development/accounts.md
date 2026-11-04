@@ -237,7 +237,7 @@ flowchart LR
     W["code waits"] --> F["write request_pending"]
     F -- refused --> E["CredentialsUnavailable, nothing sent"]
     F --> X["send the token request"]
-    X -- "typed OAuth refusal, local error" --> C["clear the flag"]
+    X -- "typed OAuth refusal, local error, connection never opened" --> C["clear the flag"]
     X -- "timeout, 5xx, malformed" --> U["clear the flag, set outcome_unknown"]
     X -- "set for the current attempt, verified" --> A["commit the account, then clear"]
     X -- "set for a replaced attempt, other subject, failed check" --> L["revocation list, then clear"]
@@ -249,8 +249,9 @@ A received set never has two owners and never none. A refused save holds the set
 lane; it is tried again once when the attempt moves (as a list entry, since its attempt is gone)
 or on Retry, never on every pass. A live attempt ends then with `CredentialsUnavailable` and
 Retry, since its code could only wait behind the held set.
-A pending flag a crash left behind becomes `outcome_unknown` on the next request, and
-a later success never clears it.
+A pending flag a crash left behind becomes `outcome_unknown` as soon as the next start reads the
+vault, before any save could finish it as known, and a later success never clears it. A list
+save that no request owns (a rejected refresh set's) finishes no request.
 
 **Local policies:**
 - A grant without a refresh token is refused; nothing is saved for it.
@@ -310,39 +311,59 @@ sequenceDiagram
     participant P as provider
     C->>M: access()
     M->>V: write request_pending
+    M->>V: mark the refresh token sent
     M->>P: refresh_token grant (30 s deadline)
     P-->>M: rotated set
-    M->>V: save it, pending_identity_validation set, flag cleared
+    M->>V: save it unmarked, pending_identity_validation set, request_pending cleared
     M->>P: discovery and JWKS, verify against the saved subject
     P-->>M: verified
-    M->>V: save it, pending flag cleared
-    M-->>C: bearer
+    M->>V: save it, pending_identity_validation cleared
+    M-->>C: bearer, or one renewal first if it's due by now
 ```
 
+- The refresh token is marked as sent (`refresh_sent`, in the account record) after
+  `request_pending` is written and before the request goes out. The successor's save replaces the
+  whole set, so the mark clears in the same commit that makes the successor durable. A typed
+  refusal, a local error or a connection that never opened (`HttpError::Connect`) issued nothing:
+  the mark is cleared and the token may go again. Any other ending may have consumed it, and so
+  may a refresh a start finds still marked: the session ends with `SessionEnded` and Sign in, and
+  the token stays for sign-out to revoke but is never sent again. An answer that names a
+  successor Kumochi can't keep lists that successor and ends the session the same way. No reuse
+  grace for a rotated token is documented, so a new sign-in is the safe recovery.
 - The rotated set is saved before any further network work. A refused lane save holds its set
   in memory and tells waiting callers `CredentialsUnavailable`. The next `access` saves any held
-  set again first, and never asks for another token for a held rotated set.
+  set again first, and never asks for another token for a rotated set that's held or being saved,
+  Retry's included. A committed rotated set moves the generation, so a check or a refresh still
+  meant for the set it replaced is dropped, and a check never verifies a set it didn't check.
 - The identity check's save and an ended session's save run off the lane. They never clear the
   lane's pending flag, and one queued for a generation that has since moved is dropped, so it
   can't overwrite a newer sign-in.
 - `pending_identity_validation` is durable, so a set left pending by a crash is checked before
   its first use after the restart. A failed check leaves it pending and blocks access; the next
-  `access` checks again without a second refresh. A refresh that leaves out the identity
-  token or the refresh token keeps the saved one and isn't pending.
+  `access` checks again without a second refresh, and joins a check already out. A refresh that
+  leaves out the identity token or the refresh token keeps the saved one and isn't pending.
+- Once a verified or held set is saved, its expiry is checked again against the latest wall time
+  an input carried. A bearer that's due is renewed first, once per flight, so a renewal that comes
+  back already due (a zero lifetime, say) is handed out rather than renewed in a loop.
 - `verify_refreshed` binds the token to the subject this account already verified, with no
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
   Another subject or an invalid token, like a pending set with nothing to check, ends the session
   and lists the set's refresh token as an exchange's would be (unknown when no slot is free).
-  Network, status, discovery and clock failures leave the set pending.
+  Network, status, discovery, bounds and clock failures leave the set pending, since a captive
+  portal's page can fail discovery's parse or a document's size bound. The registration-only save
+  waits until the rejected token is listed, or its outcome is recorded unknown, so the token never
+  leaves `chatgpt` unowned.
 - Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
   email, answers `SessionEnded` with Sign in, and moves the generation. The view is
-  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out, in this process only:
-  after a restart it's `SignedOut`.
+  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. With the tokens gone
+  that lasts in this process only: after a restart it's `SignedOut`. A token kept because it may
+  be consumed keeps its mark, so `SignInAgain` outlasts a restart.
 - A result that arrives under an old generation never becomes the account: during a sign-out its
   rotated token replaces the listed `Account` entry, so the successor is what gets revoked. One
   that didn't rotate leaves the old token in place, so nothing is unknown.
 - An unusable answer that names a refresh token lists it as an exchange's would be, when an
-  exchange slot is free and its entry fits; otherwise its outcome is unknown.
+  exchange slot is free and its entry fits; otherwise its outcome is unknown. Either way the
+  session ends, since the token it replaced was consumed.
 - A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
   sign-out saves nothing.
 
@@ -352,11 +373,13 @@ sequenceDiagram
 | `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable`, other codes with 429 or 5xx | retry later | `AccountOffline`, Retry |
 | `subscription_sharing_user_not_eligible` | unavailable | `PlanUnavailable` |
 | `invalid_client`, `chatpass_v2_*`, other codes | fix the request | `AccountMisconfigured` |
-| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `AccountOffline`, Retry |
-| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `SignInFailed`, Retry |
+| connection never opened | nothing sent | `AccountOffline`, Retry |
+| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
+| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
 
-Every row but the first keeps the credentials. A typed refusal issued nothing, so it clears the
-pending flag without setting `outcome_unknown`.
+Every row but the first keeps the credentials; the two unknown rows keep them only for sign-out
+to revoke. A typed refusal or a connection that never opened issued nothing, so it clears the
+pending flag without setting `outcome_unknown`, and clears the sent mark.
 
 **Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
 at once: the attempt moves, the listener closes, the account leaves memory, and the view is
@@ -481,7 +504,7 @@ it is dropped.
 | Record | Layout |
 | --- | --- |
 | `host` | One credential containing a JSON UUIDv4 URN, generated from `getrandom` on first use. |
-| `chatgpt` | A manifest `{slot,chunks}` and chunks in slots `0` and `1`. JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`). Registration-only JSON contains just `client_id` and `subject`. |
+| `chatgpt` | A manifest `{slot,chunks}` and chunks in slots `0` and `1`. JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
 | `revoke` | Its own manifest and two slots. JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
 | `signout` | One token-free compact JSON credential, never chunked: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase` and `Revoking`/`Deleting`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
 
