@@ -179,6 +179,11 @@ impl Opaque {
         }
         Ok(Self(bytes.into_boxed_slice()))
     }
+
+    /// How many bytes it holds.
+    pub fn size(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl fmt::Debug for Opaque {
