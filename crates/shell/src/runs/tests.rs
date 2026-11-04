@@ -730,12 +730,13 @@ fn press(runs: &mut Runs) -> (Escape, Option<ControlToBrain>) {
         working: runs.working(),
         speaking: false,
         drawing: runs.drawing(),
+        pulling: false,
     };
     let action = decide(activity, Panel::Open);
     let message = match action {
         Escape::Stop => runs.stop(),
         Escape::Clear => runs.clear().clear,
-        Escape::Dismiss | Escape::CancelEdit | Escape::Ignore => None,
+        Escape::CancelPull | Escape::Dismiss | Escape::CancelEdit | Escape::Ignore => None,
     };
     (action, message)
 }
