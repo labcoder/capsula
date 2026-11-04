@@ -498,7 +498,12 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
             })
         }
     }
-    for (count, expected) in [(3, 6115.0), (4, 8521.0), (8, 8521.0)] {
+    for (count, scale, expected) in [
+        (3, 1, 6115.0),
+        (4, 1, 8521.0),
+        (8, 1, 8521.0),
+        (8, 3, 2605.3333),
+    ] {
         let mut scene = new_scene("tall_loops");
         let before = LayoutState::new(&scene);
         let mut put = vec![
@@ -508,6 +513,7 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
         for index in 0..count {
             put.push(json!({"edge":{"id":format!("e{index}"),"in":"diagram","from":"a","to":"a","label":"retrying"}}));
         }
+        put.push(json!({"anim":{"target":"diagram","track":"scale","keys":[[0,scale]]}}));
         let picture = scene_support::prepared_with(
             &mut scene,
             &mut GlobalBudget::default(),

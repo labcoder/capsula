@@ -230,23 +230,12 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
                 });
             let points = if edge.from == edge.to {
                 // shortcut: the node-only fit can leave long loop labels past the host's right edge; include edge bounds or flip lanes when the native painter proves clipping.
-                let lane = f32::from(u16::try_from(index).expect("edge cap fits u16"));
-                let offset = (2.0 * lane * (lane_height + 12.0)).min(
-                    (crate::limits::MAX_COORD - lane_height - from.max().y - from.size.y - 24.0)
-                        .max(0.0),
-                );
-                quadratic(
-                    [
-                        Vec2::new(from.max().x, from.center().y),
-                        Vec2::new(from.center().x, from.max().y),
-                    ],
-                    from.max()
-                        + Vec2::new(
-                            from.size.x.max(
-                                from.size.x * 0.25 + chip_size.map_or(0.0, |size| size.x) + 24.0,
-                            ),
-                            from.size.y + 24.0 + offset,
-                        ),
+                self_loop(
+                    from,
+                    chip_size,
+                    lane_height,
+                    index,
+                    state.resting_transform(object.item.handle)?,
                 )
             } else {
                 curve(object.anchors, direction, bow)
@@ -273,6 +262,46 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
         }
     }
     Ok(())
+}
+
+fn self_loop(
+    from: Rect,
+    chip_size: Option<Vec2>,
+    lane_height: f32,
+    index: usize,
+    world: Affine,
+) -> Arc<[Vec2]> {
+    let lane = f32::from(u16::try_from(index).expect("edge cap fits u16"));
+    let mut offset = (2.0 * lane * (lane_height + 12.0))
+        .min((crate::limits::MAX_COORD - lane_height - from.max().y - from.size.y - 24.0).max(0.0));
+    let control = from.max()
+        + Vec2::new(
+            from.size
+                .x
+                .max(from.size.x * 0.25 + chip_size.map_or(0.0, |size| size.x) + 24.0),
+            from.size.y + 24.0,
+        );
+    let reserve = world.bounds(Rect::centered(control, chip_size.unwrap_or_default()));
+    for (min, max, slope) in [
+        (reserve.origin.x, reserve.max().x, world.0[2]),
+        (reserve.origin.y, reserve.max().y, world.0[3]),
+    ] {
+        let available = if slope > 0.0 {
+            (crate::limits::MAX_COORD - max) / slope
+        } else if slope < 0.0 {
+            (-crate::limits::MAX_COORD - min) / slope
+        } else {
+            offset
+        };
+        offset = offset.min(available.max(0.0));
+    }
+    quadratic(
+        [
+            Vec2::new(from.max().x, from.center().y),
+            Vec2::new(from.center().x, from.max().y),
+        ],
+        control + Vec2::new(0.0, offset),
+    )
 }
 
 fn repaint_curve(
