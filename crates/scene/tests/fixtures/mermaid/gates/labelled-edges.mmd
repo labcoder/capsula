@@ -1,0 +1,6 @@
+flowchart LR
+request[Request] -->|normal| process[Process]
+process -.->|retry| retry[Retry]
+retry ==>|batch| result[Result]
+request ---|shared| result
+result <-->|sync| store[(Store)]

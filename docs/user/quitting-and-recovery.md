@@ -8,3 +8,5 @@ Kumochi runs as two processes: the window you see and a background process that 
 - **Drawings.** Quit clears what Kumochi has drawn, and so does Esc. If the window or the
   background process crashes instead, the drawings that were on screen come back when it
   reconnects.
+- An unrelated second window crash may clear up to four visible overlay drawings to stop a
+  crash loop; their history is kept.

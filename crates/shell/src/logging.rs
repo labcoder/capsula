@@ -3,9 +3,6 @@
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
 //! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
 
-use std::path::PathBuf;
-
-use kumochi_protocol::constants;
 use tracing::Level;
 use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
 
@@ -16,7 +13,7 @@ const KEEP_DAYS: usize = 7;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LoggingError {
     /// The per-user data folder isn't known.
-    #[error("%LOCALAPPDATA% is not set")]
+    #[error("%LOCALAPPDATA% is not set to an absolute path")]
     NoLocalAppData,
     /// The log folder or file couldn't be created.
     #[error("can't open the log file")]
@@ -34,10 +31,8 @@ pub(crate) enum LoggingError {
 /// # Errors
 /// Fails when the log folder can't be found or created, or logging already started.
 pub(crate) fn init(prefix: &str) -> Result<(), LoggingError> {
-    let dir = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
+    let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
-        .join(constants::DATA_DIR)
         .join("logs");
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)

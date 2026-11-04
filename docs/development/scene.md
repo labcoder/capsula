@@ -31,7 +31,9 @@ the scene-state validator, not the typed parser.
 
 `put` accepts `line`, `arrow`, `path`, `shape`, `text`, `callout`, `highlight`,
 `diagram`, `node`, `edge`, `table`, `row`, `chart`, `series`, `anim` and `mermaid`.
-Addressable objects require model ids: there are no generated `_1` aliases.
+Wire objects require model ids: there are no generated `_1` aliases. Mermaid
+compilation preserves source node and named-group ids and privately generates the
+root, anonymous-group and edge ids.
 Ids contain 1–40 ASCII letters, digits, underscores, dots or hyphens. Host handles
 are a separate, opaque `u32` identity.
 
@@ -63,16 +65,6 @@ Path data (`d`) and Mermaid source (`src`) use `Source`, not display `Text`.
 Each is capped at 8 KiB of UTF-8 bytes (`MAX_SOURCE_BYTES`); the path figure comes
 from S1, while the Mermaid figure is a starting cap. Admission's shared SVG preflight
 enforces the 512-command path limit. Source Debug exposes byte length only.
-
-The bounded Mermaid lexical reader is exercised in unit tests: a UTF-8-safe cursor
-reads ids, labels, shapes and links, with typed refusals for unsupported syntax.
-The grammar builds ordered nodes, parent-first groups and links, assigning node
-membership to the first closing group. Its tests cover complete-input parsing,
-direction, metadata and refusal boundaries. Admission still rejects Mermaid;
-these grammar and compiler layers alone do not enable it. The test-linked compiler
-expands sources in place into a private root, groups, nodes and edges. It checks
-expanded slots and per-diagram counts, reserves collision-free names, and keeps
-original-slot diagnostics and private drawing facts alongside the executable step.
 
 The mixed-syntax types (`Start`, `Anchor`, `Color`, cells, chart points and key
 values) use JSON visitors only when `is_human_readable()` is true. Their binary
@@ -112,8 +104,8 @@ or wrongly typed parents/endpoints, properties the target does not own, invalid
 track values/times, and removals that orphan a surviving dependant. Only `draw`
 has kind-specific track ownership checks so far; a `set` or `anim` targeting an object
 removed by that same step fails as `UnknownRef`. The motion layer defines the
-remaining property rules. Mermaid expansion must run before admission; it remains
-unsupported until A8.
+remaining property rules. Admission expands bounded Mermaid sources before checking
+the executable candidate; callers still submit and persist the original typed step.
 
 Ids, including dropped or removed ids, stay reserved for the scene's lifetime.
 An identical typed step id is a no-op even after its step was dropped; a conflicting
@@ -132,6 +124,66 @@ one-based, slots are zero-based, and animation slots are not compacted away.
 Neither Stop nor append renumbers old handles. The returned commit index is
 zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
 and slots beyond the 856-operation bound.
+
+### Bounded Mermaid flowcharts
+
+`{"mermaid":{"in":"d","src":"flowchart LR\nA[Start] --> B[Done]"}}`
+adds a self-contained flowchart inside diagram `d`. The target may be declared later
+in the same step, but it must be a diagram, not another container. The parser consumes
+the complete source, including its suffix; it never commits a valid prefix.
+
+The D1 subset accepts `flowchart` and `graph`, TB/TD/BT/LR/RL directions, box,
+round, pill, diamond, circle and cylinder nodes, chains and spaced `&` fan-out,
+normal/open/dotted/thick labelled links with no, end or both arrowheads, nested
+subgraphs and whole-line `%%` comments. Subgraphs may set their own direction;
+otherwise it inherits from the nearest diagram. Source order determines node
+first-mention order and edge fan-out order.
+
+The first closing subgraph that references a node owns it, including edge-only
+references. A later declaration does not move it. Repeated declarations in the same
+scope update its label and shape; explicitly shaped or labelled declarations in
+different scopes are refused. Bare membership mentions are references, not
+redefinitions. A quoted multiword header creates a fresh anonymous group; a quoted
+one-word header keeps its valid source id. Reopening a named group is unsupported.
+
+Symbolic directions and BR, minimum-length links, edge ids, group endpoints,
+other shapes or heads, configuration, styling, interactions, HTML, entity codes,
+Mermaid Markdown strings and non-WireId identifiers return `Unsupported` rather
+than disappearing. Unknown header words, including misspellings, and refused
+statement-leading id bytes also return `Unsupported`; D1 does not distinguish
+an unknown diagram kind from a typo. Malformed or truncated D1 syntax returns `Malformed`, including
+an `import` after an otherwise valid graph. Text and source limits remain enforced;
+labels such as `click style direction end` and `1<2` are ordinary text. `<br>` stays
+unsupported rather than becoming a line break.
+
+Each source expands in place into a boxless root, parent-first groups, first-mentioned
+nodes and source-ordered edges. A bounded deterministic allocator skips every id
+reserved by the scene or declared or referenced anywhere in the step, including
+source group ids, parents, anchors, edge endpoints and animation, set and remove
+targets. A generated object cannot satisfy an otherwise dangling reference.
+All expanded objects and operations count once against the ordinary scene and step
+caps before handles are constructed. The 48-node and 96-edge caps apply to each
+diagram after membership and edge ownership are resolved, not to the whole source.
+
+The original `Step` remains authoritative for duplicate identity, `SceneState::step`,
+`PreparedStep::step` and recovery. A private executable step and slot-origin map drive
+admission, preparation and motion. Syntax errors name the original
+`put[i].mermaid.src`; generated-slot errors map there too, while root-target errors
+name `.mermaid.in` and shifted plain-operation errors retain their original indices.
+Whole-scene budget failures can still name the root. Replaying original records
+recompiles the same handles and private drawing facts without a wire-format change.
+
+Private group titles, reversed direction and link paint travel beside the executable
+step, not in new wire fields. A title is text on its group's own handle, so it is
+not another child or object and survives ordinary updates and retained-handle cuts.
+Its measured width is capped at 180 logical pixels. For content bounds C and title
+size L, the ranked bounds have width `max(C.width, L.width)` and reserve
+`L.height + 16` pixels above C; the title sits horizontally centred at the top.
+Plain diagrams remain labelless, and neither plain nor Mermaid groups emit a frame.
+
+This parser is a reduced port of Pele's flowchart lexer/parser, with its MIT notice
+and pinned revision in `THIRD-PARTY-NOTICES.md`. Unsupported families are deliberate
+differences, not claims of full Mermaid or upstream-suite compatibility.
 
 The ignored `measure_whole_scene_removal_admit` test measures the complete
 admission call for 600 existing text objects and 600 removals, including the
@@ -380,7 +432,21 @@ Anchors to or across a boxed diagram draw late because its glide applies after
 placement. References to the cluster itself, its ancestors, siblings or outside
 objects are also drawn late, so they do not contribute to its ranked size; A9's
 renders judge this shortcut. Changed objects retain the later-growth behavior above.
-Private Mermaid group labels belong to the parser/compiler layer.
+Private Mermaid group titles reserve the band described above before parent ranking;
+their text belongs to the group handle, not a synthetic child.
+
+RL and BT mirror the initial rank coordinates along the inherited right/down axis.
+A nested group that declares its own direction replaces both the axis and its reversal;
+one without a direction inherits both. Later nodes retain the existing members' positions
+and take free slots toward decreasing x for RL or decreasing y for BT. Recovery derives
+the same direction and slots from the original Mermaid source.
+
+Prepared-result residency charges newly compiled private facts and the owned compiled
+record, including its operation array and cloned step fields. Plain tickets share the
+original log record and add no compiled-record charge. Retained-prefix
+residency counts every private fact still held by its surviving handles, including
+the title text copy kept separately from the painted text. Both use the same
+compiled metadata retained across cuts and recovery.
 
 Port mapping: S1's `geom::{Vec2, Rect}`, `Theme::color` and diagram `layout` become
 `geom::{Vec2, Rect}`, `Theme::resolve` and `layout::diagram::layout`. The two S1 diagram

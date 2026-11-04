@@ -392,6 +392,8 @@ impl<S: CredentialStore> Vault<S> {
 
     fn erase(&mut self, record: Chunked) -> Result<(), VaultError> {
         self.clean[record.index()] = [false; 2];
+        // The manifest goes first, so no interruption leaves it naming a deleted chunk.
+        self.store.delete(&self.target(record.name()))?;
         let mut result = Ok(());
         for slot in 0..2 {
             let deleted = delete_chunks(
@@ -402,11 +404,7 @@ impl<S: CredentialStore> Vault<S> {
             .map_err(VaultError::from);
             result = result.and(deleted);
         }
-        let manifest = self
-            .store
-            .delete(&self.target(record.name()))
-            .map_err(VaultError::from);
-        result.and(manifest)?;
+        result?;
         self.assert_absent(record, None)?;
         self.clean[record.index()] = [true; 2];
         Ok(())
