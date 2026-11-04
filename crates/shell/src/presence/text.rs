@@ -77,7 +77,11 @@ impl Presence {
         }
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
-        let bounds = self.layout.panel;
+        // The accepted dock's anchor, at the typing panel's own height, as the peek's place.
+        let bounds = self.layout.anchored_panel(
+            platform::work_area()?,
+            [380.0, 140.0].map(|value| super::scaled(value, self.scale)),
+        );
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
@@ -130,6 +134,7 @@ impl Presence {
         let events = self.events.clone();
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
+        let notice = typing_notice(self.error.as_ref(), self.refusal, cx.global::<Strings>());
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
@@ -141,6 +146,7 @@ impl Presence {
                 input,
                 stop,
                 conversation: Conversation::default(),
+                notice,
                 owner,
                 events,
             })
@@ -284,15 +290,22 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let strings = cx.global::<Strings>();
-        if typing_notice(previous.0.as_ref(), previous.1, strings)
-            != typing_notice(self.error.as_ref(), self.refusal, strings)
+        let notice = typing_notice(self.error.as_ref(), self.refusal, strings);
+        if typing_notice(previous.0.as_ref(), previous.1, strings) != notice
             && let Some(text) = &self.text
         {
-            text.view.update(cx, |_, cx| cx.notify());
+            text.view.update(cx, |view, cx| {
+                view.notice = notice;
+                cx.notify();
+            });
         }
         if previous.0 != self.error {
             if let Some(panel) = &self.thread_panel {
-                panel.view.update(cx, |_, cx| cx.notify());
+                let error = self.error.clone();
+                panel.view.update(cx, |view, cx| {
+                    view.error = error;
+                    cx.notify();
+                });
             }
             self.refresh_dock(cx);
         }
@@ -392,6 +405,8 @@ pub(super) struct TextView {
     /// The Stop fallback, here too because this panel covers the status panel's.
     pub(super) stop: bool,
     conversation: Conversation,
+    /// Pushed by presence, never read from it: the first frame renders while presence is updating.
+    notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
 }
@@ -399,11 +414,7 @@ pub(super) struct TextView {
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
-        let owner = self.owner.upgrade();
-        let presence = owner.as_ref().map(|owner| owner.read(cx));
-        let notice = presence.and_then(|owner| {
-            typing_notice(owner.error.as_ref(), owner.refusal, cx.global::<Strings>())
-        });
+        let notice = self.notice.clone();
         let context = self.conversation.context.clone();
         let back_owner = self.owner.clone();
         let stop = self.stop.then(|| {
@@ -473,7 +484,12 @@ impl Render for TextView {
                     .text_xs()
                     .child(cx.global::<Strings>().get(Text::ThreadDeleting))
             }))
-            .children(notice.map(|notice| div().text_xs().child(notice)))
+            .children(notice.map(|notice| {
+                div()
+                    .debug_selector(|| format!("typing-notice {notice}"))
+                    .text_xs()
+                    .child(notice)
+            }))
             .child(Input::new(&self.input))
             .children(stop)
     }
@@ -519,7 +535,64 @@ fn answer_tail(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hide, Typing, answer_tail};
+    use gpui_kit::component::input::InputState;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext,
+        WeakEntity, WindowOptions,
+    };
+
+    use super::{Conversation, Hide, TextView, Typing, answer_tail};
+    use crate::strings::Strings;
+
+    /// The typing panel as the shell opens it, with a pushed notice and no readable presence.
+    fn open(
+        cx: &mut TestAppContext,
+        notice: Option<&'static str>,
+    ) -> (AnyWindowHandle, Entity<TextView>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Strings::english());
+            let (events, _) = async_channel::unbounded();
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                cx.new(|_| TextView {
+                    input,
+                    stop: false,
+                    conversation: Conversation::default(),
+                    notice: notice.map(SharedString::from),
+                    owner: WeakEntity::new_invalid(),
+                    events,
+                })
+            })
+            .expect("a window")
+        })
+    }
+
+    const OFFLINE: &str = "typing-notice Kumo can't reach the brain.";
+    const TOO_LONG: &str = "typing-notice That turn is too long.";
+
+    /// Which of the two notices the window's latest frame drew.
+    fn drawn(cx: &mut TestAppContext, window: AnyWindowHandle) -> [bool; 2] {
+        cx.run_until_parked();
+        let mut frame = VisualTestContext::from_window(window, cx);
+        [OFFLINE, TOO_LONG].map(|notice| frame.debug_bounds(notice).is_some())
+    }
+
+    #[gpui::test]
+    fn the_typing_notice_draws_from_its_pushed_copy(cx: &mut TestAppContext) {
+        let (window, view) = open(cx, Some("Kumo can't reach the brain."));
+        assert_eq!(drawn(cx, window), [true, false]);
+        view.update(cx, |view, cx| {
+            view.notice = Some("That turn is too long.".into());
+            cx.notify();
+        });
+        assert_eq!(drawn(cx, window), [false, true]);
+        view.update(cx, |view, cx| {
+            view.notice = None;
+            cx.notify();
+        });
+        assert_eq!(drawn(cx, window), [false, false]);
+    }
 
     #[test]
     fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {

@@ -377,42 +377,65 @@ fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     );
 }
 
-/// A set whose token is for another subject, or is no valid token, ends the session, and its
-/// refresh token is listed as an exchange's would be; with the list full, it's unknown.
+/// N1 (OSC-204): a set whose token is for another subject, or is no valid token, ends the
+/// session and stays in `chatgpt`, pending so it's never used, with nothing written, full list or
+/// not. A restart checks it again and writes nothing either: a sign-in's Commit or the sign-out's
+/// Prepare owns its token.
 #[test]
-fn a_rotated_set_that_fails_its_check_is_listed_and_ends_the_session() {
-    for failure in [IdentityError::OtherAccount, IdentityError::Token] {
-        let mut h = Harness::seeded("refresh-other", account_at(NOW, None));
+fn a_rotated_set_that_fails_its_check_ends_the_session_and_stays_in_chatgpt() {
+    for (token, full) in [(false, false), (true, false), (false, true)] {
+        let context = format!("invalid token: {token}, full list: {full}");
+        let failure = || {
+            Err(if token {
+                IdentityError::Token
+            } else {
+                IdentityError::OtherAccount
+            })
+        };
+        let mut h = Harness::seeded("refresh-other", |vault| {
+            account_at(NOW, None)(vault);
+            if full {
+                full_list(vault);
+            }
+        });
         h.access(1, NOW);
         h.refreshed(rotated(Some("id-new")));
-        h.validated(Err(failure));
+        let before = (h.account(), h.revocations(), h.marker());
+        assert!(h.tokens().pending_identity_validation, "{context}");
+        h.store.arm(usize::MAX, Fault::Refuse);
+        h.validated(failure());
         assert_eq!(
             h.answers,
             [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))],
-            "{failure:?}"
+            "{context}"
         );
-        assert_eq!(h.account(), Some(ended()), "{failure:?}");
+        let written = |h: &Harness| h.store.0.lock().expect("fake lock").mutations.len();
+        assert_eq!(written(&h), 0, "{context}: nothing written");
         assert_eq!(
-            h.revocations(),
-            [(
-                CLIENT.to_owned(),
-                "refresh-new".to_owned(),
-                NOW,
-                Origin::Exchange
-            )],
-            "{failure:?}"
+            (h.account(), h.revocations(), h.marker()),
+            before,
+            "{context}"
         );
-        assert_eq!(h.marker(), marker(&["sweep"]), "{failure:?}");
+        let mut h = h.restart();
+        h.store.arm(usize::MAX, Fault::Refuse);
+        h.access(2, NOW);
+        h.validated(failure());
+        assert_eq!(
+            h.answers,
+            [(2, failed(ErrorKey::SessionEnded, &[Action::SignIn]))],
+            "{context}: checked again after the restart"
+        );
+        assert_eq!(
+            written(&h),
+            0,
+            "{context}: nothing written after the restart"
+        );
+        assert_eq!(
+            (h.account(), h.revocations(), h.marker()),
+            before,
+            "{context}"
+        );
     }
-    let mut h = Harness::seeded("refresh-other-full", |vault| {
-        account_at(NOW, None)(vault);
-        full_list(vault);
-    });
-    h.access(1, NOW);
-    h.refreshed(rotated(Some("id-new")));
-    h.validated(Err(IdentityError::OtherAccount));
-    assert_eq!(h.revocations().len(), MAX_EXCHANGES);
-    assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
 }
 
 /// A key the check's key set lacks, even fetched again, leaves the set pending like a discovery
@@ -435,7 +458,7 @@ fn a_check_whose_key_is_missing_stays_pending() {
 
 /// L2: a rotated set that can't be saved as the account, its access token past its bound say,
 /// still lists its successor when the entry fits, so the rotated token is revoked. The token it
-/// replaced was consumed, so the session ends.
+/// replaced was consumed, so the session ends, and it stays in `chatgpt` marked as sent.
 #[test]
 fn a_rotated_set_too_big_to_save_lists_its_successor() {
     let mut h = Harness::seeded("refresh-unsaveable", account_at(NOW, None));
@@ -457,57 +480,9 @@ fn a_rotated_set_too_big_to_save_lists_its_successor() {
             Origin::Exchange
         )]
     );
-    assert_eq!(h.account(), Some(ended()));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-old"));
+    assert!(h.tokens().refresh_sent, "never sent again");
     assert_eq!(h.refreshes.len(), 1);
-}
-
-/// N1: a rejected set's token stays in `chatgpt` until its list entry commits, and only then is
-/// the registration saved over it; with the list full, the unknown outcome is written first.
-#[test]
-fn a_rejected_set_is_listed_before_its_token_leaves_the_account() {
-    let mut h = Harness::seeded("refresh-reject-order", account_at(NOW, None));
-    h.access(1, NOW);
-    h.refreshed(rotated(Some("id-new")));
-    let before = h.marker();
-    h.hold = true;
-    h.validated(Err(IdentityError::OtherAccount));
-    assert!(matches!(h.held, Some(Job::List { .. })), "{:?}", h.held);
-    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
-    assert_eq!(h.marker(), before);
-    h.release();
-    assert_eq!(
-        h.revocations(),
-        [(
-            CLIENT.to_owned(),
-            "refresh-new".to_owned(),
-            NOW,
-            Origin::Exchange
-        )]
-    );
-    assert_eq!(h.account(), Some(ended()));
-
-    let mut h = Harness::seeded("refresh-reject-order-full", |vault| {
-        account_at(NOW, None)(vault);
-        full_list(vault);
-    });
-    h.access(1, NOW);
-    h.refreshed(rotated(Some("id-new")));
-    h.hold = true;
-    h.validated(Err(IdentityError::OtherAccount));
-    assert!(
-        matches!(
-            h.held,
-            Some(Job::Marker(MarkerUpdate::RequestFinished {
-                outcome_unknown: true
-            }))
-        ),
-        "{:?}",
-        h.held
-    );
-    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
-    h.release();
-    assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
-    assert_eq!(h.account(), Some(ended()));
 }
 
 /// H1: a check that lands while a sign-in's commit runs never overwrites the new account.
@@ -562,7 +537,10 @@ fn a_held_list_save_is_saved_again_at_the_next_use() {
     assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
     h.op(AccountOp::SignIn);
     assert_eq!(h.revocations()[0].1, "refresh-unusable");
-    assert_eq!(h.account(), Some(ended()));
+    assert!(
+        h.tokens().refresh_sent,
+        "the spent token stays, never sent again"
+    );
 }
 
 /// A refresh out at sign-out that didn't rotate left the old token in place: nothing's unknown.
@@ -679,7 +657,8 @@ fn a_check_out_at_sign_out_saves_nothing() {
 
 /// An unusable answer that named a successor lists it as an exchange's would be, so the rotated
 /// token is revoked; with the list's exchange slots full, it can't be owned and stays unknown.
-/// The token it replaced was consumed, so the session ends and that token is never sent again.
+/// The token it replaced was consumed, so the session ends and that token stays in `chatgpt`,
+/// marked as sent, so it's never sent again.
 #[test]
 fn an_unusable_refresh_that_named_a_successor_lists_it() {
     let unusable = || {
@@ -706,7 +685,8 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
             Origin::Exchange
         )]
     );
-    assert_eq!(h.account(), Some(ended()));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-old"));
+    assert!(h.tokens().refresh_sent);
     assert_eq!(h.marker(), marker(&["sweep"]));
 
     let mut h = Harness::seeded("refresh-unusable-full", |vault| {
@@ -721,7 +701,8 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
         "nothing dropped, nothing added"
     );
     assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
-    assert_eq!(h.account(), Some(ended()));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-old"));
+    assert!(h.tokens().refresh_sent);
 }
 
 /// The token is marked as sent before it goes out. A crash before its answer is saved, or with
@@ -950,8 +931,8 @@ fn a_bearer_that_expires_during_its_save_is_renewed() {
     );
 }
 
-/// A pending flag the last run left is uncertainty from the next start on, and a rejected set's
-/// list save ends no request: a sign-out after it stays unconfirmed.
+/// A pending flag the last run left is uncertainty from the next start on. A rejected set stays in
+/// `chatgpt`, so the sign-out after it adopts its token, and stays unconfirmed.
 #[test]
 fn a_pending_flag_left_by_a_crash_outlives_a_rejected_set() {
     let mut h = Harness::seeded("refresh-orphan", |vault| {
@@ -963,8 +944,12 @@ fn a_pending_flag_left_by_a_crash_outlives_a_rejected_set() {
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
     h.access(1, NOW);
     h.validated(Err(IdentityError::OtherAccount));
-    assert_eq!(h.revocations()[0].1, "refresh-old");
+    assert!(h.revocations().is_empty());
     h.op(AccountOp::SignOut);
+    assert_eq!(
+        run(&h.revoking[0]),
+        [("refresh-old".to_owned(), Origin::Account)]
+    );
     h.sign_out_confirmed();
     assert_eq!(
         h.view(),

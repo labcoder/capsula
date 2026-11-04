@@ -150,6 +150,11 @@ impl CallId {
         }
         Ok(Self(id.to_owned()))
     }
+
+    /// The id's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The tools a call can name.
@@ -178,6 +183,11 @@ impl Opaque {
             return Err(Refused::OutputItem);
         }
         Ok(Self(bytes.into_boxed_slice()))
+    }
+
+    /// How many bytes it holds.
+    pub fn size(&self) -> usize {
+        self.0.len()
     }
 }
 

@@ -23,6 +23,7 @@ use crate::platform::SessionLock;
 use crate::test_support::{Captured, Scratch};
 
 mod lane;
+mod ownership;
 mod refresh;
 mod sign_out;
 mod sweep;
@@ -1001,6 +1002,7 @@ fn the_notice_is_reported_cleared_only_when_its_marker_write_lands() {
         let Done::Committed {
             result,
             notice_cleared,
+            ..
         } = real.run(Job::Commit(account))
         else {
             panic!("a commit answers with Committed");

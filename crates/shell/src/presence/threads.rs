@@ -154,6 +154,7 @@ impl Presence {
     fn create_threads(&self, cx: &mut Context<'_, Self>) -> Result<ThreadsPanel, OpenError> {
         let model = self.threads.clone();
         let owner = cx.weak_entity();
+        let error = self.error.clone();
         let events = self.events.clone();
         let close_events = self.events.clone();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
@@ -162,7 +163,7 @@ impl Presence {
                 send(&close_events, PresenceEvent::DismissPanel);
                 false
             });
-            cx.new(|cx| ThreadsView::new(model, owner, events, window, cx))
+            cx.new(|cx| ThreadsView::new(model, owner, error, events, window, cx))
         })
         .map_err(|error| OpenError::Gpui(error.into()))?;
         let events = self.events.clone();
