@@ -113,7 +113,7 @@ mod tests {
     use crate::presence::kumo::frame::FrameState;
     use crate::presence::kumo::look::Look;
     use crate::presence::kumo::math::v2;
-    use crate::presence::kumo::neck::{GooShader, Neck, Rect};
+    use crate::presence::kumo::neck::{GooShader, Neck, Piece, Rect};
     use crate::presence::kumo::raster::Renderer;
     use crate::presence::kumo::shape::Silhouette;
 
@@ -266,11 +266,11 @@ mod tests {
         px
     }
 
-    fn body(src: u16) -> Vec<u8> {
+    fn body(src: u16, f: &FrameState) -> Vec<u8> {
         let renderer = Renderer::new(&Silhouette::emoji(), src, Look::default());
         let mut px = vec![0; renderer.image_len()];
         renderer
-            .render(&FrameState::IDLE, &mut px)
+            .render(f, &mut px)
             .expect("the buffer is the renderer's size");
         px
     }
@@ -461,7 +461,7 @@ mod tests {
             (84, 66.0, 340),
             (168, 84.0, 457),
         ] {
-            let px = body(src);
+            let px = body(src, &FrameState::IDLE);
             let d = soft_edge(&px, src);
             assert!(
                 (d * 1000.0 - f64::from(soft)).abs() < 0.5,
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn two_bodies_a_frame_apart_are_owned() {
-        let px = body(84);
+        let px = body(84, &FrameState::IDLE);
         let first = snapped(10.3, 7.6, 84.0, 1.25);
         let layers = [
             Layer {
@@ -515,16 +515,17 @@ mod tests {
 
     /// The goo for `neck` shaded at `scale`: its pixels, size, and region in logical pixels.
     fn goo(neck: &Neck, scale: f32) -> (Vec<u8>, u16, u16, Rect) {
-        let r = neck.bounds().expect("an attached neck has goo");
+        let r = neck.bounds(Piece::Neck).expect("an attached neck has goo");
         let (w, h) = GooShader::size(r, scale);
         let mut px = vec![0; w * h * 4];
         let f = FrameState {
             body_scale: neck.body_scale(),
             ..FrameState::IDLE
         };
-        GooShader::new(BODY)
+        GooShader::neck(BODY)
             .render(
                 neck,
+                Piece::Neck,
                 r,
                 scale,
                 &Silhouette::emoji(),
@@ -586,7 +587,6 @@ mod tests {
             }
             (neck, body)
         };
-        let bpx = body(84);
         let mut widest: f64 = 0.0;
         for (to, frames) in [
             ((0.0, 70.08), 72),
@@ -595,6 +595,12 @@ mod tests {
             ((20.0, 10.08), 72),
         ] {
             let (neck, centre) = pull(to, frames);
+            // The body drawn with the same frame as the goo, drawn out as the neck stretches.
+            let f = FrameState {
+                body_scale: neck.body_scale(),
+                ..FrameState::IDLE
+            };
+            let bpx = body(84, &f);
             for dpi in [1.0_f32, 1.25, 1.5, 2.0] {
                 for scale in [dpi * 0.5, dpi.min(1.0)] {
                     let (px, w, h, r) = goo(&neck, scale);
