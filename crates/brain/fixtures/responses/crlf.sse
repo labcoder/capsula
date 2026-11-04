@@ -1,0 +1,14 @@
+: keep-alive
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","status":"in_progress"}}
+
+data: [DONE]
+
+event: response.output_text.delta
+id: 3
+data: {"type":"response.output_text.delta",
+data: "delta":"two lines"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_fixture","status":"completed"}}
+
