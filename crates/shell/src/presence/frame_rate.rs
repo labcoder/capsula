@@ -1,5 +1,9 @@
-//! How fast the stretch draws: the user's cap fitted to the display's refresh, so every frame
+//! How fast Kumochi animates: the user's cap fitted to the display's refresh, so every frame
 //! waits the same whole number of refreshes. How it's paced: docs/development/frame-rate.md.
+#![cfg_attr(
+    not(test),
+    expect(dead_code, reason = "B2b's frame loop paces the peek with `Pacer`")
+)]
 
 use std::time::{Duration, Instant};
 
@@ -8,7 +12,7 @@ use kumochi_protocol::message::MaxFrameRate;
 /// Automatic's candidates.
 const AUTOMATIC: [u16; 2] = [60, 72];
 
-/// A frame steps at most this many effective intervals, so a stall can't fling the bulb.
+/// A frame steps at most this many effective intervals, so a stall can't fling what moves.
 const MAX_STEP_FRAMES: f64 = 2.0;
 
 /// The rate frames are drawn at: the display's refresh divided by the smallest whole number
@@ -42,7 +46,7 @@ fn hertz(refresh: Option<Duration>) -> Option<f64> {
         .filter(|hz| hz.is_finite() && *hz >= 1.0)
 }
 
-/// The stretch's frame clock: which vsync callbacks draw, and how far each drawn frame steps.
+/// An animation's frame clock: which vsync callbacks draw, and how far each drawn frame steps.
 #[derive(Debug, Default)]
 pub(crate) struct Pacer {
     /// When the loop started, or the last frame drew.

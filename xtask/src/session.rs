@@ -603,7 +603,7 @@ fn click_panel(
         counts.behavior_fail += u32::from(!entered);
         ensure!(
             entered,
-            "pill click did not make an owned panel HWND visible"
+            "line click did not make an owned panel HWND visible"
         );
         session.move_pointer(leave, Target::Edit)?;
         let leave_qpc = session.last_qpc;

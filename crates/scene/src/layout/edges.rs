@@ -1,6 +1,6 @@
 //! Edge outlines, sampled curves and the narrow visible-link bow pass.
 use super::{
-    PrepareError, SurfaceGeometry, compound,
+    PrepareError,
     primitives::{Build, arrow_head, point_bounds, reference, text_origin},
     state::{LayoutState, Placed},
 };
@@ -130,6 +130,7 @@ pub(super) fn build(
         cached,
     );
     placed.anchors = [a, b];
+    placed.edge_direction = cached.map_or(direction, |old| old.edge_direction);
     Ok(placed)
 }
 
@@ -144,6 +145,10 @@ fn curve([a, b]: [Vec2; 2], direction: Direction, bow: f32) -> Arc<[Vec2]> {
     } else {
         Vec2::new(2.0 * bow, 0.0)
     };
+    quadratic([a, b], control)
+}
+
+fn quadratic([a, b]: [Vec2; 2], control: Vec2) -> Arc<[Vec2]> {
     let mut points = Vec::new();
     let pieces = u16::try_from(crate::path::PROCEDURAL_CURVE_PIECES)
         .expect("procedural curve count fits u16");
@@ -166,11 +171,7 @@ fn heads(points: &[Vec2], head: Head) -> Vec<[Vec2; 3]> {
     heads
 }
 
-pub(super) fn route(
-    state: &mut LayoutState,
-    build: &Build<'_>,
-    surface: SurfaceGeometry,
-) -> Result<(), PrepareError> {
+pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), PrepareError> {
     let mut pairs = BTreeMap::<_, Vec<_>>::new();
     for (id, object) in &state.objects {
         if let Op::Edge(edge) = &*object.source
@@ -186,20 +187,17 @@ pub(super) fn route(
         }
     }
     for ids in pairs.values() {
-        if !ids
-            .iter()
-            .any(|id| matches!(&*state.objects[id].source, Op::Edge(edge) if edge.label.is_some()))
-        {
-            continue;
-        }
-        let parallel = ids.len() > 1;
+        let parallel = ids.len() > 1
+            && ids.iter().any(
+                |id| matches!(&*state.objects[id].source, Op::Edge(edge) if edge.label.is_some()),
+            );
         for (index, id) in ids.iter().enumerate() {
             build.check_cancel()?;
             let object = &state.objects[id];
             let Op::Edge(edge) = &*object.source else {
                 unreachable!("edge pair")
             };
-            let direction = compound::direction(state, object.item.parent, surface).0;
+            let direction = object.edge_direction;
             let from = reference(state, &edge.from, object.item.parent)?;
             let to = reference(state, &edge.to, object.item.parent)?;
             let extent = if direction == Direction::Right {
@@ -213,7 +211,31 @@ pub(super) fn route(
             } else {
                 skipped_bow(state, object, direction)?
             };
-            let points = curve(object.anchors, direction, bow);
+            let chip_size = object
+                .item
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Prim::Rect { rect, .. } => Some(rect.size),
+                    _ => None,
+                });
+            let points = if edge.from == edge.to {
+                quadratic(
+                    [
+                        Vec2::new(from.max().x, from.center().y),
+                        Vec2::new(from.center().x, from.max().y),
+                    ],
+                    from.max()
+                        + Vec2::new(
+                            from.size.x.max(
+                                from.size.x * 0.25 + chip_size.map_or(0.0, |size| size.x) + 24.0,
+                            ),
+                            from.size.y + 24.0,
+                        ),
+                )
+            } else {
+                curve(object.anchors, direction, bow)
+            };
             let head = match state.extra(object.item.handle) {
                 Some(Extra::Link { head, .. }) => *head,
                 _ => Head::End,
@@ -223,40 +245,69 @@ pub(super) fn route(
             for head in &heads {
                 bounds = bounds.union(point_bounds(head)?);
             }
-            if let Some(size) =
-                object
-                    .item
-                    .primitives
-                    .iter()
-                    .find_map(|primitive| match primitive {
-                        Prim::Rect { rect, .. } => Some(rect.size),
-                        _ => None,
-                    })
-            {
+            if let Some(size) = chip_size {
                 bounds = bounds.union(Rect::centered(points[points.len() / 2], size));
             }
-            let Prim::Line { points: old, .. } = &object.item.primitives[0] else {
-                unreachable!("edge starts with its curve");
-            };
-            let changed = **old != *points;
+            let primitives = repaint_curve(&object.item.primitives, &points, heads);
             let object = state.objects.get_mut(id).expect("edge exists");
-            if changed {
-                let mut heads = heads.into_iter();
-                for primitive in Arc::make_mut(&mut object.item.primitives) {
-                    match primitive {
-                        Prim::Line { points: old, .. } => *old = Arc::clone(&points),
-                        Prim::Fill { points, .. } => {
-                            *points =
-                                Arc::from(heads.next().expect("edge head count is unchanged"));
-                        }
-                        _ => {}
-                    }
-                }
+            if let Some(primitives) = primitives {
+                object.item.primitives = primitives;
             }
+            object.anchors = [points[0], points[points.len() - 1]];
             object.item.bounds = bounds;
         }
     }
     Ok(())
+}
+
+fn repaint_curve(
+    primitives: &[Prim],
+    points: &Arc<[Vec2]>,
+    heads: Vec<[Vec2; 3]>,
+) -> Option<Arc<[Prim]>> {
+    let Prim::Line {
+        points: old,
+        closed,
+        color,
+        width,
+        dashed,
+    } = &primitives[0]
+    else {
+        unreachable!("edge starts with its curve");
+    };
+    let changed = **old != **points
+        || !primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Prim::Fill { points, .. } => Some(&**points),
+                _ => None,
+            })
+            .eq(heads.iter().map(<[Vec2; 3]>::as_slice));
+    changed.then(|| {
+        std::iter::once(Prim::Line {
+            points: if **old == **points {
+                Arc::clone(old)
+            } else {
+                Arc::clone(points)
+            },
+            closed: *closed,
+            color: *color,
+            width: *width,
+            dashed: *dashed,
+        })
+        .chain(heads.into_iter().map(|head| Prim::Fill {
+            points: head.into(),
+            color: *color,
+        }))
+        .chain(
+            primitives
+                .iter()
+                .skip(1)
+                .filter(|primitive| !matches!(primitive, Prim::Fill { .. }))
+                .cloned(),
+        )
+        .collect()
+    })
 }
 
 fn skipped_bow(
@@ -313,4 +364,78 @@ fn skipped_bow(
     } else {
         0.0
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{curve, heads, repaint_curve};
+    use crate::{
+        display::Prim,
+        geom::{Rect, Vec2},
+        record::{Direction, Head},
+        theme::Theme,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn repaint_replaces_any_old_head_count_and_preserves_other_geometry() {
+        let points = curve(
+            [Vec2::new(0.0, 0.0), Vec2::new(16.0, 0.0)],
+            Direction::Right,
+            0.0,
+        );
+        let color = Theme::default().line.into();
+        let line = Prim::Line {
+            points: Arc::clone(&points),
+            closed: false,
+            color,
+            width: 2.0,
+            dashed: true,
+        };
+        let chip = Prim::Rect {
+            rect: Rect::centered(Vec2::new(8.0, 0.0), Vec2::new(2.0, 2.0)),
+            radius: 1.0,
+            fill: Some(color),
+            border: None,
+        };
+        for count in [0, 1, 2, 3] {
+            let mut old = vec![line.clone()];
+            old.extend((0..count).map(|_| Prim::Fill {
+                points: Arc::from([Vec2::new(-100.0, -100.0); 3]),
+                color,
+            }));
+            old.push(chip.clone());
+            let new = repaint_curve(&old, &points, heads(&points, Head::Both))
+                .expect("repaint wrong heads");
+            assert_eq!(new.len(), 4);
+            assert_eq!(new[0], line);
+            assert_eq!(
+                new[1],
+                Prim::Fill {
+                    points: Arc::from([
+                        Vec2::new(16.0, 0.0),
+                        Vec2::new(7.0, 4.0),
+                        Vec2::new(7.0, -4.0)
+                    ]),
+                    color
+                }
+            );
+            assert_eq!(
+                new[2],
+                Prim::Fill {
+                    points: Arc::from([
+                        Vec2::new(0.0, 0.0),
+                        Vec2::new(9.0, -4.0),
+                        Vec2::new(9.0, 4.0)
+                    ]),
+                    color
+                }
+            );
+            assert_eq!(new[3], chip);
+            assert_eq!(
+                repaint_curve(&new, &points, heads(&points, Head::Both)),
+                None
+            );
+        }
+    }
 }

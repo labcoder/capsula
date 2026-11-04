@@ -1,10 +1,10 @@
 # Frame rate
 
-The stretch is the only animation Kumochi paces itself, and it draws no faster than the
-user's **Max frame rate** (Settings → General). A few of Kit's own animations run at the full
+Kumochi paces no animation of its own until the dock's peek returns one (B2b); when it does,
+that animation draws no faster than the user's **Max frame rate** (Settings → General). A few of Kit's own animations run at the full
 refresh; [Pacing](#pacing) lists them. The choices are Automatic (the default), 30, 60, 72, 120
 and 144.
-The code is `shell/src/presence/frame_rate.rs` and the stretch's `tick`; all of it is
+The code is `shell/src/presence/frame_rate.rs`; all of it is
 cross-platform, reading the display's refresh through GPUI's `Window::refresh_interval`.
 
 ## The effective rate
@@ -39,7 +39,7 @@ fast pointer input; the fixture runs below have none.
 flowchart LR
     V["vsync: on_next_frame"] --> G{"since the last drawn frame<br/>≥ interval − refresh/2?"}
     G -- no --> S["ask for the next frame"]
-    G -- yes --> D["step the spring, reshape, repaint if a pixel changed"]
+    G -- yes --> D["step the animation, repaint if a pixel changed"]
     D --> S
 ```
 
@@ -55,9 +55,8 @@ GPUI's `observe_window_display`, and its radio shows the newest choice while the
 `Pacer` in `frame_rate.rs` owns this clock. Starting the loop starts it, so the first callback
 always draws and steps only the time since the start, never a whole interval that hasn't passed.
 
-The spring integrates in equal steps of at most 1/144 s, so the bulb moves alike at every
-rate. A frame steps at most two effective intervals: every cap moves in real time, and a stall
-(a debugger, a hung compositor) can't fling the bulb.
+A frame steps at most two effective intervals, so every cap moves in real time and a stall
+(a debugger, a hung compositor) can't fling what it draws.
 
 Kumochi's windows set `inactive_frame_interval: None`. They never activate, so GPUI's default
 would throttle them to 30 fps, and nothing of theirs animates at rest.

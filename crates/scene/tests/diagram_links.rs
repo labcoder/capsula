@@ -343,3 +343,133 @@ fn a_detached_bowed_edge_keeps_its_curve_when_its_label_changes() {
     assert_eq!(chip(&cut, handle), chip(&next.after, handle));
     assert_eq!(scene.object_count(), 1);
 }
+
+#[test]
+fn a_labelled_self_loop_runs_outside_its_node() {
+    for (label, width, middle_x) in [
+        ("retry", 48.0, 256.0),
+        ("a very long wrapped self loop label", 188.0, 326.0),
+    ] {
+        let mut scene = new_scene("self_loop");
+        let before = LayoutState::new(&scene);
+        let picture = prepared(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"loop","put":[
+                {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
+                {"node":{"id":"a","in":"diagram","label":"A"}},
+                {"edge":{"id":"loop","in":"diagram","from":"a","to":"a","label":label}}
+            ]}),
+        );
+        let handle = scene.handle(&id("loop")).expect("loop");
+        assert_eq!(
+            chip(&picture.after, handle),
+            Rect {
+                origin: Vec2::new(232.0, 76.0),
+                size: Vec2::new(width, 14.0),
+            }
+        );
+        let items = picture.after.items();
+        let item = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("edge");
+        let Prim::Line { points, .. } = &item.primitives[0] else {
+            panic!("curve")
+        };
+        assert_eq!(points[0], Vec2::new(220.0, 36.0));
+        assert_eq!(points[8], Vec2::new(middle_x, 83.0));
+        assert_eq!(points[16], Vec2::new(180.0, 56.0));
+    }
+}
+
+#[test]
+fn removing_the_last_label_restores_the_fresh_unlabelled_curve() {
+    let mut scene = new_scene("remove_label");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let value = json!({"id":"pair","put":[
+        {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
+        {"node":{"id":"a","in":"diagram","label":"A"}},
+        {"node":{"id":"b","in":"diagram","label":"B"}},
+        {"edge":{"id":"keep","in":"diagram","from":"a","to":"b"}},
+        {"edge":{"id":"remove","in":"diagram","from":"b","to":"a","label":"retry"}}
+    ]});
+    let first = prepared(&mut scene, &mut budget, &before, value.clone());
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"remove","remove":["remove"]}),
+    );
+    let mut fresh_scene = new_scene("fresh_remove");
+    let fresh_before = LayoutState::new(&fresh_scene);
+    let mut fresh_value = value;
+    fresh_value["put"].as_array_mut().expect("put").pop();
+    let fresh = prepared(
+        &mut fresh_scene,
+        &mut GlobalBudget::default(),
+        &fresh_before,
+        fresh_value,
+    );
+    let a = next.after.items();
+    let b = fresh.after.items();
+    let a = a
+        .iter()
+        .find(|item| item.handle == scene.handle(&id("keep")).expect("cached"))
+        .expect("cached item");
+    let b = b
+        .iter()
+        .find(|item| item.handle == fresh_scene.handle(&id("keep")).expect("fresh"))
+        .expect("fresh item");
+    assert_eq!(a.bounds, b.bounds);
+    assert_eq!(a.primitives, b.primitives);
+    let Prim::Line { points, .. } = &a.primitives[0] else {
+        panic!("curve")
+    };
+    assert_eq!(points[8], Vec2::new(180.0, 36.0));
+}
+
+#[test]
+fn each_frame_side_repels_a_chip_independently() {
+    for (side, direction, position, node_offset, expected) in [
+        ("top", "right", [0, -10], [100, 0], Vec2::new(108.25, 29.0)),
+        (
+            "bottom",
+            "right",
+            [0, 84],
+            [100, 0],
+            Vec2::new(108.25, 29.0),
+        ),
+        ("left", "down", [-54, 0], [0, 100], Vec2::new(172.0, 119.0)),
+        ("right", "down", [54, 0], [0, 100], Vec2::new(172.0, 119.0)),
+    ] {
+        let mut scene = new_scene("frame_side");
+        let before = LayoutState::new(&scene);
+        let picture = prepared(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"side","put":[
+                {"diagram":{"id":"diagram"}},
+                {"mermaid":{"in":"diagram","src":"flowchart TB\nsubgraph g[G]\nA\nend\n"}},
+                {"diagram":{"id":"other","dir":direction,"box":[0,0,360,300]}},
+                {"node":{"id":"a","in":"other","label":"A"}},
+                {"node":{"id":"b","in":"other","label":"B"}},
+                {"edge":{"id":"edge","in":"other","from":"a","to":"b","label":"x"}},
+                {"anim":{"target":"a","track":"pos","keys":[[0,[-node_offset[0],-node_offset[1]]]]}},
+                {"anim":{"target":"b","track":"pos","keys":[[0,node_offset]]}},
+                {"anim":{"target":"other","track":"pos","keys":[[0,position]]}}
+            ]}),
+        );
+        assert_eq!(
+            chip(&picture.after, scene.handle(&id("edge")).expect("edge")),
+            Rect {
+                origin: expected,
+                size: Vec2::new(16.0, 14.0),
+            },
+            "{side}"
+        );
+    }
+}

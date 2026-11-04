@@ -1,13 +1,16 @@
 # The dock
 
-The dock sits at the top center of your screen's work area. It shows Starting, Ready,
-Reconnecting or Offline. Press the left mouse button on it to toggle the small status panel;
+The dock is a short line at the top center of your screen's work area. Press the left mouse
+button on it to toggle the small status panel, which shows Starting, Ready, Reconnecting or
+Offline;
 move away from both the dock and panel to close it after a short grace period. Opening the
-status panel doesn't take focus from your current app. Hovering only stretches the dock.
+status panel doesn't take focus from your current app. Hovering does nothing yet.
 
-When the pointer reaches the dock, the dock stretches toward it and follows it a short way.
-Move farther away, or onto the panel, and it settles back. Only the dock's own shape takes the
-pointer: clicks just beside it, even while it stretches, reach the app underneath.
+Only a thin band around the line takes the pointer: clicks beside it reach the app underneath.
+
+For now the line has no label. Its status, Offline, **Check settings** and **Settings not
+saved** show only in the status panel, so you have to open it to see them. That's a stopgap
+until a later release shows them in a peek beside the line, not the final design.
 
 Use the tray menu to choose one of nine positions: top, middle or bottom, aligned left,
 center or right. This choice currently lasts until the shell restarts. A later release moves
@@ -20,7 +23,8 @@ Display-scale changes currently require restarting the shell.
 If the background process can't be reached, the panel and tray offer Retry. Quit in either
 the panel or tray shuts down both processes. Closing the panel alone doesn't quit.
 
-While you hold [the shortcut](shortcut.md), the dock shows Listening. A double tap opens a small
+While you hold [the shortcut](shortcut.md), the line turns the accent colour to show it's
+listening. A double tap opens a small
 typing box under the dock; [Esc](escape.md) or switching to another window hides it and keeps
 your draft. Enter sends what you typed and the answer appears in the box. A message that can't
 be sent stays there, with the reason. Switching away leaves your chosen window in front.
@@ -28,8 +32,8 @@ be sent stays there, with the reason. Switching away leaves your chosen window i
 **[Settings…](settings.md)** opens the name fields. Opening the typing box or Tasks closes
 Settings, saving an active edit as if you had left the field.
 
-If the dock says **Check settings**, open **Settings…** for the full explanation and retry the
+If the status panel says **Check settings**, open **Settings…** for the full explanation and retry the
 field that failed. A successful retry clears that notice.
 
-If the dock says **Settings not saved**, an edit couldn't be sent or failed validation.
+If the status panel says **Settings not saved**, an edit couldn't be sent or failed validation.
 Open **Settings…** to correct or cancel the edit; the draft stays there until you do.

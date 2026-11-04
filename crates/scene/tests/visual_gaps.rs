@@ -232,17 +232,22 @@ fn label_collisions_use_world_bounds_across_transformed_parents() {
 fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
     let mut scene = new_scene("full_edge");
     let before = LayoutState::new(&scene);
-    let mut value = labelled_pair(["abc", "def"]);
+    let mut value = labelled_pair(["abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwx"]);
+    value["put"][2]["node"]["label"] = json!("abcdefghijklmnopqrstuvwx");
     for index in [3, 4] {
         value["put"][index]["edge"]["to"] = json!("a");
     }
+    value["put"]
+        .as_array_mut()
+        .expect("put")
+        .push(json!({"anim":{"target":"b","track":"pos","keys":[[0,[0,-30]]]}}));
     let picture = prepared(&mut scene, &mut GlobalBudget::default(), &before, value);
     for name in ["e1", "e2"] {
         assert_eq!(
             chip(&picture.after, scene.handle(&id(name)).expect("edge")),
             Rect {
-                origin: Vec2::new(164.0, 29.0),
-                size: Vec2::new(32.0, 14.0)
+                origin: Vec2::new(232.0, 76.0),
+                size: Vec2::new(188.0, 14.0)
             }
         );
     }

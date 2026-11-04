@@ -75,13 +75,13 @@ const MAX_ESCAPE_TOGGLES: u32 = 64;
 const FRAME: [i32; 4] = [80, 80, 640, 490];
 const EDIT_FRAME: [i32; 4] = [12, 84, 600, 260];
 
-const GESTURES: [&str; 3] = ["Hold", "Double-tap", "Stretch"];
+const GESTURES: [&str; 2] = ["Hold", "Double-tap"];
 
 #[derive(Debug, Clone, Copy)]
 struct Controls {
     edit: HWND,
     ready: HWND,
-    verdicts: [HWND; 3],
+    verdicts: [HWND; 2],
 }
 
 thread_local! {
@@ -234,7 +234,7 @@ fn arm(root: HWND, up_time: u32) -> Result<()> {
 }
 
 fn selections() -> Result<usize> {
-    let mut selections = [0; 3];
+    let mut selections = [0; 2];
     for (selection, verdict) in selections.iter_mut().zip(controls()?.verdicts) {
         // SAFETY: an in-process query of this thread's own combo box; -1 means no selection.
         *selection = unsafe { SendMessageW(verdict, CB_GETCURSEL, None, None) }.0 - 1;
@@ -712,7 +712,7 @@ fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> 
         root,
         instance,
     )?;
-    let mut verdicts = [HWND::default(); 3];
+    let mut verdicts = [HWND::default(); 2];
     for (index, (slot, gesture)) in verdicts.iter_mut().zip(GESTURES).enumerate() {
         *slot = verdict_box(index, gesture, root, instance)?;
     }
@@ -725,7 +725,7 @@ fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> 
     child(
         w!("STATIC"),
         &HSTRING::from(
-            "The dock starts top center; Listening is its label.\r\nSelect all three verdicts (Unrated is valid), then click Ready.\r\nDo not touch mouse or keyboard until this window closes.\r\nAllow about 10 minutes (up to 1 hour), not just one second.\r\nBefore injection input re-arms Ready; afterwards it stops.",
+            "The dock line starts top center; Listening turns it the accent colour.\r\nSelect both verdicts (Unrated is valid), then click Ready.\r\nDo not touch mouse or keyboard until this window closes.\r\nAllow about 10 minutes (up to 1 hour), not just one second.\r\nBefore injection input re-arms Ready; afterwards it stops.",
         ),
         WINDOW_STYLE::default(),
         [12, 352, 600, 96],

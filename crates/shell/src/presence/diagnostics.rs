@@ -5,7 +5,7 @@
 use std::fmt::Arguments;
 use std::fs::File;
 use std::io::Write as _;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{App, Global};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
@@ -39,6 +39,12 @@ impl PendingPaint {
 pub(crate) struct Diagnostics {
     writer: NonBlocking,
     guard: Option<WorkerGuard>,
+    /// `--settle-after-ms=<n>`: when the settled interval starts, counted from launch.
+    settle: Option<Duration>,
+    /// Dock frames painted since launch.
+    paints: u64,
+    /// `paints` when the settled interval started.
+    settled: Option<u64>,
 }
 
 impl Global for Diagnostics {}
@@ -56,10 +62,16 @@ impl Diagnostics {
         }) else {
             return Ok(None);
         };
+        let settle = std::env::args()
+            .find_map(|arg| arg.strip_prefix("--settle-after-ms=")?.parse().ok())
+            .map(Duration::from_millis);
         let (writer, guard) = tracing_appender::non_blocking(File::create(path)?);
         Ok(Some(Self {
             writer,
             guard: Some(guard),
+            settle,
+            paints: 0,
+            settled: None,
         }))
     }
 }
@@ -77,6 +89,41 @@ pub(super) fn record(cx: &mut App, line: Arguments<'_>) {
         .write_all(line.as_bytes())
     {
         tracing::warn!(%error, "can't queue input diagnostics");
+    }
+}
+
+/// Counts one dock frame, for the settled-interval paint check.
+pub(super) fn dock_painted(cx: &mut App) {
+    if cx.has_global::<Diagnostics>() {
+        cx.global_mut::<Diagnostics>().paints += 1;
+    }
+}
+
+/// When the settled interval starts, if this run checks it.
+pub(super) fn settle_delay(cx: &App) -> Option<Duration> {
+    cx.has_global::<Diagnostics>()
+        .then(|| cx.global::<Diagnostics>().settle)
+        .flatten()
+}
+
+/// Starts the settled interval: dock frames from here on should be none at rest.
+pub(super) fn settle(cx: &mut App) {
+    if cx.has_global::<Diagnostics>() {
+        let diagnostics = cx.global_mut::<Diagnostics>();
+        diagnostics.settled = Some(diagnostics.paints);
+    }
+    record(cx, format_args!("dock settled"));
+}
+
+/// At Quit, records how many dock frames the settled interval painted, if it started.
+pub(super) fn settled_paints(cx: &mut App) {
+    if !cx.has_global::<Diagnostics>() {
+        return;
+    }
+    let diagnostics = cx.global::<Diagnostics>();
+    if let Some(settled) = diagnostics.settled {
+        let paints = diagnostics.paints - settled;
+        record(cx, format_args!("dock paints settled={paints}"));
     }
 }
 

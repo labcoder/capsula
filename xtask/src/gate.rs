@@ -37,24 +37,17 @@ const FINAL_RESERVE: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trial {
     Idle,
-    StretchOne,
-    StretchTwo,
-    StretchThree,
     Input(Phase, FixtureEscMode),
     ReceiptRest,
-    ReceiptMotion,
     StopButton,
 }
 
-const TRIALS: [Trial; 13] = [
+// shortcut: the motion trials (three stretch CPU rows and the motion receipts) left with the stretch; C2a brings them back with the pull.
+const TRIALS: [Trial; 9] = [
     Trial::Idle,
-    Trial::StretchOne,
-    Trial::StretchTwo,
-    Trial::StretchThree,
     Trial::Input(Phase::Keyboard, FixtureEscMode::Free),
     Trial::Input(Phase::Click, FixtureEscMode::Free),
     Trial::ReceiptRest,
-    Trial::ReceiptMotion,
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
     Trial::Input(Phase::Layouts, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Free),
@@ -67,10 +60,9 @@ impl Trial {
         let seconds = match self {
             Self::Input(Phase::Keyboard, _) => 50,
             Self::Input(Phase::Click, _) | Self::ReceiptRest => 30,
-            Self::ReceiptMotion => 40,
             Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
-            Self::Idle | Self::StretchOne | Self::StretchTwo | Self::StretchThree => return None,
+            Self::Idle => return None,
         };
         Some(Duration::from_secs(seconds))
     }
@@ -86,9 +78,6 @@ impl Trial {
     fn name(self) -> &'static str {
         match self {
             Self::Idle => "cpu-idle",
-            Self::StretchOne => "cpu-stretch-1",
-            Self::StretchTwo => "cpu-stretch-2",
-            Self::StretchThree => "cpu-stretch-3",
             Self::Input(Phase::Keyboard, _) => "keyboard",
             Self::Input(Phase::Click, _) => "click",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
@@ -96,7 +85,6 @@ impl Trial {
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
             Self::Input(Phase::Esc, FixtureEscMode::Reserved) => "escape-contested",
             Self::ReceiptRest => "receipt-rest",
-            Self::ReceiptMotion => "receipt-motion",
             Self::StopButton => "stop-button",
         }
     }
@@ -104,16 +92,8 @@ impl Trial {
     fn cpu_limit(self) -> Option<f64> {
         match self {
             Self::Idle => Some(1.0),
-            Self::StretchOne | Self::StretchTwo | Self::StretchThree => Some(10.0),
             _ => None,
         }
-    }
-
-    fn stretch(self) -> bool {
-        matches!(
-            self,
-            Self::StretchOne | Self::StretchTwo | Self::StretchThree | Self::ReceiptMotion
-        )
     }
 
     fn contested(self) -> bool {
@@ -318,7 +298,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 
 fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
     println!(
-        "Injection is disabled. The dock is at the top center by default; Listening appears as its label. Try hold, double tap and stretch on the dock. This test window is only for the three verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and do not touch the mouse or keyboard until this window closes (about 10 minutes, at most one hour). The first quiet second only opens injection. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
+        "Injection is disabled. The dock is a short line at the top center by default; Listening turns it the accent colour. Try hold and double tap. This test window is only for the two verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and do not touch the mouse or keyboard until this window closes (about 10 minutes, at most one hour). The first quiet second only opens injection. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
     );
     let feel_directory = output.join("feel");
     fs::create_dir(&feel_directory)?;
@@ -538,16 +518,13 @@ fn run_trial(
     let diagnostics = Diagnostics::in_directory(&directory);
     let observer = directory.join("observer.log");
     let mut options = Vec::new();
-    if trial.stretch() {
-        options.push(OsString::from("--stretch-fixture"));
-    }
     if trial.cpu_limit().is_none() {
         options.push(diagnostics.argument());
         let mut argument = OsString::from("--gate-observer=");
         argument.push(&observer);
         options.push(argument);
     }
-    if matches!(trial, Trial::ReceiptRest | Trial::ReceiptMotion) {
+    if trial == Trial::ReceiptRest {
         options.push(OsString::from("--receipt-fixture"));
     }
     if matches!(trial, Trial::Input(Phase::Esc, _) | Trial::StopButton) {
@@ -642,14 +619,7 @@ fn run_trial(
                 &mut counts,
                 receipts::Mode::Rest,
             ),
-            Trial::ReceiptMotion => receipts::exercise(
-                session,
-                &observer,
-                &directory,
-                &mut counts,
-                receipts::Mode::Motion,
-            ),
-            _ => bail!("CPU trial reached input dispatch"),
+            Trial::Idle => bail!("CPU trial reached input dispatch"),
         }
     })();
     let release = session.release_injected();
@@ -730,13 +700,8 @@ fn summarize(
                 output,
                 &diagnostics.click_injections.borrow(),
             ),
-            Trial::ReceiptRest | Trial::ReceiptMotion => {
-                let mode = if trial == Trial::ReceiptRest {
-                    receipts::Mode::Rest
-                } else {
-                    receipts::Mode::Motion
-                };
-                receipts::summarize(observer, pid, &mut rows, dock, output, mode)
+            Trial::ReceiptRest => {
+                receipts::summarize(observer, pid, &mut rows, dock, output, receipts::Mode::Rest)
             }
             _ => Ok(()),
         }
@@ -822,7 +787,7 @@ mod tests {
             phase_deadline(
                 now,
                 now + Duration::from_secs(120),
-                Trial::StretchOne.budget()
+                Trial::ReceiptRest.budget()
             )
             .unwrap(),
             now + Duration::from_secs(90)
@@ -831,7 +796,7 @@ mod tests {
             phase_deadline(
                 now,
                 now + Duration::from_millis(119_999),
-                Trial::StretchOne.budget()
+                Trial::ReceiptRest.budget()
             )
             .is_err()
         );
@@ -855,12 +820,9 @@ mod tests {
             .iter()
             .position(|trial| *trial == Trial::Input(Phase::Click, FixtureEscMode::Free))
             .unwrap();
+        assert_eq!(TRIALS[hover + 1], Trial::ReceiptRest);
         assert_eq!(
-            &TRIALS[hover + 1..hover + 3],
-            &[Trial::ReceiptRest, Trial::ReceiptMotion]
-        );
-        assert_eq!(
-            &TRIALS[11..],
+            &TRIALS[7..],
             &[
                 Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
                 Trial::StopButton
@@ -871,7 +833,7 @@ mod tests {
                 .iter()
                 .take_while(|trial| trial.cpu_limit().is_some())
                 .count(),
-            4
+            1
         );
     }
 }
