@@ -158,6 +158,8 @@ impl Accounts {
                     Arc::clone(&self.net.http),
                     self.events_tx.clone(),
                 ))),
+                // Nothing asks for the bearer until the runtime runs refreshes (PR 10a-3).
+                Effect::Refresh { .. } | Effect::Validate { .. } | Effect::Access { .. } => {}
             }
         }
         frames

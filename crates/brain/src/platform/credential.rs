@@ -3,8 +3,9 @@
 use kumochi_protocol::Secret;
 use zeroize::Zeroizing;
 
+/// This platform's store; code outside `platform` names only this one.
 #[cfg(windows)]
-pub(crate) use super::windows::WindowsCredentialStore;
+pub(crate) use super::windows::WindowsCredentialStore as NativeCredentialStore;
 
 #[cfg(all(test, windows))]
 pub(crate) mod fixture;

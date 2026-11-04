@@ -23,6 +23,7 @@ use crate::platform::SessionLock;
 use crate::test_support::{Captured, Scratch};
 
 mod lane;
+mod refresh;
 mod sign_out;
 mod sweep;
 
@@ -115,6 +116,7 @@ fn saved_account(subject: &str, refresh: &str) -> Secret<Account> {
             scope: Zeroizing::new(PLAN.to_owned()),
             expires_at: NOW + 60,
             pending_identity_validation: false,
+            refresh_sent: false,
         }),
     })
 }
@@ -170,6 +172,12 @@ struct Harness {
     listening: Vec<(u64, Intent)>,
     /// Each listener's saved client, in order.
     saved_clients: Vec<Option<String>>,
+    /// Every refresh sent: its generation, client and refresh token.
+    refreshes: Vec<(u64, String, String)>,
+    /// Every identity check of a rotated set: its generation, subject and token.
+    validations: Vec<(u64, String, String)>,
+    /// Every answer to `Access`, with the bearer's text.
+    answers: Vec<(u64, Result<String, Denied>)>,
     closed: usize,
     /// Every token request sent, in order.
     sent: Vec<(u64, Authorization)>,
@@ -215,6 +223,9 @@ impl Harness {
             markers: Vec::new(),
             listening: Vec::new(),
             saved_clients: Vec::new(),
+            refreshes: Vec::new(),
+            validations: Vec::new(),
+            answers: Vec::new(),
             closed: 0,
             sent: Vec::new(),
             revoking: Vec::new(),
@@ -289,6 +300,28 @@ impl Harness {
                     authorization,
                 } => self.sent.push((attempt, authorization)),
                 Effect::Revoke(entries) => self.revoking.push(entries),
+                Effect::Refresh {
+                    generation,
+                    client,
+                    refresh_token,
+                } => self.refreshes.push((
+                    generation,
+                    client.expose().to_string(),
+                    refresh_token.expose().to_string(),
+                )),
+                Effect::Validate {
+                    generation,
+                    subject,
+                    id_token,
+                    ..
+                } => self.validations.push((
+                    generation,
+                    subject.expose().to_string(),
+                    id_token.expose().to_string(),
+                )),
+                Effect::Access { ticket, result } => self
+                    .answers
+                    .push((ticket, result.map(|bearer| bearer.expose().to_string()))),
             }
         }
         if let Some(job) = job {

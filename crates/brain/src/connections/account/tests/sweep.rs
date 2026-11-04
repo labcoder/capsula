@@ -406,7 +406,7 @@ fn a_token_listed_during_a_backward_clock_excursion_never_ages_out_early() {
     h.reply(Err(ExchangeError::Unusable {
         refresh_token: Some(secret("refresh-new")),
     }));
-    assert!(matches!(h.held, Some(Job::List(_))));
+    assert!(matches!(h.held, Some(Job::List { .. })));
     h.wall.unix.store(NOW - 33 * 86_400, Ordering::SeqCst);
     h.release();
     h.wall.unix.store(NOW, Ordering::SeqCst);

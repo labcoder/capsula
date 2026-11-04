@@ -48,12 +48,14 @@ impl AccountState {
                 .account
                 .as_ref()
                 .is_none_or(|account| account.expose().tokens.is_none())
+            && !self.session_ended()
         {
             return;
         }
         self.attempt += 1;
         self.admitting = None;
         self.deferred = None;
+        self.moved(effects);
         if self.live.take().is_some() {
             effects.push(Effect::Close);
         }
