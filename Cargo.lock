@@ -3552,6 +3552,7 @@ dependencies = [
  "base64 0.22.1",
  "fluent-bundle",
  "getrandom 0.3.4",
+ "httparse",
  "jsonwebtoken",
  "keyring",
  "kumochi-protocol",
