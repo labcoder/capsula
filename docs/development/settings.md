@@ -79,6 +79,23 @@ the confirmation. Kit restores focus; a removed trigger falls back to the Settin
 Manage usage uses the fixed protocol URL and GPUI open_url through a keyboard-capable Base
 Link. No new platform adapter or credential access is added.
 
+### Offline Accounts captures
+
+Debug builds accept `--accounts-fixture=<state> --quit-after-ms=<1..120000>` and optional
+`--accounts-appearance=light|dark|large`. For example, run `target/debug/kumochi.exe
+--accounts-fixture=refused-unconfirmed --accounts-appearance=light --quit-after-ms=5000`
+after building the shell. Fixed states cover waiting/offline, signed-out/unconfirmed,
+signing-in/busy, enabled/no-email/declined/unavailable, retry/sign-in-again, signing-out,
+refused/refused-unconfirmed, not-durable/not-durable-unconfirmed, confirmation and backlog.
+
+The fixture branches before normal startup: no instance lock, capability/credential read,
+brain/link, presence observer, Raw Input or global Escape registration. It opens the real
+SettingsView over synthetic snapshots with no Presence owner. Account commands cannot send;
+Manage usage is inert. State and appearance flags reject missing, mistyped or duplicate
+values; the fixture requires a bounded quit deadline and quits automatically. The module,
+snapshot factory and fixture-only view state are excluded from release builds, which refuse
+the fixture flags. These renders prove UI states, not real authentication or credential cleanup.
+
 ## Config keys
 
 | Key | Type | Default |

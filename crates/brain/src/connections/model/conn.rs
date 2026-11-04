@@ -23,10 +23,10 @@ use crate::connections::http_client::{self, HttpError};
 
 const HOST: &str = "api.openai.com";
 /// The most bytes one response may put on the wire: the stream's cap and its framing.
-const MAX_WIRE_BYTES: usize = MAX_STREAM_BYTES + 1024 * 1024;
+pub(super) const MAX_WIRE_BYTES: usize = MAX_STREAM_BYTES + 1024 * 1024;
 const READ_BYTES: usize = 16 * 1024;
 /// An idle connection older than this is closed rather than reused [guess].
-const POOL_IDLE: Duration = Duration::from_secs(50);
+pub(super) const POOL_IDLE: Duration = Duration::from_secs(50);
 
 /// Opens a connection to the model host.
 pub trait Connect: Send + Sync {

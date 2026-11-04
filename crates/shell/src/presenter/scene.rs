@@ -9,7 +9,7 @@ use std::{
 
 use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, SceneId};
 use kumochi_scene::{
-    Preparation, SceneEvent, SceneState, StopCut,
+    Preparation, SceneBinding, SceneEvent, StopCut,
     deferred::Deferred,
     layout::{LayoutState, PreparedStep},
     text::Bounded,
@@ -21,7 +21,7 @@ use super::Effect;
 pub(super) const WINDOW: usize = 8;
 
 pub(super) struct Scene {
-    pub(super) state: SceneState,
+    pub(super) state: SceneBinding,
     /// The layout at the activated bound: recovered at rest, empty, or the last consumed step's.
     pub(super) rest: LayoutState,
     pub(super) retained: usize,
@@ -29,6 +29,8 @@ pub(super) struct Scene {
     pub(super) running: Option<Running>,
     /// Prepared and not consumed, oldest first.
     pub(super) ready: VecDeque<Ready>,
+    /// A consumption refused while this scene's admission was out, served before its next one.
+    pub(super) pending_consumption: Option<u32>,
     pub(super) cut: Cut,
     /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
     pub(super) skipping: bool,
@@ -98,8 +100,11 @@ impl Out {
 }
 
 impl Scene {
-    pub(super) fn new(state: SceneState, rest: LayoutState, retained: usize) -> Self {
-        let cut = if matches!(state.recovery_log().last(), Some(SceneEvent::Stop(_))) {
+    pub(super) fn new(state: SceneBinding, rest: LayoutState, retained: usize) -> Self {
+        let cut = if matches!(
+            state.view().recovery_log().last(),
+            Some(SceneEvent::Stop(_))
+        ) {
             Cut::Applied
         } else {
             Cut::Open
@@ -111,6 +116,7 @@ impl Scene {
             queue: VecDeque::new(),
             running: None,
             ready: VecDeque::new(),
+            pending_consumption: None,
             cut,
             skipping: false,
         }
@@ -147,27 +153,28 @@ impl Scene {
     /// What the dropper is told this scene owns: its prepared layouts and its semantic state.
     pub(super) fn attributed(&self) -> usize {
         self.residency()
-            .saturating_add(self.state.attributed_bytes())
+            .saturating_add(self.state.view().attributed_bytes())
     }
 
-    /// Drops queued and prepared work, and asks a running job to stop. Its window positions free
-    /// here, once; a late answer finds nothing running.
+    /// Drops queued and prepared work with any consumption waiting on it, and asks a running job
+    /// to stop. Its window positions free here, once; a late answer finds nothing running.
     pub(super) fn halt(&mut self) {
         if let Some(running) = self.running.take() {
             running.cancel.store(true, Ordering::Relaxed);
         }
         drop(Deferred::new(
             std::mem::take(&mut self.queue),
-            self.state.attributed_bytes(),
+            self.state.view().attributed_bytes(),
         ));
         let bytes = self.residency().saturating_sub(self.retained);
         drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
+        self.pending_consumption = None;
     }
 
     /// The cut at the activated bound, keeping every object at rest there.
     pub(super) fn cut_now(&self) -> StopCut {
         StopCut {
-            activated: self.state.activated(),
+            activated: self.state.view().activated(),
             revealed: Bounded::new(self.rest.revealed_at_rest())
                 .expect("a scene holds at most its object cap"),
         }
@@ -177,7 +184,7 @@ impl Scene {
 impl std::fmt::Debug for Scene {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scene")
-            .field("revision", &self.state.revision())
+            .field("revision", &self.state.view().revision())
             .field("queued", &self.queue.len())
             .field("ready", &self.ready.len())
             .field("cut", &self.cut)

@@ -1,4 +1,5 @@
 //! Canonical semantic state, atomic admission and replayable Stop cuts.
+mod binding;
 pub(crate) mod metrics;
 pub(crate) mod object;
 mod retire;
@@ -14,6 +15,7 @@ use crate::{
     record::{Start, Track},
     text::Bounded,
 };
+pub use binding::{BindingError, SceneBinding, SceneRead};
 use object::Object;
 use retire::{map_bytes, records_bytes, retire_undo};
 use serde::{Deserialize, Serialize};
@@ -83,10 +85,17 @@ pub enum Admission {
 
 /// An opaque candidate. Creating it never mutates the scene or global context.
 pub struct Admitted {
-    owner: Arc<()>,
     global: Arc<()>,
-    revision: u32,
     generation: u64,
+    local: DetachedCandidate,
+}
+
+/// A candidate checked against one scene snapshot and no global budget. Only
+/// [`SceneBinding::apply_detached`] installs it, after checking every global cap.
+#[derive(Debug)]
+pub struct DetachedCandidate {
+    owner: Arc<()>,
+    revision: u32,
     mutation: u64,
     usage: Usage,
     candidate: Deferred<Box<Candidate>>,
@@ -100,6 +109,8 @@ struct Candidate {
     created: Vec<(WireId, Handle)>,
     removed: Vec<(WireId, Object)>,
     changed: Vec<(WireId, Object)>,
+    /// Composed scales of new and resized paths, which preparation flattens.
+    path_scales: BTreeMap<Handle, f32>,
     /// `map_bytes(&after)`, accumulated while admission built it.
     after_bytes: usize,
     /// What commit adds to `SceneState::history_bytes`.
@@ -108,8 +119,8 @@ struct Candidate {
 impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Admitted")
-            .field("revision", &self.revision)
-            .field("objects", &self.candidate.after.len())
+            .field("revision", &self.local.revision)
+            .field("objects", &self.local.candidate.after.len())
             .finish_non_exhaustive()
     }
 }
@@ -362,6 +373,23 @@ impl SceneState {
     /// Rejects invalid identities, references, ownership, values or a cleared scene.
     pub fn admit(&self, step: &Step, global: &GlobalBudget) -> Result<Admission, StepError> {
         self.check_context(global)?;
+        Ok(match self.admit_local(step, Some(global))? {
+            Some(local) => Admission::New(Admitted {
+                global: Arc::clone(&global.identity),
+                generation: global.generation(),
+                local,
+            }),
+            None => Admission::Duplicate,
+        })
+    }
+
+    /// Admission against this state alone, or `None` for a retransmission. Without a budget,
+    /// as on a worker, every global cap waits for the binding that applies the candidate.
+    fn admit_local(
+        &self,
+        step: &Step,
+        global: Option<&GlobalBudget>,
+    ) -> Result<Option<DetachedCandidate>, StepError> {
         let fail = |path, code| StepError::in_step(&step.id, path, code);
         if self.cleared {
             return Err(fail(FieldPath::default(), ErrorCode::SceneCleared));
@@ -369,7 +397,7 @@ impl SceneState {
         if let Some(revision) = self.step_ids.get(&step.id) {
             let stored = &self.steps[revision];
             return if self.original(stored.event) == step {
-                Ok(Admission::Duplicate)
+                Ok(None)
             } else {
                 Err(fail(
                     FieldPath::default().field("id"),
@@ -421,9 +449,11 @@ impl SceneState {
                 ErrorCode::OverBudget(Budget::LiveObjects),
             ));
         }
-        global
-            .check(self.bound_usage(), minimum)
-            .map_err(|code| fail(FieldPath::default(), code))?;
+        if let Some(global) = global {
+            global
+                .check(self.bound_usage(), minimum)
+                .map_err(|code| fail(FieldPath::default(), code))?;
+        }
         let original = Deferred::new(
             Arc::new(step.clone()),
             heap::ARC_HEADER + heap::step_bytes(step),
@@ -438,7 +468,7 @@ impl SceneState {
             + heap::extras_bytes(std::iter::empty(), [&expansion.extras]);
         let expansion = Deferred::new(expansion, bytes);
         self.candidate(&original, &expansion, global)
-            .map(Admission::New)
+            .map(Some)
             .map_err(|error| expansion.blame(error))
     }
 
@@ -449,8 +479,8 @@ impl SceneState {
         &self,
         original: &Arc<Step>,
         expansion: &Expansion,
-        global: &GlobalBudget,
-    ) -> Result<Admitted, StepError> {
+        global: Option<&GlobalBudget>,
+    ) -> Result<DetachedCandidate, StepError> {
         let step = &*expansion.run;
         let fail = |path, code| StepError::in_step(&step.id, path, code);
         let revision = self.revision + 1;
@@ -517,9 +547,11 @@ impl SceneState {
                 .chain(changed.iter()),
         )
         .map_err(|code| fail(FieldPath::default(), code))?;
-        global
-            .check(self.bound_usage(), usage)
-            .map_err(|code| fail(FieldPath::default(), code))?;
+        if let Some(global) = global {
+            global
+                .check(self.bound_usage(), usage)
+                .map_err(|code| fail(FieldPath::default(), code))?;
+        }
         let removed = object::removals(step, &mut after, &removal_ids)?;
         owned -= removed
             .iter()
@@ -541,6 +573,23 @@ impl SceneState {
                 let removed = removed.into_inner();
                 let changed: Vec<_> = changed.into_inner().into_iter().collect();
                 let ids: usize = created.iter().map(|(id, _)| id.as_str().len()).sum();
+                let resized: HashSet<_> = changed
+                    .iter()
+                    .filter_map(|(id, old)| {
+                        after
+                            .get(id)
+                            .filter(|new| new.work.usage.segments != old.work.usage.segments)
+                            .map(|_| id)
+                    })
+                    .collect();
+                let path_scales = after
+                    .iter()
+                    .filter_map(|(id, object)| {
+                        let path = object.work.path.as_ref()?;
+                        (object.handle.revision() == revision || resized.contains(id))
+                            .then_some((object.handle, path.composed_scale))
+                    })
+                    .collect();
                 Candidate {
                     after_bytes: heap::btree::<WireId, Object>(after.len()) + owned,
                     history_bytes: original.id.as_str().len()
@@ -556,15 +605,14 @@ impl SceneState {
                     created,
                     removed,
                     changed,
+                    path_scales,
                 }
             })
             .map(Box::new);
         candidate.attribute(candidate.attributed_bytes());
-        Ok(Admitted {
+        Ok(DetachedCandidate {
             owner: Arc::clone(&self.identity),
-            global: Arc::clone(&global.identity),
             revision: self.revision,
-            generation: global.generation(),
             mutation: self.mutation,
             usage,
             candidate,
@@ -579,62 +627,57 @@ impl SceneState {
         admitted: Admitted,
         global: &mut GlobalBudget,
     ) -> Result<Committed, StaleAdmission> {
+        let local = &admitted.local;
         if self.cleared
-            || admitted.mutation != self.mutation
-            || admitted.revision != self.revision
+            || local.mutation != self.mutation
+            || local.revision != self.revision
             || admitted.generation != global.generation()
-            || !Arc::ptr_eq(&admitted.owner, &self.identity)
+            || !Arc::ptr_eq(&local.owner, &self.identity)
             || !Arc::ptr_eq(&admitted.global, &global.identity)
         {
             return Err(StaleAdmission);
         }
+        let (preparation, created) = self.install(admitted.local, global);
+        self.reserved
+            .extend(created.iter().map(|(id, _)| id.clone()));
+        Ok(Committed {
+            index: preparation.revision - 1,
+            revision: preparation.revision,
+            handles: created,
+            preparation,
+        })
+    }
+
+    /// Installs and charges a candidate whose stamps and budget were checked. The caller
+    /// reserves the returned created ids.
+    fn install(
+        &mut self,
+        local: DetachedCandidate,
+        global: &mut GlobalBudget,
+    ) -> (Preparation, Vec<(WireId, Handle)>) {
         let revision = self.revision + 1;
-        let resized: HashSet<_> = admitted
-            .candidate
-            .changed
-            .iter()
-            .filter_map(|(id, old)| {
-                admitted
-                    .candidate
-                    .after
-                    .get(id)
-                    .filter(|new| new.work.usage.segments != old.work.usage.segments)
-                    .map(|_| id)
-            })
-            .collect();
-        let path_scales = admitted
-            .candidate
-            .after
-            .iter()
-            .filter_map(|(id, object)| {
-                let path = object.work.path.as_ref()?;
-                (object.handle.revision() == revision || resized.contains(id))
-                    .then_some((object.handle, path.composed_scale))
-            })
-            .collect();
-        let preparation = Preparation {
-            owner: Arc::clone(&self.identity),
-            cut_revision: self.last_cut_revision,
-            revision,
-            step: Arc::clone(&admitted.candidate.step),
-            run: Arc::clone(&admitted.candidate.run),
-            extras: Arc::clone(&admitted.candidate.extras),
-            path_scales,
-            canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
-        };
         let Candidate {
             step,
-            run: _,
-            extras: _,
+            run,
+            extras,
             after,
             created,
             removed,
             changed,
+            path_scales,
             after_bytes,
             history_bytes,
-        } = *admitted.candidate.into_inner();
-        self.reserved
-            .extend(created.iter().map(|(id, _)| id.clone()));
+        } = *local.candidate.into_inner();
+        let preparation = Preparation {
+            owner: Arc::clone(&self.identity),
+            cut_revision: self.last_cut_revision,
+            revision,
+            step: Arc::clone(&step),
+            run,
+            extras,
+            path_scales,
+            canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
+        };
         self.step_ids.insert(step.id.clone(), revision);
         self.steps.insert(
             revision,
@@ -652,13 +695,8 @@ impl SceneState {
         drop(Deferred::new(replaced, bytes));
         self.history_bytes += history_bytes;
         self.revision = revision;
-        self.apply_usage(global, admitted.usage);
-        Ok(Committed {
-            index: revision - 1,
-            revision,
-            handles: created,
-            preparation,
-        })
+        self.apply_usage(global, local.usage);
+        (preparation, created)
     }
 
     /// Marks a kept step's removals retired. Repeated notifications are harmless.

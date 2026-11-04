@@ -6,8 +6,11 @@
 //!
 //! - Live frames wait until the connection's recovered batch is installed, so no live suffix
 //!   overtakes recovery. Their credit is withheld meanwhile, so the data window bounds them.
-//! - Each `StepCommit` goes through the mirror's `admit` and `commit` under one shell budget,
-//!   and its lifetime index must match before anything is prepared.
+//! - One `StepCommit` at a time is admitted on a worker against a read-only snapshot of its
+//!   scene, then installed through the scene's binding under the one shell budget; its lifetime
+//!   index must match first. Every later scene frame waits behind it in arrival order. An
+//!   admission has 250 ms from reaching the lane, slot wait included; past that only its scene is
+//!   cleared, as if the shell had cleared it.
 //! - A scene prepares one step at a time, on the tip the previous step left, and holds at most
 //!   [`scene::WINDOW`] prepared or running steps. A result is checked again when it comes back:
 //!   job, scene, cut and layout base. A step has 250 ms from when its predecessor was ready and
@@ -22,6 +25,7 @@
 //!   presenter owns them, so whichever path discards them, they drop on the dropper thread. Once the
 //!   dropper has stopped, intake and new work stop with it, and the watchdog fails what waits.
 
+mod admit;
 mod measure;
 mod prepare;
 mod recovery;
@@ -43,7 +47,8 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    Admission, GlobalBudget, SceneState, Step, StopCut, StopOutcome,
+    DetachedCandidate, GlobalBudget, SceneBinding, SceneRead, SceneState, StepError, StopCut,
+    StopOutcome,
     deferred::{self, Deferred},
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
     limits::MAX_RESIDENT_BYTES,
@@ -51,8 +56,9 @@ use kumochi_scene::{
     theme::Theme,
 };
 
+use admit::Lane;
 pub(crate) use measure::Measure;
-pub(crate) use prepare::{Completion, PrepareJob, RecoveryJob};
+pub(crate) use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
 use snapshot::Assembler;
@@ -61,7 +67,8 @@ use snapshot::Assembler;
 const LAYOUT_VERSION: u32 = 1;
 /// A step's preparation should take no longer; missing it is only logged.
 const TARGET: Duration = Duration::from_millis(50);
-/// A step's preparation fails this long after it became eligible, and a later answer is dropped.
+/// An admission fails this long after it reached the lane, and a step's preparation this long
+/// after it became eligible; a later answer is dropped.
 const DEADLINE: Duration = Duration::from_millis(250);
 // shortcut: margin over measured core recovery; B9 must measure real-font cap scenes.
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(2);
@@ -106,6 +113,14 @@ pub(crate) enum Effect {
     Prepare(PrepareJob),
     /// Run on a background executor, then pass the answer to [`Presenter::completed`].
     Recover(RecoveryJob),
+    /// Run on a background executor, then pass the answer to [`Presenter::completed`].
+    Admit(AdmitJob),
+    /// A consumption refused as busy can be retried now, before this scene admits again.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "B6's activation owner is the production caller")
+    )]
+    ConsumptionReady { scene: SceneId, index: u32 },
 }
 
 /// Every v1 scene the shell mirrors, and the work preparing them.
@@ -118,7 +133,9 @@ pub(crate) struct Presenter {
     /// The one budget every mirrored scene is bound to.
     global: GlobalBudget,
     scenes: BTreeMap<SceneId, Scene>,
-    /// Live frames that arrived before recovery was installed, with their withheld credit.
+    /// The one commit being admitted; later scene frames wait in `held` behind it.
+    lane: Option<Lane>,
+    /// Live frames waiting for recovery or the admission lane, with their withheld credit.
     held: VecDeque<(Deferred<DataToShell>, u32)>,
     held_bytes: u32,
     /// A clear came before recovery was described, so the held live scenes clear once applied.
@@ -150,6 +167,7 @@ impl Presenter {
             assembler: Assembler::default(),
             global: GlobalBudget::default(),
             scenes: BTreeMap::new(),
+            lane: None,
             held: VecDeque::new(),
             held_bytes: 0,
             clear_after_recovery: false,
@@ -176,6 +194,9 @@ impl Presenter {
     pub(crate) fn disconnected(&mut self) {
         if let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Offline) {
             recovery.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(lane) = self.lane.take() {
+            lane.cancel();
         }
         for scene in self.scenes.values_mut() {
             scene.halt();
@@ -248,33 +269,36 @@ impl Presenter {
                 let effect = self.assembler.chunk(generation, chunk, bytes)?;
                 self.assembled(effect, now, &mut out)?;
             }
-            Ok(_) => {}
-            Err(frame) => {
-                if let DataToShell::ScenesRemoved { scenes } = &*frame
-                    && current
-                {
-                    out.credit(bytes);
-                    self.removed(scenes, now, &mut out)?;
-                }
-                let live = current
-                    && matches!(
+            Err(frame) if current => {
+                let removed = matches!(&*frame, DataToShell::ScenesRemoved { .. });
+                let scene = removed
+                    || matches!(
                         &*frame,
                         DataToShell::SceneBegin { .. }
                             | DataToShell::SceneStepCommit { .. }
                             | DataToShell::SceneCutApplied { .. }
                             | DataToShell::SceneEnd { .. }
                     );
-                if live && matches!(self.phase, Phase::Live) {
-                    self.live(&frame, bytes, now, &mut out)?;
-                } else if live {
+                let direct = if matches!(self.phase, Phase::Live) {
+                    self.lane.is_none()
+                        && self.held.is_empty()
+                        && !self.waits_for_consumption(&frame)
+                } else {
+                    removed
+                };
+                if scene && direct {
+                    self.live(frame, bytes, now, &mut out)?;
+                } else if scene {
+                    let lane = self.lane.as_ref().map_or(0, |lane| lane.bytes);
                     self.held_bytes = self
                         .held_bytes
                         .checked_add(bytes)
-                        .filter(|held| *held <= DATA_WINDOW)
+                        .filter(|held| held.saturating_add(lane) <= DATA_WINDOW)
                         .ok_or(Broken::Window)?;
                     self.held.push_back((frame, bytes));
                 }
             }
+            Ok(_) | Err(_) => {}
         }
         Ok(out.finish())
     }
@@ -306,6 +330,15 @@ impl Presenter {
                     self.prepared(scene, &running, result, full_after, now, &mut out);
                 }
             }
+            Completion::Admitted {
+                id,
+                read,
+                result,
+                slot,
+            } => {
+                drop(slot);
+                self.admitted(id, read, result, now, &mut out)?;
+            }
             Completion::Recovered {
                 id,
                 scenes,
@@ -336,7 +369,8 @@ impl Presenter {
         Ok(out.finish())
     }
 
-    /// The watchdog: fails every step past its deadline and abandons a recovery past its own.
+    /// The watchdog: fails every step and admission past its deadline and abandons a recovery
+    /// past its own.
     /// Call it when [`Presenter::deadline`] passes, independently of any job.
     /// # Errors
     /// [`Broken`] when a held frame applied after abandoning recovery can't be mirrored.
@@ -371,6 +405,7 @@ impl Presenter {
             .values()
             .filter_map(Scene::due)
             .map(|(since, ..)| since + DEADLINE)
+            .chain(self.lane.as_ref().map(Lane::deadline))
             .chain(recovering)
             .min()
     }
@@ -417,6 +452,12 @@ impl Presenter {
         } else if !matches!(self.phase, Phase::Live) {
             out.credit(self.assembler.clear().credit);
             self.clear_after_recovery = true;
+        }
+        if let Some(lane) = self.lane.take() {
+            out.credit(lane.cancel());
+        }
+        if matches!(self.phase, Phase::Live) {
+            self.discard_held(now, &mut out)?;
         }
         let ids: Vec<_> = self.scenes.keys().copied().collect();
         for id in ids {
@@ -477,13 +518,22 @@ impl Presenter {
 
     fn live(
         &mut self,
-        frame: &DataToShell,
+        frame: Deferred<DataToShell>,
         bytes: u32,
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
+        let commit = match *frame {
+            DataToShell::SceneStepCommit {
+                run, scene, index, ..
+            } => Some((run, scene, index)),
+            _ => None,
+        };
+        if let Some(commit) = commit {
+            return self.admit(commit, frame, bytes, now, out);
+        }
         out.credit(bytes);
-        match frame {
+        match &*frame {
             DataToShell::SceneBegin { scene, header } => {
                 if self.cleared.contains(scene) {
                     return Ok(());
@@ -506,52 +556,62 @@ impl Presenter {
                     self.forget(*scene, out);
                     return Ok(());
                 }
+                let bytes = state.attributed_bytes();
+                let state = SceneBinding::bind(Deferred::new(state, bytes), &mut self.global)
+                    .map_err(|_| Broken::Scenes)?;
                 self.scenes
                     .insert(*scene, Scene::new(state, rest, retained));
                 Ok(())
             }
-            DataToShell::SceneStepCommit {
-                run,
-                scene,
-                index,
-                step,
-            } => self.commit(*run, *scene, *index, step, now, out),
             DataToShell::SceneCutApplied {
                 scene,
                 revision,
                 cut,
             } => self.cut_applied(*scene, *revision, cut, out),
+            DataToShell::ScenesRemoved { scenes } => self.removed(scenes, now, out),
             _ => Ok(()),
         }
     }
 
-    fn commit(
+    /// Installs the lane's answer, or expires the lane if the answer is late. Any other answer is
+    /// stale and only drops. A timely rejection means the mirror disagrees with the brain.
+    fn admitted(
         &mut self,
-        run: RunId,
-        id: SceneId,
-        index: u32,
-        step: &Step,
+        job: u64,
+        read: SceneRead,
+        result: Option<Result<DetachedCandidate, StepError>>,
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
-        if self.cleared.contains(&id) {
+        let Some(lane) = self.lane.take_if(|lane| lane.id == job) else {
+            return Ok(());
+        };
+        if now >= lane.deadline() {
+            self.expire(lane, out);
             return Ok(());
         }
+        let Lane {
+            run,
+            scene: id,
+            index,
+            eligible_at,
+            bytes,
+            ..
+        } = lane;
         let fenced = self.fenced.is_some_and(|fenced| run <= fenced);
         let scene = self.scenes.get_mut(&id).ok_or(Broken::Order)?;
-        if index != scene.state.revision() {
-            return Err(Broken::Index);
-        }
-        let Ok(Admission::New(admitted)) = scene.state.admit(step, &self.global) else {
-            return Err(Broken::Step);
-        };
-        let committed = scene
+        let candidate = result.ok_or(Broken::Step)?.map_err(|_| Broken::Step)?;
+        let preparation = scene
             .state
-            .commit(admitted, &mut self.global)
+            .apply_detached(read, candidate, &mut self.global)
             .map_err(|_| Broken::Step)?;
-        let committed = Deferred::new(committed, scene.state.attributed_bytes());
-        if committed.index != index {
-            return Err(Broken::Index);
+        let preparation = Deferred::new(preparation, scene.state.view().attributed_bytes());
+        out.credit(bytes);
+        if let Some(pending) = scene.pending_consumption {
+            out.effects.push(Effect::ConsumptionReady {
+                scene: id,
+                index: pending,
+            });
         }
         let applied = scene.cut == Cut::Applied;
         if applied {
@@ -577,19 +637,13 @@ impl Presenter {
         if scene.skipping {
             return Err(Broken::Order);
         }
-        let preparation = committed.map(|committed| {
-            let bytes = committed.handles.capacity()
-                * size_of::<(kumochi_scene::WireId, kumochi_scene::Handle)>();
-            drop(Deferred::new(committed.handles, bytes));
-            committed.preparation
-        });
         scene.queue.push_back(Ticket {
             run,
             index,
-            eligible_at: None,
+            eligible_at,
             preparation,
         });
-        self.pump(id, now, out)
+        Ok(())
     }
 
     /// The brain applied a cut after every step it committed before it. A scene it no longer
@@ -604,7 +658,7 @@ impl Presenter {
         let Some(scene) = self.scenes.get_mut(&id) else {
             return Ok(());
         };
-        if scene.state.revision() != revision {
+        if scene.state.view().revision() != revision {
             return Err(Broken::Cut);
         }
         scene.halt();
@@ -615,7 +669,7 @@ impl Presenter {
         scene.cut = Cut::Applied;
         scene.skipping = false;
         let rest = match outcome {
-            StopOutcome::Kept => scene.rest.cut(&scene.state).ok(),
+            StopOutcome::Kept => scene.rest.cut(scene.state.view()).ok(),
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
@@ -633,8 +687,11 @@ impl Presenter {
         Ok(())
     }
 
+    /// Starts waiting work, the admission lane and its held frames ahead of scene steps.
     fn pump_all(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         self.dispatch_recovery(now, out)?;
+        self.dispatch_admission(now, out);
+        self.drain(now, out)?;
         let ids: Vec<_> = self.scenes.keys().copied().collect();
         for id in ids {
             self.pump(id, now, out)?;
@@ -648,9 +705,12 @@ impl Presenter {
     fn pump(&mut self, id: SceneId, now: Instant, out: &mut Out) -> Result<(), Broken> {
         if let Some(scene) = self.scenes.get_mut(&id)
             && scene.open()
-            && let Some(ticket) = scene.queue.front_mut()
         {
-            ticket.eligible_at.get_or_insert(now);
+            match (scene.queue.front_mut(), &mut self.lane) {
+                (Some(ticket), _) => _ = ticket.eligible_at.get_or_insert(now),
+                (None, Some(lane)) if lane.scene == id => _ = lane.eligible_at.get_or_insert(now),
+                _ => {}
+            }
         }
         if self.workers() >= MAX_WORKERS || !self.dropper_running() {
             return Ok(());
@@ -733,7 +793,7 @@ impl Presenter {
         }
         .and_then(|prepared| {
             if prepared.index != running.index
-                || prepared.validate(&scene.state, scene.tip()).is_err()
+                || prepared.validate(scene.state.view(), scene.tip()).is_err()
             {
                 Err(SceneFailure::Validation)
             } else if total.saturating_add(prepared.resident_bytes) > MAX_RESIDENT_BYTES {
@@ -783,9 +843,10 @@ impl Presenter {
     fn release(&mut self, id: SceneId) {
         if let Some(mut scene) = self.scenes.remove(&id) {
             scene.halt();
-            scene.state.clear(&mut self.global).expect(BOUND);
             let bytes = scene.attributed();
-            drop(Deferred::new(scene, bytes));
+            let Scene { state, rest, .. } = scene;
+            state.release(&mut self.global).expect(BOUND);
+            drop(Deferred::new(rest, bytes));
         }
     }
 

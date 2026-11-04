@@ -26,9 +26,10 @@ flowchart LR
   `PROC_THREAD_ATTRIBUTE_JOB_LIST` naming both jobs, so it's inside from its first instruction.
   Ending a run terminates its run job and waits until the job is empty, which ends that run's
   processes and nothing else.
-- **The screen worker** sits in the brain job directly, so ending a run never touches it. In
-  slice 0 it's a placeholder that only waits.
-- Helpers inherit no handles, and nothing secret is ever on their command lines.
+- **The screen worker** sits in the brain job directly, so ending a run never touches it.
+  Its [supervisor](screen.md) owns its pipes, deadlines and respawns.
+- Helpers inherit no handles except the screen worker's two explicit stdin/stdout handles.
+  Nothing secret is ever on their command lines.
 - **The shell** isn't in any job, so a brain crash doesn't take the window with it. Each process
   starts the other detached and, where the starting job allows it, outside that job.
 
