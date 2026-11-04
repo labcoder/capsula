@@ -201,6 +201,25 @@ pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
+    session_run(args, ("feel-ready", feel), &TRIALS)
+}
+
+/// The hover phase alone, opened by the owner's away rule instead of a Ready press.
+pub(crate) fn hover(args: impl Iterator<Item = String>) -> Result<()> {
+    session_run(
+        args,
+        ("idle-open", idle_open),
+        &[Trial::Input(Phase::Hover, FixtureEscMode::Free)],
+    )
+}
+
+type Opener = fn(&mut Session, &Images, &Path, Instant) -> Result<()>;
+
+fn session_run(
+    args: impl Iterator<Item = String>,
+    (opener, open): (&str, Opener),
+    trials: &[Trial],
+) -> Result<()> {
     let output = retained_output(args)?;
     ensure!(
         platform::processes()?.is_empty(),
@@ -239,11 +258,11 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         fixture_window = Some(window);
         session = Some(Session::new(window, end)?);
         let session = session.as_mut().context("persistent session missing")?;
-        feel(session, &images, &output, end)?;
+        open(session, &images, &output, end)?;
         let registry = Registry::snapshot();
         fs::write(output.join("registry-before.txt"), format!("{registry:#?}"))?;
         let measured = (|| {
-            for (index, trial) in TRIALS.into_iter().enumerate() {
+            for (index, &trial) in trials.iter().enumerate() {
                 session.guard()?;
                 session.set_phase(u8::try_from(index + 1)?)?;
                 run_trial(trial, session, &images, &output, end)?;
@@ -275,8 +294,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         let phase = metadata
             .phase
             .checked_sub(1)
-            .and_then(|index| TRIALS.get(usize::from(index)))
-            .map_or("feel-ready", |trial| trial.name());
+            .and_then(|index| trials.get(usize::from(index)))
+            .map_or(opener, |trial| trial.name());
         format!("guard_stop phase={phase} metadata={metadata:?}\n")
     });
     print!("{guard_report}");
@@ -289,7 +308,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     fs::write(
         output.join("session-result.txt"),
         format!(
-            "runtime_s={:.3}\nautomation_result={final_result:?}\nhuman_feel_is_separate=true\nalt_tab=owner_manual_separate_verdict\nplacements=runtime_unmeasured\n{guard_report}",
+            "opener={opener}\nruntime_s={:.3}\nautomation_result={final_result:?}\nhuman_feel_is_separate=true\nalt_tab=owner_manual_separate_verdict\nplacements=runtime_unmeasured\n{guard_report}",
             started.elapsed().as_secs_f64()
         ),
     )?;
@@ -344,6 +363,38 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
     let summarized =
         fs::write(feel_directory.join("summary.txt"), summary).map_err(anyhow::Error::from);
     session::combine([body, stopped, summarized])
+}
+
+/// Rez must have had no input for this long before the idle opener arms.
+const AWAY: Duration = Duration::from_secs(600);
+
+/// Opens injection only after `AWAY` with no input, then the unchanged guarded quiet second.
+fn idle_open(session: &mut Session, _: &Images, output: &Path, end: Instant) -> Result<()> {
+    println!(
+        "Injection is disabled until Rez has had no input for {} minutes; any input after that stops the run.",
+        AWAY.as_secs() / 60
+    );
+    let open_end = end
+        .checked_sub(PHASE_LIMIT + FINAL_RESERVE)
+        .context("session too short for the idle opener")?;
+    let mut attempts = 0;
+    loop {
+        session.await_idle(open_end, AWAY)?;
+        attempts += 1;
+        println!("idle_attempt={attempts}");
+        if session.await_quiet(open_end)? {
+            break;
+        }
+        println!("idle_attempt={attempts} rearmed=true injection_opened=false");
+    }
+    fs::write(
+        output.join("opener.txt"),
+        format!(
+            "opener=idle\naway_s={}\nattempts={attempts}\n",
+            AWAY.as_secs()
+        ),
+    )?;
+    Ok(())
 }
 
 fn physical_rect([left, top, width, height]: [i32; 4]) -> Result<RECT> {

@@ -407,3 +407,16 @@ restores owned fixture layout state, closes only owned windows/processes gracefu
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
 Actual Alt-Tab into owner applications remains manual or unmeasured.
+
+### The hover-only idle session
+
+`hover-gate <path-session.txt>` runs the hover phase alone, with the same transcript, evidence
+directory, fixture, guards and PresentMon bounds as `gate-session`. Only the opener differs.
+Nobody presses Ready. The task polls `GetLastInputInfo` once a second, sending nothing, and
+once Rez has had no input for ten minutes it asks the fixture to arm itself. The fixture checks
+the idle time again on its own thread, takes the foreground (allowed once the foreground lock
+timeout has passed), focuses its EDIT, registers the physical-input and session guards, and
+publishes Ready with no feel verdicts. From there the unchanged quiet second opens injection,
+and the first input the harness didn't send stops the run. A physical Ready press during this
+task is refused: the task opens only on idle. `gate-session` keeps its Ready press, and no
+other task arms on idle.
