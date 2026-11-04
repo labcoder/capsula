@@ -539,6 +539,7 @@ piece count must be positive and even. If all 63 interior samples
 are occupied, the label stays at the midpoint rather than disappearing; continuous
 placement and making extra routing room are deferred until after D1. Collision
 avoidance is for resting geometry, not crossings introduced by later animation.
+The pass revisits every label, so its cost grows quadratically with label count; add a spatial index when any legal scene's measured preparation exceeds 50 ms or preparation appears on the critical path in the M2 or B9 gates.
 The host paints `Frame::paint_items()` batches in order: ordinary geometry first,
 then edge-label chips and text. This allocation-free iterator keeps a later edge
 from striking through an earlier edge's label. `Frame::items()` still exposes

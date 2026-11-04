@@ -30,6 +30,7 @@ pub(super) fn separate(state: &mut LayoutState, build: &Build<'_>) -> Result<(),
         return Ok(());
     }
     let mut occupied = obstacles(state)?;
+    // shortcut: revisiting every label makes placement quadratic in label count; add a spatial index if any legal scene's measured preparation exceeds 50 ms or preparation is on the M2 or B9 critical path.
     for id in ids {
         build.check_cancel()?;
         let object = &state.objects[&id];
