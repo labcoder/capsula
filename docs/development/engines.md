@@ -223,7 +223,9 @@ second one:
 2. Admission against those sources, then a send lease under `SendKey::Build`, so a delete between
    the read and the grant gets `Rebuild`; the rebuild is a normal build.
 3. The request asks for the summary rewritten within the room left, at most `MAX_SUMMARY`. Its
-   text is collected, never shown, and goes through the same budget and deadline as the run.
+   text is collected, never shown, and goes through the same budget and deadline as the run. The
+   answer is cut on a character boundary until its summary item fits the room as the bound counts
+   it, escapes included, and to `MAX_SUMMARY` raw bytes.
 4. `StoreSummary` and its acknowledgement are owned by that build's key; only the current run's
    own acknowledgement starts the next normal build. After Stop or a replacement it's stale.
 5. A second `TooLarge` ends the run as `failed(budget)`.

@@ -8,12 +8,14 @@
 //! after either, every late answer of it is stale. A run compacts at most once until a build is
 //! admitted, so a delete's rebuild can't start a second one.
 
+use std::fmt;
+
 use kumochi_protocol::message::EventId;
 
 use super::admission::{Build, BuildKey, origin};
-use super::{Coordinator, Effect, JobAsk, SendKey, Stale, StoreOp, Unbuilt};
+use super::{Coordinator, Effect, JobAsk, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
 use crate::context::RunSnapshot;
-use crate::context::compact::clean_summary;
+use crate::context::compact::fit_summary;
 use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Failure, Generation};
 
@@ -32,23 +34,45 @@ pub struct CompactContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompactBuilt {
     pub(crate) key: BuildKey,
-    /// The request and the longest summary it may write; `Ok(None)` when there's no summary to
-    /// rewrite or no room for one.
+    /// The request and the escaped bytes its summary's text may take; `Ok(None)` when there's no
+    /// summary to rewrite or no room for one.
     pub(crate) result: Result<Option<(JobAsk, usize)>, Unbuilt>,
 }
 
 /// Where an inline compaction is.
-#[derive(Debug)]
 pub(super) enum Inline {
     Reading,
     Sending {
         generation: Generation,
         covers: (EventId, EventId),
-        limit: usize,
+        allowance: usize,
         model: Option<String>,
         text: String,
     },
     Writing,
+}
+
+impl fmt::Debug for Inline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reading => f.write_str("Reading"),
+            Self::Sending {
+                generation,
+                covers,
+                allowance,
+                model,
+                text,
+            } => f
+                .debug_struct("Sending")
+                .field("generation", generation)
+                .field("covers", covers)
+                .field("allowance", allowance)
+                .field("model", model)
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::Writing => f.write_str("Writing"),
+        }
+    }
 }
 
 impl Coordinator {
@@ -97,7 +121,7 @@ impl Coordinator {
             .as_mut()
             .filter(|build| build.key() == key && matches!(build.inline, Some(Inline::Reading)))
             .ok_or(Stale)?;
-        let (ask, limit) = match result {
+        let (ask, allowance) = match result {
             Ok(Some(found)) => found,
             Ok(None) | Err(Unbuilt::TooLarge { .. }) => {
                 return self.fail(key.run, Failure::Budget, effects);
@@ -116,7 +140,7 @@ impl Coordinator {
         build.inline = Some(Inline::Sending {
             generation: ask.generation,
             covers,
-            limit,
+            allowance,
             model: ask
                 .built
                 .request
@@ -154,7 +178,7 @@ impl Coordinator {
         let Some(Inline::Sending {
             generation,
             covers,
-            limit,
+            allowance,
             model,
             text,
         }) = &mut build.inline
@@ -169,7 +193,7 @@ impl Coordinator {
             }
             TurnEvent::OutputItem { .. } => {}
             TurnEvent::Finished(Finish::Completed) => {
-                let Some(summary) = clean_summary(text, *limit) else {
+                let Some(summary) = fit_summary(text, *allowance) else {
                     return self.fail(run, Failure::Budget, effects);
                 };
                 let write = StoreOp::StoreSummary {
@@ -177,7 +201,7 @@ impl Coordinator {
                     thread,
                     generation: *generation,
                     covers: *covers,
-                    text: summary,
+                    text: SummaryText(summary),
                     model: model.take(),
                 };
                 build.inline = Some(Inline::Writing);

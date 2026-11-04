@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use kumochi_protocol::constants::DISPLAY_NAME;
 use kumochi_protocol::message::{EventId, ThreadId, ThreadKind};
 
-use super::bound::{fixed_bytes, item_bytes};
+use super::bound::{escaped, fixed_bytes, item_bytes};
 use super::build::{fill, render};
 use super::{
     Body, BuildError, Built, InputItem, Item, ModelRequest, Origin, RAW_RUNS, Role, RunSnapshot,
@@ -141,10 +141,28 @@ pub(crate) fn clean_summary(output: &str, max: usize) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+/// Inline compaction's answer as a summary: cleaned to [`MAX_SUMMARY`] bytes, then cut on a
+/// character boundary so its text adds at most `allowance` bytes to its item once JSON-escaped,
+/// the way the bound counts it. `None` when nothing is left.
+pub(crate) fn fit_summary(output: &str, allowance: usize) -> Option<String> {
+    let text = clean_summary(output, MAX_SUMMARY)?;
+    let mut added = 0;
+    let end = text
+        .char_indices()
+        .find_map(|(at, c)| {
+            added += escaped(c.encode_utf8(&mut [0; 4])) - 2;
+            (added > allowance).then_some(at)
+        })
+        .unwrap_or(text.len());
+    let text = text[..end].trim_end();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 /// Inline compaction's request (B5), when a run's current turn fits without the thread's summary
 /// but not with it: the summary rewritten to fit the `room` the bound leaves. It covers what the
-/// summary covered, and the length it may take is returned with it. `None` when the thread is
-/// being deleted or gone, has no summary, or leaves no room.
+/// summary covered. The allowance returned with it is what the new text may add to its item,
+/// counted escaped, for [`fit_summary`]. `None` when the thread is being deleted or gone, has no
+/// summary, or leaves no room.
 ///
 /// # Errors
 /// [`BuildError`] when the read fails or the run's origin doesn't own the thread.
@@ -161,10 +179,11 @@ pub(crate) fn rewrite(
         return Ok(None);
     };
     let wrapper = item_bytes(&summary_item(previous.first, previous.last, ""));
-    let limit = room.saturating_sub(wrapper).min(MAX_SUMMARY);
-    if limit == 0 {
+    let allowance = room.saturating_sub(wrapper);
+    if allowance == 0 {
         return Ok(None);
     }
+    let limit = allowance.min(MAX_SUMMARY);
     let request = ModelRequest {
         choice: run.choice.clone(),
         instructions: instructions(run),
@@ -186,7 +205,7 @@ pub(crate) fn rewrite(
                 sources: vec![thread],
             },
         },
-        limit,
+        allowance,
     )))
 }
 

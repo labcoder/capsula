@@ -7,7 +7,7 @@ use super::{R, T, build_context, ends_failed, engine, fresh, request};
 use crate::context::{Built, Origin};
 use crate::coordinator::{
     BuildContext, BuildKey, CompactBuilt, CompactContext, ContextBuilt, Coordinator, Effect, Input,
-    JobAsk, LeaseId, SEND_DEADLINE, SendKey, Stale, StoreOp, Unbuilt,
+    JobAsk, LeaseId, SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Failure, Generation};
@@ -104,7 +104,7 @@ fn store_summary(attempt: u64, text: &str) -> Effect {
         thread: T,
         generation: G,
         covers: COVERS,
-        text: text.to_owned(),
+        text: SummaryText(text.to_owned()),
         model: None,
     })
 }
@@ -160,6 +160,43 @@ fn a_summary_too_large_for_the_turn_is_rewritten_under_the_run_then_built_again(
         core.handle(too_large(3, Some(ROOM))),
         Ok(ends_failed(Failure::Budget)),
         "a second too-large build in the episode fails on its budget"
+    );
+}
+
+#[test]
+fn an_escaped_answer_is_cut_to_the_bytes_its_item_may_add() {
+    let mut core = compacting();
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    assert_eq!(
+        core.handle(engine(R, TurnEvent::TextDelta("\"".repeat(60)))),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        Ok(vec![store_summary(2, &"\"".repeat(50))]),
+        "60 quotes escape to 120 bytes; 50 take the whole allowance of 100"
+    );
+}
+
+#[test]
+fn formatting_the_run_never_shows_the_summary_being_collected() {
+    const SENTINEL: &str = "sentinel: the rewritten summary of task four";
+    let mut core = compacting();
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    assert_eq!(
+        core.handle(engine(R, TurnEvent::TextDelta(SENTINEL.to_owned()))),
+        Ok(Vec::new())
+    );
+    let shown = format!("{:?}", core.current);
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    assert!(!shown.contains("sentinel"), "the summary text leaked");
+    assert!(
+        !shown.contains(byte_list.trim_matches(['[', ']'])),
+        "the summary bytes leaked"
+    );
+    assert!(
+        shown.contains(&format!("text_bytes: {}", SENTINEL.len())),
+        "the length is missing"
     );
 }
 

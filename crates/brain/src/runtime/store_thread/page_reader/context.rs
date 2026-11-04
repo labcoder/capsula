@@ -107,14 +107,14 @@ pub(super) fn read_compact(
         })
     });
     let result = match read {
-        Ok(Ok(found)) => Ok(found.map(|(found, limit)| {
+        Ok(Ok(found)) => Ok(found.map(|(found, allowance)| {
             (
                 JobAsk {
                     generation: found.generation,
                     built: found.built,
                     covers: Some(found.covers),
                 },
-                limit,
+                allowance,
             )
         })),
         Ok(Err(error)) => {
