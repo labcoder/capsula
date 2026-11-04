@@ -74,10 +74,10 @@ impl Silhouette {
             let from = v3(p.x - lobe.center.x, p.y - lobe.center.y, z);
             dist = smin(dist, from.len() - lobe.radius, self.blend);
         }
-        if self.detail > 0.0 {
-            // Front face only: the z = 0 slice must stay the exact silhouette the bake reads
-            // coverage from, or the rim flickers between hits and misses.
-            let front = (z.abs() / 0.18).clamp(0.0, 1.0);
+        // Front face only: the z = 0 slice must stay the exact silhouette the bake reads coverage
+        // from, or the rim flickers between hits and misses. So that slice skips the noise.
+        let front = (z.abs() / 0.18).clamp(0.0, 1.0);
+        if self.detail > 0.0 && front > 0.0 {
             dist += self.detail * front * front * fbm(p * self.detail_freq);
         }
         smax(dist, self.floor - p.y, 0.14) * self.depth.min(1.0)
