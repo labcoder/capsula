@@ -75,6 +75,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
         let mut admissions = Vec::new();
         let mut clears = Vec::new();
         let mut consumptions = Vec::new();
+        let mut queued_consumptions = Vec::new();
         for iteration in 0..37 {
             let (mut mirror, now) = live();
             for (offset, (first, second, third, _)) in workloads.iter().enumerate() {
@@ -87,6 +88,37 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     .enumerate()
                 {
                     if mirror.scenes[&id].ready.len() == super::super::scene::WINDOW {
+                        if index == super::super::scene::WINDOW {
+                            let effects = commit(
+                                &mut mirror,
+                                id,
+                                u32::try_from(index).expect("ninth step"),
+                                value.clone(),
+                                now,
+                            )
+                            .expect("a successor held by the window");
+                            assert!(super::jobs(effects).is_empty());
+                            let head = mirror.scenes[&id]
+                                .ready
+                                .front()
+                                .expect("the head")
+                                .step
+                                .index;
+                            let start = Instant::now();
+                            let consumed =
+                                mirror.consume_ready(id, head, now).expect("the head fits");
+                            let job = only_job(consumed.effects.expect("the successor dispatch"));
+                            drop(consumed.step);
+                            let elapsed = start.elapsed().as_nanos();
+                            let effects = mirror
+                                .completed(job.run(&mut Shaper), now)
+                                .expect("the queued successor prepared");
+                            assert!(effects.is_empty());
+                            if iteration >= 5 {
+                                queued_consumptions.push(elapsed);
+                            }
+                            continue;
+                        }
                         let elapsed = consume_timed(&mut mirror, id, now);
                         if iteration >= 5 {
                             consumptions.push(elapsed);
@@ -109,7 +141,10 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 }
                 assert_eq!(mirror.scenes[&id].ready.len(), super::super::scene::WINDOW);
                 assert_eq!(mirror.scenes[&id].tip().revision(), 63);
-                assert_eq!(mirror.scenes[&id].state.object_count(), counts[offset]);
+                assert_eq!(
+                    mirror.scenes[&id].state.view().object_count(),
+                    counts[offset]
+                );
             }
             let usage = mirror.global.usage();
             assert_eq!(usage.objects, counts.iter().sum::<usize>());
@@ -121,6 +156,8 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 if counts.len() == 1 { 17_400 } else { 6_000 }
             );
             let mut elapsed = Vec::with_capacity(workloads.len());
+            let mut receipts = Vec::with_capacity(workloads.len());
+            let mut applies = Vec::with_capacity(workloads.len());
             for (offset, (_, _, _, last)) in workloads.iter().enumerate() {
                 let scene = SceneId(100 + u64::try_from(offset).expect("four scenes"));
                 let consumed = consume_timed(&mut mirror, scene, now);
@@ -143,9 +180,16 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 let effects = mirror
                     .data(GENERATION, Deferred::new(message, 0), bytes, now)
                     .expect("64th admission");
-                let sample = start.elapsed().as_nanos();
-                elapsed.push(sample);
+                let admission = super::only_admission(effects);
+                let receipt = start.elapsed().as_nanos();
+                let done = admission.run();
+                let start = Instant::now();
+                let effects = mirror.completed(done, now).expect("64th admitted prefix");
                 let job = only_job(effects);
+                let apply = start.elapsed().as_nanos();
+                elapsed.push(receipt + apply);
+                receipts.push(receipt);
+                applies.push(apply);
                 let effects = mirror
                     .completed(job.run(&mut Shaper), now)
                     .expect("64th prepared prefix");
@@ -168,6 +212,9 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 admissions.extend_from_slice(&elapsed);
                 clears.push(cleared);
                 println!(
+                    "motion_admit_parts receipt_ns={receipts:?} apply_ns={applies:?} sum_ns={elapsed:?}; reducer and effect selection, executor dispatch and pipe drain unmeasured"
+                );
+                println!(
                     "motion_ui_raw scenes={} objects={} lifetime_prefixes=64 ready_per_scene=8 tracks_per_scene=256 sample={} admission_ns={elapsed:?} clear_ns={cleared} charged_bytes={charged}",
                     counts.len(),
                     counts.iter().sum::<usize>(),
@@ -178,8 +225,18 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
         admissions.sort_unstable();
         clears.sort_unstable();
         consumptions.sort_unstable();
+        queued_consumptions.sort_unstable();
         println!(
-            "motion_consume scenes={} objects={} samples={} p50_ns={} p95_ns={} max_ns={}; includes retirement, rest index clone, owner credit and effects disposal",
+            "motion_consume_queued scenes={} objects={} samples={} p50_ns={} p95_ns={} max_ns={}; ninth successor queued; includes retirement, rest clone, successor input clone, owner release and effect selection; executor dispatch unmeasured",
+            counts.len(),
+            counts.iter().sum::<usize>(),
+            queued_consumptions.len(),
+            queued_consumptions[queued_consumptions.len() / 2],
+            queued_consumptions[queued_consumptions.len() * 95 / 100],
+            queued_consumptions[queued_consumptions.len() - 1],
+        );
+        println!(
+            "motion_consume scenes={} objects={} samples={} p50_ns={} p95_ns={} max_ns={}; no queued successor; includes retirement, rest index clone, owner credit and effects disposal",
             counts.len(),
             counts.iter().sum::<usize>(),
             consumptions.len(),
@@ -445,7 +502,7 @@ fn measure_native_eight_window_residency() {
                 }
                 assert_eq!(consumed, 256);
                 for scene in presenter.scenes.values() {
-                    assert_eq!(scene.state.activated(), 64);
+                    assert_eq!(scene.state.view().activated(), 64);
                     assert!(scene.ready.is_empty() && scene.queue.is_empty());
                 }
                 assert!(peak <= MAX_RESIDENT_BYTES);

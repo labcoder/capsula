@@ -13,7 +13,8 @@ use kumochi_scene::{deferred::Deferred, layout::PreparedStep, limits::MAX_RESIDE
 
 use super::{Broken, Effect, Out, Presenter, Ready};
 
-/// Why nothing was consumed; each leaves the presenter unchanged.
+/// Why nothing was consumed; each leaves the presenter unchanged, except that `Busy` keeps the
+/// request.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "B6's activation owner is the production caller")
@@ -30,6 +31,9 @@ pub(crate) enum ConsumeError {
     NotReady,
     /// Its layout as the rest, with this owner's charge, would pass the prepared allowance.
     Residency,
+    /// The scene's admission is out. The request is kept, and `Effect::ConsumptionReady` names
+    /// it once the admission is in; the scene admits nothing more until it is served or halts.
+    Busy,
 }
 
 /// A consumed step, charged against the prepared allowance until its owner drops it.
@@ -73,7 +77,7 @@ pub(crate) struct Consumed {
 
 impl Presenter {
     /// Consumes the scene's oldest prepared step, which must be `expected_index`: its removals
-    /// retire, its layout becomes the rest and its window position frees.
+    /// retire, its layout becomes the rest, its window position frees and held frames resume.
     /// # Errors
     /// [`ConsumeError`], with nothing changed.
     #[cfg_attr(
@@ -86,14 +90,19 @@ impl Presenter {
         expected_index: u32,
         now: Instant,
     ) -> Result<Consumed, ConsumeError> {
+        let busy = self.lane.as_ref().is_some_and(|lane| lane.scene == id);
         let total = self.residency();
         let scene = self.scenes.get_mut(&id).ok_or(ConsumeError::UnknownScene)?;
-        if expected_index < scene.state.activated() {
+        if expected_index < scene.state.view().activated() {
             return Err(ConsumeError::AlreadyConsumed);
         }
         let head = scene.ready.front().ok_or(ConsumeError::NotReady)?;
         if head.step.index != expected_index {
             return Err(ConsumeError::OutOfOrder);
+        }
+        if busy {
+            scene.pending_consumption = Some(expected_index);
+            return Err(ConsumeError::Busy);
         }
         let bytes = head.step.attribution();
         let after = total
@@ -106,11 +115,12 @@ impl Presenter {
         scene
             .state
             .retire(expected_index, &mut self.global)
-            .expect("a prepared step was committed under this budget");
+            .expect("a prepared step was committed under this budget, and no admission reads it");
         let Ready { step, full_after } = scene.ready.pop_front().expect("the head was just read");
         let old = std::mem::replace(&mut scene.rest, step.after.clone());
         drop(Deferred::new(old, scene.retained));
         scene.retained = full_after;
+        scene.pending_consumption = None;
         self.returned.fetch_add(bytes, Ordering::Relaxed);
         let step = ConsumedStep {
             step,
