@@ -148,6 +148,34 @@ Measured on Rez, release build, under the measuring lock (04:20:50–04:21:33Z),
 
 The cost per pixel is about 110 to 160 ns, highest in the smallest regions, likely mostly the body's signed distance near the crown. The z = 0 slice no longer evaluates the surface noise it multiplies by zero, and every pixel is written once. Together that cut the neck's median by 16–20%, with matching aggregate byte sums before and after (a consistency check, not a proof of identical images). The join padding then gave back up to about 7%. At half scale the medians are under C2a's 400 µs goo gate, but single frames reach 473 µs here and 775 µs in an earlier session. The gate is a maximum, so C2a tunes the goo before claiming it.
 
+## The pull
+
+`pull.rs`'s `Pull` is what a drag does to Kumo, frame by frame. `presence/drag.rs`'s `DragOwner` decides when the drag ends. Both are pure, and C2a wires them to the peek and the dock overlay.
+
+- **The body.** It follows the pointer on a critically damped spring (28 per second, 24 substeps an update), keeping the offset at which it was pressed, so it doesn't jump to the pointer. A negative or non-finite step counts as none, and one longer than 0.1 s as 0.1 s, as the neck's does.
+- **Its width** goes from the peek's 64 px at home to the 84 px carry width at `SNAP_LEN` away, smoothly with distance, so it shrinks back the same way.
+- **The neck** is a `Neck` for the 84 px body, stepped after the body each update, so the snap is the neck's own decision. Once the neck breaks, the free body stays inside the dock overlay, including on the step that breaks it.
+- **The end.** `release` sends the body home, whatever ended the drag. Before the snap, that's the spring back into the peek. After it, that's the invalid drop until C2b has drop targets. `settled` says when it's home and still, so the pull can go.
+- **Reduced motion.** The body is wherever the pointer puts it, with no spring, and goes home in one step. The neck still breaks, so the snap and the cancellation behave the same.
+
+The drag owner turns GPUI's mouse events, Esc and the native bridge's capture losses into one ending per drag. Each press that starts a drag gets a new generation. While a drag is live, another press starts nothing.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Live: press, a new generation
+    Live --> Live: move with a button held
+    Live --> Idle: the initiating button's release, Released
+    Live --> Idle: Esc, Cancelled
+    Live --> Idle: another button's release, a move with none held, capture taken, or the window closed, Lost
+```
+
+- **A capture loss** applies only to a drag that started before the loss was emitted, on the performance counter, so one queued during an earlier drag can't end the next. A loss caused by the initiating button's own release is ignored, because the release that follows is the ending.
+- **After the ending,** every event is ignored until the next press: a late release after Esc, a second Esc, or a loss after a release.
+- **Only `Released`** may have effects, and the caller still validates the drop. `Cancelled` and `Lost` never do.
+
+Tests cover releasing outside the peek, Esc followed by a late release, a second button's press and release, the voluntary capture change, losses from outside and by another button, a loss drained after a newer drag began (including one stamped at that drag's own start), a missed release, the window closing, and events with no drag. For the pull, they cover following from the press point, springing home before and after the snap, staying inside the overlay, reduced motion, bad and long steps, and the same motion at 72 and 144 frames a second.
+
 ## Expressions
 
 `expression.rs`'s `Animator` turns a `Mood` (idle, listening, thinking, speaking) into frames.

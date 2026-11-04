@@ -3,6 +3,7 @@
 
 mod deletes;
 pub(crate) mod diagnostics;
+mod drag;
 mod drawings;
 mod escape;
 mod frame_rate;
