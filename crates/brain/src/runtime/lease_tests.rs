@@ -1,10 +1,8 @@
 //! The send lease across the brain: a quit keeps pumping a granted send's settlement and the
 //! delete it held, and a held delete never reaches the store when the brain stops first.
 
-use std::time::Duration;
-
 use kumochi_protocol::message::{ControlToBrain, ThreadId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
 use super::deletes::listed;
@@ -18,12 +16,12 @@ use crate::test_support::Scratch;
 /// The first task: a fresh store's thread 1 is the main thread.
 const T: ThreadId = ThreadId(2);
 
-/// A transport that asks before sending and keeps its lease for `hold` after the grant, even
+/// A transport that asks before sending and keeps its lease until the test releases it, even
 /// once its round is dropped, as a send whose last bytes are still going out would.
 #[derive(Debug)]
 struct Holds {
-    hold: Duration,
     granted: mpsc::UnboundedSender<()>,
+    release: watch::Receiver<bool>,
 }
 
 impl Engine for Holds {
@@ -33,13 +31,13 @@ impl Engine for Holds {
         events: mpsc::Sender<TurnEvent>,
         gate: SendGate,
     ) -> Round {
-        let (hold, granted) = (self.hold, self.granted.clone());
+        let (granted, mut release) = (self.granted.clone(), self.release.clone());
         Box::pin(async move {
             let _open = events;
             if let Answer::Grant(lease) = gate.ask().await {
                 granted.send(()).ok();
                 tokio::spawn(async move {
-                    tokio::time::sleep(hold).await;
+                    release.wait_for(|released| *released).await.ok();
                     drop(lease);
                 });
             }
@@ -48,11 +46,18 @@ impl Engine for Holds {
     }
 }
 
-/// A brain whose sends hold their leases for `hold`; the receiver hears each grant.
-fn holding(scratch: &Scratch, hold: Duration) -> (Brain, mpsc::UnboundedReceiver<()>) {
+/// A brain whose sends hold their leases until the sender says so; the receiver hears each grant.
+fn holding(scratch: &Scratch) -> (Brain, mpsc::UnboundedReceiver<()>, watch::Sender<bool>) {
     let (granted, grants) = mpsc::unbounded_channel();
-    let brain = patient_brain_with(scratch, Box::new(Holds { hold, granted }));
-    (brain, grants)
+    let (release, released) = watch::channel(false);
+    let brain = patient_brain_with(
+        scratch,
+        Box::new(Holds {
+            granted,
+            release: released,
+        }),
+    );
+    (brain, grants, release)
 }
 
 fn delete() -> ControlToBrain {
@@ -63,10 +68,15 @@ fn delete() -> ControlToBrain {
     }
 }
 
+fn is_delete(seen: &Seen) -> bool {
+    matches!(seen, Seen::StoreOpQueued(StoreOp::Delete { .. }))
+}
+
 #[tokio::test]
 async fn quit_with_a_held_lease_pumps_settlement_and_held_deletes() {
     let scratch = Scratch::new("quit-lease");
-    let (mut brain, mut grants) = holding(&scratch, Duration::from_millis(300));
+    let (mut brain, mut grants, release) = holding(&scratch);
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -84,18 +94,38 @@ async fn quit_with_a_held_lease_pumps_settlement_and_held_deletes() {
     let Ended::Quit { deadline } = ended else {
         panic!("expected a quit, got {ended:?}");
     };
-    assert_eq!(brain.quit(deadline).await, Quit::Complete);
+    let settle = async {
+        let draining = async {
+            while let Some(seen) = observed.recv().await {
+                assert!(
+                    !is_delete(&seen),
+                    "the delete went out while its lease was held"
+                );
+                if seen == Seen::QuitDraining {
+                    return;
+                }
+            }
+        };
+        timeout(PATIENCE, draining).await.expect("draining in time");
+        release.send(true).expect("the holder waits");
+    };
+    let (quit, ()) = tokio::join!(brain.quit(deadline), settle);
+    assert_eq!(quit, Quit::Complete);
+    let mut queued = 0;
+    while let Ok(seen) = observed.try_recv() {
+        queued += usize::from(is_delete(&seen));
+    }
     assert_eq!(
-        listed(&scratch),
-        0,
-        "the held delete went out once the send settled"
+        queued, 1,
+        "the held delete went out once, after the settlement"
     );
+    assert_eq!(listed(&scratch), 0);
 }
 
 #[tokio::test]
 async fn a_held_delete_is_not_committed_or_reported_after_restart() {
     let scratch = Scratch::new("restart-lease");
-    let (mut brain, mut grants) = holding(&scratch, Duration::from_secs(3600));
+    let (mut brain, mut grants, _held) = holding(&scratch);
     let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -118,10 +148,7 @@ async fn a_held_delete_is_not_committed_or_reported_after_restart() {
     );
     brain.close().await;
     while let Ok(seen) = observed.try_recv() {
-        assert!(
-            !matches!(seen, Seen::StoreOpQueued(StoreOp::Delete { .. })),
-            "the held delete reached the store"
-        );
+        assert!(!is_delete(&seen), "the held delete reached the store");
     }
     assert_eq!(
         listed(&scratch),

@@ -142,6 +142,7 @@ impl Coordinator {
         }
         for thread in self.held_deletes() {
             if sources.contains(&thread) {
+                self.refused_delete = true;
                 self.deleted(thread, Deleted::NotHidden, None, effects)?;
             }
         }

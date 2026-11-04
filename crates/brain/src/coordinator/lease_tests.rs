@@ -292,6 +292,10 @@ fn a_send_that_never_settles_refuses_its_held_deletes_and_stops_granting() {
     let mut expected = ends_failed(Failure::Engine);
     expected.push(told(B, Deleted::NotHidden));
     assert_eq!(core.handle(due(lease(R, 1, 1))), Ok(expected));
+    assert!(
+        core.refused_delete(),
+        "a quit after this refusal is incomplete"
+    );
     assert_eq!(
         core.handle(due(lease(R, 1, 1))),
         Err(Stale),
