@@ -298,7 +298,7 @@ mod tests {
         let fixture = Fixture::parse("0 step first\n1000 step second").expect("parses");
         let (inputs, mut received) = mpsc::channel(16);
         let _cancel = start(&fixture, request(), inputs, gate());
-        let mut core = Coordinator::new(ThreadId(1), ThreadId(1), RunId(2), Vec::new());
+        let mut core = Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(2), Vec::new());
         core.handle(Input::Turn {
             thread: Some(ThreadId(1)),
             text: "go".to_owned(),
@@ -329,6 +329,7 @@ mod tests {
                     run: RunId(3),
                     thread: ThreadId(1),
                     phase: Phase::Answering,
+                    error: None,
                 }),
                 Effect::Store(StoreOp::CommitStep {
                     thread: ThreadId(1),

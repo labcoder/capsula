@@ -89,7 +89,7 @@ fn typed_brain_with_steps(
             main,
             high,
             Vec::new(),
-            Box::new(Fixture::parse("").expect("fixture")),
+            crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
             scratch.config(),
             crate::test_support::accounts(scratch),
         )
@@ -184,7 +184,7 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
         main,
         high,
         Vec::new(),
-        Box::new(Fixture::parse("").expect("fixture")),
+        crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
     )
@@ -521,7 +521,7 @@ async fn a_refused_snapshot_scene_is_durably_cleared_before_the_other_scene_is_d
         .clear();
     let (last_thread, last_run) = store.high_water().expect("high water");
     brain.coordinator =
-        crate::coordinator::Coordinator::new(main, last_thread, last_run, Vec::new());
+        crate::coordinator::Coordinator::ready_for_tests(main, last_thread, last_run, Vec::new());
     assert!(brain.coordinator.restore_drawings(Ok(recovery)).is_empty());
     drop(store);
     let (out, mut controls) = mpsc::channel(4);
@@ -589,7 +589,7 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
         main,
         high,
         Vec::new(),
-        Box::new(Fixture::parse("").expect("fixture")),
+        crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
     )
@@ -723,7 +723,7 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
         main,
         high,
         Vec::new(),
-        Box::new(Fixture::parse("").expect("fixture")),
+        crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
     )
