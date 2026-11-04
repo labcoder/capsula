@@ -114,7 +114,7 @@ neck's and the body's bands.
   - **The stub** is the frozen curve from 0.21 to the attachment. It travels with the live body, keeps its frozen shape, and melts up into the cloud within 0.12 s.
   - The body springs back to round with a damped wobble. After the recoil, nothing of the neck is drawn.
 - **Reduced motion.** The neck still breaks at the same point, so the snap and drop decisions don't change, but no goo is drawn, the body stays round, and there's no recoil. Turning it on mid-recoil ends the recoil.
-- **Pieces.** `Piece::Neck`, `Drip` and `Stub` are shaded separately, each into the image of its own `bounds`. A region covers the piece's capsule ends and its root fillet's ellipse, each padded by a tenth of the body.
+- **Pieces.** `Piece::Neck`, `Drip` and `Stub` are shaded separately, each into the image of its own `bounds`. A region covers the piece's capsule ends and its root fillet's ellipse, each padded. The drip pads by a tenth of the body. The neck and the stub, which melt into the body, pad by 1.5 fillets (0.135 of the body), the furthest from a capsule the shader blends in the body's field, so the join's shading stays inside the region. A test shades a stub into a region 40 px wider and finds nothing outside its own.
 - **Caps.** Each piece's curve lies in the hull of its own control points, so its region has a fixed cap for a body size:
   - the neck within 144 of the dock;
   - the drip within (2u − u²) × 144 = 42.39 of the dock at u = 0.16. With the control and the end perpendicular, the point at 0.16 is (38.7072, 3.6864), and 42.3936 is the collinear bound;
@@ -123,7 +123,7 @@ neck's and the body's bands.
   Its widest capsule, fillet and pad go around that, rounded outward. Tests put each piece inside its cap after a 3,000 px jump on the crossing step, with extremal controls, and after far moves on the first recoil frame and mid-recoil. They also check that a short sideways pull loses nothing outside its region.
 
 `GooShader` shades a piece into a straight-alpha BGRA image of its region at a caller-chosen scale, half the display's for D1, up to `MAX_SCALE`, 1.0.
-- **Scratch.** `GooShader::neck` serves the attached neck and the drip, which never coexist. `GooShader::stub` serves the stub. Each one's tile table and distance rows are sized once, from its pieces' caps at `MAX_SCALE` (344 and 607 pixels a side for an 84 px body), and reused, so shading allocates nothing. Tests check the exact limit and one pixel over on each axis.
+- **Scratch.** `GooShader::neck` serves the attached neck and the drip, which never coexist. `GooShader::stub` serves the stub. Each one's tile table and distance rows are sized once, from its pieces' caps at `MAX_SCALE` (350 and 613 pixels a side for an 84 px body), and reused, so shading allocates nothing. Tests check the exact limit and one pixel over on each axis.
 - **Skipping work.** Tiles that no capsule, fillet or body can reach take the clear colour without shading. Every pixel is written once.
 - **Colour.** Near the body the neck and the stub melt into the crown through a smooth minimum. They're lit with the body's surface and finish functions, so they're the same material. Clear pixels carry the theme's top colour, or the blended surface colour where they're shaded, and none is black.
 - **Errors.** A wrong buffer, or a region or scale past the scratch, returns `GooMismatch`.
