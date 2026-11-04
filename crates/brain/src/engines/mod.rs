@@ -8,6 +8,11 @@
 //! [`Cancel`] aborts the pump and the engine's future with it, even while the pump waits on a
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the claude engine (slice 8's C5b) drives it")
+)]
+mod claude_code;
 pub(crate) mod fixture;
 #[cfg_attr(
     not(test),
@@ -219,6 +224,8 @@ pub enum TurnEvent {
         /// The provider's item as JSON: the same value it sent, though not always the same bytes.
         item: Opaque,
     },
+    /// The question's tokens, sent once before an agent engine's `Finished`.
+    Usage(Usage),
     /// The round ended.
     Finished(Finish),
 }
@@ -247,6 +254,7 @@ impl fmt::Debug for TurnEvent {
                 .field("index", index)
                 .field("item", item)
                 .finish(),
+            Self::Usage(usage) => f.debug_tuple("Usage").field(usage).finish(),
             Self::Finished(finish) => f.debug_tuple("Finished").field(finish).finish(),
         }
     }
@@ -273,6 +281,46 @@ pub enum EngineFailure {
     Provider,
     /// The Responses stream failed, was refused, or broke its rules.
     Stream(crate::connections::model::error::Failure),
+    /// The question hit the native turn cap.
+    TurnCap,
+    /// Claude Code's stdout broke its rules.
+    ClaudeStream(ClaudeStreamFailure),
+}
+
+/// How Claude Code's stdout broke its rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaudeStreamFailure {
+    /// A line over the line bound.
+    LineTooLong,
+    /// More stdout than the question's budget.
+    Budget,
+    /// A line that isn't JSON or isn't UTF-8.
+    NotJson,
+    /// A known message with the wrong shape.
+    Mistyped,
+}
+
+/// Token counts as the provider reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tokens {
+    /// Uncached input.
+    pub input: u32,
+    /// Output.
+    pub output: u32,
+    /// Input read from the prompt cache.
+    pub cache_read: u32,
+    /// Input written to the prompt cache.
+    pub cache_write: u32,
+}
+
+/// One question's tokens: the whole question, and its first native request apart, for the
+/// prompt-cache decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// Every native request together.
+    pub whole: Tokens,
+    /// The first native request alone, when the stream showed it.
+    pub first_request: Option<Tokens>,
 }
 
 /// A provider's id for one tool call: ASCII and at most [`CallId::MAX`] bytes.
