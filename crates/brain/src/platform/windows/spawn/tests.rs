@@ -237,8 +237,39 @@ fn pipes_carry_stdin_to_the_child_and_its_stdout_back() {
     );
 }
 
+/// Runs the ignored test `name` alone in a child of this test binary, so a handle it makes
+/// inheritable can't reach a child another test starts at the same time.
+fn run_alone(name: &str) {
+    let job = Job::new().expect("job");
+    let exe = exe();
+    let args: Vec<OsString> = ["--exact", name, "--ignored", "--test-threads=1"]
+        .map(OsString::from)
+        .to_vec();
+    let mut child = spawn(&Launch {
+        exe: &exe,
+        args: &args,
+        cwd: exe.parent().expect("folder"),
+        env: &base_env(),
+        stdio: Stdio::Piped,
+        jobs: &[&job],
+    })
+    .expect("spawn");
+    let ended = read_to_end(child.stdout.take().expect("stdout"));
+    let out = ended
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the isolated test ends");
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("test result: ok. 1 passed"), "{text}");
+}
+
 #[test]
 fn an_inheritable_brain_handle_stays_with_the_brain() {
+    run_alone("platform::windows::spawn::tests::isolated_inheritable_handle");
+}
+
+#[test]
+#[ignore = "runs alone in its own process; see run_alone"]
+fn isolated_inheritable_handle() {
     let job = Job::new().expect("job");
     let (reader, writer) = io::pipe().expect("pipe");
     set_inheritable(writer.as_raw_handle()).expect("inheritable");
@@ -247,7 +278,6 @@ fn an_inheritable_brain_handle_stays_with_the_brain() {
     // The only writer left would be the child's copy, if it had inherited one.
     let ended = read_to_end(reader);
     assert_eq!(
-        // Long enough for a test's own short-lived std child, which may inherit it, to end.
         ended
             .recv_timeout(Duration::from_secs(10))
             .expect("EOF while the child lives"),
@@ -440,6 +470,42 @@ fn bad_environment_entries_are_refused() {
         let error = environment_block(&bad).expect_err("refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
     }
+}
+
+#[test]
+fn a_nul_or_relative_path_is_refused_before_any_child_starts() {
+    let job = Job::new().expect("job");
+    let exe = exe();
+    let folder = exe.parent().expect("folder").to_owned();
+    let sentinel: OsString = "later-sentinel".into();
+    let nul_exe = PathBuf::from(format!("{}\0tail", exe.display()));
+    let nul_cwd = PathBuf::from(format!("{}\0tail", folder.display()));
+    let cases: [(&Path, Vec<OsString>, &Path); 7] = [
+        (&exe, vec!["first\0tail".into(), sentinel.clone()], &folder),
+        (&exe, vec!["\0first".into(), sentinel.clone()], &folder),
+        (&nul_exe, vec![sentinel], &folder),
+        (Path::new("\0"), vec![], &folder),
+        (&exe, vec![], &nul_cwd),
+        (Path::new("kumochid.exe"), vec![], &folder),
+        (&exe, vec![], Path::new("")),
+    ];
+    for (exe, args, cwd) in &cases {
+        let error = spawn(&Launch {
+            exe,
+            args,
+            cwd,
+            env: &base_env(),
+            stdio: Stdio::Piped,
+            jobs: &[&job],
+        })
+        .expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{exe:?} {cwd:?}");
+    }
+    assert_eq!(
+        job.active_processes().expect("count"),
+        0,
+        "no child started"
+    );
 }
 
 #[test]
