@@ -683,7 +683,8 @@ ordinary clear path, keeping its history, instead of cutting it.
 `layout::recover_all` recovers a visible batch for the shell: one result per source,
 in input order, and one new `GlobalBudget`. Each scene recovers alone. Scenes that
 recover are charged in input order and bound to that budget privately, so `stop`,
-`clear` and `admit` accept only it; there is no public adopt or bind call. A failed
+`clear` and `admit` accept only it. The shell's consuming `SceneBinding::bind` adopts
+that already-charged state without charging it twice or advancing the budget. A failed
 scene charges nothing, and neither does a recovered scene that would take the batch
 past a global cap with the scenes before it: it fails whole, with revision zero and
 `OverBudget`. Once `cancel` is set, the scenes still preparing fail with `Cancelled`.
@@ -779,7 +780,7 @@ must measure below 64 MiB before v1; if it does not, revisit bounded waiting wit
 release condition rather than raising the cap. These are requested Rust allocation bytes,
 not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers sit outside
 the presenter allowance, as does the dropper queue; returned consumption owners do not.
-v1 still needs bounded admission, admission at most 1 ms, clear/cut/eviction/timeout tails
+v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
 backlog grows. Queue attribution must be corrected before relying on its churn meter.
 
@@ -894,14 +895,40 @@ membership, ordinals, full log and retained counts, and every received frame byt
 its header. It returns credit per consumed chunk so recovery can exceed the data window;
 only pre-membership chunks and the waiting live suffix withhold bounded credit.
 
+One ordered admission lane holds a read-only `SceneRead` on a worker. It builds a protected
+`DetachedCandidate` without a global budget; only the non-cloneable `SceneBinding` can
+install it. Application checks the snapshot's owner, context, revision and mutation,
+all current global caps, and unique mutable ownership before changing either the scene
+or its charge. Rejected candidates leave both unchanged. There is no deep-copy fallback
+when a read is still alive. The brain keeps its ordinary admit/commit API.
+
+Later mutating scene frames remain FIFO behind admission, including removal and cut
+acknowledgements. The lane's frame and held frames share the 512 KiB data window, with
+credit withheld until consumption or current-session abandonment. Credit never crosses
+into a replacement connection. Admission, preparation and recovery share the same eight
+worker/answer leases, including cancelled workers and answers awaiting delivery.
+
+The lane's one 250 ms deadline begins when its frame reaches the head, including worker-slot
+waiting. Tick and completion reject at the same exact boundary. An admission timeout clears
+only the affected scene, including any recovered rest, and releases only its previously
+mirrored semantic usage. Its durable tombstone and ordinary ClearDrawing resend intent
+survive failed delivery and reconnect. Late answers, commits and cut acknowledgements
+cannot restore that scene or release its charge twice. A timely current validation or
+apply error still ends the connection; it is not converted into this timeout policy.
+
 ```mermaid
 flowchart LR
-    Pipe[Typed pipe frames] --> Assembly[Bounded log assembly]
+    Pipe[Typed pipe frames] -->|snapshots| Assembly[Bounded log assembly]
     Assembly --> Recovery[Scene-local batch recovery]
     Recovery --> Mirror[Canonical mirror and shared budget]
+    Pipe -->|live commits| Lane[Ordered admission lane]
+    Lane --> Candidate[Read-only worker admission]
+    Candidate --> Apply[Validate stamps, current caps and uniqueness]
+    Apply --> Mirror
     Mirror --> Worker[Serial immutable preparation jobs]
     Worker --> Publish[Validate job, cut, index and residency]
     Watchdog[Independent deadline timer] --> Mirror
+    Watchdog --> Lane
 ```
 
 GPUI's shared text system crosses to the background executor; each worker constructs its
@@ -929,8 +956,13 @@ semantic retirement, and returns the protected charged owner plus scheduler effe
 scenes, consumed indices, out-of-order requests, missing ready results and insufficient
 residency leave state unchanged. Freeing a window position immediately gives its next
 successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`; outstanding-admission serialization and its Busy/wake contract belong to
-the following bounded-admission layer.
+and `StepShown`. During an admission read, a valid consumption request returns Busy and
+records one pending request without changing semantic state, residency or window positions.
+Returning the read offers a wake/retry point before the next admission for that scene.
+A Residency refusal instead fails without waiting for bytes; the activation caller must
+handle it explicitly, since a ready head has no watchdog or guaranteed owner-release wake.
+If that retry is refused for residency, its pending barrier remains until successful
+consumption or an explicit halt, so ignoring the refusal would also block the FIFO.
 
 Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
@@ -942,6 +974,9 @@ scenes clear and late answers cannot restore them. Stop clears incomplete recove
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
 acknowledgement reaches the exact final committed revision. One new commit permits one new
 effective cut; stale acknowledgements for removed scenes do nothing.
+Stop also covers a scene whose begin is still held behind admission: the brain's
+unseen-scene job cuts unnamed, unactivated scenes from that run. Their acknowledgements
+stay FIFO behind the held commits, so the shell does not send a second cancelled cut.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.

@@ -16,7 +16,7 @@ mod root_store;
 pub(crate) use credential::WindowsCredentialStore;
 pub use folders::{config_dir, data_dir, session_lock_path};
 pub use fs::{free_space, links_unsupported, replace_file};
-pub use job::{Helper, Job};
+pub use job::{ChildPipes, Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
 };

@@ -11,6 +11,7 @@ use gpui_kit::{
 
 use super::diagnostics::{self, PendingPaint};
 use super::geometry::Layout;
+use super::kumo_view::PullSite;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
 use super::{OpenError, Presence, platform};
@@ -377,6 +378,11 @@ impl Presence {
                     dock.drawn = drawn;
                     cx.notify();
                 });
+                let site = PullSite {
+                    line: placement.frame.paint,
+                    slot: placement.layout.dock,
+                };
+                self.kumo.update(cx, |kumo, _| kumo.set_site(Some(site)));
                 true
             }
             Attempt::Failed {
@@ -394,6 +400,7 @@ impl Presence {
                         dock.paint = None;
                         cx.notify();
                     });
+                    self.kumo.update(cx, |kumo, _| kumo.set_site(None));
                 }
                 if retry {
                     on_next_frame(window, owner, Self::retry_line);

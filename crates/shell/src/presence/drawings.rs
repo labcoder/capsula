@@ -43,6 +43,10 @@ impl Presence {
                 Effect::Recover(job) => {
                     Self::scene_worker(move |measure| job.run(measure), cx);
                 }
+                Effect::Admit(job) => {
+                    Self::scene_worker(move |_| job.run(), cx);
+                }
+                Effect::ConsumptionReady { .. } => {}
             }
         }
         self.scene_watchdog(cx);

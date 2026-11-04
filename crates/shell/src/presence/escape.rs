@@ -1,5 +1,6 @@
 //! Local Esc routing for the focused surface.
 
+use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
 use crate::escape;
 
@@ -34,6 +35,11 @@ impl Presence {
         };
         let action = local_decision(self.activity, panel, &self.presenter);
         let tell = match action {
+            Escape::CancelPull => {
+                self.kumo
+                    .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
+                None
+            }
             Escape::Stop => self.runs.stop(),
             Escape::Clear => {
                 let effect = self.runs.clear();
@@ -80,7 +86,10 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        self.activity = Self::activity(&self.runs, panel, &self.presenter);
+        self.activity = Activity {
+            pulling: self.kumo.read(cx).pull_live(),
+            ..Self::activity(&self.runs, panel, &self.presenter)
+        };
         self.refresh_conversation(cx);
         // Stamped once the local stop or clear is applied, for the Esc smoke's timing.
         diagnostics::record(cx, format_args!("escape action={action:?}"));
