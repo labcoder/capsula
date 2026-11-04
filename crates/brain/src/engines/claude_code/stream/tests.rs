@@ -500,9 +500,7 @@ fn leak(text: &str) -> Option<&'static str> {
         }
         if rest.first() == Some(&b'/')
             && before.is_none_or(|byte| byte.is_ascii_whitespace() || b"\"'=(,".contains(&byte))
-            && rest
-                .get(1)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || b"~._".contains(byte))
+            && rest.get(1).is_some_and(|byte| !byte.is_ascii_whitespace())
         {
             return Some("rooted path");
         }
@@ -556,6 +554,10 @@ fn the_leak_check_catches_paths_and_uuids_in_any_spelling() {
         r#"{"home":"\u002fhome\u002fexample"}"#,
         r#"{"args":["--config", "/etc/x"]}"#,
         r#"{"note":"run in /tmp now"}"#,
+        r#"{"home":"/é/private"}"#,
+        r#"{"home":"\u002f\u00e9\u002fprivate"}"#,
+        r#"{"share":"//server/share"}"#,
+        r#"{"share":"\u002f\u002fserver\u002fshare"}"#,
         r#"{"x":"Users\\someone"}"#,
         r#"{"session_id":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"}"#,
         r#"{"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0":1}"#,
