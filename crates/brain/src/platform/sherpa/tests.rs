@@ -416,20 +416,14 @@ fn a_preloaded_foreign_onnxruntime_is_a_conflict() {
     let scratch = Scratch::new("sherpa-conflict");
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     let exe = std::env::current_exe().expect("own path");
-    let output = std::process::Command::new(exe)
+    let stdout = run(std::process::Command::new(exe)
         .args([
             "--ignored",
             "--exact",
             "platform::sherpa::tests::child_preloads_a_foreign_onnxruntime",
         ])
-        .env(CHILD, scratch.dir())
-        .output()
-        .expect("child runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && stdout.contains("1 passed"),
-        "the child passed: {stdout}"
-    );
+        .env(CHILD, scratch.dir()));
+    assert!(stdout.contains("1 passed"), "the child passed: {stdout}");
 }
 
 /// Runs only in the child process: loads a harmless system DLL renamed `onnxruntime.dll` from a
@@ -478,8 +472,19 @@ fn natives_dir() -> PathBuf {
     )
 }
 
+/// Runs `command` to the end and returns its stdout; it must succeed. Only the start holds
+/// [`crate::platform::spawn_lock`], since handles are inherited only then.
+#[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
 fn run(command: &mut std::process::Command) -> String {
-    let output = command.output().expect("the tool runs");
+    let child = {
+        let _spawning = crate::platform::spawn_lock();
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the tool starts")
+    };
+    let output = child.wait_with_output().expect("the tool runs");
     assert!(output.status.success(), "{command:?} failed: {output:?}");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
