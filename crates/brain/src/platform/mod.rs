@@ -31,5 +31,7 @@ pub use windows::{
     data_dir, free_space, launch_detached, links_unsupported, replace_file, session_id,
     session_lock_path, trust_roots,
 };
+#[cfg(windows)]
+pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(all(test, windows))]
 pub(crate) use windows::{PipeClient, test_pair};

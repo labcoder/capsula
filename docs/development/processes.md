@@ -30,6 +30,24 @@ flowchart LR
   Its [supervisor](screen.md) owns its pipes, deadlines and respawns.
 - Helpers inherit no handles except the screen worker's two explicit stdin/stdout handles.
   Nothing secret is ever on their command lines.
+- **Starting a helper with an explicit launch** (`platform::spawn`, for Claude Code) takes an
+  argument vector, a working folder and the whole environment: nothing is inherited from the
+  brain. Arguments are quoted by the rules `CommandLineToArgvW` reads, so an empty argument
+  survives. A command line over 32,767 UTF-16 units, or an environment name that's empty, holds
+  `=`, or repeats another without regard to case, is refused before anything starts. The block
+  is sorted by ordinal uppercase, and an empty environment is passed as an empty block, never a
+  null pointer, which would inherit the brain's. A `Launch` prints counts, never argument or
+  environment values. It holds `platform::spawn_lock()` from marking its handles inheritable
+  until they're closed, as every other process start in the brain does.
+- **Its standard handles** are one of three:
+  - `Piped`: three anonymous pipes, no window. The brain gets blocking ends; the async bridge
+    belongs to the supervisor that owns a run's lifetime.
+  - `Null`: the `NUL` device, no window.
+  - `Console`: a new visible console with its own handles, for a sign-in the user must be able to
+    answer. The brain gets no pipe and sees none of it.
+- **Why Win32 and not std:** std's `Command` can't place a process in a job from its first
+  instruction, and GPUI has no process API. macOS counterpart: `posix_spawn` with its own process
+  group and an explicit `envp`, ended with `killpg` (unverified).
 - **The shell** isn't in any job, so a brain crash doesn't take the window with it. Each process
   starts the other detached and, where the starting job allows it, outside that job.
 
