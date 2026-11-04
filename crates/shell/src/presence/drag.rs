@@ -65,6 +65,9 @@ struct Live {
     button: MouseButton,
     /// The press's time on the performance counter.
     start: i64,
+    /// The initiating button's own release took capture, so its `Up` should follow in the same
+    /// dispatch. [`DragOwner::reconcile`] loses the drag if it didn't.
+    loss_pending: bool,
 }
 
 #[derive(Debug, Default)]
@@ -86,6 +89,7 @@ impl DragOwner {
             generation,
             button,
             start,
+            loss_pending: false,
         });
         Some(generation)
     }
@@ -104,11 +108,14 @@ impl DragOwner {
                 pressed: Some(_),
             } => return Outcome::Moved(live.generation, at),
             Event::Up { button, at } if button == live.button => End::Released(at),
-            // A loss emitted before this drag began is an earlier drag's. The initiating
-            // button's own release is voluntary: its `Up` is the ending.
-            Event::CaptureLost { at, released }
-                if at <= live.start || released == Some(live.button) =>
-            {
+            // A loss emitted before this drag began is an earlier drag's.
+            Event::CaptureLost { at, .. } if at <= live.start => return Outcome::Ignored,
+            // The initiating button's own release is voluntary: its `Up` is the ending.
+            Event::CaptureLost { released, .. } if released == Some(live.button) => {
+                self.live = Some(Live {
+                    loss_pending: true,
+                    ..live
+                });
                 return Outcome::Ignored;
             }
             Event::Escape => End::Cancelled,
@@ -119,6 +126,18 @@ impl DragOwner {
         };
         self.live = None;
         Outcome::Ended(live.generation, end)
+    }
+
+    /// Call at the end of the dispatch that delivered a capture loss: a voluntary loss whose
+    /// release never came ends the drag as lost, so no drag outlives its capture.
+    pub(crate) fn reconcile(&mut self) -> Outcome {
+        match self.live {
+            Some(live) if live.loss_pending => {
+                self.live = None;
+                Outcome::Ended(live.generation, End::Lost)
+            }
+            _ => Outcome::Ignored,
+        }
     }
 }
 
@@ -203,6 +222,29 @@ mod tests {
             owner.handle(up(LEFT, 7.0)),
             Outcome::Ended(g, End::Released(at(7.0, 0.0)))
         );
+        assert_eq!(owner.reconcile(), Outcome::Ignored);
+    }
+
+    #[test]
+    fn a_voluntary_loss_with_no_release_is_lost_at_the_end_of_its_dispatch() {
+        let (mut owner, g) = dragging(10);
+        assert_eq!(owner.handle(lost(20, Some(LEFT))), Outcome::Ignored);
+        assert_eq!(owner.reconcile(), Outcome::Ended(g, End::Lost));
+        assert_eq!(owner.reconcile(), Outcome::Ignored);
+        assert_eq!(owner.live(), None);
+        let next = owner.press(LEFT, 30);
+        assert_eq!(next, Some(Generation(2)));
+        assert_eq!(
+            owner.handle(up(LEFT, 3.0)),
+            Outcome::Ended(Generation(2), End::Released(at(3.0, 0.0)))
+        );
+    }
+
+    #[test]
+    fn reconciling_a_drag_with_no_pending_loss_does_nothing() {
+        let (mut owner, g) = dragging(10);
+        assert_eq!(owner.reconcile(), Outcome::Ignored);
+        assert_eq!(owner.live(), Some(g));
     }
 
     #[test]

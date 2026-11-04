@@ -152,10 +152,10 @@ The cost per pixel is about 110 to 160 ns, highest in the smallest regions, like
 
 `pull.rs`'s `Pull` is what a drag does to Kumo, frame by frame. `presence/drag.rs`'s `DragOwner` decides when the drag ends. Both are pure, and C2a wires them to the peek and the dock overlay.
 
-- **The body.** It follows the pointer on a critically damped spring (28 per second, 24 substeps an update), keeping the offset at which it was pressed, so it doesn't jump to the pointer. A negative or non-finite step counts as none, and one longer than 0.1 s as 0.1 s, as the neck's does.
+- **The body.** It follows the pointer on a critically damped spring (28 per second, 24 substeps an update), keeping the offset at which it was pressed, so it doesn't jump to the pointer. It's integrated relative to home, so near home its small steps aren't rounded away against screen coordinates. A negative or non-finite step counts as none, and one longer than 0.1 s as 0.1 s, as the neck's does.
 - **Its width** goes from the peek's 64 px at home to the 84 px carry width at `SNAP_LEN` away, smoothly with distance, so it shrinks back the same way.
-- **The neck** is a `Neck` for the 84 px body, stepped after the body each update, so the snap is the neck's own decision. Once the neck breaks, the free body stays inside the dock overlay, including on the step that breaks it.
-- **The end.** `release` sends the body home, whatever ended the drag. Before the snap, that's the spring back into the peek. After it, that's the invalid drop until C2b has drop targets. `settled` says when it's home and still, so the pull can go.
+- **The neck** is a `Neck` for the 84 px body, stepped after the body each update, so the snap is the neck's own decision. Once the neck breaks, the free body stays inside the dock overlay, including on the step that breaks it. The snap is decided on the body's unclamped path, and then the neck takes the clamped body without another step, so the stub stays on the body it's drawn against. An overlay narrower or shorter than the body can't hold it: on that axis the body's corner sits at the overlay's origin and it overhangs the far edge.
+- **The end.** `release` sends the body home, whatever ended the drag. Before the snap, that's the spring back into the peek. After it, that's the invalid drop until C2b has drop targets. Once the released body is within 0.05 px of home and slower than 0.05 px a second, it lands exactly home with no velocity, and `settled` says so, so the pull can go idle.
 - **Reduced motion.** The body is wherever the pointer puts it, with no spring, and goes home in one step. The neck still breaks, so the snap and the cancellation behave the same.
 
 The drag owner turns GPUI's mouse events, Esc and the native bridge's capture losses into one ending per drag. Each press that starts a drag gets a new generation. While a drag is live, another press starts nothing.
@@ -167,14 +167,14 @@ stateDiagram-v2
     Live --> Live: move with a button held
     Live --> Idle: the initiating button's release, Released
     Live --> Idle: Esc, Cancelled
-    Live --> Idle: another button's release, a move with none held, capture taken, or the window closed, Lost
+    Live --> Idle: another button's release, a move with none held, capture taken, the window closed, or no release by the end of its own capture loss's dispatch, Lost
 ```
 
-- **A capture loss** applies only to a drag that started before the loss was emitted, on the performance counter, so one queued during an earlier drag can't end the next. A loss caused by the initiating button's own release is ignored, because the release that follows is the ending.
+- **A capture loss** applies only to a drag that started before the loss was emitted, on the performance counter, so one queued during an earlier drag can't end the next. A loss caused by the initiating button's own release is held, because the release that follows in the same dispatch is the ending. The caller calls `reconcile` at the end of the dispatch that delivered a loss: if that release never came, the drag ends there as `Lost`, so the next press starts a new generation instead of finding a drag still live.
 - **After the ending,** every event is ignored until the next press: a late release after Esc, a second Esc, or a loss after a release.
 - **Only `Released`** may have effects, and the caller still validates the drop. `Cancelled` and `Lost` never do.
 
-Tests cover releasing outside the peek, Esc followed by a late release, a second button's press and release, the voluntary capture change, losses from outside and by another button, a loss drained after a newer drag began (including one stamped at that drag's own start), a missed release, the window closing, and events with no drag. For the pull, they cover following from the press point, springing home before and after the snap, staying inside the overlay, reduced motion, bad and long steps, and the same motion at 72 and 144 frames a second.
+Tests cover releasing outside the peek, Esc followed by a late release, a second button's press and release, the voluntary capture change with and without its release, losses from outside and by another button, a loss drained after a newer drag began (including one stamped at that drag's own start), a missed release, the window closing, and events with no drag. For the pull, they cover following from the press point, springing home before and after the snap, landing exactly home at screen coordinates near 1280 and 2400 at 72 and 144 frames a second (down, sideways, and past the snap), the stub staying on the clamped body from the breaking step, staying inside the overlay, the exact widths at home, halfway and past the snap, reduced motion, bad and long steps, and the same motion at 72 and 144 frames a second.
 
 ## Expressions
 

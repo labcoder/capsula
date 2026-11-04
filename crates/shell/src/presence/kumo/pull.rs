@@ -20,7 +20,7 @@ const MAX_STEP: f32 = 0.1;
 /// Substeps per update, so the spring is stable at any frame rate.
 const SUBSTEPS: u8 = 24;
 /// How close to home, in logical pixels, and how slow, in logical pixels a second, a released
-/// body must be to count as home.
+/// body must be to land exactly home.
 const SETTLED: f32 = 0.05;
 
 pub(crate) struct Pull {
@@ -28,7 +28,9 @@ pub(crate) struct Pull {
     home: Vec2,
     /// The pointer's offset from the body's centre at the press, kept so the body doesn't jump.
     grip: Vec2,
-    body: Vec2,
+    /// The body's centre less `home`. Kept relative so the spring's small steps near home
+    /// aren't rounded away against large screen coordinates.
+    offset: Vec2,
     velocity: Vec2,
     target: Vec2,
     /// The dock overlay, which the free body stays inside.
@@ -46,7 +48,7 @@ impl Pull {
             neck,
             home,
             grip: press - home,
-            body: home,
+            offset: v2(0.0, 0.0),
             velocity: v2(0.0, 0.0),
             target: home,
             bounds,
@@ -90,36 +92,44 @@ impl Pull {
             inside(self.target)
         } else {
             self.target
-        };
+        } - self.home;
         if self.motion == Motion::Reduced {
-            self.body = target;
+            self.offset = target;
             self.velocity = v2(0.0, 0.0);
         } else if dt > 0.0 {
             let h = dt / f32::from(SUBSTEPS);
             for _ in 0..SUBSTEPS {
-                let pull = target - self.body;
+                let pull = target - self.offset;
                 let acc = v2(
                     SPRING * SPRING * pull.x - 2.0 * SPRING * self.velocity.x,
                     SPRING * SPRING * pull.y - 2.0 * SPRING * self.velocity.y,
                 );
                 self.velocity = self.velocity + v2(acc.x * h, acc.y * h);
-                self.body = self.body + v2(self.velocity.x * h, self.velocity.y * h);
+                self.offset = self.offset + v2(self.velocity.x * h, self.velocity.y * h);
             }
         }
-        self.neck.update(dt, self.body);
-        // The step that breaks the neck may have taken the body past the overlay's edge.
+        // Slow and close is rest, not a fast pass through home, so the pull can go idle.
+        if self.released && self.offset.len() <= SETTLED && self.velocity.len() <= SETTLED {
+            self.offset = v2(0.0, 0.0);
+            self.velocity = v2(0.0, 0.0);
+        }
+        // The snap is decided on the body's own path.
+        self.neck.update(dt, self.body());
+        // The step that breaks the neck may have taken the body past the overlay's edge. The
+        // neck then takes the clamped body without another step, so the stub stays on it.
         if free(&self.neck, self.released) {
-            self.body = inside(self.body);
+            self.offset = inside(self.body()) - self.home;
+            self.neck.update(0.0, self.body());
         }
     }
 
     pub(crate) fn body(&self) -> Vec2 {
-        self.body
+        self.home + self.offset
     }
 
     /// The body's width: the peek's at home, the carry width from [`SNAP_LEN`] away.
     pub(crate) fn width(&self) -> f32 {
-        let out = smoothstep(0.0, SNAP_LEN, (self.body - self.home).len());
+        let out = smoothstep(0.0, SNAP_LEN, self.offset.len());
         mix(PEEK_WIDTH, CARRY_WIDTH, out)
     }
 
@@ -127,9 +137,9 @@ impl Pull {
         &self.neck
     }
 
-    /// Whether the released body is home and still, so the pull can end.
+    /// Whether the released body is exactly home and still, so the pull can end.
     pub(crate) fn settled(&self) -> bool {
-        self.released && (self.body - self.home).len() <= SETTLED && self.velocity.len() <= SETTLED
+        self.released && self.offset == v2(0.0, 0.0) && self.velocity == v2(0.0, 0.0)
     }
 }
 
@@ -138,7 +148,7 @@ mod tests {
     use super::{CARRY_WIDTH, MAX_STEP, PEEK_WIDTH, Pull};
     use crate::presence::kumo::expression::Motion;
     use crate::presence::kumo::math::{Vec2, v2};
-    use crate::presence::kumo::neck::{Rect, SNAP_LEN};
+    use crate::presence::kumo::neck::{Piece, Rect, SNAP_LEN};
 
     const FRAME: f32 = 1.0 / 72.0;
     const DOCK: Vec2 = v2(400.0, 10.0);
@@ -163,10 +173,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "the width's ends are exact")]
     fn a_grab_starts_at_home_at_the_peek_width() {
         let pull = grab(Motion::Full);
         assert_eq!(pull.body(), HOME);
-        assert!((pull.width() - PEEK_WIDTH).abs() < 1e-6);
+        assert_eq!(pull.width(), PEEK_WIDTH);
         assert!(!pull.settled(), "a held pull isn't settled");
         assert!(!pull.neck().broken());
     }
@@ -199,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "the width's ends are exact")]
     fn past_the_snap_the_neck_breaks_and_the_free_body_stays_in_the_overlay() {
         let mut pull = grab(Motion::Full);
         pull.aim(v2(400.0, 900.0));
@@ -210,10 +222,7 @@ mod tests {
             "{:?}",
             pull.body()
         );
-        assert!(
-            (pull.width() - CARRY_WIDTH).abs() < 1e-6,
-            "past SNAP_LEN from home"
-        );
+        assert_eq!(pull.width(), CARRY_WIDTH, "past SNAP_LEN from home");
         assert!(bottom - HOME.y > SNAP_LEN);
         pull.release();
         run(&mut pull, 72);
@@ -222,6 +231,73 @@ mod tests {
             "the invalid drop goes home: {:?}",
             pull.body()
         );
+    }
+
+    #[test]
+    fn the_stub_stays_on_the_clamped_body_from_the_breaking_step() {
+        let mut pull = grab(Motion::Full);
+        pull.aim(v2(400.0, 900.0));
+        for dt in [0.1, FRAME, FRAME] {
+            pull.update(dt);
+            assert!(pull.neck().broken());
+            assert_eq!(pull.body(), v2(400.0, 300.0 - CARRY_WIDTH * 0.5));
+            // The stub's last capsule ends where the neck met the body's top.
+            let top = pull.body() - v2(0.0, CARRY_WIDTH * 0.12);
+            let r = pull
+                .neck()
+                .bounds(Piece::Stub)
+                .expect("a stub while recoiling");
+            let (lo, hi) = (r.origin, r.origin + r.size);
+            assert!(
+                (lo.x..=hi.x).contains(&top.x) && (lo.y..=hi.y).contains(&top.y),
+                "{r:?} {top:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_lands_exactly_home_at_screen_coordinates() {
+        let screen = Rect {
+            origin: v2(0.0, 0.0),
+            size: v2(2560.0, 1440.0),
+        };
+        // Down and aside, sideways, and far enough to break.
+        let pulls = [
+            (v2(60.0, 90.0), false),
+            (v2(60.0, 0.0), false),
+            (v2(-100.0, 200.0), true),
+        ];
+        for home in [v2(1280.0, 1200.0), v2(2400.0, 1200.0)] {
+            for rate in [72_u16, 144] {
+                for (reach, breaks) in pulls {
+                    let dt = 1.0 / f32::from(rate);
+                    let second = usize::from(rate);
+                    let mut pull =
+                        Pull::grab(home - v2(0.0, 34.0), home, home, screen, Motion::Full);
+                    pull.aim(home + reach);
+                    for _ in 0..second {
+                        pull.update(dt);
+                    }
+                    assert_eq!(pull.neck().broken(), breaks, "{home:?} {rate} {reach:?}");
+                    pull.release();
+                    let home_after = (1..=second).find(|_| {
+                        pull.update(dt);
+                        pull.settled()
+                    });
+                    assert!(home_after.is_some(), "{home:?} {rate} {reach:?}");
+                    assert_eq!(pull.body(), home);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "halfway to SNAP_LEN is exactly halfway")]
+    fn halfway_to_the_snap_the_body_is_halfway_to_the_carry_width() {
+        let mut pull = grab(Motion::Reduced);
+        pull.aim(HOME + v2(0.0, 72.0));
+        pull.update(FRAME);
+        assert_eq!(pull.width(), 74.0);
     }
 
     #[test]
