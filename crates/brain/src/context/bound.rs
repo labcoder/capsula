@@ -2,10 +2,9 @@
 //! for each item's and the body's own fields [guess]. 13a checks the serialised body again.
 
 use super::{InputItem, ModelRequest, ToolSchema};
-use crate::engines::CallId;
 
-/// The fields around each item, and its call id at its longest.
-const ITEM_OVERHEAD: usize = 64 + CallId::MAX;
+/// The fields around each item.
+const ITEM_OVERHEAD: usize = 64;
 /// The body's own fields: model, effort, flags and the item list's brackets.
 const BODY_OVERHEAD: usize = 512;
 
@@ -19,9 +18,11 @@ pub(super) fn item_bytes(item: &InputItem) -> usize {
         + match item {
             InputItem::Message { text, .. } => escaped(text),
             InputItem::FunctionCall {
-                name, arguments, ..
-            } => escaped(name) + escaped(arguments),
-            InputItem::FunctionOutput { output, .. } => escaped(output),
+                call,
+                name,
+                arguments,
+            } => escaped(call.as_str()) + escaped(name) + escaped(arguments),
+            InputItem::FunctionOutput { call, output } => escaped(call.as_str()) + escaped(output),
             InputItem::Reasoning(item) => item.size(),
         }
 }

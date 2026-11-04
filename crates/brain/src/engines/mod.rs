@@ -150,6 +150,11 @@ impl CallId {
         }
         Ok(Self(id.to_owned()))
     }
+
+    /// The id's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The tools a call can name.

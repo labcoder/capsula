@@ -261,15 +261,14 @@ fn quote(
     if origin == Origin::Kumo && source.kind != ThreadKind::Thread {
         return Ok(json!({ "task": task, "note": UNAVAILABLE }));
     }
+    // Its title is shown even for an empty range, so it's a source either way.
+    sources.insert(reference.thread);
     let excerpt = snapshot.excerpt(
         reference.thread,
         reference.first,
         reference.last,
         REREAD_CAP,
     )?;
-    if !excerpt.text.is_empty() {
-        sources.insert(reference.thread);
-    }
     Ok(json!({
         "task": task,
         "title": source.title,

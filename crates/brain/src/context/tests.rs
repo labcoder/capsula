@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
-use super::bound::request_bytes;
+use super::bound::{item_bytes, request_bytes};
 use super::build::{Turn, build};
 use super::*;
 use crate::engines::{CallId, Opaque};
@@ -628,11 +628,15 @@ fn the_bound_is_exact_and_older_runs_go_first() {
         input: over.request.input[1..].to_vec(),
         ..over.request.clone()
     });
-    assert!(
-        world
-            .build(&run, (main, current), Supplied::default(), alone)
-            .is_ok(),
-        "the current run alone fits"
+    let only = world
+        .build(&run, (main, current), Supplied::default(), alone)
+        .expect("the current run alone fits");
+    assert_eq!(
+        only.request.input,
+        [message(
+            Role::User,
+            &format!("current\n\nLocal time: {TIME}")
+        )]
     );
     let too_large = world.build(&run, (main, current), Supplied::default(), alone - 1);
     assert!(
@@ -708,6 +712,51 @@ fn at_most_the_newest_eight_runs_stay_raw_and_a_dropped_runs_sources_dont_count(
 }
 
 #[test]
+fn a_title_shown_from_an_empty_range_still_counts_its_task_as_a_source() {
+    let mut world = world("ctx-title-source");
+    let main = world.main;
+    let (high_thread, high_run) = world.store.high_water().expect("ids");
+    let b = ThreadId(high_thread.0 + 1);
+    world
+        .store
+        .begin_turn(
+            b,
+            Some("plan the surprise party"),
+            RunId(high_run.0 + 1),
+            "plan the surprise party",
+        )
+        .expect("turn");
+    let b_ids = world.events(b);
+    let (_, current) = world.run(Some(main), "what about b?", None);
+    let last = *world.events(main).last().expect("an event");
+    let empty = HistoryRef {
+        thread: b,
+        first: EventId(b_ids[0].0 + 1),
+        last: EventId(b_ids[0].0 + 1),
+    };
+    let supplied = Supplied {
+        summary: None,
+        items: history(current, last, vec![empty]),
+    };
+    let built = world
+        .build(
+            &snapshot(Origin::Kumo, None),
+            (main, current),
+            supplied,
+            BOUND,
+        )
+        .expect("built");
+    assert_eq!(
+        quoted(&built),
+        [
+            json!({ "task": b.0, "title": "plan the surprise party", "events": null, "text": "",
+                 "truncated": false, "continue_from": null })
+        ]
+    );
+    assert_eq!(built.sources, [main, b]);
+}
+
+#[test]
 fn a_kept_older_runs_history_counts_its_sources() {
     let mut world = world("ctx-older-sources");
     let main = world.main;
@@ -732,6 +781,78 @@ fn a_kept_older_runs_history_counts_its_sources() {
         .expect("built");
     assert_eq!(built.request.input.len(), 4, "the older run is kept whole");
     assert_eq!(built.sources, [main, b]);
+}
+
+#[test]
+fn an_items_size_counts_its_escaped_call_id_and_text() {
+    // 64 for the item's fields; "a\"b" escapes to 6 bytes with its quotes, and "x\ny" to 6.
+    let small = InputItem::FunctionOutput {
+        call: call("a\"b"),
+        output: "x\ny".to_owned(),
+    };
+    assert_eq!(item_bytes(&small), 64 + 6 + 6);
+    // Each NUL escapes to the six bytes \u0000: 64 of them and the quotes are 386 bytes.
+    let nuls = InputItem::FunctionCall {
+        call: call(&"\0".repeat(64)),
+        name: "n".to_owned(),
+        arguments: String::new(),
+    };
+    assert_eq!(item_bytes(&nuls), 64 + 386 + 3 + 2);
+}
+
+#[test]
+fn a_bound_one_byte_short_drops_an_older_tool_pair_whole() {
+    let mut world = world("ctx-pair-cut");
+    let main = world.main;
+    let (high_thread, high_run) = world.store.high_water().expect("ids");
+    let b = ThreadId(high_thread.0 + 1);
+    world
+        .store
+        .begin_turn(b, Some("b"), RunId(high_run.0 + 1), "b text")
+        .expect("turn");
+    let b_ids = world.events(b);
+    let (_, older) = world.run(Some(main), "older ask", None);
+    let older_event = *world.events(main).last().expect("an event");
+    world.run(Some(b), "gap", None);
+    world.run(Some(b), "gap", None);
+    let (_, current) = world.run(Some(main), "current ask", None);
+    let supplied = || Supplied {
+        summary: None,
+        items: history(older, older_event, vec![whole(&b_ids[..1], b)]),
+    };
+    let run = snapshot(Origin::Kumo, None);
+    let output = json!({ "quoted_history": [{ "task": b.0, "title": "b",
+        "events": [b_ids[0].0, b_ids[0].0], "text": "user: b text", "truncated": false,
+        "continue_from": null }] })
+    .to_string();
+    let now = message(Role::User, &format!("current ask\n\nLocal time: {TIME}"));
+    let full = vec![
+        message(Role::User, "older ask"),
+        InputItem::FunctionCall {
+            call: call("c1"),
+            name: "read_history".to_owned(),
+            arguments: "{}".to_owned(),
+        },
+        InputItem::FunctionOutput {
+            call: call("c1"),
+            output,
+        },
+        now.clone(),
+    ];
+    let fits = world
+        .build(&run, (main, current), supplied(), BOUND)
+        .expect("built");
+    let size = request_bytes(&fits.request);
+    let exact = world
+        .build(&run, (main, current), supplied(), size)
+        .expect("fits exactly");
+    assert_eq!(exact.request.input, full);
+    assert_eq!(exact.sources, [main, b]);
+    let short = world
+        .build(&run, (main, current), supplied(), size - 1)
+        .expect("built");
+    assert_eq!(short.request.input, [now]);
+    assert_eq!(short.sources, [main]);
 }
 
 #[test]
