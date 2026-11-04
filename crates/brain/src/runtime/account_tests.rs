@@ -20,7 +20,7 @@ use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::oauth::id_token::IdentityError;
 use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launcher};
-use crate::connections::records::Account;
+use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::SessionLock;
@@ -400,4 +400,81 @@ async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
         received.identity,
         Err(IdentityError::Status { status: 503 })
     ));
+}
+
+/// Answers the refresh-token grant with a rotated set that carries no identity token.
+struct Rotating;
+
+impl Http for Rotating {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let (status, body) = match request.endpoint {
+            Endpoint::Token => {
+                let tokens = json!({"access_token":"access-new", "refresh_token":"refresh-new", "token_type":"Bearer", "scope":"openid offline_access chatgpt.tokens.use.direct", "expires_in":3600});
+                (200, serde_json::to_vec(&tokens).expect("fixture"))
+            }
+            Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => (503, Vec::new()),
+        };
+        std::future::ready(Ok(Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(body)),
+        }))
+    }
+}
+
+/// Design §3 rule 3: a caller that stops waiting cancels only its wait. The refresh it started
+/// runs as its own task to the end, and the rotated set is saved.
+#[tokio::test]
+async fn a_dropped_wait_never_cancels_its_refresh() {
+    let scratch = Scratch::new("account-refresh-dropped");
+    let store = FakeStore::default();
+    let service = "test-accounts-refresh";
+    let reader = |name| {
+        let lock = scratch.db().with_file_name(name);
+        Vault::with_service(store.clone(), service, &lock).expect("vault")
+    };
+    let saved = reader("seed.lock").save_account(&Secret::new(Account {
+        client_id: Zeroizing::new("client-saved".to_owned()),
+        subject: Some(Zeroizing::new("subject-1".to_owned())),
+        email: None,
+        plan_enabled: true,
+        tokens: Some(Tokens {
+            access_token: Zeroizing::new("access-old".to_owned()),
+            refresh_token: Zeroizing::new("refresh-old".to_owned()),
+            id_token: None,
+            scope: Zeroizing::new("openid offline_access chatgpt.tokens.use.direct".to_owned()),
+            expires_at: 1_800_000_000,
+            pending_identity_validation: false,
+        }),
+    }));
+    assert!(matches!(saved, SaveResult::Committed { .. }));
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let opening = store.clone();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), service, &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let http = SharedHttp::new(Rotating);
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        ..test_support::net()
+    };
+    let mut accounts = Accounts::spawn(worker, net).expect("accounts");
+    let (wait, _) = accounts.access();
+    drop(wait);
+    let refresh_token = || {
+        let account = reader("reader.lock").load_account().expect("readable");
+        account
+            .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
+    };
+    // The pending flag, the refresh and the rotated set's save.
+    for _ in 0..3 {
+        let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        accounts.handle(input);
+    }
+    assert_eq!(refresh_token(), Some("refresh-new".to_owned()));
+    accounts.close(Instant::now()).await;
 }

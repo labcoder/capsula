@@ -295,12 +295,13 @@ stamped `u64::MAX`, which never age out. While the brain runs, wall time moving 
 entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
 set back while it's listed only delays its age-out.
 
-**Refresh** (`account::refresh`, design §3 rule 3). A caller asks for the bearer with
-`Input::Access`, answered by `Effect::Access`. Each call checks the wall clock: a set with 60 s or
+**Refresh** (`account::refresh`, design §3 rule 3). The bearer is handed out only through
+`Accounts::access`, which answers on a oneshot. Each call checks the wall clock: a set with 60 s or
 less left [local policy], or with no wall time, is refreshed first; there's no timer. The refresh
 is one flight on the token lane, from the request until the rotated set is committed and its
 identity token verified. Callers that arrive meanwhile join it, and all of them get the same
-answer.
+answer. The request and the identity check run as tokio tasks the brain never aborts, so a caller
+that drops its receiver ends only its own wait.
 
 ```mermaid
 sequenceDiagram

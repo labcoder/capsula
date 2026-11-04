@@ -3,6 +3,7 @@
 //! serialized; Windows can miss a read on one thread while another writes. The listener and
 //! the exchange run as tasks, and everything reports back on one channel the core loop polls.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
@@ -14,17 +15,23 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
-use crate::connections::account::{AccountState, Effect, Input, Job, Listened, Received, Worker};
+use crate::connections::account::{
+    AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
+};
 use crate::connections::clock::Clock;
 use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
-use crate::connections::oauth::id_token::verify;
+use crate::connections::oauth::id_token::{IdentityError, verify, verify_refreshed};
+use crate::connections::oauth::refresh::refresh;
 use crate::connections::oauth::revoke::{BUDGET, revoke};
 use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link};
+
+/// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
+pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
 
 /// Builds the account HTTP client; every exchange builds its own, so a trust store fixed since
 /// the last try is read again.
@@ -56,6 +63,9 @@ pub(crate) struct Accounts {
     /// The live attempt's listener; aborting it closes the loopback.
     listener: Option<JoinHandle<()>>,
     net: Net,
+    /// Callers waiting for the bearer, by ticket.
+    tickets: HashMap<u64, oneshot::Sender<Access>>,
+    next_ticket: u64,
 }
 
 impl Accounts {
@@ -81,6 +91,8 @@ impl Accounts {
             events,
             listener: None,
             net,
+            tickets: HashMap::new(),
+            next_ticket: 0,
         };
         accounts.apply(started);
         let done = loaded
@@ -97,6 +109,21 @@ impl Accounts {
             .recv()
             .await
             .expect("the account system holds a sender")
+    }
+
+    /// Asks for the bearer, refreshed first when it's due; it comes on the receiver. Dropping the
+    /// receiver cancels only the wait: a refresh it started still runs to its end and is saved.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "PR 10b's catalog read is the first caller")
+    )]
+    pub(crate) fn access(&mut self) -> (oneshot::Receiver<Access>, Vec<ControlToShell>) {
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        let (answer, receiver) = oneshot::channel();
+        self.tickets.insert(ticket, answer);
+        let now = self.net.clock.unix_seconds();
+        (receiver, self.handle(Input::Access { ticket, now }))
     }
 
     /// Applies an input; what the shell should hear, in order.
@@ -158,8 +185,35 @@ impl Accounts {
                     Arc::clone(&self.net.http),
                     self.events_tx.clone(),
                 ))),
-                // Nothing asks for the bearer until the runtime runs refreshes (PR 10a-3).
-                Effect::Refresh { .. } | Effect::Validate { .. } | Effect::Access { .. } => {}
+                // Never aborted: the old token may already have rotated.
+                Effect::Refresh {
+                    generation,
+                    client,
+                    refresh_token,
+                } => drop(tokio::spawn(refresh_task(
+                    generation,
+                    client,
+                    refresh_token,
+                    self.net.clone(),
+                    self.events_tx.clone(),
+                ))),
+                Effect::Validate {
+                    generation,
+                    client,
+                    subject,
+                    id_token,
+                } => drop(tokio::spawn(validate_task(
+                    generation,
+                    [client, subject, id_token],
+                    self.net.clone(),
+                    self.events_tx.clone(),
+                ))),
+                Effect::Access { ticket, result } => {
+                    // A caller that stopped waiting just doesn't hear it.
+                    if let Some(answer) = self.tickets.remove(&ticket) {
+                        answer.send(result).ok();
+                    }
+                }
             }
         }
         frames
@@ -276,6 +330,57 @@ async fn revoke_task(
         _ => Vec::new(),
     };
     events.send(Input::Revoked(confirmed)).ok();
+}
+
+async fn refresh_task(
+    generation: u64,
+    client: Secret<Zeroizing<String>>,
+    refresh_token: Secret<Zeroizing<String>>,
+    net: Net,
+    events: mpsc::UnboundedSender<Input>,
+) {
+    let result = async {
+        let build = Arc::clone(&net.http);
+        let http = tokio::task::spawn_blocking(move || build())
+            .await
+            .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
+            .map_err(ExchangeError::Http)?;
+        refresh(&http, client.expose(), refresh_token.expose()).await
+    }
+    .await;
+    // Its lifetime starts on arrival.
+    let now = net.clock.unix_seconds();
+    events
+        .send(Input::Refreshed {
+            generation,
+            result,
+            now,
+        })
+        .ok();
+}
+
+async fn validate_task(
+    generation: u64,
+    [client, subject, id_token]: [Secret<Zeroizing<String>>; 3],
+    net: Net,
+    events: mpsc::UnboundedSender<Input>,
+) {
+    let result = async {
+        let build = Arc::clone(&net.http);
+        let http = tokio::task::spawn_blocking(move || build())
+            .await
+            .map_err(|_| IdentityError::Http(HttpError::Configuration))??;
+        verify_refreshed(
+            &http,
+            &id_token,
+            client.expose(),
+            subject.expose(),
+            net.clock.as_ref(),
+        )
+        .await
+    }
+    .await;
+    events.send(Input::Validated { generation, result }).ok();
 }
 
 pub(super) async fn exchange_task(
