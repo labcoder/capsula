@@ -81,6 +81,22 @@ pub const FOCUS_INPUT_MARKER: usize = 0x4350_5346;
 /// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
 pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
 
+/// Kumochi's own Claude Code configuration folder (`CLAUDE_CONFIG_DIR`), in the [`DATA_DIR`]
+/// folder under `%LOCALAPPDATA%`. Claude Code keeps its sign-in there; Kumochi never opens it.
+pub const CLAUDE_CODE_DIR: &str = "claude-code";
+/// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
+/// `%LOCALAPPDATA%`.
+pub const ENGINE_DIR: &str = "engine";
+/// The MCP server name Claude Code sees, so its tools are `mcp__kumochi__*`.
+pub const MCP_SERVER_NAME: &str = "kumochi";
+/// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`] and a dash.
+pub const BRIDGE_PIPE: &str = "claude-bridge";
+/// The Credential Manager account under [`CREDENTIAL_SERVICE`] holding the Anthropic API key.
+pub const ANTHROPIC_KEY_ACCOUNT: &str = "anthropic-key";
+/// The account the shell stages a pasted key in, for the brain to check and move.
+pub const ANTHROPIC_STAGING_ACCOUNT: &str = "anthropic-key-staged";
+/// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
+pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
 /// `cargo xtask pipe-dump`. Capabilities are zeroed in the recording.
 pub const PIPE_TAP_ENV: &str = "KUMOCHI_PIPE_TAP";

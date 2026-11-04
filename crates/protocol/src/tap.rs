@@ -10,7 +10,10 @@
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, encode};
-use crate::message::{AccountOp, ControlToBrain, ControlToShell, DataToBrain, DataToShell};
+use crate::message::{
+    AccountOp, ConnectionOp, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
+    DataToShell,
+};
 
 /// The start of every recording, with the format's version.
 pub const MAGIC: [u8; 5] = *b"KTAP\x02";
@@ -51,6 +54,8 @@ impl Tapped for ControlToBrain {
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
             Self::AccountOp(_) => "AccountOp",
+            Self::Connection(_) => "Connection",
+            Self::Warm { .. } => "Warm",
         }
     }
 
@@ -78,6 +83,16 @@ impl Tapped for ControlToBrain {
                         | AccountOp::EnablePlan
                         | AccountOp::Retry
                 )
+                | Self::Connection(
+                    ConnectionOp::AnthropicKeyStaged
+                        | ConnectionOp::CheckAnthropicKey
+                        | ConnectionOp::RemoveAnthropicKey
+                        | ConnectionOp::ConnectClaudeCode
+                        | ConnectionOp::CancelClaudeSignIn
+                        | ConnectionOp::DisconnectClaudeCode
+                        | ConnectionOp::FindClaudeCode
+                )
+                | Self::Warm { thread: _ }
         )
     }
 }
@@ -97,6 +112,7 @@ impl Tapped for ControlToShell {
             Self::ScenesV1 { .. } => "ScenesV1",
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
+            Self::Connections(_) => "Connections",
         }
     }
 
@@ -120,6 +136,11 @@ impl Tapped for ControlToShell {
                 }
                 | Self::TurnRefused { thread: _ }
                 | Self::Error(_)
+                // Versions, states and content-free reasons only.
+                | Self::Connections(ConnectionsView {
+                    anthropic: _,
+                    claude_code: _
+                })
         )
     }
 }

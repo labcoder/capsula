@@ -260,6 +260,7 @@ fn switch_uses_the_received_title_and_choice() {
     chosen.choice = Some(ModelChoice {
         model: ModelSlug::new("stored-model").expect("valid"),
         effort: Effort::High,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     });
     state.refresh();
     let request = state.requests().remove(0);
@@ -287,6 +288,7 @@ fn switch_uses_the_received_title_and_choice() {
         Some(ModelChoice {
             model: ModelSlug::new("stored-model").expect("valid"),
             effort: Effort::High,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         })
     );
     assert_eq!(runs.target(), Target::Task(ThreadId(9)));

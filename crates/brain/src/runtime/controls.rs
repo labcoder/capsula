@@ -77,11 +77,14 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             index,
             cut,
         })),
+        // shortcut: nothing answers Connection or Warm until A1, C2 and C5b build them.
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::Quitting
         | ControlToBrain::Settings(_)
-        | ControlToBrain::AccountOp(_) => None,
+        | ControlToBrain::AccountOp(_)
+        | ControlToBrain::Connection(_)
+        | ControlToBrain::Warm { .. } => None,
     })
 }
 

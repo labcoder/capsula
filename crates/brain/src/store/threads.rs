@@ -127,5 +127,11 @@ pub(super) fn choice_of(
         tracing::warn!("a stored effort this build doesn't know reads as no choice");
         return Ok(None);
     };
-    Ok(Some(ModelChoice { model, effort }))
+    // shortcut: the store keeps no connection until A3's migration, so every saved choice reads
+    // as ChatGPT's.
+    Ok(Some(ModelChoice {
+        model,
+        effort,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+    }))
 }

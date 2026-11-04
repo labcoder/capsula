@@ -96,6 +96,7 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
     let choice = ModelChoice {
         model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
         effort: Effort::Medium,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
     assert_eq!(
         core.handle(Input::ThreadOp(ThreadOp::SetModel {

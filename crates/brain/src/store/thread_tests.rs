@@ -67,6 +67,7 @@ fn choice(model: &str, effort: Effort) -> ModelChoice {
     ModelChoice {
         model: ModelSlug::new(model).expect("valid"),
         effort,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     }
 }
 
