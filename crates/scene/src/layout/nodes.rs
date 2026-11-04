@@ -1,6 +1,6 @@
 use super::{
-    Glide, PrepareError, SurfaceGeometry, compound, diagram,
-    primitives::{Build, arrow_head, ellipse, layout_error, point_bounds, rect, text_origin},
+    Glide, PrepareError, SurfaceGeometry, compound, diagram, edges,
+    primitives::{Build, ellipse, layout_error, rect, text_origin},
     state::{LayoutState, Placed, Rest},
 };
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
     mermaid::Extra,
-    record::{Align, Direction, Head, Node, NodeShape},
+    record::{Align, Direction, Node, NodeShape},
     state::object,
 };
 use std::{
@@ -299,6 +299,7 @@ pub(super) fn place(
             .flatten()
             .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
             .collect();
+        let initial = fresh.iter().all(|fresh| *fresh);
         let placement = diagram::layout(&sizes, nodes, &edges, direction, gap)?;
         let mut ranks = placement.ranks.clone();
         for (slot, (_, id, _)) in all.iter().enumerate() {
@@ -313,7 +314,6 @@ pub(super) fn place(
                 }
             }
         }
-        let initial = fresh.iter().all(|fresh| *fresh);
         // shortcut: only unboxed top-level diagrams fit their initial batch; boxed, nested and
         // diagram-less batches stay unscaled until a render shows one overflowing.
         let fits = initial
@@ -453,7 +453,7 @@ pub(super) fn place(
                 let (id, _) = waiting.remove(index);
                 let (handle, source) = &sources[id];
                 let mut object = if matches!(&**source, Op::Edge(_)) {
-                    edge(source, *handle, parent, direction.0, state, build, None)?
+                    edges::build(source, *handle, parent, direction.0, state, build, None)?
                 } else {
                     build.primitive(source, *handle, parent, state, None)?
                 };
@@ -499,17 +499,24 @@ pub(super) fn place(
                 group.item.transform = Affine::pose(scale, 0.0, offset);
             }
             if let Some((text, size)) = title {
-                // shortcut: groups stay frameless pending P3 check 8's membership verdict; add frames if it rejects headings.
                 let (bounds, origin) = compound::banded(contents.unwrap_or_default(), size);
                 group.item.bounds = bounds;
-                group.item.primitives = Arc::from([Prim::Text {
-                    origin,
-                    text,
-                    style,
-                    color: build.theme.fg.into(),
-                    max_width: Some(180.0),
-                    align: Align::Center,
-                }]);
+                group.item.primitives = Arc::from([
+                    Prim::Rect {
+                        rect: bounds,
+                        radius: 8.0,
+                        fill: None,
+                        border: Some((build.theme.line.into(), 1.0)),
+                    },
+                    Prim::Text {
+                        origin,
+                        text,
+                        style,
+                        color: build.theme.fg.into(),
+                        max_width: Some(180.0),
+                        align: Align::Center,
+                    },
+                ]);
                 group.title = Some(size);
             } else if let Some(contents) = contents {
                 group.item.bounds = contents;
@@ -807,126 +814,4 @@ fn node_primitives(
         });
     }
     output
-}
-
-/// Where a ray from `rect`'s center toward `toward` leaves the outline of the node `id`: its
-/// diamond or ellipse inscribed in `rect`, else `rect` itself.
-fn port(state: &LayoutState, id: &crate::WireId, rect: Rect, toward: Vec2) -> Vec2 {
-    let shape = state
-        .objects
-        .get(id)
-        .and_then(|object| match &*object.source {
-            Op::Node(node) => Some(node.shape),
-            _ => None,
-        });
-    let center = rect.center();
-    let delta = toward - center;
-    let half = rect.size * 0.5;
-    let reach = match shape {
-        Some(NodeShape::Diamond) => (delta.x / half.x).abs() + (delta.y / half.y).abs(),
-        Some(NodeShape::Circle) => (delta.x / half.x).hypot(delta.y / half.y),
-        _ => return rect.edge_toward(toward),
-    };
-    if reach.is_normal() {
-        center + delta * reach.recip()
-    } else {
-        rect.edge_toward(toward)
-    }
-}
-
-pub(super) fn edge(
-    source: &Arc<Op>,
-    handle: Handle,
-    parent: Option<Handle>,
-    direction: Direction,
-    state: &LayoutState,
-    build: &mut Build<'_>,
-    cached: Option<&Placed>,
-) -> Result<Placed, PrepareError> {
-    let Op::Edge(edge) = &**source else {
-        unreachable!("edge builder receives an edge");
-    };
-    let [a, b] = if let Some(old) = cached {
-        old.anchors
-    } else {
-        let from = super::primitives::reference(state, &edge.from, parent)?;
-        let to = super::primitives::reference(state, &edge.to, parent)?;
-        [
-            port(state, &edge.from, from, to.center()),
-            port(state, &edge.to, to, from.center()),
-        ]
-    };
-    let middle = (a + b) * 0.5;
-    // shortcut: curves can obscure skipped-rank and back links; P3 check 8 decides whether detour routing is required.
-    let control = if direction == Direction::Right {
-        Vec2::new(middle.x, a.y)
-    } else {
-        Vec2::new(a.x, middle.y)
-    };
-    let mut points = Vec::new();
-    let pieces = u16::try_from(crate::path::PROCEDURAL_CURVE_PIECES)
-        .expect("procedural curve count fits u16");
-    for n in 0..=pieces {
-        let t = f32::from(n) / f32::from(pieces);
-        points.push(a * (1.0 - t).powi(2) + control * (2.0 * (1.0 - t) * t) + b * t.powi(2));
-    }
-    let (head, thick) = match state.extra(handle) {
-        Some(Extra::Link { head, thick }) => (*head, *thick),
-        _ => (Head::End, false),
-    };
-    let last = usize::from(pieces);
-    let mut heads = Vec::new();
-    if matches!(head, Head::End | Head::Both) {
-        heads.push(arrow_head(points[last - 1], points[last]));
-    }
-    if matches!(head, Head::Start | Head::Both) {
-        heads.push(arrow_head(points[1], points[0]));
-    }
-    let mut bounds = point_bounds(&points)?;
-    for head in &heads {
-        bounds = bounds.union(point_bounds(head)?);
-    }
-    let color = build.color(edge.color.as_ref());
-    let mut primitives = vec![Prim::Line {
-        points: points.into(),
-        closed: false,
-        color,
-        width: if thick { 3.5 } else { 2.0 },
-        dashed: edge.dash,
-    }];
-    primitives.extend(heads.into_iter().map(|head| Prim::Fill {
-        points: head.into(),
-        color,
-    }));
-    if let Some(label) = &edge.label {
-        let style = TextStyle {
-            size: build.theme.font_size - 1.0,
-            bold: false,
-        };
-        let size = build.measure(label, style, Some(180.0))?;
-        let origin = middle - size * 0.5;
-        bounds = bounds.union(Rect { origin, size });
-        primitives.push(Prim::Text {
-            origin: text_origin(Rect { origin, size }, Some(180.0), Align::Center),
-            text: label.clone(),
-            style,
-            color: build.theme.fg.into(),
-            max_width: Some(180.0),
-            align: Align::Center,
-        });
-    }
-    let mut placed = Placed::new(
-        Item {
-            handle,
-            parent,
-            primitives: primitives.into(),
-            bounds,
-            transform: Affine::default(),
-            opacity: edge.opacity.map_or(1.0, crate::Finite::get),
-        },
-        Arc::clone(source),
-        cached,
-    );
-    placed.anchors = [a, b];
-    Ok(placed)
 }

@@ -193,9 +193,12 @@ Private group titles, reversed direction and link paint travel beside the execut
 step, not in new wire fields. A title is text on its group's own handle, so it is
 not another child or object and survives ordinary updates and retained-handle cuts.
 Its measured width is capped at 180 logical pixels. For content bounds C and title
-size L, the ranked bounds have width `max(C.width, L.width)` and reserve
-`L.height + 16` pixels above C; the title sits horizontally centred at the top.
-Plain diagrams remain labelless, and neither plain nor Mermaid groups emit a frame.
+size L, the title band has width `max(C.width, L.width)` and reserves
+`L.height + 16` pixels above C. A rounded, unfilled frame encloses the band and
+contents with 8 pixels of padding, using the theme's line color at 1 pixel width.
+The title is centred inside its top inset. The final bounds pass resizes both the
+frame and title placement when members change. Untitled structural diagrams stay
+frameless, so anonymous layout wrappers do not introduce unexplained boundaries.
 
 This parser is a reduced port of Pele's flowchart lexer/parser, with its MIT notice
 and pinned revision in `THIRD-PARTY-NOTICES.md`. Unsupported families are deliberate
@@ -496,15 +499,42 @@ vertical pixels around their text, with an 80-by-40 minimum. Circles use the lar
 dimension; diamonds enlarge to contain the text rectangle. The minimum 72-pixel rank
 gap widens once per group for its longest along-flow edge label plus 24 pixels. This
 can spread unrelated rank pairs; per-pair gaps wait for a render showing the need.
-Quadratic routes follow the inherited flow axis but do not avoid intervening nodes
-or group title bands; cycles and cross-group links can cross them. Diamond and circle ports intersect
+Quadratic routes follow the inherited flow axis. A narrow visible-link pass offsets
+the control point perpendicular to that axis: labelled, straight skipped-rank links
+crossing an intermediate sibling node bow over the chain, and parallel links between
+the same node pair (including opposite directions) alternate on opposite sides when
+at least one has a label. The midpoint offset starts at half the node's perpendicular
+extent plus 12 pixels; further parallel lanes use multiples of that offset, in wire-id
+order. Endpoints stay anchored and arrowheads follow the bowed tangent. The former
+144-pixel skipped-link gap is unnecessary and removed; existing nodes still never reflow.
+General routing around nodes or group title bands waits until after D1;
+cycles and cross-group links can still cross them. Diamond and circle ports intersect
 their inscribed outlines in the resolved axis-aligned bounds; other shapes retain
 rectangular ports. Fully rotated-outline routing is not implemented. Text primitive
 origins name the wrapping box, while item bounds continue to describe aligned ink.
+Edge labels use rounded theme-background chips with 4-pixel horizontal and 2-pixel
+vertical padding. After all edges are prepared and bowed, group frames and title
+origins settle using canonical midpoint-chip bounds, not the previous pass's nudges.
+Then a wire-id-ordered pass places each
+chip at the curve midpoint, then tries alternating earlier/later quarter-segment samples
+of its own curve until its world-space bounds avoid node bounds, group-title ink,
+the four border strips of titled frames and the chips already placed. Occupied
+rectangles grow by 4 world pixels, so adjacent chips have a visible gap. The frame
+interior is not an obstacle. This placement moves labels, not the underlying routes.
+This includes parent and resting model transforms, and runs again after updates
+or removals without retaining a second label cache. The quarter-segment table's
+array length is tied to its subdivision count at compile time. If all 63 interior samples
+are occupied, the label stays at the midpoint rather than disappearing; continuous
+placement and making extra routing room are deferred until after D1. Collision
+avoidance is for resting geometry, not crossings introduced by later animation.
+The host paints `Frame::paint_items()` batches in order: ordinary geometry first,
+then edge-label chips and text. This allocation-free iterator keeps a later edge
+from striking through an earlier edge's label. `Frame::items()` still exposes
+one object per handle for inspection, not the foreground paint sequence.
 At the 0.8 floor, default edge labels are 11.2px and subtitles 10.4px, not 12px.
-P3 check 8's owner look must decide whether frameless group membership, obscured
-skipped-rank/back links, later cluster overlap and floor-clipped content are acceptable.
-These are disclosed limits, not claims that the reference gates are free of collisions.
+Routing beyond those two narrow bow cases remains after D1. The owner accepted floor clipping, later
+cluster overlap and frozen detached table grids for D1. Those limits are unchanged;
+frames and chips do not promise that every reference gate is free of collisions.
 
 The ignored `cluster_inputs::prepare_many_clusters` test times initial preparation
 with deterministic text measurement: flat 16/32/64/128-cluster growth, a successful

@@ -1,0 +1,316 @@
+//! Edge outlines, sampled curves and the narrow visible-link bow pass.
+use super::{
+    PrepareError, SurfaceGeometry, compound,
+    primitives::{Build, arrow_head, point_bounds, reference, text_origin},
+    state::{LayoutState, Placed},
+};
+use crate::{
+    Handle, Op,
+    display::{Item, Prim, TextStyle},
+    geom::{Affine, Rect, Vec2},
+    mermaid::Extra,
+    record::{Align, Direction, Head, NodeShape},
+};
+use std::{collections::BTreeMap, sync::Arc};
+
+/// Where a ray from `rect`'s center toward `toward` leaves the outline of the node `id`: its
+/// diamond or ellipse inscribed in `rect`, else `rect` itself.
+fn port(state: &LayoutState, id: &crate::WireId, rect: Rect, toward: Vec2) -> Vec2 {
+    let shape = state
+        .objects
+        .get(id)
+        .and_then(|object| match &*object.source {
+            Op::Node(node) => Some(node.shape),
+            _ => None,
+        });
+    let center = rect.center();
+    let delta = toward - center;
+    let half = rect.size * 0.5;
+    let reach = match shape {
+        Some(NodeShape::Diamond) => (delta.x / half.x).abs() + (delta.y / half.y).abs(),
+        Some(NodeShape::Circle) => (delta.x / half.x).hypot(delta.y / half.y),
+        _ => return rect.edge_toward(toward),
+    };
+    if reach.is_normal() {
+        center + delta * reach.recip()
+    } else {
+        rect.edge_toward(toward)
+    }
+}
+
+pub(super) fn build(
+    source: &Arc<Op>,
+    handle: Handle,
+    parent: Option<Handle>,
+    direction: Direction,
+    state: &LayoutState,
+    build: &mut Build<'_>,
+    cached: Option<&Placed>,
+) -> Result<Placed, PrepareError> {
+    let Op::Edge(edge) = &**source else {
+        unreachable!("edge builder receives an edge");
+    };
+    let [a, b] = if let Some(old) = cached {
+        old.anchors
+    } else {
+        let from = super::primitives::reference(state, &edge.from, parent)?;
+        let to = super::primitives::reference(state, &edge.to, parent)?;
+        [
+            port(state, &edge.from, from, to.center()),
+            port(state, &edge.to, to, from.center()),
+        ]
+    };
+    let points = if let Some(old) = cached {
+        let Prim::Line { points, .. } = &old.item.primitives[0] else {
+            unreachable!("edge starts with its curve");
+        };
+        Arc::clone(points)
+    } else {
+        curve([a, b], direction, 0.0)
+    };
+    let (head, thick) = match state.extra(handle) {
+        Some(Extra::Link { head, thick }) => (*head, *thick),
+        _ => (Head::End, false),
+    };
+    let heads = heads(&points, head);
+    let label_middle = points[points.len() / 2];
+    let mut bounds = point_bounds(&points)?;
+    for head in &heads {
+        bounds = bounds.union(point_bounds(head)?);
+    }
+    let color = build.color(edge.color.as_ref());
+    let mut primitives = vec![Prim::Line {
+        points,
+        closed: false,
+        color,
+        width: if thick { 3.5 } else { 2.0 },
+        dashed: edge.dash,
+    }];
+    primitives.extend(heads.into_iter().map(|head| Prim::Fill {
+        points: head.into(),
+        color,
+    }));
+    if let Some(label) = &edge.label {
+        let style = TextStyle {
+            size: build.theme.font_size - 1.0,
+            bold: false,
+        };
+        let size = build.measure(label, style, Some(180.0))?;
+        let origin = label_middle - size * 0.5;
+        let chip = Rect {
+            origin: origin - Vec2::new(4.0, 2.0),
+            size: size + Vec2::new(8.0, 4.0),
+        };
+        bounds = bounds.union(chip);
+        primitives.push(Prim::Rect {
+            rect: chip,
+            radius: 4.0,
+            fill: Some(build.theme.surface.into()),
+            border: None,
+        });
+        primitives.push(Prim::Text {
+            origin: text_origin(Rect { origin, size }, Some(180.0), Align::Center),
+            text: label.clone(),
+            style,
+            color: build.theme.fg.into(),
+            max_width: Some(180.0),
+            align: Align::Center,
+        });
+    }
+    let mut placed = Placed::new(
+        Item {
+            handle,
+            parent,
+            primitives: primitives.into(),
+            bounds,
+            transform: Affine::default(),
+            opacity: edge.opacity.map_or(1.0, crate::Finite::get),
+        },
+        Arc::clone(source),
+        cached,
+    );
+    placed.anchors = [a, b];
+    Ok(placed)
+}
+
+fn curve([a, b]: [Vec2; 2], direction: Direction, bow: f32) -> Arc<[Vec2]> {
+    let middle = (a + b) * 0.5;
+    let control = if direction == Direction::Right {
+        Vec2::new(middle.x, a.y)
+    } else {
+        Vec2::new(a.x, middle.y)
+    } + if direction == Direction::Right {
+        Vec2::new(0.0, 2.0 * bow)
+    } else {
+        Vec2::new(2.0 * bow, 0.0)
+    };
+    let mut points = Vec::new();
+    let pieces = u16::try_from(crate::path::PROCEDURAL_CURVE_PIECES)
+        .expect("procedural curve count fits u16");
+    for n in 0..=pieces {
+        let t = f32::from(n) / f32::from(pieces);
+        points.push(a * (1.0 - t).powi(2) + control * (2.0 * (1.0 - t) * t) + b * t.powi(2));
+    }
+    points.into()
+}
+
+fn heads(points: &[Vec2], head: Head) -> Vec<[Vec2; 3]> {
+    let last = points.len() - 1;
+    let mut heads = Vec::new();
+    if matches!(head, Head::End | Head::Both) {
+        heads.push(arrow_head(points[last - 1], points[last]));
+    }
+    if matches!(head, Head::Start | Head::Both) {
+        heads.push(arrow_head(points[1], points[0]));
+    }
+    heads
+}
+
+pub(super) fn route(
+    state: &mut LayoutState,
+    build: &Build<'_>,
+    surface: SurfaceGeometry,
+) -> Result<(), PrepareError> {
+    let mut pairs = BTreeMap::<_, Vec<_>>::new();
+    for (id, object) in &state.objects {
+        if let Op::Edge(edge) = &*object.source
+            && state.objects.contains_key(&edge.from)
+            && state.objects.contains_key(&edge.to)
+        {
+            let key = if edge.from <= edge.to {
+                (edge.from.clone(), edge.to.clone())
+            } else {
+                (edge.to.clone(), edge.from.clone())
+            };
+            pairs.entry(key).or_default().push(id.clone());
+        }
+    }
+    for ids in pairs.values() {
+        if !ids
+            .iter()
+            .any(|id| matches!(&*state.objects[id].source, Op::Edge(edge) if edge.label.is_some()))
+        {
+            continue;
+        }
+        let parallel = ids.len() > 1;
+        for (index, id) in ids.iter().enumerate() {
+            build.check_cancel()?;
+            let object = &state.objects[id];
+            let Op::Edge(edge) = &*object.source else {
+                unreachable!("edge pair")
+            };
+            let direction = compound::direction(state, object.item.parent, surface).0;
+            let from = reference(state, &edge.from, object.item.parent)?;
+            let to = reference(state, &edge.to, object.item.parent)?;
+            let extent = if direction == Direction::Right {
+                from.size.y.max(to.size.y)
+            } else {
+                from.size.x.max(to.size.x)
+            };
+            let bow = if parallel && edge.from != edge.to {
+                let lane = f32::from(u16::try_from(index / 2 + 1).expect("edge cap fits u16"));
+                (extent * 0.5 + 12.0) * lane * if index % 2 == 0 { -1.0 } else { 1.0 }
+            } else {
+                skipped_bow(state, object, direction)?
+            };
+            let points = curve(object.anchors, direction, bow);
+            let head = match state.extra(object.item.handle) {
+                Some(Extra::Link { head, .. }) => *head,
+                _ => Head::End,
+            };
+            let heads = heads(&points, head);
+            let mut bounds = point_bounds(&points)?;
+            for head in &heads {
+                bounds = bounds.union(point_bounds(head)?);
+            }
+            if let Some(size) =
+                object
+                    .item
+                    .primitives
+                    .iter()
+                    .find_map(|primitive| match primitive {
+                        Prim::Rect { rect, .. } => Some(rect.size),
+                        _ => None,
+                    })
+            {
+                bounds = bounds.union(Rect::centered(points[points.len() / 2], size));
+            }
+            let Prim::Line { points: old, .. } = &object.item.primitives[0] else {
+                unreachable!("edge starts with its curve");
+            };
+            let changed = **old != *points;
+            let object = state.objects.get_mut(id).expect("edge exists");
+            if changed {
+                let mut heads = heads.into_iter();
+                for primitive in Arc::make_mut(&mut object.item.primitives) {
+                    match primitive {
+                        Prim::Line { points: old, .. } => *old = Arc::clone(&points),
+                        Prim::Fill { points, .. } => {
+                            *points =
+                                Arc::from(heads.next().expect("edge head count is unchanged"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            object.item.bounds = bounds;
+        }
+    }
+    Ok(())
+}
+
+fn skipped_bow(
+    state: &LayoutState,
+    object: &Placed,
+    direction: Direction,
+) -> Result<f32, PrepareError> {
+    let Op::Edge(edge) = &*object.source else {
+        unreachable!("edge bow")
+    };
+    let from = &state.objects[&edge.from];
+    let to = &state.objects[&edge.to];
+    let [a, b] = object.anchors;
+    let straight = if direction == Direction::Right {
+        (a.y - b.y).abs() <= f32::EPSILON
+    } else {
+        (a.x - b.x).abs() <= f32::EPSILON
+    };
+    if edge.label.is_none()
+        || !straight
+        || from.item.parent != to.item.parent
+        || from
+            .rank
+            .zip(to.rank)
+            .is_none_or(|(a, b)| a.abs_diff(b) <= 1)
+    {
+        return Ok(0.0);
+    }
+    let span = Rect::centered(
+        (a + b) * 0.5,
+        Vec2::new((b.x - a.x).abs(), (b.y - a.y).abs()),
+    );
+    let mut extent = 0.0_f32;
+    for (id, node) in &state.objects {
+        if id == &edge.from
+            || id == &edge.to
+            || node.item.parent != from.item.parent
+            || !matches!(&*node.source, Op::Node(_))
+        {
+            continue;
+        }
+        let bounds = reference(state, id, object.item.parent)?;
+        if span.intersects(bounds) {
+            extent = extent.max(if direction == Direction::Right {
+                bounds.size.y
+            } else {
+                bounds.size.x
+            });
+        }
+    }
+    // shortcut: only straight skipped-rank links and parallel pairs bow; general node/title routing waits until after D1.
+    Ok(if extent > 0.0 {
+        -(extent * 0.5 + 12.0)
+    } else {
+        0.0
+    })
+}

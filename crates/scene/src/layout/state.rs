@@ -153,10 +153,24 @@ impl LayoutState {
         }
     }
     /// Every placed item with its resting values and inherited opacity, for activation.
-    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32)> {
-        self.objects
-            .values()
-            .map(|object| (&object.item, object.rest, object.inherited_opacity))
+    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32, usize)> {
+        self.objects.values().map(|object| {
+            let primitives = &object.item.primitives;
+            let label_start = if matches!(&*object.source, Op::Edge(_)) {
+                primitives
+                    .iter()
+                    .position(|primitive| matches!(primitive, crate::display::Prim::Rect { .. }))
+                    .unwrap_or(primitives.len())
+            } else {
+                primitives.len()
+            };
+            (
+                &object.item,
+                object.rest,
+                object.inherited_opacity,
+                label_start,
+            )
+        })
     }
     /// Last prepared or fenced commit revision, including gaps after a cut.
     pub fn revision(&self) -> u32 {
@@ -598,7 +612,7 @@ mod tests {
                 .expect("safe")
                 .expect("group")
         });
-        assert_eq!(bounds[0].size.x.to_bits(), 180.0_f32.to_bits());
+        assert_eq!(bounds[0].size.x.to_bits(), 188.0_f32.to_bits());
         assert_eq!(bounds[0].size.y.to_bits(), 152.0_f32.to_bits());
         assert_eq!(
             bounds[1].origin.x.to_bits(),

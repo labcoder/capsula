@@ -1,6 +1,6 @@
 use super::{
     Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
-    SurfaceGeometry, compound, heap, nodes,
+    SurfaceGeometry, compound, edge_labels, edges, heap, nodes,
     primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
@@ -263,7 +263,7 @@ pub fn prepare(
         let previous = after.objects.get(&id).cloned();
         let parent = parent(source, &after, previous.as_ref())?;
         let mut object = if matches!(&**source, Op::Edge(_)) {
-            nodes::edge(
+            edges::build(
                 source,
                 *handle,
                 parent,
@@ -279,7 +279,9 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
+    edges::route(&mut after, &build, surface)?;
     update_group_bounds(&mut after);
+    edge_labels::separate(&mut after, &build)?;
     for ((id, property), motion) in motions {
         let object = after.objects.get_mut(&id).ok_or_else(invariant)?;
         Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
@@ -581,7 +583,8 @@ fn update_group_bounds(state: &mut LayoutState) {
             if bounds != object.item.bounds {
                 object.item.bounds = bounds;
                 if let Some(origin) = title {
-                    object.item.primitives = compound::retitle(&object.item.primitives, origin);
+                    object.item.primitives =
+                        compound::retitle(&object.item.primitives, bounds, origin);
                 }
                 changed = true;
             }
