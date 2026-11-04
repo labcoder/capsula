@@ -96,7 +96,9 @@ rows read as `thread` and `words` with no model:
 - **Titles.** `SetTitle` changes only a live task, never the main thread. A user title replaces
   any title. A model title applies only while `title_source` is still `words` and the deletion
   generation is the one it names, so a model title that arrives after a rename, a hide or a
-  removal changes nothing. A later `BeginTurn` on an existing thread never touches its title or
+  removal changes nothing. `SetTitle` answers `TitleSet` with whether it changed the row. The
+  title job reads a task's first ask with `Snapshot::first_ask`, which finds nothing once the
+  title isn't first words. A later `BeginTurn` on an existing thread never touches its title or
   source. Neither a rename nor a model choice moves the thread in the list.
 - **Model choice.** `SetModel` stores a live thread's `model` and `effort`; a hidden or missing
   thread changes nothing.

@@ -32,9 +32,8 @@ use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
-use crate::context::{ConnectionTag, RunSnapshot};
-use crate::coordinator::LeaseId;
-use crate::coordinator::{BuildContext, Coordinator, Effect, Input, StoreOp};
+use crate::context::{ConnectionTag, Origin, RunSnapshot};
+use crate::coordinator::{BuildContext, Coordinator, Effect, Input, JobKey, LeaseId, StoreOp};
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -133,6 +132,8 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     /// The current run's round, aborted when its `Cancel` drops.
     round: Option<(RunId, Cancel)>,
+    /// The background job's request, aborted the same way.
+    job: Option<(JobKey, Cancel)>,
     /// Rounds waiting for leave to send.
     asks: Asks,
     /// When each granted send's deadline passes, in no order.
@@ -239,6 +240,7 @@ impl Brain {
             engine_tx,
             engine_events,
             round: None,
+            job: None,
             asks: Asks::default(),
             send_deadlines: Vec::new(),
             deadline: None,
@@ -261,6 +263,9 @@ impl Brain {
         brain
             .apply(recovery_clears, None)
             .expect("offline effects cannot fill a shell queue");
+        if let Some(generation) = brain.account.sendable() {
+            brain.offline(Input::SignedIn { generation });
+        }
         Ok(brain)
     }
 
@@ -776,16 +781,28 @@ impl Brain {
     /// A run's first build takes the names and default model as they are now, so a rename
     /// applies from the next run.
     fn seed(&self, build: &mut BuildContext) {
-        let view = self.config.view();
         let origin = build.origin;
-        build.snapshot.get_or_insert_with(|| RunSnapshot {
+        build.snapshot.get_or_insert_with(|| self.snapshot(origin));
+    }
+
+    /// Starts `job`'s request on the engine, replacing any job still running.
+    fn start_job(&mut self, job: JobKey, request: engines::RunRequest) {
+        let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+        let cancel = engines::start_job(&*self.engine, request, job, self.inputs_tx.clone(), gate);
+        self.job = Some((job, cancel));
+    }
+
+    /// What a run's first build, or a job's read, takes: the names and default model now.
+    fn snapshot(&self, origin: Origin) -> RunSnapshot {
+        let view = self.config.view();
+        RunSnapshot {
             origin,
             assistant: view.assistant_name.clone(),
             user: view.user_name.clone(),
             choice: view.default_model.clone(),
             // shortcut: no run records its connection yet; 13b tags each with the one it used.
             connection: ConnectionTag(0),
-        });
+        }
     }
 
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
@@ -805,6 +822,9 @@ impl Brain {
                 Effect::Store(mut op) => {
                     if let StoreOp::BuildContext(build) = &mut op {
                         self.seed(build);
+                    }
+                    if let StoreOp::ReadTitle(read) = &mut op {
+                        read.snapshot = Some(self.snapshot(Origin::Task(read.key.thread)));
                     }
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
@@ -852,6 +872,8 @@ impl Brain {
                         engines::start(&*self.engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
                 }
+                Effect::StartJob { job, request } => self.start_job(job, request),
+                Effect::CancelJob(job) => drop(self.job.take_if(|(held, _)| *held == job)),
                 Effect::Grant(lease) => {
                     let granted = SendLease::new(lease, self.inputs_tx.clone());
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));

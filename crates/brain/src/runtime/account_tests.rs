@@ -10,7 +10,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
     AccountOp, AccountView, Action, ControlToBrain, ControlToShell, DataToShell, Effort, ErrorKey,
-    ModelChoice, ModelInfo, ModelSlug, PlanState, UserError,
+    ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -27,7 +27,9 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
+use crate::coordinator::StoreOp;
 use crate::platform::{SessionLock, SessionLockError};
+use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
@@ -1045,4 +1047,55 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(scratch.config().view().default_model, Some(luna));
+}
+
+impl<S: AsyncRead + AsyncWrite> Shell<S> {
+    /// Submits `text` as a new task and reads its run to `Done` and its data's end.
+    async fn finish_task(&mut self, text: &str) {
+        self.submit(text).await;
+        let (run, _) = self.state().await;
+        assert_eq!(self.state().await, (run, Phase::Done));
+        loop {
+            match self.data().await {
+                DataToShell::RunEnd { run: ended } if ended == run => return,
+                DataToShell::Models { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+}
+
+/// A usable account at startup lets a task's `Done` start its title job, and a sign-out fences
+/// jobs before anything else that sign-out does: the next task's `Done` starts none.
+#[tokio::test]
+async fn a_title_job_starts_only_while_the_account_can_send() {
+    let scratch = Scratch::new("account-jobs");
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let mut seen = brain.observe();
+    let mut titles = move || {
+        std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadTitle(_))))
+            .count()
+    };
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.finish_task("first").await;
+        assert_eq!(titles(), 1, "the account could send at startup");
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
+            .await;
+        while !matches!(
+            shell.frame().await,
+            ControlToShell::Account(AccountView::SignedOut { .. })
+        ) {}
+        shell.finish_task("second").await;
+        assert_eq!(titles(), 0, "signed out, so no job starts");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }

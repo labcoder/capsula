@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp};
+use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
 use crate::engines::RunRequest;
 use crate::store::Failure;
@@ -145,6 +145,7 @@ impl Coordinator {
 
     /// A delete was accepted: the current build may have read its thread.
     pub(super) fn expose(&mut self, thread: ThreadId) {
+        self.expose_job(thread);
         if let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) {
             build.exposed.insert(thread);
         }
@@ -206,7 +207,7 @@ impl Coordinator {
         build.sources = made.sources;
         effects.push(Effect::StartEngine {
             request: RunRequest {
-                key,
+                key: SendKey::Build(key),
                 run: key.run,
                 thread,
                 origin: origin(thread, main),
