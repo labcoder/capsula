@@ -578,7 +578,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         } => {
             purger.op_arriving();
             let applied = match store.reconnect().and_then(|()| {
-                store.store_summary(thread, generation, covers, &text, model.as_deref())
+                store.store_summary(thread, generation, covers, &text.0, model.as_deref())
             }) {
                 Ok(applied) => applied,
                 Err(error) => {

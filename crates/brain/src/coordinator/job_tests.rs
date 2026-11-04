@@ -8,7 +8,7 @@ use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin};
 use crate::coordinator::{
     Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey, JobKind, JobOutput, LeaseId, ReadJob,
-    SEND_DEADLINE, SendKey, Stale, StoreOp, Unbuilt,
+    SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Generation, TitleSource};
@@ -527,7 +527,7 @@ fn store_summary(key: JobKey) -> Effect {
         thread: T,
         generation: G,
         covers: COVERS,
-        text: "Earlier".to_owned(),
+        text: SummaryText("Earlier".to_owned()),
         model: None,
     })
 }
@@ -549,6 +549,43 @@ fn compacting() -> Coordinator {
     );
     assert_eq!(core.handle(ready(key(3))), Ok(granted(lease(key(3), 1))));
     core
+}
+
+#[test]
+fn formatting_the_summary_write_shows_its_length_never_its_text() {
+    const SENTINEL: &str = "sentinel: the private summary of task four";
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(Input::SendSettled {
+            lease: lease(key(3), 1)
+        }),
+        Ok(Vec::new())
+    );
+    let effects = core
+        .handle(Input::JobDone {
+            key: key(3),
+            output: Some(JobOutput::Summary(SENTINEL.to_owned())),
+        })
+        .expect("the slot's own job is current");
+    let [effect @ Effect::Store(op @ StoreOp::StoreSummary { .. })] = effects.as_slice() else {
+        panic!("the job's only effect is its summary write");
+    };
+    let length = format!("SummaryText({})", SENTINEL.len());
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    let byte_list = byte_list.trim_matches(['[', ']']);
+    for shown in [
+        format!("{op:?}"),
+        format!("{effect:?}"),
+        format!("{effects:?}"),
+    ] {
+        assert!(!shown.contains("sentinel"), "the summary text leaked");
+        assert!(!shown.contains(byte_list), "the summary bytes leaked");
+        assert!(shown.contains(&length), "the length is missing");
+        assert!(
+            shown.contains("covers: (EventId(20), EventId(31))"),
+            "the range is missing"
+        );
+    }
 }
 
 #[test]

@@ -607,6 +607,16 @@ mod tests {
 
     /// What a title job's round of `events` reports.
     async fn job_title(events: Vec<TurnEvent>, then: Then) -> Option<String> {
+        job_output(events, then, JobKind::Title)
+            .await
+            .map(|output| match output {
+                JobOutput::Title(title) => title.as_str().to_owned(),
+                JobOutput::Summary(_) => panic!("a title job reports a title"),
+            })
+    }
+
+    /// What a job of `kind` reports for a round of `events`.
+    async fn job_output(events: Vec<TurnEvent>, then: Then, kind: JobKind) -> Option<JobOutput> {
         let (alive, _gone) = mpsc::channel(1);
         let engine = Sends {
             events,
@@ -619,15 +629,48 @@ mod tests {
         };
         let (inputs, mut received) = mpsc::unbounded_channel();
         let gate = SendGate::closed(request().key);
-        let _cancel = super::start_job(&engine, request(), (key, JobKind::Title), inputs, gate);
+        let _cancel = super::start_job(&engine, request(), (key, kind), inputs, gate);
         let Some(Input::JobDone { key: done, output }) = received.recv().await else {
             panic!("a job reports JobDone");
         };
         assert_eq!(done, key, "it reports its own key");
-        output.map(|output| match output {
-            JobOutput::Title(title) => title.as_str().to_owned(),
-            JobOutput::Summary(_) => panic!("a title job reports a title"),
-        })
+        output
+    }
+
+    #[tokio::test]
+    async fn a_compaction_job_takes_up_to_16_kib_and_cuts_it_to_the_summary_bound() {
+        let completed = TurnEvent::Finished(Finish::Completed);
+        let limit = crate::jobs::MAX_SUMMARY_OUTPUT;
+        assert_eq!(limit, 16 * 1024);
+        assert_eq!(
+            job_output(
+                vec![text("  Earlier: "), text("Lisbon\n"), completed.clone()],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            Some(JobOutput::Summary("Earlier: Lisbon".to_owned()))
+        );
+        assert_eq!(
+            job_output(
+                vec![text(&"x".repeat(limit)), completed.clone()],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            Some(JobOutput::Summary("x".repeat(8 * 1024))),
+            "exactly 16 KiB is taken"
+        );
+        assert_eq!(
+            job_output(
+                vec![text(&"x".repeat(limit - 1)), text("yy"), completed],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            None,
+            "one byte over across deltas fails"
+        );
     }
 
     #[tokio::test]

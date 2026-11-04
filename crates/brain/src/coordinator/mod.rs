@@ -35,7 +35,7 @@ pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
-pub use store_op::StoreOp;
+pub use store_op::{StoreOp, SummaryText};
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);

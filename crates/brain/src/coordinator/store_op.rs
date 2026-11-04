@@ -4,6 +4,8 @@ use kumochi_protocol::message::{
     DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
 };
 
+use std::fmt;
+
 use super::Input;
 use crate::store::{Generation, RunEnd, SceneTarget, TitleSource};
 
@@ -112,7 +114,7 @@ pub enum StoreOp {
         /// The first and last events it covers.
         covers: (EventId, EventId),
         /// The summary.
-        text: String,
+        text: SummaryText,
         /// The model that wrote it; `None` when the engine took none.
         model: Option<String>,
     },
@@ -123,6 +125,16 @@ pub enum StoreOp {
         /// The model and effort.
         choice: ModelChoice,
     },
+}
+
+/// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
+#[derive(Clone, PartialEq)]
+pub struct SummaryText(pub String);
+
+impl fmt::Debug for SummaryText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SummaryText").field(&self.0.len()).finish()
+    }
 }
 
 impl StoreOp {
