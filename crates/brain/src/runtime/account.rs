@@ -9,15 +9,19 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::ControlToShell;
+use kumochi_protocol::message::{
+    AccountOp, AccountRecovery, AccountView, ControlToShell, DataToShell, ErrorKey, ModelInfo,
+    PlanState, SettingsOp, UserError,
+};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use crate::connections::account::{
     AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
 };
+use crate::connections::catalog::{CatalogError, default_model, read};
 use crate::connections::clock::Clock;
 use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
@@ -28,7 +32,7 @@ use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, Si
 use crate::connections::records::{Account, Revocable};
 use crate::platform::credential::CredentialStore;
 
-use super::{Brain, Full, Link};
+use super::{Brain, Full, Link, settings};
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
 pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
@@ -51,6 +55,65 @@ impl std::fmt::Debug for Net {
     }
 }
 
+/// What the account system hears: its machine's input, or the end of a catalog read.
+#[derive(Debug)]
+pub(crate) enum Event {
+    Machine(Input),
+    /// The read started under `epoch` ended: the models, or what to tell the user, if anything.
+    Read {
+        epoch: u64,
+        result: Result<Vec<ModelInfo>, Option<UserError>>,
+    },
+}
+
+impl From<Input> for Event {
+    fn from(input: Input) -> Self {
+        Self::Machine(input)
+    }
+}
+
+/// The account's model catalog, in memory only (design §3 rule 6): one read at a time, cleared
+/// when the account stops being usable, so another account never shows this one's models.
+#[derive(Debug, Default)]
+struct Catalog {
+    /// Moves whenever the account stops being usable; a read started before is dropped.
+    epoch: u64,
+    usable: bool,
+    /// The read out, while it waits for the bearer, its client or the answer.
+    read: Option<AbortHandle>,
+    /// The last read's models; `None` until one succeeds in this epoch.
+    models: Option<Vec<ModelInfo>>,
+    /// The shell hasn't heard the current list.
+    unsent: bool,
+}
+
+impl Catalog {
+    fn viewed(&mut self, view: &AccountView) {
+        let usable = matches!(
+            view,
+            AccountView::SignedIn {
+                plan: PlanState::Enabled,
+                recovery: None | Some(AccountRecovery::Retry),
+                ..
+            }
+        );
+        if self.usable && !usable {
+            self.epoch += 1;
+            self.cancel();
+            self.unsent |= self.models.take().is_some();
+        }
+        self.usable = usable;
+    }
+
+    /// Stops the read out, so it sends nothing more; a refresh its bearer wait started still
+    /// runs to its end and is saved.
+    fn cancel(&mut self) {
+        if let Some(read) = self.read.take() {
+            read.abort();
+        }
+    }
+}
+
 /// The account machine, the credential thread and the tasks it started.
 #[derive(Debug)]
 pub(crate) struct Accounts {
@@ -66,6 +129,9 @@ pub(crate) struct Accounts {
     /// Callers waiting for the bearer, by ticket.
     tickets: HashMap<u64, oneshot::Sender<Access>>,
     next_ticket: u64,
+    catalog: Catalog,
+    reads_tx: mpsc::UnboundedSender<Event>,
+    reads: mpsc::UnboundedReceiver<Event>,
 }
 
 impl Accounts {
@@ -83,6 +149,7 @@ impl Accounts {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (loaded_tx, loaded) = std_mpsc::channel();
         let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone())?;
+        let (reads_tx, reads) = mpsc::unbounded_channel();
         let mut accounts = Self {
             state,
             jobs: Some(jobs),
@@ -93,6 +160,9 @@ impl Accounts {
             net,
             tickets: HashMap::new(),
             next_ticket: 0,
+            catalog: Catalog::default(),
+            reads_tx,
+            reads,
         };
         accounts.apply(started);
         let done = loaded
@@ -104,19 +174,17 @@ impl Accounts {
     }
 
     /// The next report from the credential thread or a task.
-    pub(crate) async fn next(&mut self) -> Input {
-        self.events
-            .recv()
-            .await
-            .expect("the account system holds a sender")
+    pub(crate) async fn next(&mut self) -> Event {
+        tokio::select! {
+            input = self.events.recv() => {
+                Event::Machine(input.expect("the account system holds a sender"))
+            }
+            Some(read) = self.reads.recv() => read,
+        }
     }
 
     /// Asks for the bearer, refreshed first when it's due; it comes on the receiver. Dropping the
     /// receiver cancels only the wait: a refresh it started still runs to its end and is saved.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "PR 10b's catalog read is the first caller")
-    )]
     pub(crate) fn access(&mut self) -> (oneshot::Receiver<Access>, Vec<ControlToShell>) {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
@@ -126,17 +194,85 @@ impl Accounts {
         (receiver, self.handle(Input::Access { ticket, now }))
     }
 
-    /// Applies an input; what the shell should hear, in order.
-    pub(crate) fn handle(&mut self, input: Input) -> Vec<ControlToShell> {
+    /// Applies an input; what the shell should hear, in order. The catalog is read when the
+    /// account becomes usable, and again on Retry or a connection while no read succeeded.
+    pub(crate) fn handle(&mut self, event: impl Into<Event>) -> Vec<ControlToShell> {
+        let input = match event.into() {
+            Event::Machine(input) => input,
+            Event::Read { epoch, result } => return self.read_ended(epoch, result),
+        };
+        let ask = matches!(input, Input::Op(AccountOp::Retry) | Input::Connected);
+        // A new shell hears the list there is.
+        self.catalog.unsent |= matches!(input, Input::Connected) && self.catalog.models.is_some();
+        let was_usable = self.catalog.usable;
         let effects = self.state.handle(input);
-        self.apply(effects)
+        let mut frames = self.apply(effects);
+        let catalog = &self.catalog;
+        if catalog.usable
+            && catalog.read.is_none()
+            && catalog.models.is_none()
+            && (ask || !was_usable)
+        {
+            let (wait, access) = self.access();
+            frames.extend(access);
+            let task = tokio::spawn(read_catalog(wait, Arc::clone(&self.net.http)));
+            self.catalog.read = Some(task.abort_handle());
+            drop(tokio::spawn(catalog_task(
+                self.catalog.epoch,
+                task,
+                self.reads_tx.clone(),
+            )));
+        }
+        frames
+    }
+
+    /// A catalog read ended; one for an account that has since changed is dropped.
+    fn read_ended(
+        &mut self,
+        epoch: u64,
+        result: Result<Vec<ModelInfo>, Option<UserError>>,
+    ) -> Vec<ControlToShell> {
+        if epoch != self.catalog.epoch {
+            return Vec::new();
+        }
+        self.catalog.read = None;
+        match result {
+            Ok(models) => {
+                self.catalog.models = Some(models);
+                self.catalog.unsent = true;
+                Vec::new()
+            }
+            Err(None) => Vec::new(),
+            Err(Some(error)) => {
+                let unavailable = error.key() == ErrorKey::PlanUnavailable;
+                let mut frames = vec![ControlToShell::Error(error)];
+                if unavailable {
+                    frames.extend(self.handle(Input::PlanUnavailable));
+                }
+                frames
+            }
+        }
+    }
+
+    /// The last catalog read in this epoch, if one succeeded.
+    pub(super) fn models(&self) -> Option<&[ModelInfo]> {
+        self.catalog.models.as_deref()
+    }
+
+    /// The catalog for the shell, once each time it changes or a shell connects.
+    pub(super) fn models_unsent(&mut self) -> Option<Vec<ModelInfo>> {
+        std::mem::take(&mut self.catalog.unsent)
+            .then(|| self.catalog.models.clone().unwrap_or_default())
     }
 
     fn apply(&mut self, effects: Vec<Effect>) -> Vec<ControlToShell> {
         let mut frames = Vec::new();
         for effect in effects {
             match effect {
-                Effect::View(view) => frames.push(ControlToShell::Account(view)),
+                Effect::View(view) => {
+                    self.catalog.viewed(&view);
+                    frames.push(ControlToShell::Account(view));
+                }
                 Effect::Error(error) => frames.push(ControlToShell::Error(error)),
                 Effect::Vault(job) => {
                     let sent = self
@@ -219,7 +355,7 @@ impl Accounts {
         frames
     }
 
-    /// Stops taking work. A refresh already out runs to its end, and its result's save, until
+    /// Stops taking work and cancels the catalog read. A refresh already out runs to its end, and its result's save, until
     /// `refresh_by`, so a rotated set the provider issued isn't lost; past that its token stays
     /// marked as sent, and the next start never sends it again. Then it waits for the credential
     /// job already dispatched, past `deadline` if it must, so it never overlaps the instance
@@ -230,6 +366,7 @@ impl Accounts {
         if let Some(listener) = self.listener.take() {
             listener.abort();
         }
+        self.catalog.cancel();
         let settled = tokio::time::timeout_at(refresh_by, async {
             while self.state.refresh_out() {
                 let input = self.next().await;
@@ -241,6 +378,8 @@ impl Accounts {
         if settled.is_err() {
             tracing::warn!("a refresh is still out at shutdown; its token stays marked as sent");
         }
+        // One the settling started.
+        self.catalog.cancel();
         self.jobs = None;
         let Some(mut released) = self.released.take() else {
             return;
@@ -257,17 +396,36 @@ impl Accounts {
 }
 
 impl Brain {
-    /// Applies an account input and tells the connected shell, if any, what changed.
+    /// Applies an account input and tells the connected shell, if any, what changed. A catalog
+    /// read that leaves `default_model` unset or unlisted queues the brain's own change to it.
     pub(super) fn account_input(
         &mut self,
-        input: Input,
-        link: Option<&mut Link<'_, '_>>,
+        input: impl Into<Event>,
+        mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let frames = self.account.handle(input);
+        let event = input.into();
+        let read = matches!(event, Event::Read { .. });
+        let frames = self.account.handle(event);
+        if read
+            && let Some(choice) = self
+                .account
+                .models()
+                .and_then(|models| default_model(self.config.view().default_model.as_ref(), models))
+        {
+            self.settings_ops.push_back(settings::Queued {
+                op: SettingsOp::SetDefaultModel(choice),
+                epoch: settings::BRAIN,
+            });
+            self.pump_settings(link.as_deref_mut())?;
+        }
         let Some(link) = link else {
             return Ok(());
         };
-        frames.iter().try_for_each(|frame| link.control(frame))
+        frames.iter().try_for_each(|frame| link.control(frame))?;
+        match self.account.models_unsent() {
+            Some(models) => link.data(&DataToShell::Models { models }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -344,6 +502,46 @@ async fn revoke_task(
         _ => Vec::new(),
     };
     events.send(Input::Revoked(confirmed)).ok();
+}
+
+/// Reads the catalog with the bearer `wait` brings. Aborting it drops only that wait, never a
+/// refresh it started.
+async fn read_catalog(
+    wait: oneshot::Receiver<Access>,
+    http: HttpFactory,
+) -> Result<Vec<ModelInfo>, Option<UserError>> {
+    let bearer = match wait.await {
+        Ok(Ok(bearer)) => bearer,
+        Ok(Err(Denied::Failed(error))) => return Err(Some(error)),
+        Ok(Err(Denied::Unusable)) | Err(_) => return Err(None),
+    };
+    let failed = |error: HttpError| Some(CatalogError::Http(error).failure());
+    let http = tokio::task::spawn_blocking(move || http())
+        .await
+        .map_err(|_| failed(HttpError::Configuration))?
+        .map_err(failed)?;
+    read(&http, bearer)
+        .await
+        .map_err(|error| Some(error.failure()))
+}
+
+/// Reports the end of `task`, a read in its own task so one that panics still ends; a cancelled
+/// one reports nothing.
+async fn catalog_task(
+    epoch: u64,
+    task: JoinHandle<Result<Vec<ModelInfo>, Option<UserError>>>,
+    reads: mpsc::UnboundedSender<Event>,
+) {
+    let result = match task.await {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() => return,
+        Err(_) => {
+            // The payload isn't logged.
+            tracing::error!("a catalog read stopped before it reported");
+            Err(Some(CatalogError::Http(HttpError::Transport).failure()))
+        }
+    };
+    reads.send(Event::Read { epoch, result }).ok();
 }
 
 async fn refresh_task(

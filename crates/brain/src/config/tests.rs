@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, ErrorKey, MaxFrameRate, SettingsOp, ThreadId, UserName,
+    AssistantName, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice, ModelSlug,
+    SettingsOp, ThreadId, UserName,
 };
 
 use super::{Config, ConfigError};
@@ -218,4 +219,66 @@ fn only_an_unreadable_file_asks_the_user_to_fix_it() {
     assert_eq!(ConfigError::NoHome.key(), ErrorKey::SettingsRefused);
     let write = ConfigError::Write(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     assert_eq!(write.key(), ErrorKey::SettingsRefused);
+}
+
+fn choice(slug: &str, effort: Effort) -> ModelChoice {
+    ModelChoice {
+        model: ModelSlug::new(slug).expect("valid"),
+        effort,
+    }
+}
+
+#[test]
+fn the_default_model_persists_and_a_bad_one_reads_as_unset() {
+    let scratch = Scratch::new("config-default-model");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(config.view().default_model, None);
+    let luna = choice("gpt-6-luna", Effort::Low);
+    apply(&mut config, SettingsOp::SetDefaultModel(luna.clone()));
+    assert_eq!(config.view().default_model, Some(luna.clone()));
+    let table: toml::Table = std::fs::read_to_string(&path)
+        .expect("readable")
+        .parse()
+        .expect("parses");
+    assert_eq!(table["default_model"]["model"].as_str(), Some("gpt-6-luna"));
+    assert_eq!(table["default_model"]["effort"].as_str(), Some("Low"));
+    let reload = || {
+        Config::load(Some(dir.clone()), ThreadId(1))
+            .view()
+            .default_model
+            .clone()
+    };
+    assert_eq!(reload(), Some(luna));
+    let longest = "a".repeat(MAX_SLUG_BYTES);
+    let over = "a".repeat(MAX_SLUG_BYTES + 1);
+    let cases = [
+        (
+            format!("default_model = {{ model = \"{longest}\", effort = \"Max\" }}"),
+            Some(choice(&longest, Effort::Max)),
+        ),
+        (
+            format!("default_model = {{ model = \"{over}\", effort = \"Max\" }}"),
+            None,
+        ),
+        ("default_model = \"gpt-6-luna\"".to_owned(), None),
+        (
+            "default_model = { model = \"Not A Slug\", effort = \"Low\" }".to_owned(),
+            None,
+        ),
+        (
+            "default_model = { model = \"gpt-6-luna\", effort = \"ultra\" }".to_owned(),
+            None,
+        ),
+        (
+            "default_model = { model = \"gpt-6-luna\" }".to_owned(),
+            None,
+        ),
+        ("default_model = {}".to_owned(), None),
+    ];
+    for (text, expected) in cases {
+        std::fs::write(&path, &text).expect("seeded");
+        assert_eq!(reload(), expected, "{text}");
+    }
 }

@@ -142,6 +142,7 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         onboarded: true,
         main_thread: ThreadId(9),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+        default_model: None,
     };
     frame::write(
         &mut &link.control,
@@ -651,6 +652,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         onboarded: true,
         main_thread: ThreadId(9),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
+        default_model: None,
     };
     for message in [
         ControlToShell::Welcome {

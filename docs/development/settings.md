@@ -66,6 +66,11 @@ the [user guide](../user/settings.md).
 | `user_name` | 1–24 characters, or absent | absent (unset) |
 | `onboarded` | boolean | `false` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
+| `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
+
+`default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
+`SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
+settled `SettingsView` (see [accounts](accounts.md#model-catalog)). A bad value reads as unset.
 
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
 both sides: trimmed, 1–24 Unicode scalar values, one line, with no control characters and no

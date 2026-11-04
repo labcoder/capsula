@@ -408,7 +408,8 @@ impl Threads {
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
-            | DataToShell::SceneEnd { .. } => {
+            | DataToShell::SceneEnd { .. }
+            | DataToShell::Models { .. } => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             }
         }

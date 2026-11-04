@@ -359,6 +359,7 @@ mod tests {
             onboarded: true,
             main_thread: ThreadId(1),
             max_frame_rate: MaxFrameRate::AUTOMATIC,
+            default_model: None,
         }
     }
 

@@ -12,6 +12,13 @@ use super::{NameError, ThreadId};
 pub const MAX_TITLE_CHARS: usize = 80;
 /// The longest model slug, in bytes.
 pub const MAX_SLUG_BYTES: usize = 64;
+/// The most models one catalog lists [local policy].
+pub const MAX_MODELS: usize = 200;
+/// The longest model display name, in Unicode scalar values [local policy].
+pub const MAX_MODEL_NAME_CHARS: usize = 80;
+/// Every listed model is treated as able to call tools [local policy, the Captain's pick (b)]:
+/// the model list doesn't say, so a provider's refusal shows at run time instead.
+pub const LISTED_MODELS_CALL_TOOLS: bool = true;
 
 /// What a thread is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +32,20 @@ pub enum ThreadKind {
 name! {
     /// A task's title as the user or a model set it.
     ThreadTitle, MAX_TITLE_CHARS
+}
+
+name! {
+    /// A model's name as the catalog shows it.
+    ModelName, MAX_MODEL_NAME_CHARS
+}
+
+/// One model the account's catalog lists, in the catalog's order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// What a run sends.
+    pub slug: ModelSlug,
+    /// What the picker shows.
+    pub display_name: ModelName,
 }
 
 /// A model slug broke the rule.

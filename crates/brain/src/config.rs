@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, ErrorKey, MaxFrameRate, SettingsOp, SettingsView, ThreadId, UserName,
+    AssistantName, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView, ThreadId,
+    UserName,
 };
 use toml::{Table, Value};
 
@@ -18,6 +19,7 @@ const ASSISTANT_NAME: &str = "assistant_name";
 const USER_NAME: &str = "user_name";
 const ONBOARDED: &str = "onboarded";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
+const DEFAULT_MODEL: &str = "default_model";
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +161,10 @@ impl Config {
                     table.remove(MAX_FRAME_RATE);
                 }
             },
+            SettingsOp::SetDefaultModel(choice) => {
+                let value = Value::try_from(choice).expect("a model choice is two strings");
+                table.insert(DEFAULT_MODEL.to_owned(), value);
+            }
         }
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
@@ -227,12 +233,16 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
             .unwrap_or_default(),
         Some(_) => invalid(MAX_FRAME_RATE).unwrap_or_default(),
     };
+    let default_model = table.get(DEFAULT_MODEL).and_then(|value| {
+        (value.clone().try_into::<ModelChoice>().ok()).or_else(|| invalid(DEFAULT_MODEL))
+    });
     SettingsView {
         assistant_name,
         user_name,
         onboarded,
         main_thread,
         max_frame_rate,
+        default_model,
     }
 }
 

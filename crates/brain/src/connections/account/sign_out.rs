@@ -52,6 +52,11 @@ impl AccountState {
         {
             return;
         }
+        let disposition = if self.unavailable {
+            Disposition::Erase
+        } else {
+            Disposition::Keep
+        };
         self.attempt += 1;
         self.admitting = None;
         self.deferred = None;
@@ -61,9 +66,6 @@ impl AccountState {
         }
         self.loaded.account = None;
         self.loaded.notice = true;
-        // shortcut: nothing reports `PlanState::Unavailable` until PR 10 reads the catalog; then
-        // that account's sign-out erases its registration (pick 2).
-        let disposition = Disposition::Keep;
         self.leaving = Some(Leaving {
             step: Step::Promote(disposition),
             stuck: None,

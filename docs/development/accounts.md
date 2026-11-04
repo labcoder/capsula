@@ -454,11 +454,44 @@ stateDiagram-v2
 
 While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start nothing and are
 answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
-(`Keep`); `Erase` comes only from a persisted marker, a damaged one included (it reads as
-`Erase`/`Revoking`), until PR 10 reports `PlanState::Unavailable`. A refused marker read at startup
+(`Keep`), unless the catalog found the account's plan unavailable: then it erases it (`Erase`,
+pick 2). `Erase` also comes from a persisted marker, a damaged one included (it reads as
+`Erase`/`Revoking`). A refused marker read at startup
 decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and so does a lock error on
 the load after Finish; Retry or the next start reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
 whole sign-out makes, for Keep and Erase.
+
+## Model catalog
+
+`connections::catalog::read` sends one bearer GET to `/v1/models` and keeps the `models` entries
+whose `visibility` is `"list"`, in the server's order. Each must have a `ModelSlug` and a
+one-line `ModelName` (1–80 characters); a mistyped, invalid or duplicate entry, or one past
+`MAX_MODELS` (200), is skipped and counted, and only the count is logged. Every listed model is
+treated as tool-capable (`LISTED_MODELS_CALL_TOOLS`, a local policy).
+
+`runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
+(`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
+while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
+account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
+its client or awaits the answer, and the list is cleared; the shell then hears an empty
+`Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
+wait started. It's keyed by that epoch rather than the machine's
+generation, which moves on every rotation and would clear the list hourly.
+
+| Answer | Shown |
+| --- | --- |
+| 200 with a model list | `Models` on the data pipe, once per change and per connection |
+| 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
+| 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
+| `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
+| other codes | as the refresh table above maps them |
+
+`Unavailable` lasts in memory until the account moves, and that account's sign-out erases the
+registration. shortcut: a 401 only offers Retry; PR 11's request path refreshes on it.
+
+A read that leaves `default_model` unset or no longer listed sets it, as the brain's own settings
+change: `gpt-6-luna` at `Low` when listed, otherwise the first model at `Low`. A listed choice is
+never overwritten, and an empty list changes nothing (see [settings](settings.md#config-keys)).
 
 ## Credential storage
 

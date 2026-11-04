@@ -156,6 +156,7 @@ impl Tapped for DataToShell {
             Self::SceneSnapshotV1 { .. } => "SceneSnapshotV1",
             Self::SceneCutApplied { .. } => "SceneCutApplied",
             Self::SceneEnd { .. } => "SceneEnd",
+            Self::Models { .. } => "Models",
         }
     }
 
