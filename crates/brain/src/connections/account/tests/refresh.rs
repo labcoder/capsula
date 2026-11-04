@@ -415,6 +415,52 @@ fn a_rotated_set_that_fails_its_check_is_listed_and_ends_the_session() {
     assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
 }
 
+/// A key the check's key set lacks, even fetched again, leaves the set pending like a discovery
+/// failure: the session goes on, and the next use checks again.
+#[test]
+fn a_check_whose_key_is_missing_stays_pending() {
+    let mut h = Harness::seeded("refresh-unknown-key", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(rotated(Some("id-new")));
+    h.validated(Err(IdentityError::UnknownKey));
+    assert_eq!(
+        h.answers,
+        [(1, failed(ErrorKey::SignInFailed, &[Action::Retry]))]
+    );
+    assert!(h.tokens().pending_identity_validation, "still pending");
+    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
+    h.access(2, NOW);
+    assert_eq!(h.validations.len(), 2, "checked again");
+}
+
+/// L2: a rotated set that can't be saved as the account, its access token past its bound say,
+/// still lists its successor when the entry fits, so the rotated token is revoked. The token it
+/// replaced was consumed, so the session ends.
+#[test]
+fn a_rotated_set_too_big_to_save_lists_its_successor() {
+    let mut h = Harness::seeded("refresh-unsaveable", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(Ok(TokenSet {
+        access_token: secret(&"a".repeat(crate::connections::records::MAX_TOKEN_BYTES + 1)),
+        ..rotated(None).expect("a set")
+    }));
+    assert_eq!(
+        h.answers,
+        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
+    );
+    assert_eq!(
+        h.revocations(),
+        [(
+            CLIENT.to_owned(),
+            "refresh-new".to_owned(),
+            NOW,
+            Origin::Exchange
+        )]
+    );
+    assert_eq!(h.account(), Some(ended()));
+    assert_eq!(h.refreshes.len(), 1);
+}
+
 /// N1: a rejected set's token stays in `chatgpt` until its list entry commits, and only then is
 /// the registration saved over it; with the list full, the unknown outcome is written first.
 #[test]

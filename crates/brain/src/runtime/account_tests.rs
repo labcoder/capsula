@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
-use kumochi_protocol::message::{AccountOp, AccountView, ControlToBrain, ControlToShell, ErrorKey};
+use kumochi_protocol::message::{
+    AccountOp, AccountView, Action, ControlToBrain, ControlToShell, ErrorKey, UserError,
+};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -15,7 +17,7 @@ use tokio::time::{Instant, timeout};
 use zeroize::Zeroizing;
 
 use super::{Ended, PATIENCE, Shell, duplex};
-use crate::connections::account::{Input, Listened, Worker};
+use crate::connections::account::{Denied, Input, Listened, Worker};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::oauth::id_token::IdentityError;
@@ -24,7 +26,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::{SessionLock, SessionLockError};
-use crate::runtime::account::{Accounts, Net, exchange_task};
+use crate::runtime::account::{Access, Accounts, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
@@ -583,6 +585,100 @@ fn saved_refresh(scratch: &Scratch, store: &FakeStore) -> (String, bool) {
         .expect("an account");
     let tokens = account.expose().tokens.as_ref().expect("tokens");
     (tokens.refresh_token.to_string(), tokens.refresh_sent)
+}
+
+/// Panics on the refresh-token grant or, with `check`, answers it with a set to check and panics
+/// on the check's discovery; either way after the token was marked as sent.
+struct Panicking {
+    check: bool,
+}
+
+impl Http for Panicking {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let body = (self.check && matches!(request.endpoint, Endpoint::Token)).then(|| {
+            let tokens = json!({"access_token":"access-new", "refresh_token":"refresh-new", "id_token":"id.token.new", "token_type":"Bearer", "scope":"openid offline_access chatgpt.tokens.use.direct", "expires_in":3600});
+            serde_json::to_vec(&tokens).expect("fixture")
+        });
+        async move {
+            let Some(body) = body else {
+                panic!("the transport panicked");
+            };
+            Ok(Response {
+                status: 200,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(body)),
+            })
+        }
+    }
+}
+
+/// Runs the account system until `wait` is answered, and that answer's bearer text.
+async fn answered(
+    accounts: &mut Accounts,
+    mut wait: oneshot::Receiver<Access>,
+) -> Result<String, Denied> {
+    let answer = timeout(PATIENCE, async {
+        loop {
+            if let Ok(answer) = wait.try_recv() {
+                return answer;
+            }
+            let input = accounts.next().await;
+            accounts.handle(input);
+        }
+    })
+    .await
+    .expect("answered in time");
+    answer.map(|bearer| bearer.expose().to_string())
+}
+
+fn failed(key: ErrorKey, action: Action) -> Result<String, Denied> {
+    let error = UserError::new(key, Vec::new(), vec![action]).expect("within limits");
+    Err(Denied::Failed(error))
+}
+
+/// #98 M2, CAPS-151 M2: a refresh task that panics after its token was marked as sent still ends
+/// its flight. The token may have gone out, so the session ends and it stays marked; a later
+/// caller is answered at once instead of joining a dead flight.
+#[tokio::test]
+async fn a_refresh_task_that_panics_still_answers_its_callers() {
+    let scratch = Scratch::new("account-refresh-panic");
+    let store = FakeStore::default();
+    let http = SharedHttp::new(Panicking { check: false });
+    let mut accounts = due_account(&scratch, &store, http);
+    let (wait, _) = accounts.access();
+    assert_eq!(
+        answered(&mut accounts, wait).await,
+        failed(ErrorKey::SessionEnded, Action::SignIn)
+    );
+    let (later, _) = accounts.access();
+    assert_eq!(answered(&mut accounts, later).await, Err(Denied::Unusable));
+    accounts.close(Instant::now(), Instant::now()).await;
+    assert_eq!(
+        saved_refresh(&scratch, &store),
+        ("refresh-old".to_owned(), true)
+    );
+}
+
+/// #98 M2: a check task that panics leaves its set pending, and the next caller checks it again.
+#[tokio::test]
+async fn a_check_task_that_panics_leaves_the_set_pending() {
+    let scratch = Scratch::new("account-check-panic");
+    let store = FakeStore::default();
+    let http = SharedHttp::new(Panicking { check: true });
+    let mut accounts = due_account(&scratch, &store, http);
+    let retry = failed(ErrorKey::SignInFailed, Action::Retry);
+    let (wait, _) = accounts.access();
+    assert_eq!(answered(&mut accounts, wait).await, retry);
+    let (later, _) = accounts.access();
+    assert_eq!(answered(&mut accounts, later).await, retry);
+    accounts.close(Instant::now(), Instant::now()).await;
+    assert_eq!(
+        saved_refresh(&scratch, &store),
+        ("refresh-new".to_owned(), false)
+    );
 }
 
 /// CAPS-151 H3: a refresh out at shutdown runs to its end, and its rotated set is saved before
