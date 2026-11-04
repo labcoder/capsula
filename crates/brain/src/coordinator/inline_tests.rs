@@ -91,10 +91,10 @@ fn granted(attempt: u64) -> Vec<Effect> {
     ]
 }
 
-fn stored(attempt: u64, applied: bool) -> Input {
+fn stored(attempt: u64) -> Input {
     Input::SummaryStored {
         owner: SendKey::Build(key(attempt)),
-        applied,
+        applied: true,
     }
 }
 
@@ -154,12 +154,8 @@ fn a_summary_too_large_for_the_turn_is_rewritten_under_the_run_then_built_again(
         core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
         Ok(vec![store_summary(2, "Short")])
     );
-    assert_eq!(core.handle(stored(2, true)), Ok(vec![rebuilt(3)]));
-    assert_eq!(
-        core.handle(stored(2, true)),
-        Err(Stale),
-        "acknowledged once"
-    );
+    assert_eq!(core.handle(stored(2)), Ok(vec![rebuilt(3)]));
+    assert_eq!(core.handle(stored(2)), Err(Stale), "acknowledged once");
     assert_eq!(
         core.handle(too_large(3, Some(ROOM))),
         Ok(ends_failed(Failure::Budget)),
@@ -257,7 +253,7 @@ fn stop_or_a_replacement_leaves_a_held_summary_ack_stale() {
             })
             .expect("current");
         }
-        assert_eq!(core.handle(stored(2, true)), Err(Stale));
+        assert_eq!(core.handle(stored(2)), Err(Stale));
         assert_eq!(core.handle(compact_built(2, &[T])), Err(Stale));
     }
 }
