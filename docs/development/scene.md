@@ -956,9 +956,12 @@ semantic retirement, and returns the protected charged owner plus scheduler effe
 scenes, consumed indices, out-of-order requests, missing ready results and insufficient
 residency leave state unchanged. Freeing a window position immediately gives its next
 successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`. During an admission read, a valid consumption request returns Busy and
-records one pending request without changing semantic state, residency or window positions.
+and `StepShown`. While the scene's admission is in the lane, including its worker-slot wait,
+a valid consumption request returns Busy and records one pending request without changing
+semantic state, residency or window positions.
 Returning the read offers a wake/retry point before the next admission for that scene.
+Both fresh arrivals and already-held commits wait behind the pending request, even when
+the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must
 handle it explicitly, since a ready head has no watchdog or guaranteed owner-release wake.
 If that retry is refused for residency, its pending barrier remains until successful
