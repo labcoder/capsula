@@ -43,8 +43,17 @@ sequenceDiagram
   becomes `-32603` for its call. The brain's side (C4b) reassembles a request up to 512 KiB.
 - **Bodies.** The brain sends a result or error body, which must be valid JSON; the bridge splices
   it into the envelope unparsed.
+- **Hello first.** The brain must send `Hello` within 5 seconds of the connect, before anything
+  else; otherwise the bridge exits 1 without forwarding a line.
 - **Ending.** stdin's end, or the pipe's, ends the bridge with exit 0, without reconnecting. When
-  the deadline in `Hello` passes, the call in flight gets `-32603` and the bridge exits 1.
+  the deadline in `Hello` passes, the call in flight gets `-32603` and the bridge exits 1. Every
+  wait counts against that deadline, pipe writes included: a brain that stops reading can't hold
+  the bridge past it, and a write it cut short ends the connection rather than being retried.
+- **Stdout is bounded.** At most four lines wait for stdout. When a reader stops reading, the
+  relay waits instead of queueing, and at the end the bridge gives stdout one second to take its
+  last lines before it exits 1.
+- **Debug prints no content.** Lines, params, bodies, ids and call keys format as their kind and
+  length only.
 - **Logging never stops it.** If its log file can't open, the bridge runs anyway, with the panic
   hook installed.
 - **Threads.** stdin and stdout run on their own threads. The pipe runs on a current-thread tokio

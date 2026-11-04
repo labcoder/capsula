@@ -1,13 +1,15 @@
 //! Bridge ↔ brain messages: postcard in protocol's frame format, chunked under the data pipe's
 //! 256 KiB cap in both directions.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// The most bytes of a body one frame carries, well under the data pipe's cap with its envelope.
 pub(crate) const CHUNK: usize = 200 * 1024;
 
 /// A call as the brain sees it: `m:n:<decimal>` or `m:s:<hex>`, at most 64 ASCII bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CallKey(pub(crate) String);
 
 /// The methods the bridge relays, and `ping`, which it answers.
@@ -20,7 +22,7 @@ pub(crate) enum Method {
 }
 
 /// Bridge to brain.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(crate) enum ToBrain {
     /// Part of a request's raw params JSON; the brain reassembles at most `MAX_INCOMING`.
     Request {
@@ -34,7 +36,7 @@ pub(crate) enum ToBrain {
 }
 
 /// Brain to bridge.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(crate) enum ToBridge {
     /// Sent once at connect: the launch's remaining deadline.
     Hello { remaining_ms: u64 },
@@ -45,6 +47,58 @@ pub(crate) enum ToBridge {
         last: bool,
         error: bool,
     },
+}
+
+// Debug prints lengths and flags only: keys carry the client's id, and chunks carry tool bodies.
+impl fmt::Debug for CallKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallKey")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ToBrain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Request {
+                key,
+                method,
+                chunk,
+                last,
+            } => f
+                .debug_struct("Request")
+                .field("key", key)
+                .field("method", method)
+                .field("chunk", &chunk.len())
+                .field("last", last)
+                .finish(),
+            Self::Initialized => f.write_str("Initialized"),
+        }
+    }
+}
+
+impl fmt::Debug for ToBridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hello { remaining_ms } => f
+                .debug_struct("Hello")
+                .field("remaining_ms", remaining_ms)
+                .finish(),
+            Self::Reply {
+                key,
+                chunk,
+                last,
+                error,
+            } => f
+                .debug_struct("Reply")
+                .field("key", key)
+                .field("chunk", &chunk.len())
+                .field("last", last)
+                .field("error", error)
+                .finish(),
+        }
+    }
 }
 
 /// `body` in chunks of at most [`CHUNK`] bytes, the last one marked; an empty body is one chunk.

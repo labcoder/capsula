@@ -1,5 +1,7 @@
 //! Stdin lines, bounded, and what each JSON-RPC message is; the reply lines written back.
 
+use std::fmt;
+
 use serde_json::Value;
 
 use super::MAX_INCOMING;
@@ -7,7 +9,7 @@ use super::id::JsonRpcId;
 use super::wire::Method;
 
 /// One stdin line, without its newline or a carriage return before it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum Line {
     Text(Vec<u8>),
     /// Over [`MAX_INCOMING`]; the rest of it up to the next newline is dropped.
@@ -59,7 +61,7 @@ fn take_line(buf: &mut Vec<u8>) -> Vec<u8> {
 }
 
 /// What one line is.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub(crate) enum Incoming {
     /// Empty or whitespace only: ignored.
     Blank,
@@ -76,6 +78,39 @@ pub(crate) enum Incoming {
         id: Option<JsonRpcId>,
         error: RpcError,
     },
+}
+
+// Debug prints lengths only: lines and params are the client's text and tool arguments.
+impl fmt::Debug for Line {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => f.debug_struct("Text").field("bytes", &text.len()).finish(),
+            Self::TooLong => f.write_str("TooLong"),
+        }
+    }
+}
+
+impl fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blank => f.write_str("Blank"),
+            Self::Request { id, method, params } => f
+                .debug_struct("Request")
+                .field("id", id)
+                .field("method", method)
+                .field("params", &params.len())
+                .finish(),
+            Self::Notification { initialized } => f
+                .debug_struct("Notification")
+                .field("initialized", initialized)
+                .finish(),
+            Self::Invalid { id, error } => f
+                .debug_struct("Invalid")
+                .field("id", id)
+                .field("error", error)
+                .finish(),
+        }
+    }
 }
 
 /// The JSON-RPC errors the bridge answers itself.

@@ -1,6 +1,6 @@
 //! JSON-RPC ids as the client sent them, and the call key the brain sees instead.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use serde_json::Value;
 
@@ -10,7 +10,7 @@ use super::wire::CallKey;
 pub(crate) const MAX_STRING_ID: usize = 29;
 
 /// A JSON-RPC id, written back by value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum JsonRpcId {
     Number(i64),
     String(String),
@@ -43,6 +43,19 @@ impl JsonRpcId {
         match self {
             Self::Number(number) => number.to_string(),
             Self::String(text) => Value::String(text.clone()).to_string(),
+        }
+    }
+}
+
+/// The kind and length only: an id is the client's text.
+impl fmt::Debug for JsonRpcId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(_) => f.write_str("Number"),
+            Self::String(text) => f
+                .debug_struct("String")
+                .field("bytes", &text.len())
+                .finish(),
         }
     }
 }

@@ -1,16 +1,17 @@
+use std::io::{Cursor, Write};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame::{self, Pipe};
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncWrite, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::id::{JsonRpcId, MAX_STRING_ID};
 use super::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
 use super::wire::{CHUNK, CallKey, Method, Reassembly, ToBrain, ToBridge, TooLarge, chunks};
-use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, connect, relay};
+use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, connect, relay, run};
 use crate::platform::{Instance, PipeServer, create_owner_only, test_pair};
 
 #[test]
@@ -202,15 +203,17 @@ fn bodies_are_chunked_under_the_frame_cap_and_reassembled_up_to_their_cap() {
 /// The bridge's relay on one end of a real pipe, and the brain's end for the test to drive.
 struct Bridge {
     stdin: mpsc::Sender<Input>,
-    stdout: std_mpsc::Receiver<Vec<u8>>,
+    stdout: mpsc::Receiver<Vec<u8>>,
     brain: PipeServer,
     relay: JoinHandle<Result<(), BridgeError>>,
 }
 
-async fn bridge(name: &str) -> Bridge {
-    let (brain, client) = test_pair(name).await.expect("pipe pair");
+/// A bridge whose brain has said `Hello` with `remaining_ms` left.
+async fn bridge(name: &str, remaining_ms: u64) -> Bridge {
+    let (mut brain, client) = test_pair(name).await.expect("pipe pair");
+    hello(&mut brain, remaining_ms).await;
     let (stdin, input) = mpsc::channel(16);
-    let (out, stdout) = std_mpsc::channel();
+    let (out, stdout) = mpsc::channel(4);
     let relay = tokio::spawn(relay(client, input, out));
     Bridge {
         stdin,
@@ -218,6 +221,11 @@ async fn bridge(name: &str) -> Bridge {
         brain,
         relay,
     }
+}
+
+async fn hello(brain: &mut (impl AsyncWrite + Unpin), remaining_ms: u64) {
+    let frame = frame::encode(&ToBridge::Hello { remaining_ms }, Pipe::Data).expect("encodes");
+    brain.write_all(&frame).await.expect("write");
 }
 
 impl Bridge {
@@ -228,14 +236,10 @@ impl Bridge {
             .expect("relay running");
     }
 
-    async fn stdout(&self) -> String {
-        for _ in 0..1_000 {
-            if let Ok(line) = self.stdout.try_recv() {
-                return String::from_utf8(line).expect("utf-8");
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("no stdout line");
+    async fn stdout(&mut self) -> String {
+        let line = tokio::time::timeout(Duration::from_secs(5), self.stdout.recv()).await;
+        String::from_utf8(line.expect("a stdout line in time").expect("relay running"))
+            .expect("utf-8")
     }
 
     async fn request(&mut self) -> (CallKey, Method, Vec<u8>) {
@@ -289,7 +293,7 @@ const CALL: &str =
 
 #[tokio::test]
 async fn a_call_is_relayed_and_answered_with_its_id() {
-    let mut bridge = bridge("bridge-round-trip").await;
+    let mut bridge = bridge("bridge-round-trip", 60_000).await;
     bridge
         .line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
         .await;
@@ -332,7 +336,7 @@ async fn a_call_is_relayed_and_answered_with_its_id() {
 
 #[tokio::test]
 async fn one_call_at_a_time_and_a_ping_is_answered_meanwhile() {
-    let mut bridge = bridge("bridge-busy").await;
+    let mut bridge = bridge("bridge-busy", 60_000).await;
     bridge.line(CALL).await;
     let (key, ..) = bridge.request().await;
     bridge
@@ -362,7 +366,7 @@ async fn one_call_at_a_time_and_a_ping_is_answered_meanwhile() {
 
 #[tokio::test]
 async fn a_reply_of_exactly_the_cap_passes_and_one_over_is_an_internal_error() {
-    let mut bridge = bridge("bridge-reply-cap").await;
+    let mut bridge = bridge("bridge-reply-cap", 60_000).await;
     for (len, ok) in [(MAX_REPLY, true), (MAX_REPLY + 1, false)] {
         let body = format!("\"{}\"", "a".repeat(len - 2));
         bridge.line(CALL).await;
@@ -385,7 +389,7 @@ async fn a_reply_of_exactly_the_cap_passes_and_one_over_is_an_internal_error() {
 
 #[tokio::test]
 async fn a_lost_pipe_ends_the_bridge_without_an_error() {
-    let mut bridge = bridge("bridge-lost").await;
+    let mut bridge = bridge("bridge-lost", 60_000).await;
     bridge.line(CALL).await;
     bridge.request().await;
     drop(bridge.brain);
@@ -394,8 +398,7 @@ async fn a_lost_pipe_ends_the_bridge_without_an_error() {
 
 #[tokio::test]
 async fn the_deadline_fails_the_call_in_flight_and_ends_the_bridge() {
-    let mut bridge = bridge("bridge-deadline").await;
-    bridge.send(&ToBridge::Hello { remaining_ms: 50 }).await;
+    let mut bridge = bridge("bridge-deadline", 300).await;
     bridge.line(CALL).await;
     bridge.request().await;
     assert_eq!(
@@ -423,4 +426,167 @@ async fn a_pipe_served_by_another_executable_is_refused() {
     let _second = create_owner_only(&name, Instance::Next).expect("second instance");
     let own = std::env::current_exe().expect("test executable");
     assert!(connect(&name, &own).is_ok(), "this process serves it");
+}
+
+#[test]
+fn debug_prints_no_id_line_params_or_body() {
+    const PLANTED: &str = "kumochi-planted";
+    // "kumo" as a byte list and as the hex a call key spells.
+    let (decimal, hex) = ("107, 117, 109, 111", "6b756d6f");
+    let id = JsonRpcId::String(PLANTED.to_owned());
+    let line = format!(
+        r#"{{"jsonrpc":"2.0","id":"{PLANTED}","method":"tools/call","params":{{"text":"{PLANTED}"}}}}"#
+    );
+    let printed = [
+        format!("{:?}", Input::Line(Line::Text(line.clone().into_bytes()))),
+        format!("{:?}", classify(line.as_bytes())),
+        format!(
+            "{:?}",
+            classify(br#"{"jsonrpc":"2.0","id":424242,"method":"nope"}"#)
+        ),
+        format!(
+            "{:?}",
+            ToBrain::Request {
+                key: id.key(),
+                method: Method::ToolsCall,
+                chunk: line.into_bytes(),
+                last: true
+            }
+        ),
+        format!(
+            "{:?}",
+            ToBridge::Reply {
+                key: id.key(),
+                chunk: PLANTED.as_bytes().to_vec(),
+                last: true,
+                error: false
+            }
+        ),
+        format!("{:?}", Some(id)),
+    ];
+    for text in printed {
+        for needle in [PLANTED, decimal, hex, "424242"] {
+            assert!(!text.contains(needle), "{needle} in {text}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_hello_in_time_or_another_message_first_ends_the_bridge() {
+    let (_brain, client) = tokio::io::duplex(1024);
+    let (_stdin, input) = mpsc::channel(16);
+    let (out, _stdout) = mpsc::channel(4);
+    assert!(matches!(
+        relay(client, input, out).await,
+        Err(BridgeError::NoHello)
+    ));
+
+    let (mut brain, client) = tokio::io::duplex(1024);
+    let reply = ToBridge::Reply {
+        key: CallKey("m:n:1".to_owned()),
+        chunk: vec![],
+        last: true,
+        error: false,
+    };
+    brain
+        .write_all(&frame::encode(&reply, Pipe::Data).expect("encodes"))
+        .await
+        .expect("write");
+    let (_stdin, input) = mpsc::channel(16);
+    let (out, _stdout) = mpsc::channel(4);
+    assert!(matches!(
+        relay(client, input, out).await,
+        Err(BridgeError::NoHello)
+    ));
+}
+
+#[tokio::test]
+async fn a_brain_that_stops_reading_cannot_hold_a_request_past_the_deadline() {
+    let (mut brain, client) = tokio::io::duplex(1024);
+    hello(&mut brain, 200).await;
+    let (stdin, input) = mpsc::channel(16);
+    let (out, mut stdout) = mpsc::channel(4);
+    let relay = tokio::spawn(relay(client, input, out));
+    let call = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"text":"{}"}}}}"#,
+        "a".repeat(CHUNK + 1)
+    );
+    stdin
+        .send(Input::Line(Line::Text(call.into_bytes())))
+        .await
+        .expect("relay running");
+    let ended = tokio::time::timeout(Duration::from_secs(5), relay).await;
+    assert!(matches!(
+        ended.expect("ends in time").expect("joins"),
+        Err(BridgeError::Deadline)
+    ));
+    assert_eq!(
+        String::from_utf8(stdout.recv().await.expect("the call's failure")).expect("utf-8"),
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}\n"
+    );
+    drop(brain);
+}
+
+/// A stdout nobody reads: every write waits until the test ends.
+struct Withheld(std_mpsc::Receiver<()>);
+
+impl Write for Withheld {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        self.0.recv().unwrap_or_default();
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs the whole bridge on its own thread against a brain that said `Hello`, with a stdout
+/// nobody reads and twenty pings on stdin; `lose_after` drops the brain's end that long after.
+fn withheld(
+    remaining_ms: u64,
+    lose_after: Option<Duration>,
+) -> (Result<(), BridgeError>, Duration) {
+    let (mut brain, client) = tokio::io::duplex(64 * 1024);
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime")
+        .block_on(hello(&mut brain, remaining_ms));
+    let pings = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}
+"#
+    .repeat(20);
+    let (keep, withheld) = std_mpsc::channel();
+    let (done, ended) = std_mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        done.send(run(
+            move || Ok::<DuplexStream, BridgeError>(client),
+            Cursor::new(pings),
+            Withheld(withheld),
+        ))
+        .unwrap_or_default();
+    });
+    if let Some(after) = lose_after {
+        std::thread::sleep(after);
+        drop(brain);
+    }
+    let result = ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the bridge ends in time");
+    drop(keep);
+    (result, started.elapsed())
+}
+
+#[test]
+fn a_stdout_nobody_reads_holds_neither_memory_nor_the_ending() {
+    let (result, took) = withheld(300, None);
+    assert!(matches!(result, Err(BridgeError::Deadline)), "{result:?}");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+
+    let (result, took) = withheld(60_000, Some(Duration::from_millis(100)));
+    assert!(
+        matches!(result, Err(BridgeError::Stdout)),
+        "a lost pipe, with lines unwritten: {result:?}"
+    );
+    assert!(took < Duration::from_secs(3), "{took:?}");
 }
