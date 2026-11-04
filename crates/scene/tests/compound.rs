@@ -221,7 +221,7 @@ fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() 
             &mut GlobalBudget::default(),
             &before,
             json!({"id":"contents","put":[
-                {"diagram":{"id":"outer"}},
+                {"diagram":{"id":"outer","box":[0,0,360,300]}},
                 {"diagram":{"id":"left","in":"outer"}},
                 child,
                 {"diagram":{"id":"right","in":"outer"}},
@@ -417,7 +417,27 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
             assert_eq!(scene.usage().objects, count);
             assert_eq!(prepared.after.items().len(), count);
             if count == 600 && matches!(fixture, fixtures::Fixture::CrossGroup) {
-                let clusters = ["g1", "ge", "gf", "g10"].map(|name| bounds(&prepared.after, name));
+                let items = prepared.after.items();
+                let root = prepared.after.handle(&id("g0")).expect("root");
+                assert_eq!(
+                    items
+                        .iter()
+                        .find(|item| item.handle == root)
+                        .expect("root item")
+                        .transform
+                        .0[0]
+                        .to_bits(),
+                    0.8_f32.to_bits()
+                );
+                let clusters = ["g1", "ge", "gf", "g10"].map(|name| {
+                    let handle = prepared.after.handle(&id(name)).expect("cluster");
+                    let item = items
+                        .iter()
+                        .find(|item| item.handle == handle)
+                        .expect("cluster item");
+                    assert_eq!(item.parent, Some(root));
+                    item.transform.bounds(item.bounds)
+                });
                 for pair in clusters.windows(2) {
                     assert_eq!(
                         pair[1].origin.y.to_bits(),
@@ -425,7 +445,6 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
                     );
                     assert_eq!(pair[1].center().x.to_bits(), pair[0].center().x.to_bits());
                 }
-                let items = prepared.after.items();
                 for index in 0..96 {
                     let handle = prepared
                         .after

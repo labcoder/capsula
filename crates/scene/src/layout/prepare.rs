@@ -267,6 +267,7 @@ pub fn prepare(
                 source,
                 *handle,
                 parent,
+                compound::direction(&after, parent, surface).0,
                 &after,
                 &mut build,
                 previous.as_ref(),
@@ -298,6 +299,7 @@ pub fn prepare(
                 !Arc::ptr_eq(&old.item.primitives, &object.item.primitives)
                     || old.item.bounds != object.item.bounds
                     || old.item.parent != object.item.parent
+                    || old.item.transform != object.item.transform
             })
         })
         .map(|(_, object)| object.item.clone())

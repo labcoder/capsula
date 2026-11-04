@@ -5,6 +5,7 @@
 
 use super::{
     SurfaceGeometry,
+    primitives::text_origin,
     state::{LayoutState, Placed},
 };
 use crate::{
@@ -13,7 +14,7 @@ use crate::{
     geom::{Rect, Vec2},
     limits::MAX_OBJECT_DEPTH,
     mermaid::Extra,
-    record::Direction,
+    record::{Align, Direction},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -147,7 +148,14 @@ pub(super) fn banded(contents: Rect, title: Vec2) -> (Rect, Vec2) {
     };
     (
         bounds,
-        Vec2::new(bounds.center().x - title.x * 0.5, bounds.origin.y),
+        text_origin(
+            Rect {
+                origin: Vec2::new(bounds.center().x - title.x * 0.5, bounds.origin.y),
+                size: title,
+            },
+            Some(180.0),
+            Align::Center,
+        ),
     )
 }
 

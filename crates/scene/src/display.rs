@@ -89,7 +89,7 @@ pub enum Prim {
     },
     /// Text laid out using the host's matching text measurement.
     Text {
-        /// Top-left point.
+        /// Top-left of the wrapping box when `max_width` is set, otherwise of the ink.
         origin: Vec2,
         /// Display content, redacted by Debug.
         text: Text,

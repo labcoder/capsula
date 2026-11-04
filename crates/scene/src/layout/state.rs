@@ -73,7 +73,6 @@ pub(super) struct Placed {
     pub anchors: [Vec2; 2],
     pub rest: Rest,
     pub rank: Option<usize>,
-    pub initialized: bool,
     pub motion: Option<Arc<Motions>>,
     pub chart_basis: Option<Arc<super::chart::Basis>>,
     /// Resting opacity of ancestors a cut detached; `item.opacity` stays the object's own base.
@@ -93,7 +92,6 @@ impl Placed {
             anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
             rest: cached.map_or_else(Rest::default, |old| old.rest),
             rank: cached.and_then(|old| old.rank),
-            initialized: cached.is_some_and(|old| old.initialized),
             motion: cached.and_then(|old| old.motion.as_ref().map(Arc::clone)),
             chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
             inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
@@ -446,7 +444,7 @@ mod tests {
         );
         assert_eq!(second.glides.len(), 1);
         let kept = Bounded::new(
-            ["d", "overflow"]
+            ["d", "b", "c", "overflow"]
                 .map(|id| {
                     second
                         .after
@@ -475,12 +473,11 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("recover");
-        assert_eq!(rest.objects.len(), 2);
+        assert_eq!(rest.objects.len(), 4);
         for (id, object) in &rest.objects {
             let replayed = &replayed.objects[id];
             assert_eq!(object.rest, replayed.rest);
             assert_eq!(object.rank, replayed.rank);
-            assert_eq!(object.initialized, replayed.initialized);
             assert_eq!(object.motion, replayed.motion);
         }
         let next = r#"{"step":{"id":"next","put":[{"node":{"id":"next","in":"d","label":"N"}}]}}"#;
@@ -563,7 +560,7 @@ mod tests {
         let mut scene = SceneState::begin(header).expect("scene");
         let mut budget = GlobalBudget::default();
         let before = LayoutState::new(&scene);
-        let mut put = vec![r#"{"diagram":{"id":"r"}}"#.to_owned()];
+        let mut put = vec![r#"{"diagram":{"id":"r","box":[0,0,360,300]}}"#.to_owned()];
         for group in ["a", "b"] {
             put.push(format!(r#"{{"diagram":{{"id":"{group}","in":"r"}}}}"#));
             for node in ["1", "2"] {

@@ -532,6 +532,10 @@ mod tests {
         let deep = format!("flowchart LR\n{}", "subgraph\n".repeat(17));
         for (source, code) in [
             ("", ErrorCode::Malformed),
+            ("flowchart LR\nA[\"abc", ErrorCode::Malformed),
+            ("flowchart LR\nA -- text", ErrorCode::Malformed),
+            ("flowchart LR\nA[abc", ErrorCode::Malformed),
+            ("flowchart lr\nA\n", ErrorCode::Malformed),
             ("flowchart LR\nA -->\n", ErrorCode::Malformed),
             ("flowchart LR\nsubgraph g\nA\n", ErrorCode::Malformed),
             ("flowchart BR\nA\n", ErrorCode::Unsupported),

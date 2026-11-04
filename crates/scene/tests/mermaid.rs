@@ -283,10 +283,10 @@ fn refused_families_never_commit_a_valid_prefix() {
         let scene = scene();
         let budget = GlobalBudget::default();
         let source = case["src"].as_str().expect("source");
-        let expected = if case["case"] == "import-after-valid-graph" {
-            ErrorCode::Malformed
-        } else {
-            ErrorCode::Unsupported
+        let expected = match case["code"].as_str().expect("diagnostic code") {
+            "Malformed" => ErrorCode::Malformed,
+            "Unsupported" => ErrorCode::Unsupported,
+            code => panic!("unknown fixture code: {code}"),
         };
         let error = scene
             .admit(&graph(source), &budget)
@@ -296,6 +296,69 @@ fn refused_families_never_commit_a_valid_prefix() {
         assert_eq!(scene.object_count(), 0);
         assert_eq!(scene.revision(), 0);
         assert_eq!(budget.usage().objects, 0);
+    }
+}
+
+#[test]
+fn centered_node_and_edge_labels_start_their_full_wrapping_box_at_the_same_spine() {
+    let mut scene = scene();
+    let before = LayoutState::new(&scene);
+    let prepared = picture(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        &graph("flowchart TB\nA[Start] -->|next| B[Done]\n"),
+    );
+    for text in ["Start", "next", "Done"] {
+        assert_eq!(
+            title_origin(&prepared.after, text).x.to_bits(),
+            90.0_f32.to_bits()
+        );
+    }
+}
+
+#[test]
+fn a_header_only_chart_keeps_one_empty_boxless_root() {
+    let mut scene = scene();
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let prepared = picture(&mut scene, &mut budget, &before, &graph("flowchart LR"));
+    assert_eq!(scene.object_count(), 2);
+    assert_eq!(budget.usage().objects, 2);
+    assert_eq!(
+        prepared
+            .after
+            .items()
+            .iter()
+            .map(|item| item.primitives.len())
+            .collect::<Vec<_>>(),
+        [0, 0]
+    );
+}
+
+#[test]
+fn explicit_blank_labels_stay_empty_on_normal_nodes() {
+    for source in ["flowchart LR\nA[\" \"]", "flowchart LR\nA[ ]"] {
+        let mut scene = scene();
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let prepared = picture(&mut scene, &mut budget, &before, &graph(source));
+        let items = prepared.after.items();
+        let node = labelled(&items, "");
+        assert_eq!(node.handle, scene.handle(&id("A")).expect("named node"));
+        assert_eq!(node.bounds.size, Vec2::new(80.0, 40.0));
+        assert_eq!(scene.object_count(), 3);
+        assert_eq!(budget.usage().objects, 3);
+        assert_eq!(
+            node.primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Prim::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [""]
+        );
     }
 }
 
@@ -508,8 +571,8 @@ fn nested_title_bands_have_the_recorded_literal_geometry() {
     assert_rect(bounds(&prepared.after, "A"), [140.0, 84.0, 80.0, 40.0]);
     let items = prepared.after.items();
     for (name, title, expected) in [
-        ("outer", "Outer", [160.0_f32, 32.0]),
-        ("inner", "Inner", [160.0, 58.0]),
+        ("outer", "Outer", [90.0_f32, 32.0]),
+        ("inner", "Inner", [90.0, 58.0]),
     ] {
         assert_eq!(
             labelled(&items, title).handle,
@@ -1070,7 +1133,7 @@ fn a_titled_group_recomputes_its_band_after_a_later_node() {
     assert_rect(bounds(&next.after, "A"), [140.0, 58.0, 80.0, 40.0]);
     assert_rect(bounds(&next.after, "B"), [16.0, 170.0, 80.0, 40.0]);
     assert_rect(bounds(&next.after, "g"), [16.0, 32.0, 204.0, 178.0]);
-    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(98.0, 32.0));
+    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(28.0, 32.0));
 }
 
 #[test]
@@ -1115,7 +1178,7 @@ fn a_title_only_subgraph_has_a_single_literal_band() {
     );
     assert_eq!(scene.object_count(), 3);
     assert_rect(bounds(&prepared.after, "g"), [176.0, 32.0, 8.0, 26.0]);
-    assert_eq!(title_origin(&prepared.after, "T"), Vec2::new(176.0, 32.0));
+    assert_eq!(title_origin(&prepared.after, "T"), Vec2::new(90.0, 32.0));
 }
 
 #[test]

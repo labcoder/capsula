@@ -27,6 +27,17 @@ pub(super) fn layout_error(code: ErrorCode) -> PrepareError {
 pub(super) fn invariant() -> PrepareError {
     layout_error(ErrorCode::UnknownRef)
 }
+
+pub(super) fn text_origin(ink: Rect, max_width: Option<f32>, align: Align) -> Vec2 {
+    let spare = max_width.map_or(0.0, |width| width - ink.size.x);
+    let offset = match align {
+        Align::Left => 0.0,
+        Align::Center => spare * 0.5,
+        Align::Right => spare,
+    };
+    ink.origin - Vec2::new(offset, 0.0)
+}
+
 pub(super) struct Build<'a> {
     pub viewport: Rect,
     pub theme: &'a Theme,
@@ -149,7 +160,7 @@ impl Build<'_> {
             };
             let origin = Vec2::new(x, at.y - size.y * 0.5);
             output.push(Prim::Text {
-                origin,
+                origin: text_origin(Rect { origin, size }, width, text.align),
                 text: text.text.clone(),
                 style,
                 color: text
@@ -371,7 +382,14 @@ impl Build<'_> {
                 let measured = self.measure(label, style, Some(bounds.size.x))?;
                 let origin = bounds.center() - measured * 0.5;
                 output.push(Prim::Text {
-                    origin,
+                    origin: text_origin(
+                        Rect {
+                            origin,
+                            size: measured,
+                        },
+                        Some(bounds.size.x),
+                        Align::Center,
+                    ),
                     text: label.clone(),
                     style,
                     color: self.theme.fg.into(),

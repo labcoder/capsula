@@ -836,6 +836,40 @@ fn node_measurement_order_and_placement_are_deterministic_and_cancellation_is_at
 }
 
 #[test]
+fn initial_fit_still_enforces_minimum_normal_composed_scale() {
+    for (scale, expected) in [
+        (f32::MIN_POSITIVE * 2.0, Ok(8)),
+        (f32::MIN_POSITIVE, Err(ErrorCode::TransformOverflow)),
+    ] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let ticket = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"scaled","put":[
+                {"diagram":{"id":"d","dir":"right"}},
+                {"node":{"id":"a","in":"d","label":"abcdefghij","enter":"none"}},
+                {"node":{"id":"b","in":"d","label":"B","enter":"none"}},
+                {"node":{"id":"c","in":"d","label":"C","enter":"none"}},
+                {"node":{"id":"last","in":"d","label":"D","enter":"none"}},
+                {"edge":{"id":"ab","in":"d","from":"a","to":"b"}},
+                {"edge":{"id":"bc","in":"d","from":"b","to":"c"}},
+                {"edge":{"id":"cd","in":"d","from":"c","to":"last"}},
+                {"anim":{"target":"d","track":"scale","keys":[[0,scale]]}}
+            ]}),
+        );
+        let result = picture(&scene, ticket, &before, &mut Measure::default())
+            .map(|picture| picture.after.items().len())
+            .map_err(|error| match error {
+                PrepareError::Layout(error) => error.code,
+                other => panic!("unexpected preparation failure: {other:?}"),
+            });
+        assert_eq!(result, expected);
+    }
+}
+
+#[test]
 fn explicit_position_precedes_a_glide_and_later_glides_use_its_resting_value() {
     let run = |extra: Vec<Value>| {
         let mut scene = SceneState::begin(header()).expect("scene");
