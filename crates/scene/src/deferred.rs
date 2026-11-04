@@ -166,6 +166,11 @@ impl<T: Send + 'static> Deferred<T> {
         self.bytes = bytes;
     }
 
+    /// The owner's cached byte estimate, not a measurement of the payload's heap.
+    pub fn attribution(&self) -> usize {
+        self.bytes
+    }
+
     /// Releases the value to an owner that keeps it protected or off the UI thread.
     pub(crate) fn into_inner(mut self) -> T {
         self.take()

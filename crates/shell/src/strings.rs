@@ -470,6 +470,10 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::SignOutNotDurable => "error-sign-out-not-durable",
         ErrorKey::SessionEnded => "error-session-ended",
         ErrorKey::PlanUnavailable => "error-plan-unavailable",
+        ErrorKey::UsageLimit => "error-usage-limit",
+        ErrorKey::AccountRefused => "error-account-refused",
+        ErrorKey::RequestRefused => "error-request-refused",
+        ErrorKey::ResponseUnreadable => "error-response-unreadable",
     }
 }
 

@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 
 use super::presence::{PresenceError, struct_size};
+use crate::platform::{ROW_SPANS, RowSpans};
 
 /// Premultiplied BGRA with alpha 1: invisible, but Windows hit-tests it.
 const OWNED: u32 = 0x0100_0000;
@@ -37,8 +38,8 @@ pub(super) struct HitMask {
     previous: HGDIOBJ,
     pixels: *mut u32,
     width: usize,
-    /// One entry per bitmap row: up to two owned column spans, `[left, right)`.
-    rows: Vec<[Option<[usize; 2]>; 2]>,
+    /// One entry per bitmap row: up to [`ROW_SPANS`] owned column spans, `[left, right)`.
+    rows: Vec<[Option<[usize; 2]>; ROW_SPANS]>,
     /// Where the proxy is, `[x, y, width, height]`; empty before the first update.
     window: [i32; 4],
 }
@@ -106,13 +107,13 @@ impl HitMask {
             previous,
             pixels: bits.cast::<u32>(),
             width: columns,
-            rows: vec![[None; 2]; rows],
+            rows: vec![[None; ROW_SPANS]; rows],
             window: [0; 4],
         })
     }
 
     /// Rewrites the rows whose owned spans changed, from `spans`, which gives a screen row's
-    /// owned columns as up to two `[left, right)` spans. Then one `UpdateLayeredWindow` hands
+    /// owned columns as up to [`ROW_SPANS`] `[left, right)` spans. Then one `UpdateLayeredWindow` hands
     /// Windows the pixels, and moves the proxy too when `window` differs from where it is.
     ///
     /// # Errors
@@ -121,7 +122,7 @@ impl HitMask {
         &mut self,
         hwnd: HWND,
         window: [i32; 4],
-        spans: impl Fn(i32) -> [Option<[i32; 2]>; 2],
+        spans: impl Fn(i32) -> RowSpans,
     ) -> Result<MaskUpdate, PresenceError> {
         let [x, y, width, height] = window;
         let (Ok(columns), Ok(rows)) = (usize::try_from(width), usize::try_from(height)) else {
@@ -150,7 +151,7 @@ impl HitMask {
             let wanted = i32::try_from(index)
                 .ok()
                 .filter(|_| index < rows)
-                .map_or([None; 2], |row| spans(y + row).map(local));
+                .map_or([None; ROW_SPANS], |row| spans(y + row).map(local));
             if wanted == *held {
                 continue;
             }

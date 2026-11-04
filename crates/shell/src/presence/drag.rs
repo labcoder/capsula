@@ -40,10 +40,10 @@ pub(crate) enum Event {
     },
     /// `Escape::CancelPull`.
     Escape,
-    /// The native bridge's `CaptureLost`: emitted at `at` on the performance counter, with
-    /// the button whose release caused it, or `None` for a loss from outside.
+    /// The native bridge's `CaptureLost`: stamped `seq` in the UI thread's input sequence when
+    /// it was emitted, with the button whose release caused it, or `None` for a loss from outside.
     CaptureLost {
-        at: i64,
+        seq: u64,
         released: Option<MouseButton>,
     },
     /// The window holding capture closed or deactivated.
@@ -63,8 +63,8 @@ pub(crate) enum Outcome {
 struct Live {
     generation: Generation,
     button: MouseButton,
-    /// The press's time on the performance counter.
-    start: i64,
+    /// The press's stamp in the UI thread's input sequence, which never repeats a value.
+    start: u64,
     /// The initiating button's own release took capture, so its `Up` should follow in the same
     /// dispatch. [`DragOwner::reconcile`] loses the drag if it didn't.
     loss_pending: bool,
@@ -77,9 +77,9 @@ pub(crate) struct DragOwner {
 }
 
 impl DragOwner {
-    /// Starts a drag on `button`'s press at `start`. While one is live, a press starts
+    /// Starts a drag on `button`'s press, stamped `start`. While one is live, a press starts
     /// nothing: its button's release ends the live drag as lost.
-    pub(crate) fn press(&mut self, button: MouseButton, start: i64) -> Option<Generation> {
+    pub(crate) fn press(&mut self, button: MouseButton, start: u64) -> Option<Generation> {
         if self.live.is_some() {
             return None;
         }
@@ -109,7 +109,7 @@ impl DragOwner {
             } => return Outcome::Moved(live.generation, at),
             Event::Up { button, at } if button == live.button => End::Released(at),
             // A loss emitted before this drag began is an earlier drag's.
-            Event::CaptureLost { at, .. } if at <= live.start => return Outcome::Ignored,
+            Event::CaptureLost { seq, .. } if seq < live.start => return Outcome::Ignored,
             // The initiating button's own release is voluntary: its `Up` is the ending.
             Event::CaptureLost { released, .. } if released == Some(live.button) => {
                 self.live = Some(Live {
@@ -161,11 +161,11 @@ mod tests {
         }
     }
 
-    fn lost(at: i64, released: Option<MouseButton>) -> Event {
-        Event::CaptureLost { at, released }
+    fn lost(seq: u64, released: Option<MouseButton>) -> Event {
+        Event::CaptureLost { seq, released }
     }
 
-    fn dragging(start: i64) -> (DragOwner, Generation) {
+    fn dragging(start: u64) -> (DragOwner, Generation) {
         let mut owner = DragOwner::default();
         let generation = owner.press(LEFT, start).expect("no drag yet");
         (owner, generation)
@@ -260,26 +260,32 @@ mod tests {
     }
 
     #[test]
-    fn a_loss_matches_only_a_drag_that_began_before_it() {
+    fn a_loss_ends_only_the_drag_it_was_emitted_during() {
         let (mut owner, first) = dragging(10);
         assert_eq!(
-            owner.handle(up(LEFT, 0.0)),
-            Outcome::Ended(first, End::Released(at(0.0, 0.0)))
+            owner.handle(lost(11, None)),
+            Outcome::Ended(first, End::Lost),
+            "emitted during the current drag"
         );
-        let second = owner.press(LEFT, 50).expect("the first ended");
+        let second = owner.press(LEFT, 13).expect("the first ended");
         assert_ne!(first, second);
-        // Emitted during the first drag, drained during the second.
-        assert_eq!(owner.handle(lost(30, None)), Outcome::Ignored);
         assert_eq!(
-            owner.handle(lost(50, None)),
+            owner.handle(lost(12, None)),
             Outcome::Ignored,
-            "at its start"
+            "emitted between the first drag's ending and the second's press"
         );
         assert_eq!(owner.live(), Some(second));
         assert_eq!(
-            owner.handle(lost(51, None)),
-            Outcome::Ended(second, End::Lost)
+            owner.handle(up(LEFT, 0.0)),
+            Outcome::Ended(second, End::Released(at(0.0, 0.0)))
         );
+        let third = owner.press(LEFT, 20).expect("the second ended");
+        assert_eq!(
+            owner.handle(lost(14, None)),
+            Outcome::Ignored,
+            "emitted during the second drag, drained during the third"
+        );
+        assert_eq!(owner.live(), Some(third));
     }
 
     #[test]

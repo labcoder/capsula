@@ -11,7 +11,7 @@
 )]
 
 mod brain;
-mod client;
+pub(crate) mod client;
 mod delete;
 mod recover;
 mod stop;

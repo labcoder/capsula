@@ -4,20 +4,43 @@ use anyhow::{Context as _, Result, bail, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mark {
-    Applied { us: u64, start_qpc: i64 },
+    Applied {
+        us: u64,
+        start_qpc: i64,
+    },
     Painted(u64),
     Resting,
     Hold(bool),
     HoldEnded(bool),
     Opened(bool),
-    Draft { nonempty: bool, preserved: bool },
+    Draft {
+        nonempty: bool,
+        preserved: bool,
+    },
     Dismissed,
     EscapeStop,
     EscapeClear,
     EscapeDismiss,
     EscapeIgnore,
-    EscapeState { wanted: bool, stop: bool },
+    EscapeState {
+        wanted: bool,
+        stop: bool,
+    },
+    /// A line the shell records about something other than input; no gate reads it.
+    Status,
 }
+
+/// Every non-input line the shell records; any other unknown event still fails.
+const STATUS: [&str; 8] = [
+    "link state=",
+    "run phase=",
+    "submit sent=",
+    "dock settled",
+    "dock paints settled=",
+    "kumo baked ",
+    "kumo frame shade_us=",
+    "kumo reshades=",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -70,6 +93,8 @@ impl Record {
                 wanted: wanted.parse()?,
                 stop: stop.parse()?,
             }
+        } else if STATUS.iter().any(|prefix| event.starts_with(prefix)) {
+            Mark::Status
         } else {
             match event {
                 "resting" => Mark::Resting,
@@ -200,6 +225,9 @@ mod tests {
             "qpc=0 resting",
             "qpc=1 hold excluded=maybe",
             "qpc=2 unexpected",
+            "qpc=2 kumo",
+            "qpc=2 kumo bakedsize=64",
+            "qpc=2 link",
             "qpc=3 listening applied_us=-1 start_qpc=1",
             "qpc=3 listening applied_us=1 start_qpc=4",
             "qpc=3 listening applied_us=1 start_qpc=0",
@@ -207,6 +235,35 @@ mod tests {
             assert!(
                 Record::parse(line).is_err(),
                 "invalid diagnostic envelope or milestone"
+            );
+        }
+    }
+
+    #[test]
+    fn current_main_status_lines_are_not_input_marks() {
+        for (line, qpc) in [
+            ("qpc=4847822942044 link state=Connecting", 4_847_822_942_044),
+            (
+                "qpc=4847822964004 kumo baked size=64 us=3877",
+                4_847_822_964_004,
+            ),
+            (
+                "qpc=4847828032301 kumo reshades=0 unchanged=0 shade_us=0",
+                4_847_828_032_301,
+            ),
+            ("qpc=7 kumo frame shade_us=12", 7),
+            ("qpc=8 run phase=Thinking", 8),
+            ("qpc=9 submit sent=true", 9),
+            ("qpc=10 dock settled", 10),
+            ("qpc=11 dock paints settled=3", 11),
+        ] {
+            assert_eq!(
+                Record::parse(line).unwrap(),
+                Record {
+                    qpc,
+                    mark: Mark::Status
+                },
+                "{line}"
             );
         }
     }

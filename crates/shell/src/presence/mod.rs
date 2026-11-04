@@ -18,6 +18,7 @@ mod link;
 pub(crate) mod observer;
 mod paint;
 mod panels;
+mod pulling;
 mod settings;
 mod settings_view;
 #[cfg(test)]
@@ -202,13 +203,22 @@ impl Presence {
     }
 
     fn pointer_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.pointer_moved(None, cx)
+    }
+
+    /// `entered_qpc` is the native pointer-entry counter the gate times the peek from.
+    fn pointer_moved(
+        &mut self,
+        entered_qpc: Option<i64>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         let visibility = if self.line.contains(platform::cursor_position()?) {
             panels::over_line(self.panel_owner())
         } else {
             panels::pointer(self.panel_visibility, self.panel_owner())
         };
         if visibility != self.panel_visibility {
-            self.set_panel(visibility, cx)?;
+            self.set_panel_from(visibility, entered_qpc, cx)?;
         }
         if self.text_open()
             || self.threads_open()
@@ -935,7 +945,9 @@ fn listen(
                 match event {
                     // Hover opens the peek; a press does nothing until C2a's pull starts there.
                     PresenceEvent::DockPressed { .. } => {}
-                    PresenceEvent::PointerChanged => this.pointer_changed(cx)?,
+                    PresenceEvent::PointerChanged { entered_qpc } => {
+                        this.pointer_moved(entered_qpc, cx)?;
+                    }
                     PresenceEvent::Position(index) => {
                         if let Some(position) = Position::ALL.get(index) {
                             this.position(*position, cx)?;

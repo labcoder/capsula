@@ -17,3 +17,9 @@ pub(crate) use windows::{
     hide_presence_window, launch_detached, performance_counter, performance_frequency,
     place_presence_window, restore_foreground, session_id, set_capture, window_handle, work_area,
 };
+
+/// The most owned `[left, right)` column spans one hit-mask row holds: two shapes, each with
+/// its current and previous snapshot.
+pub(crate) const ROW_SPANS: usize = 4;
+/// One screen row's owned columns.
+pub(crate) type RowSpans = [Option<[i32; 2]>; ROW_SPANS];
