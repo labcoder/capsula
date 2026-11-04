@@ -915,6 +915,26 @@ async fn availability_is_the_saved_connection_until_a_sign_out_is_accepted() {
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
+/// A round's ask gets the bearer only for the ready connection it names, so a round never sends
+/// on an account its run wasn't bound to.
+#[tokio::test]
+async fn a_rounds_ask_gets_the_bearer_only_of_the_connection_it_names() {
+    let scratch = Scratch::new("account-access-for");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    for (wanted, bearer) in [
+        (Some(ConnectionTag(SEEDED + 1)), Err(Denied::Unusable)),
+        (None, Err(Denied::Unusable)),
+        (Some(ConnectionTag(SEEDED)), Ok("access-old".to_owned())),
+    ] {
+        let (answer, wait) = oneshot::channel();
+        accounts.access_for(wanted, answer);
+        assert_eq!(answered(&mut accounts, wait).await, bearer, "{wanted:?}");
+    }
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
 /// Signs out and runs the account system until the view says so.
 async fn sign_out(accounts: &mut Accounts) {
     let mut frames = accounts.handle(Input::Op(AccountOp::SignOut));

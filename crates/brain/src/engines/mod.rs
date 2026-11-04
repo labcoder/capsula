@@ -9,11 +9,7 @@
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
 pub(crate) mod fixture;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "13a's wiring sends it once 11b lands")
-)]
-mod responses;
+pub(crate) mod responses;
 
 use std::fmt;
 use std::future::Future;
@@ -274,6 +270,8 @@ pub enum EngineFailure {
     Provider,
     /// The Responses stream failed, was refused, or broke its rules.
     Stream(crate::connections::model::error::Failure),
+    /// The account gave no bearer for the run's connection; nothing was sent.
+    Access,
 }
 
 /// A provider's id for one tool call: ASCII and at most [`CallId::MAX`] bytes.

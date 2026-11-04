@@ -1,7 +1,7 @@
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
-    SceneDescriptor, SceneId, Step, ThreadId,
+    ControlToBrain, DataToBrain, DataToShell, ErrorKey, Incarnation, MAX_PENDING_TURNS, Phase,
+    RunId, SceneDescriptor, SceneId, Step, ThreadId, UserError,
 };
 
 use kumochi_brain::coordinator::{
@@ -478,9 +478,12 @@ fn data(runs: &mut Runs, message: DataToShell) -> u32 {
 /// stopped a named run or cancelled a turn not yet named; an unfenced failure still shows.
 #[test]
 fn a_failure_applied_after_esc_is_not_shown() {
+    let signed_out = || Some(UserError::from(ErrorKey::SignInNeeded));
+    let failed =
+        |runs: &mut Runs| runs.apply_run_state(RunId(1), ThreadId(1), Phase::Failed, signed_out());
     let mut runs = answering(1);
     assert_eq!(runs.stop(), Some(stop(1)));
-    assert!(!state(&mut runs, 1, Phase::Failed).visible);
+    assert_eq!(failed(&mut runs).1, None, "Esc stopped the named run");
 
     let mut runs = Runs::default();
     runs.connected(1);
@@ -489,16 +492,20 @@ fn a_failure_applied_after_esc_is_not_shown() {
     submit(&mut runs, "unnamed");
     assert_eq!(runs.stop(), None);
     assert_eq!(
-        state(&mut runs, 1, Phase::Failed),
-        Applied {
-            stop: Some(stop(1)),
-            credit: 0,
-            visible: false,
-        }
+        failed(&mut runs),
+        (
+            Applied {
+                stop: Some(stop(1)),
+                credit: 0,
+                visible: false,
+            },
+            None
+        ),
+        "Esc cancelled the turn before its run was named"
     );
 
     let mut runs = answering(1);
-    assert!(state(&mut runs, 1, Phase::Failed).visible);
+    assert_eq!(failed(&mut runs).1, signed_out(), "nothing fenced it off");
 }
 
 fn submit(runs: &mut Runs, typed: &str) {

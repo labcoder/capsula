@@ -32,13 +32,14 @@ use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, Si
 use crate::connections::records::{Account, Revocable};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready};
+use crate::engines::responses::AccessAsk;
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link, settings};
 use crate::coordinator::Input as CoreInput;
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
-pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
+pub(crate) use crate::engines::responses::Access;
 
 /// Builds the account HTTP client; every exchange builds its own, so a trust store fixed since
 /// the last try is read again.
@@ -193,12 +194,34 @@ impl Accounts {
     /// Asks for the bearer, refreshed first when it's due; it comes on the receiver. Dropping the
     /// receiver cancels only the wait: a refresh it started still runs to its end and is saved.
     pub(crate) fn access(&mut self) -> (oneshot::Receiver<Access>, Vec<ControlToShell>) {
+        let (answer, receiver) = oneshot::channel();
+        (receiver, self.answer_access(answer))
+    }
+
+    /// A model round's ask for the bearer: only the connection `wanted` gets it, while it's
+    /// the ready one, so a round never sends on an account its run wasn't bound to.
+    pub(crate) fn access_for(
+        &mut self,
+        wanted: Option<ConnectionTag>,
+        answer: oneshot::Sender<Access>,
+    ) -> Vec<ControlToShell> {
+        match self.availability() {
+            Availability::Ready(ready) if Some(ready.connection) == wanted => {
+                self.answer_access(answer)
+            }
+            _ => {
+                answer.send(Err(Denied::Unusable)).ok();
+                Vec::new()
+            }
+        }
+    }
+
+    fn answer_access(&mut self, answer: oneshot::Sender<Access>) -> Vec<ControlToShell> {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        let (answer, receiver) = oneshot::channel();
         self.tickets.insert(ticket, answer);
         let now = self.net.clock.unix_seconds();
-        (receiver, self.handle(Input::Access { ticket, now }))
+        self.handle(Input::Access { ticket, now })
     }
 
     /// Applies an input; what the shell should hear, in order. The catalog is read when the
@@ -452,6 +475,20 @@ impl Accounts {
 }
 
 impl Brain {
+    /// A round asks for the bearer, of the connection the coordinator says its send may use.
+    pub(super) fn access_asked(
+        &mut self,
+        ask: AccessAsk,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), Full> {
+        let wanted = self.coordinator.sending(ask.key);
+        let frames = self.account.access_for(wanted, ask.answer);
+        let Some(link) = link else {
+            return Ok(());
+        };
+        frames.iter().try_for_each(|frame| link.control(frame))
+    }
+
     /// Applies an account input and tells the connected shell, if any, what changed. A catalog
     /// read that leaves `default_model` unset or unlisted queues the brain's own change to it.
     pub(super) fn account_input(

@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
-use crate::coordinator::{Availability, Ready, SendKey};
+use crate::coordinator::{Availability, JobKey, Ready, SendKey};
 use crate::store::{Failure, RunEnd};
 
 fn info(slug: &str) -> ModelInfo {
@@ -325,4 +325,42 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
             .any(|effect| matches!(effect, Effect::Store(StoreOp::CommitStep { .. }))),
         "an offered draw streams its steps"
     );
+}
+
+/// A round takes the bearer of its run's connection only while that run is current: once Stop
+/// ends it, its late ask gets none, though the run stays bound while it ends. A job takes the
+/// ready connection's, and none signed out.
+#[test]
+fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
+    let mut core = typed(Some(ready(7, &["m"])));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let round = SendKey::Build(key(1));
+    let job = SendKey::Job(JobKey {
+        thread: T,
+        serial: 2,
+    });
+    assert_eq!(core.sending(round), Some(ConnectionTag(7)));
+    assert_eq!(core.handle(ready(8, &["m"])).map(|_| ()), Ok(()));
+    assert_eq!(core.sending(job), Some(ConnectionTag(8)));
+    assert_eq!(
+        core.sending(SendKey::Build(BuildKey {
+            run: RunId(11),
+            ..key(1)
+        })),
+        None,
+        "another run's round"
+    );
+
+    let mut core = typed(Some(ready(7, &["m"])));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("current");
+    assert_eq!(core.bound(R), Some(ConnectionTag(7)), "the run is ending");
+    assert_eq!(core.sending(round), None);
+
+    let core = typed(None);
+    assert_eq!(core.sending(job), None);
 }
