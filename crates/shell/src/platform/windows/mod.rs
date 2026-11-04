@@ -23,4 +23,4 @@ pub(crate) use presence::{
     performance_counter, place_hidden_presence_window, place_presence_window, restore_foreground,
     set_capture, work_area,
 };
-pub(crate) use process::{launch_detached, lock_single_instance};
+pub(crate) use process::launch_detached;
