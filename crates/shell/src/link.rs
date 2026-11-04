@@ -896,7 +896,8 @@ fn watch(
                 }
             }
             // shortcut: B3a releases the exclusion lease on these; nothing holds one yet.
-            Ok(Some(ControlToShell::CaptureDone { .. } | ControlToShell::CaptureFailed { .. })) => {}
+            Ok(Some(ControlToShell::CaptureDone { .. } | ControlToShell::CaptureFailed { .. })) => {
+            }
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");
