@@ -344,6 +344,12 @@ impl ThreadsView {
                     return;
                 }
             };
+        let renamed = match &message {
+            ControlToBrain::ThreadOp(ThreadOp::Rename { title, .. }) => {
+                Some(title.as_str().to_owned())
+            }
+            _ => None,
+        };
         let sent = self
             .owner
             .update(cx, |owner, cx| {
@@ -360,9 +366,11 @@ impl ThreadsView {
                         None => Err(Text::TurnOffline),
                     },
                 };
-                if sent.is_ok() && kind == ThreadKind::Thread {
+                if sent.is_ok()
+                    && let Some(title) = renamed.as_deref()
+                {
                     owner.threads.update(cx, |state, cx| {
-                        state.renamed(thread);
+                        state.renamed(thread, title);
                         cx.notify();
                     });
                     owner.request_pages(cx);
