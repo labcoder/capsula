@@ -48,6 +48,8 @@ pub(crate) enum Completion {
         id: u64,
         scene: SceneId,
         result: Deferred<Result<PreparedStep, PrepareError>>,
+        /// The full charge of the result's layout alone, for when it becomes rest.
+        full_after: usize,
         slot: Arc<()>,
     },
     /// A recovery batch, one result per scene, with the budget the recovered scenes are bound to.
@@ -82,16 +84,20 @@ impl PrepareJob {
         let mut result = self
             .input
             .map(|input| layout::prepare(input, measure, &cancel));
-        result.attribute(result.as_ref().map_or(0, |prepared| {
-            prepared
-                .after
-                .resident_bytes()
+        let full_after = result
+            .as_ref()
+            .map_or(0, |prepared| prepared.after.resident_bytes());
+        let owner_bytes = result.as_ref().map_or(0, |prepared| {
+            full_after
                 .saturating_add(prepared.resident_bytes)
-        }));
+                .saturating_add(prepared.original_bytes())
+        });
+        result.attribute(owner_bytes);
         Completion::Prepared {
             id: self.id,
             scene: self.scene,
             result,
+            full_after,
             slot: self.slot,
         }
     }
