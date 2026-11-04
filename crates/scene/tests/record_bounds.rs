@@ -6,6 +6,388 @@ use kumochi_scene::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+mod three {
+    use super::*;
+    use kumochi_scene::{
+        record::{Fov, Length, Pitch, Segments, Size, Spin, Unit},
+        text::Bounded,
+    };
+    use serde::de::DeserializeOwned;
+
+    fn scalar<
+        T: TryFrom<f32, Error = ErrorCode> + Into<f32> + DeserializeOwned + std::fmt::Debug,
+    >(
+        valid: &[f32],
+        invalid: &[f32],
+    ) {
+        for &raw in valid {
+            let value = T::try_from(raw).expect("exact legal boundary");
+            assert_eq!(
+                Into::<f32>::into(value).to_bits(),
+                raw.to_bits(),
+                "constructor retains the exact boundary"
+            );
+            let bytes = postcard::to_allocvec(&raw).expect("raw scalar");
+            let decoded: T = postcard::from_bytes(&bytes).expect("binary exact boundary");
+            assert_eq!(
+                Into::<f32>::into(decoded).to_bits(),
+                raw.to_bits(),
+                "postcard retains the exact boundary"
+            );
+        }
+        for &raw in invalid {
+            assert_eq!(
+                T::try_from(raw).expect_err("outside boundary"),
+                ErrorCode::OutOfRange,
+                "constructor rejects the first outside fixture"
+            );
+            let bytes = postcard::to_allocvec(&raw).expect("raw scalar");
+            assert_eq!(
+                postcard::from_bytes::<T>(&bytes).expect_err("binary range check"),
+                postcard::Error::SerdeDeCustom,
+                "postcard cannot bypass range validation"
+            );
+        }
+        for raw in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                T::try_from(raw).expect_err("nonfinite"),
+                ErrorCode::NotFinite,
+                "nonfinite values have their own exact code"
+            );
+            let bytes = postcard::to_allocvec(&raw).expect("raw scalar");
+            assert_eq!(
+                postcard::from_bytes::<T>(&bytes).expect_err("binary finite check"),
+                postcard::Error::SerdeDeCustom,
+                "postcard cannot bypass finite validation"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_3d_scalars_check_raw_postcard_and_constructor_edges() {
+        scalar::<Size>(&[0.001, 20_000.0], &[0.0, 0.000_99, 20_000.5]);
+        scalar::<Length>(&[0.0, 0.001, 20_000.0], &[-0.001, 0.000_99, 20_000.5]);
+        scalar::<Unit>(&[0.0, 1.0], &[-0.0001, 1.0001]);
+        scalar::<Fov>(&[10.0, 120.0], &[9.99, 120.01]);
+        scalar::<Pitch>(&[-85.0, 85.0], &[-85.01, 85.01]);
+        scalar::<Spin>(&[-360.0, 360.0], &[-360.5, 360.5]);
+        for raw in [3_u8, 48] {
+            assert_eq!(Segments::try_from(raw).expect("legal segments").get(), raw);
+            let bytes = postcard::to_allocvec(&raw).expect("raw segments");
+            assert_eq!(
+                postcard::from_bytes::<Segments>(&bytes)
+                    .expect("binary segments")
+                    .get(),
+                raw
+            );
+        }
+        for raw in [2_u8, 49] {
+            assert_eq!(
+                Segments::try_from(raw).expect_err("outside segments"),
+                ErrorCode::OutOfRange
+            );
+            let bytes = postcard::to_allocvec(&raw).expect("raw segments");
+            assert_eq!(
+                postcard::from_bytes::<Segments>(&bytes).expect_err("binary segments"),
+                postcard::Error::SerdeDeCustom
+            );
+        }
+    }
+
+    fn check(op: &Value, field: &str, raw: Value, code: Option<ErrorCode>) {
+        let input = json!({"step":{"id":"s","put":[op]}});
+        if let Some(code) = code {
+            let error = parse(&input).expect_err("JSON boundary failure");
+            assert_eq!(error.code, code, "JSON boundary code");
+            assert_eq!(
+                error.path.as_str(),
+                format!("put[0].{field}"),
+                "JSON boundary path"
+            );
+        } else {
+            let record = parse(&input).expect("JSON exact boundary");
+            let output = serde_json::to_value(&record).expect("serialized record");
+            let mut value = &output["step"]["put"][0];
+            for key in field.split('.') {
+                value = &value[key];
+            }
+            assert_eq!(
+                serde_json::from_value::<f32>(value.clone())
+                    .expect("numeric boundary")
+                    .to_bits(),
+                serde_json::from_value::<f32>(raw)
+                    .expect("raw boundary")
+                    .to_bits(),
+                "JSON preserves the checked scalar boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn solid_scalars_have_json_limit_and_one_over_paths() {
+        for field in ["r", "h", "depth", "scale"] {
+            for (raw, code) in [
+                (0.001, None),
+                (20_000.0, None),
+                (0.000_99, Some(ErrorCode::OutOfRange)),
+                (20_000.5, Some(ErrorCode::OutOfRange)),
+            ] {
+                let mut solid = json!({"in":"v","id":"s","shape":"sphere"});
+                solid[field] = json!(raw);
+                check(
+                    &json!({"solid":solid}),
+                    &format!("solid.{field}"),
+                    json!(raw),
+                    code,
+                );
+            }
+        }
+        for (field, values) in [
+            (
+                "r2",
+                vec![
+                    (0.0, None),
+                    (0.001, None),
+                    (20_000.0, None),
+                    (-0.001, Some(ErrorCode::OutOfRange)),
+                    (0.000_99, Some(ErrorCode::OutOfRange)),
+                    (20_000.5, Some(ErrorCode::OutOfRange)),
+                ],
+            ),
+            (
+                "opacity",
+                vec![
+                    (0.0, None),
+                    (1.0, None),
+                    (-0.0001, Some(ErrorCode::OutOfRange)),
+                    (1.0001, Some(ErrorCode::OutOfRange)),
+                ],
+            ),
+        ] {
+            for (raw, code) in values {
+                let mut solid = json!({"in":"v","id":"s","shape":"cone"});
+                solid[field] = json!(raw);
+                check(
+                    &json!({"solid":solid}),
+                    &format!("solid.{field}"),
+                    json!(raw),
+                    code,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn camera_and_light_scalars_have_json_limit_and_one_over_paths() {
+        for (field, valid, invalid) in [
+            ("fov", [10.0, 120.0], [9.99, 120.01]),
+            ("pitch", [-85.0, 85.0], [-85.01, 85.01]),
+            ("dist", [0.001, 20_000.0], [0.000_99, 20_000.5]),
+        ] {
+            for (values, code) in [(valid, None), (invalid, Some(ErrorCode::OutOfRange))] {
+                for raw in values {
+                    let mut camera = json!({});
+                    camera[field] = json!(raw);
+                    check(
+                        &json!({"view3d":{"id":"v","camera":camera}}),
+                        &format!("view3d.camera.{field}"),
+                        json!(raw),
+                        code,
+                    );
+                }
+            }
+        }
+        for (raw, code) in [
+            (-360.0, None),
+            (360.0, None),
+            (-360.5, Some(ErrorCode::OutOfRange)),
+            (360.5, Some(ErrorCode::OutOfRange)),
+        ] {
+            check(
+                &json!({"view3d":{"id":"v","spin":raw}}),
+                "view3d.spin",
+                json!(raw),
+                code,
+            );
+        }
+        for (raw, code) in [
+            (0.0, None),
+            (1.0, None),
+            (-0.0001, Some(ErrorCode::OutOfRange)),
+            (1.0001, Some(ErrorCode::OutOfRange)),
+        ] {
+            check(
+                &json!({"view3d":{"id":"v","light":{"ambient":raw}}}),
+                "view3d.light.ambient",
+                json!(raw),
+                code,
+            );
+        }
+        for raw in [json!([0, 0, 0]), json!([-0.0, 0.0, 0.0])] {
+            check(
+                &json!({"view3d":{"id":"v","light":{"dir":raw.clone()}}}),
+                "view3d.light.dir",
+                raw,
+                Some(ErrorCode::OutOfRange),
+            );
+        }
+        for (raw, expected) in [
+            (json!([0, 0, 0.5]), json!([0.0, 0.0, 0.5])),
+            (json!([0, -1, 0]), json!([0.0, -1.0, 0.0])),
+        ] {
+            let input =
+                json!({"step":{"id":"s","put":[{"view3d":{"id":"v","light":{"dir":raw}}}]}});
+            let record = parse(&input).expect("nonzero direction");
+            let output = serde_json::to_value(&record).expect("serialized record");
+            assert_eq!(output["step"]["put"][0]["view3d"]["light"]["dir"], expected);
+        }
+        let zero = postcard::to_allocvec(&[0.0_f32; 3]).expect("raw direction");
+        assert_eq!(
+            postcard::from_bytes::<kumochi_scene::record::LightDir>(&zero)
+                .expect_err("binary direction check"),
+            postcard::Error::SerdeDeCustom,
+            "postcard cannot bypass the zero-direction check"
+        );
+        let up = postcard::to_allocvec(&[0.0_f32, 1.0, 0.0]).expect("raw direction");
+        assert_eq!(
+            postcard::from_bytes::<kumochi_scene::record::LightDir>(&up)
+                .expect("nonzero binary direction")
+                .get()
+                .map(|c| c.get().to_bits()),
+            [0.0_f32, 1.0, 0.0].map(f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn segments_and_box_dimensions_have_json_limit_and_one_over_paths() {
+        for (raw, code) in [
+            (json!(3), None),
+            (json!(48), None),
+            (json!(2), Some(ErrorCode::OutOfRange)),
+            (json!(49), Some(ErrorCode::OutOfRange)),
+            (json!(48.5), Some(ErrorCode::Malformed)),
+            (json!("48"), Some(ErrorCode::Malformed)),
+        ] {
+            check(
+                &json!({"solid":{"in":"v","id":"s","shape":"sphere","segments":raw}}),
+                "solid.segments",
+                raw,
+                code,
+            );
+        }
+        for (raw, code) in [
+            (0.001, None),
+            (20_000.0, None),
+            (0.000_99, Some(ErrorCode::OutOfRange)),
+            (20_000.5, Some(ErrorCode::OutOfRange)),
+        ] {
+            for axis in 0..3 {
+                let mut size = [1.0_f32; 3];
+                size[axis] = raw;
+                let input = json!({"step":{"id":"s","put":[{"solid":{"in":"v","id":"s","shape":"box","size":size}}]}});
+                if let Some(code) = code {
+                    let error = parse(&input).expect_err("size component out of bounds");
+                    assert_eq!(error.code, code);
+                    assert_eq!(error.path.as_str(), format!("put[0].solid.size[{axis}]"));
+                } else {
+                    let Record::Step(step) = parse(&input).expect("size boundary") else {
+                        panic!("step")
+                    };
+                    let Op::Solid(solid) = &step.put[0] else {
+                        panic!("solid")
+                    };
+                    assert_eq!(
+                        solid.size.expect("size")[axis].get().to_bits(),
+                        raw.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solid_text_and_list_decode_caps_apply_in_both_formats() {
+        for count in [400, 401] {
+            let info = "é".repeat(count);
+            let input = json!({"step":{"id":"s","put":[{"solid":{"id":"s","in":"v","shape":"box","info":info}}]}});
+            let bytes = postcard::to_allocvec(&info).expect("raw text");
+            if count == 400 {
+                let Record::Step(step) = parse(&input).expect("exact info cap") else {
+                    panic!("step")
+                };
+                let Op::Solid(solid) = &step.put[0] else {
+                    panic!("solid")
+                };
+                assert_eq!(solid.info.as_ref().expect("info").as_str(), info);
+                assert_eq!(
+                    postcard::from_bytes::<kumochi_scene::Text>(&bytes)
+                        .expect("binary text cap")
+                        .as_str(),
+                    info
+                );
+            } else {
+                let error = parse(&input).expect_err("excess info");
+                assert_eq!(error.code, ErrorCode::TooLong);
+                assert_eq!(error.path.as_str(), "put[0].solid.info");
+                assert_eq!(
+                    postcard::from_bytes::<kumochi_scene::Text>(&bytes)
+                        .expect_err("binary text cap"),
+                    postcard::Error::SerdeDeCustom
+                );
+            }
+        }
+        for field in ["points", "path"] {
+            for count in [512, 513] {
+                let list = if field == "points" {
+                    json!(vec![[0.0_f32; 2]; count])
+                } else {
+                    json!(vec![[0.0_f32; 3]; count])
+                };
+                let mut solid = json!({"id":"s","in":"v","shape":"box"});
+                solid[field] = list;
+                let input = json!({"step":{"id":"s","put":[{"solid":solid}]}});
+                if count == 512 {
+                    let record = parse(&input).expect("exact list cap");
+                    let bytes = postcard::to_allocvec(&record).expect("binary list");
+                    assert_eq!(
+                        postcard::from_bytes::<Record>(&bytes).expect("exact binary list"),
+                        record
+                    );
+                } else {
+                    let error = parse(&input).expect_err("excess list");
+                    assert_eq!(error.code, ErrorCode::TooLong);
+                    assert_eq!(error.path.as_str(), format!("put[0].solid.{field}[512]"));
+                }
+                if field == "points" {
+                    let bytes =
+                        postcard::to_allocvec(&vec![[0.0_f32; 2]; count]).expect("raw outline");
+                    let decoded = postcard::from_bytes::<Bounded<[Finite; 2], 512>>(&bytes);
+                    if count == 512 {
+                        assert_eq!(decoded.expect("binary cap").len(), 512);
+                    } else {
+                        assert_eq!(
+                            decoded.expect_err("binary over cap"),
+                            postcard::Error::SerdeDeCustom
+                        );
+                    }
+                } else {
+                    let bytes =
+                        postcard::to_allocvec(&vec![[0.0_f32; 3]; count]).expect("raw path");
+                    let decoded = postcard::from_bytes::<Bounded<[Finite; 3], 512>>(&bytes);
+                    if count == 512 {
+                        assert_eq!(decoded.expect("binary cap").len(), 512);
+                    } else {
+                        assert_eq!(
+                            decoded.expect_err("binary over cap"),
+                            postcard::Error::SerdeDeCustom
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn programmatically_built_lists_reject_excess_values() {
     let at_cap = kumochi_scene::text::Bounded::<u8, 2>::new(vec![1, 2]).expect("exact cap");

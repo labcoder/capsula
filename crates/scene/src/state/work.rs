@@ -187,7 +187,9 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             work.usage.marks = r.data.len();
         }
         Op::Node(_) | Op::Edge(_) => {}
-        Op::Anim(_) | Op::Mermaid(_) => unreachable!("only visual operations get work metadata"),
+        Op::Anim(_) | Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => {
+            unreachable!("only visual operations get work metadata")
+        }
     }
     Ok(work)
 }
@@ -304,7 +306,7 @@ pub(crate) fn entrance(op: &Op) -> Option<Enter> {
         Op::Row(r) => r.enter,
         Op::Chart(r) => r.enter,
         Op::Series(r) => r.enter,
-        Op::Anim(_) | Op::Mermaid(_) => None,
+        Op::Anim(_) | Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => None,
     }
 }
 
@@ -318,6 +320,8 @@ pub(crate) fn property(track: Track) -> &'static str {
         Track::Rotate => "rotate",
         Track::Draw => "draw",
         Track::Color => "color",
+        Track::Pos3 => "pos3",
+        Track::Rot3 => "rot3",
     }
 }
 
@@ -385,7 +389,7 @@ fn key_vector(value: &KeyValue) -> [f32; 2] {
     match value {
         KeyValue::Num(value) => [value.get(), 0.0],
         KeyValue::V2(point) => [point[0].get(), point[1].get()],
-        KeyValue::Color(_) => [0.0; 2],
+        KeyValue::Color(_) | KeyValue::V3(_) => [0.0; 2],
     }
 }
 

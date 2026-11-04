@@ -2,7 +2,8 @@
 use kumochi_scene::Record;
 use kumochi_scene::record::{
     Align, Anchor, AxisScale, Cell, ChartKind, Color, Direction, Ease, Enter, Head, HighlightStyle,
-    KeyValue, NodeShape, Op, Point, ShapeKind, Side, Start, Surface, Token, Track, Version,
+    KeyValue, NodeShape, Op, Point, ShapeKind, Side, SolidShape, Start, Surface, Token, Track,
+    Version,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -12,6 +13,28 @@ fn golden<T: Serialize + DeserializeOwned + PartialEq>(json: &str, expected: &[u
     assert!(bytes == expected, "golden wire bytes are stable");
     let decoded: T = postcard::from_bytes(expected).expect("golden bytes decode");
     assert!(decoded == value, "golden bytes decode to the exact fixture");
+}
+#[test]
+fn three_dimensional_tags_append_independent_goldens() {
+    tags::<Track>(&[("pos3", 8), ("rot3", 9)]);
+    tags::<SolidShape>(&[
+        ("box", 0),
+        ("sphere", 1),
+        ("cylinder", 2),
+        ("cone", 3),
+        ("torus", 4),
+        ("extrude", 5),
+        ("lathe", 6),
+        ("tube", 7),
+    ]);
+    golden::<KeyValue>("[0,0,0]", &[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    golden::<Op>(r#"{"view3d":{"id":"v"}}"#, &[16, 1, b'v', 0, 0, 0, 1, 0]);
+    golden::<Op>(
+        r#"{"solid":{"in":"v","id":"s","shape":"box"}}"#,
+        &[
+            17, 1, b'v', 1, b's', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    );
 }
 fn tags<T: Serialize + DeserializeOwned + PartialEq>(cases: &[(&str, u8)]) {
     for (name, tag) in cases {
