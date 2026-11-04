@@ -889,6 +889,21 @@ fn a_verified_set_that_is_due_is_renewed_once_before_it_is_handed_out() {
     assert_eq!(h.refreshes.len(), 1, "renewed instead");
 }
 
+/// A save that ends after the bearer expired doesn't hand it out: its expiry is judged when the
+/// save ends, not when the save began.
+#[test]
+fn a_bearer_that_expires_during_its_save_is_renewed() {
+    let mut h = Harness::seeded("refresh-slow-save", account_at(NOW + 120, Some("id-old")));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").slow_write = Some((h.wall.unix.clone(), 180));
+    h.validated(identity("subject-1"));
+    assert!(h.answers.is_empty(), "no bearer that expired in its save");
+    assert_eq!(
+        h.refreshes,
+        [(0, CLIENT.to_owned(), "refresh-old".to_owned())]
+    );
+}
+
 /// A pending flag the last run left is uncertainty from the next start on, and a rejected set's
 /// list save ends no request: a sign-out after it stays unconfirmed.
 #[test]

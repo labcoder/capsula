@@ -240,7 +240,11 @@ impl<S: CredentialStore> Worker<S> {
                     notice_cleared,
                 }
             }
-            Job::Rotate { account, finish } => Done::Rotated(rotate(vault, &account, finish), now),
+            Job::Rotate { account, finish } => {
+                let result = rotate(vault, &account, finish);
+                // A bearer's expiry is judged when its save ends, which can be long after it began.
+                Done::Rotated(result, self.clock.unix_seconds())
+            }
             Job::List { entry, finish } => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
