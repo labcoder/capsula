@@ -43,10 +43,10 @@ enum Trial {
 }
 
 // shortcut: the motion trials (three stretch CPU rows and the motion receipts) left with the stretch; C2a brings them back with the pull.
-const TRIALS: [Trial; 9] = [
+// shortcut: hover opens the peek, so the click phase can't run; the hover phase (entry QPC to peek present) replaces it in the PR after B2b.
+const TRIALS: [Trial; 8] = [
     Trial::Idle,
     Trial::Input(Phase::Keyboard, FixtureEscMode::Free),
-    Trial::Input(Phase::Click, FixtureEscMode::Free),
     Trial::ReceiptRest,
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
     Trial::Input(Phase::Layouts, FixtureEscMode::Free),
@@ -815,14 +815,15 @@ mod tests {
     }
 
     #[test]
-    fn receipts_follow_click_and_esc_conflict_is_last() {
-        let hover = TRIALS
+    fn receipts_follow_keyboard_and_esc_conflict_is_last() {
+        assert!(!TRIALS.contains(&Trial::Input(Phase::Click, FixtureEscMode::Free)));
+        let keyboard = TRIALS
             .iter()
-            .position(|trial| *trial == Trial::Input(Phase::Click, FixtureEscMode::Free))
+            .position(|trial| *trial == Trial::Input(Phase::Keyboard, FixtureEscMode::Free))
             .unwrap();
-        assert_eq!(TRIALS[hover + 1], Trial::ReceiptRest);
+        assert_eq!(TRIALS[keyboard + 1], Trial::ReceiptRest);
         assert_eq!(
-            &TRIALS[7..],
+            &TRIALS[6..],
             &[
                 Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
                 Trial::StopButton

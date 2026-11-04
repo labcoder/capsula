@@ -191,12 +191,9 @@ A paint isn't a present. The gate harness joins its exact Canvas QPC to the sepa
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
 passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-Click gates the line band's native button-down QPC → panel present at p95 ≤8ms. A single native
-timestamp supplies both the tagged click receipt and the resulting panel-show `click_qpc`;
-only an exact origin match is eligible. The panel record's own `qpc` stays the monotonic
-state-entry timestamp, separate from that native origin. Legacy observer `hover`/paint IDs identify panel
-changes, not a hover-to-open interaction. Programmatic or Stop-fallback shows cannot substitute
-for a click sample. Hover does nothing until the peek.
+Hover opens the peek, so the click gate left with B2b. The hover phase that replaces it gates the
+proxy's native pointer-entry QPC → peek present at p95 ≤8ms and lands in the next PR, before the
+desk session runs the input gate.
 Both reports retain display latency separately: missing display feedback is unmeasured there,
 not a fabricated zero or a failure of an otherwise valid present endpoint. Receipt body
 coverage and motion pacing still require displayed frames. The UI thread only
@@ -336,19 +333,14 @@ cleanup; a phase cannot begin without its complete budget.
    (C2a).
 2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
    restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Click runs 100 guarded line clicks, first checking that pointer entry alone did not open
-   the panel. Leaving both surfaces must hide it; HWND hide observation polls for at most 300ms
-   and is not a display timestamp. Exact native button-down origins and panel paint IDs feed
-   `click-display.txt`, with independent present and display endpoints. The gated button-down
-   QPC is captured at dispatch, excluding OS routing and time waiting in the UI thread's queue.
-   Non-gating SendInput → present samples include that queue wait and are reported beside it.
-   Every native click stays in the denominator; missing or unmatched panel shows cannot pass.
+3. Click left with B2b, since pointer entry now opens the peek; the hover phase replaces it in
+   the next PR.
 4. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
    needs displayed-body receipts at the line's center and edge. Dropped-only or otherwise unavailable display evidence makes the phase
    incomplete even when native routing succeeded.
-   Body clicks now toggle the status panel; candidate points exclude its rectangle so that
+   Hovering the body opens the peek; candidate points exclude its rectangle so that
    later receipt trials cannot target the panel instead of the proxy or covering EDIT.
 5. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
    through local Esc, reopens, double-taps again while active, then clicks a second top-level

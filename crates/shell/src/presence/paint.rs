@@ -71,9 +71,7 @@ impl Element for Stamp {
         _: &mut Window,
         cx: &mut App,
     ) {
-        if self.0 == Surface::Dock {
-            diagnostics::dock_painted(cx);
-        }
+        diagnostics::painted(cx);
         observer::painted(cx, self.0, self.1);
     }
 }

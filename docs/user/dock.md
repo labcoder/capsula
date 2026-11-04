@@ -1,16 +1,14 @@
 # The dock
 
-The dock is a short line at the top center of your screen's work area. Press the left mouse
-button on it to toggle the small status panel, which shows Starting, Ready, Reconnecting or
-Offline;
-move away from both the dock and panel to close it after a short grace period. Opening the
-status panel doesn't take focus from your current app. Hovering does nothing yet.
+The dock is a short line at the top center of your screen's work area. Move the pointer onto
+it to open the peek: Kumo beside a small status panel, which shows Starting, Ready,
+Reconnecting or Offline. Move away from both the dock and the peek to close it after a short
+grace period. Opening the peek doesn't take focus from your current app.
 
 Only a thin band around the line takes the pointer: clicks beside it reach the app underneath.
 
-For now the line has no label. Its status, Offline, **Check settings** and **Settings not
-saved** show only in the status panel, so you have to open it to see them. That's a stopgap
-until a later release shows them in a peek beside the line, not the final design.
+The line itself has no label. Its status, Offline, **Check settings** and **Settings not
+saved** show in the peek.
 
 Use the tray menu to choose one of nine positions: top, middle or bottom, aligned left,
 center or right. This choice currently lasts until the shell restarts. A later release moves
