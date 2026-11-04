@@ -84,5 +84,5 @@ SOFTWARE.
   published to crates.io as `gpui-pre-windows` 0.3.10, a snapshot of zed@08cbb88.
 - License: Apache-2.0. The full text is in `vendor/gpui-pre-windows/LICENSE-APACHE`.
 - Changes: Kumochi modifies six files in `src/` and adds `src/vsync/frame_demand.rs`, so that idle
-  windows stop waking every vblank. Each modified file says so in its first line; the change is
-  described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
+  windows stop waking every vblank and hidden windows open at their requested size. Each modified
+  file says so in its first line; the changes are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
