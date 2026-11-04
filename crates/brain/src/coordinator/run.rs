@@ -71,7 +71,7 @@ impl Coordinator {
                 self.draw_ready(run, &call, &args, effects)?;
             }
             // Native items have no reader until the tool loop stores them for replay.
-            TurnEvent::OutputItem(_) => {}
+            TurnEvent::OutputItem { .. } => {}
             // shortcut: a completed round ends the run, draw call and all, which only the fixture
             // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
             TurnEvent::Finished(Finish::Completed)
