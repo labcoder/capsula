@@ -48,6 +48,7 @@ impl AccountState {
                 .account
                 .as_ref()
                 .is_none_or(|account| account.expose().tokens.is_none())
+            && !self.session_ended()
         {
             return;
         }

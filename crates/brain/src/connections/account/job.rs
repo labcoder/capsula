@@ -61,8 +61,14 @@ pub enum Job {
     /// Sign-out's Delete, then Finish.
     Finish,
     /// Save a refresh flight's account: its rotated set, the set once verified, or the
-    /// registration left when the session ended; once committed, release its lane fact.
-    Rotate(Secret<Account>),
+    /// registration left when the session ended. Only the lane's save, `finish`, releases the
+    /// lane fact once committed.
+    Rotate {
+        /// What to save.
+        account: Secret<Account>,
+        /// Whether this save ends the lane's request.
+        finish: bool,
+    },
 }
 
 impl fmt::Debug for Job {
@@ -77,7 +83,7 @@ impl fmt::Debug for Job {
             Self::Prepare => "Prepare",
             Self::Checkpoint(_) => "Checkpoint",
             Self::Finish => "Finish",
-            Self::Rotate(_) => "Rotate",
+            Self::Rotate { .. } => "Rotate",
         })
     }
 }
@@ -207,7 +213,7 @@ impl<S: CredentialStore> Worker<S> {
                 Job::Prepare => Done::Prepared(Err(VaultError::Busy)),
                 Job::Checkpoint(_) => Done::Checkpointed(Err(VaultError::Busy)),
                 Job::Finish => Done::SignedOut(Err(VaultError::Busy)),
-                Job::Rotate(_) => Done::Rotated(refused()),
+                Job::Rotate { .. } => Done::Rotated(refused()),
             };
         };
         match job {
@@ -231,7 +237,7 @@ impl<S: CredentialStore> Worker<S> {
                     notice_cleared,
                 }
             }
-            Job::Rotate(account) => Done::Rotated(rotate(vault, &account)),
+            Job::Rotate { account, finish } => Done::Rotated(rotate(vault, &account, finish)),
             Job::List(entry) => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
@@ -351,6 +357,22 @@ impl<S: CredentialStore> Worker<S> {
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Job::Rotate's own field, passed through"
+)]
+fn rotate<S: CredentialStore>(
+    vault: &mut Vault<S>,
+    account: &Secret<Account>,
+    finish: bool,
+) -> SaveResult {
+    let result = vault.save_account(account);
+    if finish && matches!(result, SaveResult::Committed { .. }) {
+        finish_request(vault);
+    }
+    result
+}
+
 /// The saved result is owned now, so the lane's pending flag can go. A refused write leaves it
 /// set, which the next request or start counts as uncertainty: conservative, never false.
 fn finish_request<S: CredentialStore>(vault: &mut Vault<S>) {
@@ -359,14 +381,6 @@ fn finish_request<S: CredentialStore>(vault: &mut Vault<S>) {
     }) {
         tracing::warn!(%error, "the token lane's pending flag stays set");
     }
-}
-
-fn rotate<S: CredentialStore>(vault: &mut Vault<S>, account: &Secret<Account>) -> SaveResult {
-    let result = vault.save_account(account);
-    if matches!(result, SaveResult::Committed { .. }) {
-        finish_request(vault);
-    }
-    result
 }
 
 fn expired(entry: &Revocable, now: u64) -> bool {
