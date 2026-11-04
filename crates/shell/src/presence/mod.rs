@@ -10,6 +10,7 @@ mod frame_rate;
 mod geometry;
 mod gesture;
 mod kumo;
+mod kumo_view;
 mod launch;
 mod line;
 mod link;
@@ -52,7 +53,10 @@ use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
+use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
+use kumo::Mood;
+use kumo_view::KumoView;
 pub(crate) use launch::Launch;
 use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
@@ -104,6 +108,10 @@ struct Presence {
     line: Line,
     /// The observer's state after the last accepted mask upload, for the dock's paint stamp.
     drawn: Drawn,
+    /// Kumo in the peek.
+    kumo: Entity<KumoView>,
+    /// The one source of animation frames.
+    frames: FrameLoop,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -124,7 +132,8 @@ impl Presence {
         let layout = position.layout(
             area,
             line::slot(self.scale),
-            [physical(300.0), physical(140.0)],
+            // Kumo and its gap sit beside the 300 px the details had before the peek.
+            [physical(380.0), physical(140.0)],
             0,
         );
         let index = Position::ALL
@@ -176,12 +185,23 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
+        if visibility != self.panel_visibility {
+            let motion = kumo_view::motion(cx);
+            self.kumo.update(cx, |kumo, cx| match visibility {
+                PanelVisibility::Visible => kumo.show(motion, cx),
+                PanelVisibility::Hidden => kumo.hide(),
+            });
+        }
         self.panel_visibility = visibility;
         Ok(())
     }
 
     fn pointer_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let visibility = panels::pointer(self.panel_visibility, self.panel_owner());
+        let visibility = if self.line.contains(platform::cursor_position()?) {
+            panels::over_line(self.panel_owner())
+        } else {
+            panels::pointer(self.panel_visibility, self.panel_owner())
+        };
         if visibility != self.panel_visibility {
             self.set_panel(visibility, cx)?;
         }
@@ -236,10 +256,20 @@ impl Presence {
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let listening = self.gesture.get().listening();
-        self.dock.update(cx, |dock, cx| {
-            dock.listening = listening;
+        let was_listening = self.dock.update(cx, |dock, cx| {
             cx.notify();
+            std::mem::replace(&mut dock.listening, listening)
         });
+        if listening != was_listening {
+            let mood = if listening {
+                Mood::Listening
+            } else {
+                Mood::Idle
+            };
+            let motion = kumo_view::motion(cx);
+            self.kumo
+                .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
+        }
         let notice = self.settings.read(cx).dock_notice().filter(|notice| {
             *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
         });
@@ -458,6 +488,14 @@ impl Presence {
         self.scene_deadline = None;
         let link = self.link.clone();
         diagnostics::settled_paints(cx);
+        let ([reshades, unchanged], shading) = self.kumo.read(cx).totals();
+        diagnostics::record(
+            cx,
+            format_args!(
+                "kumo reshades={reshades} unchanged={unchanged} shade_us={}",
+                shading.as_micros()
+            ),
+        );
         let diagnostics = diagnostics::release(cx);
         let observer = observer::release(cx);
         let told = cx.background_executor().spawn(async move {
@@ -488,6 +526,7 @@ fn scaled(value: f32, scale: f32) -> i32 {
 }
 
 struct Panel {
+    kumo: Entity<KumoView>,
     state: LinkState,
     /// A settings notice the dock line can't show.
     notice: Option<Text>,
@@ -524,20 +563,12 @@ impl Render for Panel {
                     .into_element(),
             )
         });
-        div()
-            .size_full()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
+        let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
+        let details = div()
             .flex()
             .flex_col()
             .gap_2()
-            .children(
-                cx.has_global::<Observer>().then_some(Stamp(Surface::Panel, Drawn::default())),
-            )
+            .min_w_0()
             .child(constants::DISPLAY_NAME)
             .child(strings.get(status_text(self.state)))
             .children(self.notice.map(|notice| strings.get(notice)))
@@ -578,7 +609,21 @@ impl Render for Panel {
                             send(&quit_events, PresenceEvent::Quit);
                         },
                     )),
-            )
+            );
+        // The theme fill over the blur, so the peek stays readable where glass isn't drawn.
+        div()
+            .size_full()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover.opacity(0.85))
+            .text_color(cx.theme().popover_foreground)
+            .flex()
+            .gap_3()
+            .children(stamped.then_some(Stamp(Surface::Panel, Drawn::default())))
+            .child(self.kumo.clone())
+            .child(details)
     }
 }
 
@@ -662,17 +707,23 @@ fn presence_labels(cx: &App) -> PresenceLabels {
 
 fn status_window(
     events: &Sender<PresenceEvent>,
+    kumo: Entity<KumoView>,
     cx: &mut App,
 ) -> Result<(AnyWindowHandle, Entity<Panel>), OpenError> {
     let panel_events = events.clone();
     let close_events = events.clone();
-    let (panel_window, panel) = gpui_kit::open_window(options(), cx, |window, cx| {
+    let glass = WindowOptions {
+        window_background: WindowBackgroundAppearance::Blurred,
+        ..options()
+    };
+    let (panel_window, panel) = gpui_kit::open_window(glass, cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, move |_, _| {
             send(&close_events, PresenceEvent::DismissPanel);
             false
         });
         cx.new(|_| Panel {
+            kumo,
             state: LinkState::Connecting,
             notice: None,
             stop: false,
@@ -728,7 +779,8 @@ pub(crate) fn open(
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let native = PresenceNative::new(labels, events.clone(), line::slot(scale))?;
-    let (panel_window, panel) = status_window(&events, cx)?;
+    let kumo = cx.new(|_| KumoView::new());
+    let (panel_window, panel) = status_window(&events, kumo.clone(), cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
@@ -780,7 +832,14 @@ pub(crate) fn open(
             refusal: None,
             line: Line::default(),
             drawn: Drawn::default(),
+            kumo: kumo.clone(),
+            frames: FrameLoop::default(),
         }
+    });
+    owner.update(cx, |this, cx| {
+        cx.subscribe(&kumo, |this, _, _, cx| this.want_frames(cx))
+            .detach();
+        this.kumo.update(cx, |kumo, cx| kumo.rebake(scale, cx));
     });
     let status_panel = owner.read(cx).panel.clone();
     status_panel.update(cx, |panel, _| panel.threads = Some(owner.downgrade()));
@@ -836,13 +895,8 @@ fn listen(
         while let Ok(event) = event_changes.recv().await {
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
-                    PresenceEvent::DockPressed { qpc } => {
-                        let visibility = panels::pressed(this.panel_visibility, this.panel_owner());
-                        this.pointer_settle = None;
-                        if visibility != this.panel_visibility {
-                            this.set_panel_from(visibility, Some(qpc), cx)?;
-                        }
-                    }
+                    // Hover opens the peek; a press does nothing until C2a's pull starts there.
+                    PresenceEvent::DockPressed { .. } => {}
                     PresenceEvent::PointerChanged => this.pointer_changed(cx)?,
                     PresenceEvent::Position(index) => {
                         if let Some(position) = Position::ALL.get(index) {

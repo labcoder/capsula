@@ -210,6 +210,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         let diagnostics = fs::read_to_string(&path)?;
         fs::remove_file(&path)?;
         let settled = settled_paints(&diagnostics)?;
+        for line in diagnostics.lines().filter(|line| line.contains(" kumo ")) {
+            println!("{line}");
+        }
         println!(
             "dock paints after the {}s settle, until Quit: {settled}",
             SETTLE.as_secs()

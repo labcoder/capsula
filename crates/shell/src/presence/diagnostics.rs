@@ -92,8 +92,8 @@ pub(super) fn record(cx: &mut App, line: Arguments<'_>) {
     }
 }
 
-/// Counts one dock frame, for the settled-interval paint check.
-pub(super) fn dock_painted(cx: &mut App) {
+/// Counts one dock or peek frame, for the settled-interval paint check.
+pub(super) fn painted(cx: &mut App) {
     if cx.has_global::<Diagnostics>() {
         cx.global_mut::<Diagnostics>().paints += 1;
     }
@@ -106,7 +106,7 @@ pub(super) fn settle_delay(cx: &App) -> Option<Duration> {
         .flatten()
 }
 
-/// Starts the settled interval: dock frames from here on should be none at rest.
+/// Starts the settled interval: dock and peek frames from here on should be none at rest.
 pub(super) fn settle(cx: &mut App) {
     if cx.has_global::<Diagnostics>() {
         let diagnostics = cx.global_mut::<Diagnostics>();

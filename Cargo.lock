@@ -3607,6 +3607,7 @@ dependencies = [
  "fluent-bundle",
  "gpui-kit",
  "gpui-pre",
+ "image",
  "keyring",
  "kumochi-brain",
  "kumochi-protocol",

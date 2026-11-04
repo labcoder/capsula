@@ -4,7 +4,7 @@
     not(test),
     expect(
         dead_code,
-        reason = "the dock draws Kumo from OSC-179's B2; until then only the tests call it"
+        reason = "the peek draws the body; the pull and the goo arrive with OSC-179's C2"
     )
 )]
 
@@ -17,3 +17,9 @@ mod neck;
 mod pull;
 mod raster;
 mod shape;
+
+pub(crate) use expression::{Animator, Mood, Motion};
+pub(crate) use frame::FrameState;
+pub(crate) use look::Look;
+pub(crate) use raster::Renderer;
+pub(crate) use shape::Silhouette;

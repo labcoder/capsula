@@ -38,6 +38,13 @@ pub(crate) struct PhaseContext<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Keyboard,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "shortcut: hover opens the peek, so no trial runs the click phase; the hover phase replaces it in the PR after B2b"
+        )
+    )]
     Click,
     Focus,
     Layouts,

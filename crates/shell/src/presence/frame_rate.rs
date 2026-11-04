@@ -1,9 +1,5 @@
 //! How fast Kumochi animates: the user's cap fitted to the display's refresh, so every frame
 //! waits the same whole number of refreshes. How it's paced: docs/development/frame-rate.md.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "B2b's frame loop paces the peek with `Pacer`")
-)]
 
 use std::time::{Duration, Instant};
 
@@ -44,6 +40,41 @@ fn hertz(refresh: Option<Duration>) -> Option<f64> {
     refresh
         .map(|interval| (1.0 / interval.as_secs_f64()).round())
         .filter(|hz| hz.is_finite() && *hz >= 1.0)
+}
+
+/// Presence's one source of animation frames: the pacer, and whether a frame callback is armed.
+/// Clients ask for frames; nothing else sets a timer.
+#[derive(Debug, Default)]
+pub(crate) struct FrameLoop {
+    pacer: Pacer,
+    armed: bool,
+}
+
+impl FrameLoop {
+    /// Whether a callback must be armed now. An idle loop starts its pacer at `now`.
+    pub(crate) fn want(&mut self, now: Instant) -> bool {
+        if self.armed {
+            return false;
+        }
+        self.armed = true;
+        self.pacer.start(now);
+        true
+    }
+
+    /// The seconds the callback at `now` steps, or `None` when it's too soon to draw.
+    pub(crate) fn frame(
+        &mut self,
+        now: Instant,
+        cap: MaxFrameRate,
+        refresh: Option<Duration>,
+    ) -> Option<f64> {
+        self.pacer.frame(now, cap, refresh)
+    }
+
+    /// No client wants frames: the next want arms a callback again.
+    pub(crate) fn idle(&mut self) {
+        self.armed = false;
+    }
 }
 
 /// An animation's frame clock: which vsync callbacks draw, and how far each drawn frame steps.

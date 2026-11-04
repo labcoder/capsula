@@ -43,8 +43,8 @@ live under `platform/windows`; Rust view code handles no raw window pointers.
 The nine positions are calculated from the primary display's physical work area, not its
 entire screen. Logical dimensions are converted using the dock's scale factor. The panel
 touches the dock and clamps inward at an edge. Crossing their shared edge keeps it open.
-Hover never opens it: the proxy's left-button-down toggles it without activation. A Stop
-fallback stays open regardless of pointer departure or further dock clicks while needed.
+Pointer entry on the band opens it without activation; a button-down does nothing. A Stop
+fallback stays open regardless of pointer departure while needed.
 Leaving both starts one 80 ms grace timer; there is no idle polling. The timer rechecks typing
 and Stop ownership before hiding. Synchronous native
 placement calls `bounds_changed` afterwards so GPUI receives its otherwise-dropped resize.
@@ -139,13 +139,23 @@ flowchart LR
   Listening, a link change or a settings notice. A settled dock has none of these, so it costs
   nothing.
 - **Listening** turns the line's fill to the theme's primary colour.
-- **Status panel.** Left-button-down on the band toggles the panel; hover does nothing. An
-  open panel stays while the pointer is over the band or the shown panel, and the 80 ms grace
-  timer covers the gap between them.
-- **Until the peek.** The line carries no label, so the link status, the offline notice and the
-  settings-not-saved notice show only in the status panel. B2b's hover peek brings them back
-  beside the line. The stretch is gone with the old pill: motion trials return with the pull
-  (C2a), and `cargo xtask bench stretch` says so.
+- **Peek.** Pointer entry on the band opens the status panel as the peek, with Kumo beside the
+  link status, the offline notice and the settings-not-saved notice; a button-down does
+  nothing. An open peek stays while the pointer is over the band or the panel, and the 80 ms
+  grace timer covers the gap between them. The panel's background is blurred where Windows
+  allows it, with 85% opacity as the fallback. The stretch is gone with the old pill: motion
+  trials return with the pull (C2a), and `cargo xtask bench stretch` says so.
+- **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
+  on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
+  change needs a restart (OSC-188 wires display changes). The panel is 380×140 so Kumo sits
+  beside the details without wrapping them. Opening the peek blinks once, or shows one still
+  frame under reduced motion, and Listening changes the mood. Each opening and each Listening
+  edge re-reads the system's reduced-motion preference through Kit's
+  `apply_system_reduce_motion`, since Windows posts no change Kit can follow. Frames come from the peek window's next-frame
+  callback, paced by the frame-rate cap, and stop once nothing animates, so a settled peek
+  shades nothing. Each animated frame is a new image and the one it replaced is dropped a
+  frame later (OSC-175's exception until the images are pooled). Quit logs how many frames
+  were shaded and how many repeated the one before.
 
 Unit tests put the line at 125% and 150% from a fractional origin and check the last owned
 pixel and the first pass-through pixel on each side, check that the band fits its slot at
@@ -199,10 +209,8 @@ is one line:
   and leaves both.
 - `hover id=H qpc= visible=true|false click_qpc=`, on every status panel show or hide. The
   legacy name and paint IDs are unchanged. `qpc` is state entry, before native placement;
-  `click_qpc` is zero except for click-triggered changes. The proxy captures that native
-  button-down counter once, before observer or event processing, and carries it through the
-  unconditional product event to placement. A tagged `click` receipt shares exactly that
-  `click_qpc`, so the harness measures from native receipt rather than queued owner handling.
+  `click_qpc` is zero: clicks no longer change the panel, and the hover phase that follows B2b
+  carries the proxy's native pointer-entry counter here instead.
 - `paint frame=F qpc= kind=dock|panel hover= drawn_epoch= drawn_geometry= mask_epoch=`. A dock
   frame is stamped by the dock's zero-size `Stamp` element with `hover=0`; `drawn_geometry`'s `drawn` spans
   are the rows it paints, and `0` means no commit yet. A panel frame is stamped by a zero-size

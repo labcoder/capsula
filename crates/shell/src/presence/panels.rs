@@ -24,6 +24,7 @@ impl Presence {
     }
 }
 
+/// The peek's visibility as the pointer moves elsewhere: leaving is the grace timer's call.
 pub(super) fn pointer(current: PanelVisibility, owner: Owner) -> PanelVisibility {
     match owner {
         Owner::Typing | Owner::Settings => PanelVisibility::Hidden,
@@ -32,13 +33,9 @@ pub(super) fn pointer(current: PanelVisibility, owner: Owner) -> PanelVisibility
     }
 }
 
-pub(super) fn pressed(current: PanelVisibility, owner: Owner) -> PanelVisibility {
-    match (owner, current) {
-        (Owner::Typing | Owner::Settings, _) | (Owner::Pointer, PanelVisibility::Visible) => {
-            PanelVisibility::Hidden
-        }
-        _ => PanelVisibility::Visible,
-    }
+/// The pointer is on the line: that opens the peek, unless typing or Settings owns it.
+pub(super) fn over_line(owner: Owner) -> PanelVisibility {
+    pointer(PanelVisibility::Visible, owner)
 }
 
 pub(super) fn left(owner: Owner) -> PanelVisibility {
@@ -49,35 +46,32 @@ pub(super) fn left(owner: Owner) -> PanelVisibility {
 mod tests {
     use super::Owner::{Pointer, Settings, Stop, Typing};
     use super::PanelVisibility::{Hidden, Visible};
-    use super::{left, pointer, pressed};
+    use super::{left, over_line, pointer};
 
     #[test]
-    fn settings_owns_status_visibility_until_it_is_dismissed() {
+    fn settings_and_typing_keep_the_peek_closed_even_over_the_line() {
+        assert_eq!(over_line(Settings), Hidden);
+        assert_eq!(over_line(Typing), Hidden);
         assert_eq!(pointer(Visible, Settings), Hidden);
-        assert_eq!(pressed(Hidden, Settings), Hidden);
         assert_eq!(left(Settings), Hidden);
-        assert_eq!(pressed(Hidden, Pointer), Visible);
     }
 
     #[test]
-    fn hover_never_opens_status_except_for_the_stop_fallback() {
+    fn the_line_opens_the_peek_and_moving_elsewhere_leaves_it_as_it_is() {
+        assert_eq!(over_line(Pointer), Visible);
         assert_eq!(pointer(Hidden, Pointer), Hidden);
         assert_eq!(pointer(Visible, Pointer), Visible);
+    }
+
+    #[test]
+    fn stop_keeps_the_peek_open_wherever_the_pointer_is() {
         assert_eq!(pointer(Hidden, Stop), Visible);
-        assert_eq!(pointer(Hidden, Typing), Hidden);
+        assert_eq!(over_line(Stop), Visible);
+        assert_eq!(left(Stop), Visible);
     }
 
     #[test]
-    fn click_toggles_unless_typing_or_stop_owns_the_panel() {
-        assert_eq!(pressed(Hidden, Pointer), Visible);
-        assert_eq!(pressed(Visible, Pointer), Hidden);
-        assert_eq!(pressed(Visible, Stop), Visible);
-        assert_eq!(pressed(Hidden, Stop), Visible);
-        assert_eq!(pressed(Hidden, Typing), Hidden);
-    }
-
-    #[test]
-    fn leaving_both_surfaces_hides_status_but_preserves_stop() {
+    fn leaving_both_surfaces_hides_the_peek_but_preserves_stop() {
         assert_eq!(left(Pointer), Hidden);
         assert_eq!(left(Stop), Visible);
         assert_eq!(left(Typing), Hidden);
