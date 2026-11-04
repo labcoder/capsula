@@ -1,11 +1,11 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
 use kumochi_protocol::message::{
-    DataToShell, Deleted, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
+    DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
 };
 
 use super::Input;
-use crate::store::{RunEnd, SceneTarget, TitleSource};
+use crate::store::{Generation, RunEnd, SceneTarget, TitleSource};
 
 /// A store operation: an autocommit read, or a write in one transaction.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,8 +28,8 @@ pub enum StoreOp {
     },
     /// Build a round's context on the page reader, in one read transaction.
     BuildContext(super::BuildContext),
-    /// Read a title job's request on the page reader, in one read transaction.
-    ReadTitle(super::ReadTitle),
+    /// Read a background job's request on the page reader, in one read transaction.
+    ReadJob(super::ReadJob),
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
@@ -100,6 +100,22 @@ pub enum StoreOp {
         /// The job that wrote it; `None` for the user's rename.
         job: Option<super::JobKey>,
     },
+    /// Store a summary of a live thread's events, only in the deletion generation it names.
+    /// `SummaryStored` answers it.
+    StoreSummary {
+        /// The job or build that wrote it.
+        owner: super::SendKey,
+        /// The thread.
+        thread: ThreadId,
+        /// The deletion generation it was read in.
+        generation: Generation,
+        /// The first and last events it covers.
+        covers: (EventId, EventId),
+        /// The summary.
+        text: String,
+        /// The model that wrote it; `None` when the engine took none.
+        model: Option<String>,
+    },
     /// Store a live thread's model and effort. Nothing answers it.
     SetModel {
         /// The thread.
@@ -123,11 +139,12 @@ impl StoreOp {
             Self::Drawing { .. }
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
-            | Self::ReadTitle(_)
+            | Self::ReadJob(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
             | Self::SetTitle { .. }
+            | Self::StoreSummary { .. }
             | Self::SetModel { .. } => None,
         }
     }
@@ -149,12 +166,16 @@ impl StoreOp {
                 snapshot: build.snapshot.clone(),
                 result: Err(super::Unbuilt::Failed),
             }),
-            Self::ReadTitle(read) => Input::JobBuilt(super::JobBuilt {
+            Self::ReadJob(read) => Input::JobBuilt(super::JobBuilt {
                 key: read.key,
                 result: Err(super::Unbuilt::Failed),
             }),
             Self::SetTitle { job, .. } => Input::TitleSet {
                 job: *job,
+                applied: false,
+            },
+            Self::StoreSummary { owner, .. } => Input::SummaryStored {
+                owner: *owner,
                 applied: false,
             },
             Self::BeginTurn { run, .. }

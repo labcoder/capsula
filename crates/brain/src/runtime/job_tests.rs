@@ -70,7 +70,7 @@ async fn a_tasks_first_done_run_takes_the_models_title_and_nudges_the_shell() {
         .expect("read");
     assert_eq!(titles, [(SENTINEL.to_owned(), "model".to_owned())]);
     let logs = captured.text();
-    assert!(logs.contains("a title job ended"), "{logs}");
+    assert!(logs.contains("a job ended"), "{logs}");
     assert!(!logs.contains(SENTINEL), "{logs}");
     assert!(!logs.contains("zqxfirstask"), "{logs}");
 }

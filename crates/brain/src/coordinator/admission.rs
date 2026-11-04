@@ -239,7 +239,7 @@ impl Coordinator {
 }
 
 /// A run's origin comes from its thread, never from anything a model produced.
-fn origin(thread: ThreadId, main: ThreadId) -> Origin {
+pub(super) fn origin(thread: ThreadId, main: ThreadId) -> Origin {
     if thread == main {
         Origin::Kumo
     } else {

@@ -484,7 +484,7 @@ impl StoreThread {
     pub(crate) fn send(&self, op: StoreOp) -> bool {
         if matches!(
             op,
-            StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadTitle(_)
+            StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadJob(_)
         ) {
             let stamp = self.accepted.load(Ordering::Relaxed);
             return self.reads.send(Read { stamp, op }).is_ok();
@@ -520,7 +520,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::DrawingWritten { serial, reply });
             purger.op_arrived(store);
         }
-        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadTitle(_) => {
+        StoreOp::ReadPage { .. } | StoreOp::BuildContext(_) | StoreOp::ReadJob(_) => {
             unreachable!("StoreThread::send hands reads to the reader")
         }
         StoreOp::ClearScenes { scenes } => {
@@ -566,6 +566,27 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 }
             };
             answer(acks, Input::TitleSet { job, applied });
+            purger.op_arrived(store);
+        }
+        StoreOp::StoreSummary {
+            owner,
+            thread,
+            generation,
+            covers,
+            text,
+            model,
+        } => {
+            purger.op_arriving();
+            let applied = match store.reconnect().and_then(|()| {
+                store.store_summary(thread, generation, covers, &text, model.as_deref())
+            }) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    tracing::warn!(%error, thread = thread.0, "a summary wasn't stored");
+                    false
+                }
+            };
+            answer(acks, Input::SummaryStored { owner, applied });
             purger.op_arrived(store);
         }
         StoreOp::SetModel { thread, choice } => {
