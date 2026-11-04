@@ -313,23 +313,15 @@ impl Neck {
         })
     }
 
-    /// The widest `piece`'s region can get for a body this size, logical pixels. Each piece of
-    /// the curve lies in the hull of its own control points, all within [`SNAP_LEN`] of the dock
-    /// for the neck, within the drip's reach of the dock for the drip, and within
-    /// `(1 − STUB_FROM²) × 2 × SNAP_LEN` of the attachment for the stub. Its widest capsule,
-    /// fillet and pad go around that, and two pixels of rounding. The root's join reaches at most
-    /// `2.2 × (0.9 × 0.73 × 0.15 + 1.5 × FILLET + ROOT_BLEND / 4)`, 0.54 of the body, from the
-    /// dock, well inside the neck's cap.
     /// The box, as a centre and half-size, holding the body's join around the root, or `None`
-    /// when there's none. The join reaches `pad` past the root's blend with the capsules, which
-    /// dips up to a quarter of the blend below the ellipse's own distance, both in its 2.2× wide
-    /// metric. The shader joins only within [`BODY_REACH`] of the body's centre, so that disc
-    /// cuts it, at its widest over the rows the two share.
+    /// when there's none: the root's ellipse grown by `pad` in its own 2.2× wide metric. The
+    /// shader joins only within [`BODY_REACH`] of the body's centre, so that disc cuts it, at its
+    /// widest over the rows the two share.
     fn root_join(&self, piece: Piece, root: f32, pad: f32) -> Option<(Vec2, Vec2)> {
         if piece == Piece::Drip || root <= 0.0 {
             return None;
         }
-        let r = root + pad + self.body_size * ROOT_BLEND / 4.0;
+        let r = root + pad;
         let disc = self.body_size * BODY_REACH;
         let (top, bottom) = (
             (self.dock.y - r).max(self.body.y - disc),
@@ -352,17 +344,26 @@ impl Neck {
         })
     }
 
-    /// The margin a region keeps around its capsules: a tenth of the body for the drip, and for
-    /// the pieces that join the body, the join's reach of 1.5 fillets, past which no body field
-    /// is blended in.
+    /// The margin a region keeps around its capsules, and the neck's around its root. The drip
+    /// never joins the body and pads by a tenth of it. The shader joins wherever the neck's field
+    /// is within 1.5 fillets, and that field is the capsules alone for the stub. For the neck it's
+    /// their smooth union with the root, which is never more than a quarter of the blend below
+    /// the nearer of the two, so the neck pads both by that much more.
     fn pad(piece: Piece, body_size: f32) -> f32 {
-        if piece == Piece::Drip {
-            body_size * 0.1
-        } else {
-            body_size * FILLET * 1.5
+        match piece {
+            Piece::Drip => body_size * 0.1,
+            Piece::Stub => body_size * FILLET * 1.5,
+            Piece::Neck => body_size * (FILLET * 1.5 + ROOT_BLEND / 4.0),
         }
     }
 
+    /// The widest `piece`'s region can get for a body this size, logical pixels. Each piece of
+    /// the curve lies in the hull of its own control points, all within [`SNAP_LEN`] of the dock
+    /// for the neck, within the drip's reach of the dock for the drip, and within
+    /// `(1 − STUB_FROM²) × 2 × SNAP_LEN` of the attachment for the stub. Its widest capsule,
+    /// fillet and pad go around that, and two pixels of rounding. The root's join reaches at most
+    /// `2.2 × (0.9 × 0.73 × 0.15 + 1.5 × FILLET + ROOT_BLEND / 4)`, 0.54 of the body, from the
+    /// dock, well inside the neck's cap.
     fn cap(piece: Piece, body_size: f32) -> f32 {
         let widest = body_size * 0.73 * 0.3;
         let root = body_size * 0.73 * 0.15;
@@ -1085,9 +1086,9 @@ mod tests {
 
     #[test]
     fn the_scratch_holds_its_cap_and_one_pixel_more_is_an_error() {
-        // 84 px: the neck's cap is 2 × (144 + 18.396 + 11.34) + 2 = 349.5, the drip's 160.2, and
+        // 84 px: the neck's cap is 2 × (144 + 18.396 + 12.39) + 2 = 351.6, the drip's 160.2, and
         // the stub's 2 × (275.2992 + 18.396 + 11.34) + 2 = 612.1, each rounded up.
-        assert_eq!(GooShader::neck(BODY).max, 350);
+        assert_eq!(GooShader::neck(BODY).max, 352);
         assert_eq!(GooShader::stub(BODY).max, 613);
         let neck = pulled(100.0);
         let mut shader = GooShader::neck(BODY);
@@ -1111,13 +1112,13 @@ mod tests {
                 width,
                 height,
                 got,
-                max: 350,
+                max: 352,
             })
         };
-        assert_eq!(render(350, 1, 1.0, 350 * 4), Ok(()));
-        assert_eq!(render(1, 350, 1.0, 350 * 4), Ok(()));
-        assert_eq!(render(351, 1, 1.0, 351 * 4), err(351, 1, 351 * 4));
-        assert_eq!(render(1, 351, 1.0, 351 * 4), err(1, 351, 351 * 4));
+        assert_eq!(render(352, 1, 1.0, 352 * 4), Ok(()));
+        assert_eq!(render(1, 352, 1.0, 352 * 4), Ok(()));
+        assert_eq!(render(353, 1, 1.0, 353 * 4), err(353, 1, 353 * 4));
+        assert_eq!(render(1, 353, 1.0, 353 * 4), err(1, 353, 353 * 4));
         assert_eq!(
             render(8, 4, 1.0, 8 * 4 * 4 - 1),
             err(8, 4, 127),
