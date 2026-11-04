@@ -12,8 +12,8 @@ directory.
 ## Shell editor
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
-with the same work-area clamping. Kit's tabs expose **General** and an empty **Accounts**
-placeholder. `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
+with the same work-area clamping. Kit's tabs expose **General** and **Accounts**.
+`shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
 `presence/settings.rs` owns the window and session sends, and `presence/settings_view.rs`
 owns the retained Kit inputs and subscriptions. The shell's UI thread never waits for a save.
 The plain model also retains the brain notice across reconnects and fences incoming settings
@@ -57,6 +57,27 @@ the edit clears the local indicator. General brain errors use **Needs attention*
 **Check settings**.
 No additional platform-specific code is needed. See [panels](panels.md#settings-panel) and
 the [user guide](../user/settings.md).
+
+## Accounts
+
+`shell/accounts.rs` retains the authoritative AccountView inside Settings. It never invents
+SigningIn or SigningOut, and queues no operations for reconnect. Accepted operations disable
+account controls until the next current-session view; a failed send leaves the state intact
+and explains the failure inline. Errors survive their first following view, even when that
+view changed. A later different view, an accepted operation or disconnect clears the error.
+The snapshot and errors are fenced by connection generation, not by a settings answer FIFO.
+
+`presence/accounts_view.rs` renders the snapshot with recovery taking precedence over plan
+status. Busy can Retry to acquire the account after the other session exits. Local sign-out
+cleanup and remote confirmation are independent: Running shows no remote warning; Refused
+and NotDurable say “hasn't confirmed yet”; only SignedOut says “didn't confirm”.
+
+Sign out opens a Kit confirmation through `confirmation.rs`, with Cancel explicitly focused
+and generic Enter-to-confirm disabled. Acceptance rechecks the session and state before
+sending SignOut. Leaving SignedIn, disconnecting, switching tabs or hiding Settings closes
+the confirmation. Kit restores focus; a removed trigger falls back to the Settings region.
+Manage usage uses the fixed protocol URL and GPUI open_url through a keyboard-capable Base
+Link. No new platform adapter or credential access is added.
 
 ## Config keys
 

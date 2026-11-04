@@ -756,7 +756,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     };
     let link = thread::spawn(move || start.link.attend(connection, &start.events));
     let events = patient(events);
-    let _session = connected(next(&events));
+    let session = connected(next(&events));
     let LinkEvent::Settings {
         view: shown,
         answer: false,
@@ -766,10 +766,38 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         panic!("settings first");
     };
     assert_eq!(shown, view);
+    let LinkEvent::Account { generation, view } = next(&events) else {
+        panic!("account follows settings");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(
+        view,
+        AccountView::SignedOut {
+            revocation_unconfirmed: false
+        }
+    );
     let LinkEvent::Scenes(scenes) = next(&events) else {
         panic!("scenes after the account view");
     };
     assert!(scenes.is_empty());
+    let error = kumochi_protocol::message::UserError::from(
+        kumochi_protocol::message::ErrorKey::SignInTimedOut,
+    );
+    frame::write(
+        &mut &control,
+        &ControlToShell::Error(error.clone()),
+        Pipe::Control,
+    )
+    .expect("error written");
+    let LinkEvent::Error {
+        generation,
+        error: shown,
+    } = next(&events)
+    else {
+        panic!("account error is delivered");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(shown, error);
     frame::write(&mut &control, &ControlToShell::Ping, Pipe::Control).expect("ping");
     let pong = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
     assert_eq!(pong.expect("still connected"), Some(ControlToBrain::Pong));
