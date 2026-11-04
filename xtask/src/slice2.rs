@@ -226,6 +226,7 @@ fn turn(client: &mut Client, thread: Option<ThreadId>, text: &str) -> Result<(Ru
             run,
             thread,
             phase: Phase::Thinking,
+            ..
         }) => Some((run, thread)),
         _ => None,
     })

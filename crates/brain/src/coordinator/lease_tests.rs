@@ -335,6 +335,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
                 run: R2,
                 thread: T,
                 phase: Phase::Failed,
+                error: None,
             }),
             Effect::Data(DataToShell::RunEnd { run: R2 }),
             Effect::Store(StoreOp::EndRun {
@@ -361,6 +362,7 @@ fn deleting_the_sending_runs_own_task_settles_without_a_cycle() {
                 run: R,
                 thread: T,
                 phase: Phase::Interrupted,
+                error: None,
             }),
             Effect::Data(DataToShell::RunEnd { run: R }),
             Effect::Store(StoreOp::EndRun {

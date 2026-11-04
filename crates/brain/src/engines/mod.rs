@@ -301,6 +301,9 @@ impl CallId {
     }
 }
 
+/// The draw tool's name on the wire.
+pub(crate) const DRAW: &str = "draw";
+
 /// The tools a call can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolName {

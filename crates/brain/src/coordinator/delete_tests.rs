@@ -276,7 +276,7 @@ fn the_answer_retires_the_threads_scenes_and_tells_the_data_pipe() {
         kept: vec![step("kept")],
         stopped: false,
     };
-    let mut core = Coordinator::new(
+    let mut core = Coordinator::ready_for_tests(
         ThreadId(1),
         ThreadId(9),
         RunId(9),
@@ -347,7 +347,8 @@ fn visible_ids(core: &Coordinator) -> Vec<u64> {
 
 /// Run 10 in a new thread T over `ids`, with its first step's write queued.
 fn first_step_queued(ids: &[u64]) -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
     core.handle(turn(None)).expect("a turn is never stale");
     admit(&mut core, R);
     draw_step(&mut core, R, "a").expect("current");

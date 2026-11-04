@@ -2,8 +2,8 @@
 
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
-Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Today the
-fixture engine answers every run and sends nothing.
+Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Until 13b-1b,
+every run is answered by a script that sends nothing (runs.md, "The fixture engine").
 
 ```mermaid
 flowchart LR
@@ -17,7 +17,7 @@ flowchart LR
 
 | Part | Where it comes from |
 |---|---|
-| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. It's empty until a catalog has been read; the fixture engine needs none, and a real engine refuses a request without one. |
+| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against the catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |
 | Instructions | `prompts/instructions.md` and the role file for the run's origin (`kumo.md` or `task.md`). The assistant's name and the user's name come from the run's snapshot, taken once when the run starts, so a rename applies from the next run. An unset user name leaves its line out. Names are filled in one pass, so a name is never read as a placeholder. |
 | Tools | The schemas the origin may use. None yet: slice 4's B10 adds the draw tool, 14a the history tools. |
 | Summary | The newest summary (PR 17), as `Summary of events 1–212:` and its text. Events it covers aren't sent raw. |
@@ -25,6 +25,7 @@ flowchart LR
 | Current turn | The user's text, plus their local time to the minute (SQLite's `localtime`, so the system's time zone on every platform). It's never dropped. |
 
 Reasoning items (PR 13b) are replayed only when they came from the connection the run uses now.
+That's the connection the run was bound to when its turn arrived, recorded in its snapshot.
 
 ## Origin and references
 
