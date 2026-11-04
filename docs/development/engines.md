@@ -19,7 +19,7 @@ flowchart LR
 |---|---|
 | Model and effort | The run's snapshot of the thread's model choice. |
 | Instructions | `prompts/instructions.md` and the role file for the run's origin (`kumo.md` or `task.md`). The assistant's name and the user's name come from the run's snapshot, taken once when the run starts, so a rename applies from the next run. An unset user name leaves its line out. Names are filled in one pass, so a name is never read as a placeholder. |
-| Tools | The schemas the origin may use. None yet: 14a adds the history tools, and the draw tool's schema has no PR yet. |
+| Tools | The schemas the origin may use. None yet: slice 4's B10 adds the draw tool, 14a the history tools. |
 | Summary | The newest summary (PR 17), as `Summary of events 1–212:` and its text. Events it covers aren't sent raw. |
 | Raw runs | Up to the newest 8 runs, the current one included, oldest dropped first while over the bound. A run is kept or dropped whole, so a tool call never travels without its result. |
 | Current turn | The user's text, plus their local time. It's never dropped. |

@@ -198,7 +198,7 @@ pub(crate) struct ToolSchema {
 }
 
 /// The tools a run with `origin` is offered.
-/// shortcut: none yet; 13a adds the draw tool's schema and 14a the history tools for Kumo.
+/// shortcut: none yet; slice 4's B10 adds the draw tool's schema and 14a the history tools for Kumo.
 pub(crate) fn tools(origin: Origin) -> Vec<ToolSchema> {
     match origin {
         Origin::Kumo | Origin::Task(_) => Vec::new(),
