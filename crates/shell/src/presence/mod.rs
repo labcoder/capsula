@@ -17,6 +17,7 @@ mod link;
 pub(crate) mod observer;
 mod paint;
 mod panels;
+mod pulling;
 mod settings;
 mod settings_view;
 #[cfg(test)]
