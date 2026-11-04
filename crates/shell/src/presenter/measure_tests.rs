@@ -14,7 +14,7 @@ use super::{GENERATION, RUN, Shaper, begin, commit, controls, live, only_job, st
 #[ignore = "release reducer timing on quiet Rez, no concurrent builds"]
 #[expect(
     clippy::too_many_lines,
-    reason = "construct and verify full prepared histories outside admission and clear timers"
+    reason = "construct and verify full histories with bounded read-ahead outside the timers"
 )]
 fn measure_motion_heavy_prepared_tip_admission_and_clear() {
     use kumochi_protocol::frame::{self, Pipe};
@@ -74,6 +74,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
             .collect::<Vec<_>>();
         let mut admissions = Vec::new();
         let mut clears = Vec::new();
+        let mut consumptions = Vec::new();
         for iteration in 0..37 {
             let (mut mirror, now) = live();
             for (offset, (first, second, third, _)) in workloads.iter().enumerate() {
@@ -85,6 +86,12 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     .chain(empty.iter())
                     .enumerate()
                 {
+                    if mirror.scenes[&id].ready.len() == super::super::scene::WINDOW {
+                        let elapsed = consume_timed(&mut mirror, id, now);
+                        if iteration >= 5 {
+                            consumptions.push(elapsed);
+                        }
+                    }
                     let job = only_job(
                         commit(
                             &mut mirror,
@@ -100,7 +107,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                         .expect("prepared prefix");
                     assert!(controls(&effects).is_empty(), "prefix within residency");
                 }
-                assert_eq!(mirror.scenes[&id].ready.len(), 63);
+                assert_eq!(mirror.scenes[&id].ready.len(), super::super::scene::WINDOW);
                 assert_eq!(mirror.scenes[&id].tip().revision(), 63);
                 assert_eq!(mirror.scenes[&id].state.object_count(), counts[offset]);
             }
@@ -116,6 +123,10 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
             let mut elapsed = Vec::with_capacity(workloads.len());
             for (offset, (_, _, _, last)) in workloads.iter().enumerate() {
                 let scene = SceneId(100 + u64::try_from(offset).expect("four scenes"));
+                let consumed = consume_timed(&mut mirror, scene, now);
+                if iteration >= 5 {
+                    consumptions.push(consumed);
+                }
                 let message = DataToShell::SceneStepCommit {
                     run: RUN,
                     scene,
@@ -140,9 +151,12 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     .expect("64th prepared prefix");
                 assert!(
                     controls(&effects).is_empty(),
-                    "64 prefixes within residency"
+                    "64 lifetime prefixes with bounded residency"
                 );
-                assert_eq!(mirror.scenes[&scene].ready.len(), 64);
+                assert_eq!(
+                    mirror.scenes[&scene].ready.len(),
+                    super::super::scene::WINDOW
+                );
             }
             let charged = mirror.residency();
             let start = Instant::now();
@@ -154,7 +168,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 admissions.extend_from_slice(&elapsed);
                 clears.push(cleared);
                 println!(
-                    "motion_ui_raw scenes={} objects={} prefixes=64 tracks_per_scene=256 sample={} admission_ns={elapsed:?} clear_ns={cleared} charged_bytes={charged}",
+                    "motion_ui_raw scenes={} objects={} lifetime_prefixes=64 ready_per_scene=8 tracks_per_scene=256 sample={} admission_ns={elapsed:?} clear_ns={cleared} charged_bytes={charged}",
                     counts.len(),
                     counts.iter().sum::<usize>(),
                     iteration - 5
@@ -163,14 +177,26 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
         }
         admissions.sort_unstable();
         clears.sort_unstable();
+        consumptions.sort_unstable();
         println!(
-            "motion_ui scenes={} objects={} admission_samples={} clear_samples=32 warmups=5 admission_p50_ns={} admission_max_ns={} clear_p50_ns={} clear_max_ns={}; {} reducer, fully prepared tip, clear includes output destruction, setup/preparation excluded, no paint",
+            "motion_consume scenes={} objects={} samples={} p50_ns={} p95_ns={} max_ns={}; includes retirement, rest index clone, owner credit and effects disposal",
+            counts.len(),
+            counts.iter().sum::<usize>(),
+            consumptions.len(),
+            consumptions[consumptions.len() / 2],
+            consumptions[consumptions.len() * 95 / 100],
+            consumptions[consumptions.len() - 1],
+        );
+        println!(
+            "motion_ui scenes={} objects={} admission_samples={} clear_samples=32 warmups=5 admission_p50_ns={} admission_p95_ns={} admission_max_ns={} clear_p50_ns={} clear_p95_ns={} clear_max_ns={}; {} reducer, eight-ready tip, clear includes output destruction, setup/preparation excluded, no paint",
             counts.len(),
             counts.iter().sum::<usize>(),
             admissions.len(),
             admissions[admissions.len() / 2 - 1],
+            admissions[admissions.len() * 95 / 100],
             admissions[admissions.len() - 1],
             clears[15],
+            clears[30],
             clears[31],
             if cfg!(debug_assertions) {
                 "debug"
@@ -179,6 +205,26 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
             }
         );
     }
+}
+
+fn consume_timed(presenter: &mut super::Presenter, scene: SceneId, now: Instant) -> u128 {
+    let index = presenter.scenes[&scene]
+        .ready
+        .front()
+        .expect("a ready head")
+        .step
+        .index;
+    let start = Instant::now();
+    let consumed = presenter
+        .consume_ready(scene, index, now)
+        .expect("the head fits");
+    let effects = consumed.effects.expect("a current scene");
+    let empty = effects.is_empty();
+    drop(effects);
+    drop(consumed.step);
+    let elapsed = start.elapsed().as_nanos();
+    assert!(empty, "no queued successor in this admission fixture");
+    elapsed
 }
 
 #[test]
@@ -301,5 +347,125 @@ fn measure_native_maximal_content_residency() {
                 "native_maximal_content ascii_cells={ascii} ready_per_scene={ready} peak_charge_bytes={charge}"
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "run with --exact --ignored alone under the quiet-Rez lock; no window or input"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "drive the real eight-window scheduler and returned owners on native font shaping"
+)]
+fn measure_native_eight_window_residency() {
+    use kumochi_scene::limits::MAX_RESIDENT_BYTES;
+    use std::{sync::mpsc, time::Duration};
+
+    assert!(!kumochi_scene::deferred::running());
+    let app = gpui_kit::application();
+    for content in [
+        maximal_content::Content::UnicodeBytes,
+        maximal_content::Content::AsciiCells,
+    ] {
+        let ascii = matches!(content, maximal_content::Content::AsciiCells);
+        let text = app.text_system();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.background_executor()
+            .spawn(async move {
+                let mut measure =
+                    super::super::Measure::new(text, gpui_kit::Font::default().family);
+                let (mut presenter, now) = live();
+                let mut running = Vec::new();
+                let mut drawing_bytes = 0;
+                for offset in 0..4 {
+                    let id = SceneId(200 + u64::from(offset));
+                    begin(&mut presenter, id, now);
+                    let (bytes, steps) = maximal_content::fixture(content, offset);
+                    drawing_bytes = bytes;
+                    for (index, source) in steps.into_iter().enumerate() {
+                        let effects = commit(
+                            &mut presenter,
+                            id,
+                            u32::try_from(index).expect("64 steps"),
+                            source,
+                            now,
+                        )
+                        .expect("legal maximal content");
+                        assert!(controls(&effects).is_empty());
+                        running.extend(super::jobs(effects));
+                    }
+                }
+                while let Some(job) = running.pop() {
+                    let effects = presenter
+                        .completed(job.run(&mut measure), now)
+                        .expect("a native answer");
+                    assert!(controls(&effects).is_empty(), "every prefix fits");
+                    running.extend(super::jobs(effects));
+                }
+                let usage = presenter.global.usage();
+                assert_eq!(
+                    (usage.scenes, usage.objects, usage.cells, usage.marks),
+                    (4, 1500, 4000, 20000)
+                );
+                for scene in presenter.scenes.values() {
+                    assert_eq!(scene.ready.len(), super::super::scene::WINDOW);
+                    assert_eq!(scene.queue.len(), 56);
+                }
+                let mut peak = presenter.residency();
+                let mut active: Vec<_> = (0..4).map(|_| None).collect();
+                let mut consumed = 0;
+                for expected in 0..64 {
+                    for (offset, previous) in active.iter_mut().enumerate() {
+                        let id = SceneId(200 + u64::try_from(offset).expect("four scenes"));
+                        let done = presenter
+                            .consume_ready(id, expected, now)
+                            .expect("the next native head fits with the prior owner held");
+                        assert_eq!(done.step.step().index, expected);
+                        peak = peak.max(presenter.residency());
+                        drop(previous.replace(done.step));
+                        let effects = done.effects.expect("a current scene");
+                        assert!(controls(&effects).is_empty());
+                        running.extend(super::jobs(effects));
+                        while let Some(job) = running.pop() {
+                            let effects = presenter
+                                .completed(job.run(&mut measure), now)
+                                .expect("a native answer");
+                            assert!(controls(&effects).is_empty(), "every successor fits");
+                            running.extend(super::jobs(effects));
+                            peak = peak.max(presenter.residency());
+                        }
+                        for scene in presenter.scenes.values() {
+                            assert!(
+                                scene.ready.len() + usize::from(scene.running.is_some())
+                                    <= super::super::scene::WINDOW
+                            );
+                        }
+                        assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
+                        consumed += 1;
+                    }
+                }
+                assert_eq!(consumed, 256);
+                for scene in presenter.scenes.values() {
+                    assert_eq!(scene.state.activated(), 64);
+                    assert!(scene.ready.is_empty() && scene.queue.is_empty());
+                }
+                assert!(peak <= MAX_RESIDENT_BYTES);
+                drop(active);
+                assert_eq!(
+                    presenter
+                        .returned
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0
+                );
+                drop(presenter.clear(now).expect("clear native rest"));
+                assert_eq!(presenter.residency(), 0);
+                sender.send((drawing_bytes, peak)).expect("the receiver");
+            })
+            .detach();
+        let (drawing_bytes, peak) = receiver
+            .recv_timeout(Duration::from_secs(180))
+            .expect("native window worker");
+        println!(
+            "native_eight_window ascii_cells={ascii} scenes=4 objects=1500 cells=4000 marks=20000 lifetime_prefixes=256 ready_per_scene=8 consumed=256 drawing_bytes_per_scene={drawing_bytes} peak_charge_bytes={peak} allowance_bytes={MAX_RESIDENT_BYTES}; one returned owner per scene, previous retained until next handoff, synthetic scheduler clock, no paint or RSS measurement"
+        );
     }
 }

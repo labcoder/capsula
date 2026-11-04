@@ -86,6 +86,7 @@ struct Pending {
 
 #[derive(Default)]
 pub(crate) struct Settings {
+    pub(crate) accounts: crate::accounts::Accounts,
     view: Option<SettingsView>,
     notice: Option<UserError>,
     notice_slot: Option<Slot>,

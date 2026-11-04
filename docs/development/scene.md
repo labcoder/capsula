@@ -663,10 +663,21 @@ plus both heap copies of each id and the version allocation. Shared source copie
 motion maps, geometry, chart storage and private facts include their Arc headers
 and are counted once by allocation identity. Empty indexes release retained root
 leaves, and preparation discards sizing facts before publishing its result. These
-are requested-byte allowances, not RSS or allocator bookkeeping bounds. When a ready
-result becomes the rest, charge its layout in full and keep only later ready deltas.
-Preparation rejects a single estimate over 64 MiB, and the shell enforces the
-64 MiB cap across visible scenes.
+are requested-byte allowances, not RSS or allocator bookkeeping bounds. When the oldest
+ready result becomes the rest, charge its layout in full and keep only later ready deltas.
+The returned step also carries its full attribution inside the same allowance until its
+owner releases it, even after another consumption, clear, removal or disconnect. This
+includes the original record even when the compiled run aliases the semantic log: the
+returned owner can outlive that log. The worker caches this full attribution in `Deferred`,
+so consumption reads it without walking the source on UI. Counting
+shared geometry in both rest and the returned owner is deliberately conservative; neither
+the charge nor the owner is replaced by the next consumption. The handoff preserves the
+layout's version identity, so a successor already preparing against it remains valid.
+Preparation rejects a single estimate over 64 MiB. The shell rejects adoption or a
+consumption handoff that would exceed the unchanged 64 MiB total, without waiting for
+bytes that consumption might not free. Rejected consumption changes no scene or charge.
+An empty scene whose rest cannot fit is cleared before adoption, without charging the
+semantic budget or forgetting returned owners that still consume the allowance.
 
 The ignored `measure_prepare_six_hundred_text_updates` test prepares a color update
 to 600 existing text objects, using fixed deterministic measurement rather than GPUI.
@@ -717,15 +728,18 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
-**Known limits before v1.** The legal maximal-content fixture, measured on Rez with
-real font shaping across four scenes and 256 prepared prefixes, charges 200,009,012 B
-against the unchanged 64 MiB presenter allowance. These are requested Rust allocation
-bytes, not RSS or a font-cache ceiling. The next layer adds an eight-prefix-per-scene
-window and partial-ready consumption instead of raising the cap. Inputs and outputs
-held by up to eight workers sit outside the presenter allowance, as does the dropper
-queue. v1 still needs bounded-admission and window/consumption tests, admission at
-most 1 ms, clear/cut/eviction/timeout tails at most 2 ms, and concurrent worker/dropper
-churn measurements with throttling if the backlog grows.
+**Known limits before v1.** The historical unbounded maximal-content probe, measured on
+Rez with real font shaping across four scenes and 256 prepared prefixes, charged
+200,009,012 B; that history does not fit the presenter allowance. The presenter instead
+limits each scene to eight unconsumed ready or running positions and supports private
+head-only consumption. The worst valid eight-position peak, including returned owners,
+must measure below 64 MiB before v1; if it does not, revisit bounded waiting with a real
+release condition rather than raising the cap. These are requested Rust allocation bytes,
+not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers sit outside
+the presenter allowance, as does the dropper queue; returned consumption owners do not.
+v1 still needs bounded admission, admission at most 1 ms, clear/cut/eviction/timeout tails
+at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
+backlog grows. Queue attribution must be corrected before relying on its churn meter.
 
 Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map
@@ -853,14 +867,28 @@ own `WindowTextSystem` and uses the shell theme's font family. No window crosses
 A host with no resolvable UI or fallback font aborts the shell under the release panic
 policy; drawings cannot select fonts, and ordinary shaping errors fail only their scene.
 
-Live preparation targets 50 ms and fails at 250 ms, including a queued step waiting for a
-worker slot; time behind its serial predecessor is excluded. A watchdog independent of
-completion sets cooperative cancellation and rejects
-late results. At most eight jobs or undelivered answers retain worker slots; dropping an
-unspawned job releases its slot too. Recovered layouts and queued results share a 64 MiB
-residency charge, with shared geometry and layout-owned source copies counted by identity.
-Clearing, removal and disconnect release ownership; cancelled workers keep their slots until
-their answer is applied or dropped. Cancellation never claims to kill a thread.
+Live preparation targets 50 ms and fails at 250 ms from one eligibility timestamp, stamped
+only once its exact predecessor is ready and the scene's eight-position window has room.
+Waiting for a worker slot spends that same budget; dispatch does not restart it. A ticket
+blocked behind its predecessor or a full window is untimed. Dispatch, completion and the
+independent watchdog all reject at or after the same deadline. The window counts actual
+unconsumed ready successors plus a running position, not the gap between lifetime revisions.
+
+At most eight jobs or undelivered answers retain worker slots; dropping an unspawned job
+releases its slot too. Recovered layouts, ready deltas and returned consumption owners
+share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
+waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
+ownership but cannot release a result still held by its caller. Cancelled workers keep
+their slots until their answer is applied or dropped. Cancellation never claims to kill
+a thread.
+
+Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
+semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown
+scenes, consumed indices, out-of-order requests, missing ready results and insufficient
+residency leave state unchanged. Freeing a window position immediately gives its next
+successor a chance to become eligible. No production caller consumes yet: B6 owns activation
+and `StepShown`; outstanding-admission serialization and its Busy/wake contract belong to
+the following bounded-admission layer.
 
 Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with

@@ -18,20 +18,23 @@ use kumochi_protocol::message::{RunId, ThreadId};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
+use crate::context::{ModelRequest, Origin};
 use crate::coordinator::Input;
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
 const ROUND_QUEUE: usize = 1;
 
-/// What an engine is asked to answer.
+/// What an engine is asked to answer: a request the coordinator admitted, and nothing else.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RunRequest {
     /// The run the round belongs to; every event it produces is tagged with it.
     pub run: RunId,
     /// The thread the turn was typed in.
     pub thread: ThreadId,
-    /// What the user typed.
-    pub turn: String,
+    /// Where the run started, which decides what its tools may reach (PR 13b).
+    pub(crate) origin: Origin,
+    /// The built request: the only content a round may send.
+    pub(crate) request: ModelRequest,
 }
 
 impl fmt::Debug for RunRequest {
@@ -39,8 +42,27 @@ impl fmt::Debug for RunRequest {
         f.debug_struct("RunRequest")
             .field("run", &self.run)
             .field("thread", &self.thread)
-            .field("turn_bytes", &self.turn.len())
+            .field("origin", &self.origin)
+            .field("request", &self.request)
             .finish()
+    }
+}
+
+#[cfg(test)]
+impl RunRequest {
+    /// A Kumo request with `text` as its instructions and nothing else.
+    pub(crate) fn for_tests(run: RunId, thread: ThreadId, text: &str) -> Self {
+        Self {
+            run,
+            thread,
+            origin: Origin::Kumo,
+            request: ModelRequest {
+                choice: None,
+                instructions: text.to_owned(),
+                input: Vec::new(),
+                tools: Vec::new(),
+            },
+        }
     }
 }
 
@@ -299,11 +321,7 @@ mod tests {
     }
 
     fn request() -> RunRequest {
-        RunRequest {
-            run: RunId(7),
-            thread: ThreadId(2),
-            turn: "secret words".to_owned(),
-        }
+        RunRequest::for_tests(RunId(7), ThreadId(2), "secret words")
     }
 
     fn text(delta: &str) -> TurnEvent {
@@ -442,7 +460,8 @@ mod tests {
         );
         assert_eq!(
             printed,
-            "RunRequest { run: RunId(7), thread: ThreadId(2), turn_bytes: 12 } TextDelta(12) \
+            "RunRequest { run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
+             choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
              ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem(Opaque(16))"
         );
         assert_eq!(

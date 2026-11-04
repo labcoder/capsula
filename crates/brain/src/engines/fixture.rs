@@ -185,16 +185,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{DEFAULT, Fixture, Line, call, step};
-    use crate::coordinator::{Coordinator, Effect, Input, StoreOp};
+    use crate::context::Built;
+    use crate::coordinator::{BuildKey, ContextBuilt, Coordinator, Effect, Input, StoreOp};
     use crate::engines::{Engine, EngineFailure, Finish, RunRequest, ToolName, TurnEvent, start};
     use crate::store::SceneTarget;
 
     fn request() -> RunRequest {
-        RunRequest {
-            run: RunId(3),
-            thread: ThreadId(1),
-            turn: "go".to_owned(),
-        }
+        RunRequest::for_tests(RunId(3), ThreadId(1), "go")
     }
 
     #[test]
@@ -296,6 +293,19 @@ mod tests {
         .expect("a turn is never stale");
         core.handle(Input::TurnStored { run: RunId(3) })
             .expect("current");
+        let admitted = Input::ContextBuilt(ContextBuilt {
+            key: BuildKey {
+                run: RunId(3),
+                round: 1,
+                attempt: 1,
+            },
+            snapshot: None,
+            result: Ok(Built {
+                request: request().request,
+                sources: vec![ThreadId(1)],
+            }),
+        });
+        core.handle(admitted).expect("admitted");
         let started = received.recv().await.expect("the call starts");
         assert_eq!(core.handle(started), Ok(Vec::new()));
         let first = received.recv().await.expect("the first step");

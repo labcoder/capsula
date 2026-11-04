@@ -300,14 +300,15 @@ impl PresenceNative {
     }
 
     /// Gives the proxy its owned pixels, where `spans` names a screen row's owned columns as
-    /// up to two `[left, right)` spans, and moves it to `window` when that changed.
+    /// up to [`ROW_SPANS`](crate::platform::ROW_SPANS) `[left, right)` spans, and moves it to
+    /// `window` when that changed.
     ///
     /// # Errors
     /// Fails when `window` outgrows the mask or Windows refuses the update.
     pub(crate) fn reshape(
         &mut self,
         window: [i32; 4],
-        spans: impl Fn(i32) -> [Option<[i32; 2]>; 2],
+        spans: impl Fn(i32) -> crate::platform::RowSpans,
     ) -> Result<MaskUpdate, PresenceError> {
         self.mask.update(self.hwnd, window, spans)
     }

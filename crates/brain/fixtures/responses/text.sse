@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"Hello, "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"wörld 🙂"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_fixture","status":"completed"}}
+
