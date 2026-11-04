@@ -14,7 +14,7 @@ use super::geometry::Layout;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
 use super::{OpenError, Presence, platform};
-use crate::platform::{PresenceError, PresenceNative};
+use crate::platform::{PresenceError, PresenceNative, ROW_SPANS, RowSpans};
 
 /// The line's size, in logical pixels.
 const LINE: [f32; 2] = [56.0, 3.0];
@@ -69,14 +69,13 @@ impl LineFrame {
     }
 
     /// Row `y`'s owned pixels, as the hit mask takes them.
-    pub(super) fn row_spans(&self, y: i32) -> [Option<[i32; 2]>; 2] {
+    pub(super) fn row_spans(&self, y: i32) -> RowSpans {
         let [left, top, width, height] = self.hit;
-        [
-            (top..top + height)
-                .contains(&y)
-                .then_some([left, left + width]),
-            None,
-        ]
+        let mut spans = [None; ROW_SPANS];
+        spans[0] = (top..top + height)
+            .contains(&y)
+            .then_some([left, left + width]);
+        spans
     }
 
     pub(super) fn contains(&self, [x, y]: [i32; 2]) -> bool {
@@ -317,7 +316,7 @@ impl Surfaces for Desktop<'_> {
 
     fn clear_mask(&mut self, hit: [i32; 4]) -> Result<(), PresenceError> {
         let begin_qpc = observer::begin(self.cx);
-        let update = self.native.reshape(hit, |_| [None; 2]);
+        let update = self.native.reshape(hit, |_| [None; ROW_SPANS]);
         let drawn = observer::commit(self.cx, begin_qpc, None, hit, &update);
         update?;
         self.drawn = drawn;
@@ -496,6 +495,7 @@ mod tests {
     use gpui_kit::{AppContext as _, Context, IntoElement, Render, Window, WindowOptions, div};
 
     use super::{Attempt, Line, LineFrame, Placement, Surfaces, on_next_frame, slot};
+    use crate::platform::ROW_SPANS;
     use crate::presence::geometry::Layout;
 
     /// The first and last owned pixel on each side, and the pass-through pixel beyond each.
@@ -523,9 +523,9 @@ mod tests {
         assert_eq!(frame.paint, [100, 21, 70, 3]);
         assert_eq!(frame.hit, [100, 11, 70, 23]);
         assert_edges(&frame, [100, 11, 169, 33]);
-        assert_eq!(frame.row_spans(11), [Some([100, 170]), None]);
-        assert_eq!(frame.row_spans(10), [None, None]);
-        assert_eq!(frame.row_spans(34), [None, None]);
+        assert_eq!(frame.row_spans(11), [Some([100, 170]), None, None, None]);
+        assert_eq!(frame.row_spans(10), [None; ROW_SPANS]);
+        assert_eq!(frame.row_spans(34), [None; ROW_SPANS]);
     }
 
     #[test]
