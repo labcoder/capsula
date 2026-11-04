@@ -10,7 +10,7 @@ use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{AccountOp, AccountView, ControlToBrain, ControlToShell, ErrorKey};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, timeout};
 use zeroize::Zeroizing;
 
@@ -20,10 +20,10 @@ use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::oauth::id_token::IdentityError;
 use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launcher};
-use crate::connections::records::Account;
+use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
-use crate::platform::SessionLock;
+use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::account::{Accounts, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
@@ -175,7 +175,7 @@ async fn the_account_system_never_prints_a_secret() {
     for text in &printed {
         assert!(!text.contains("SENTINEL"), "{text}");
     }
-    accounts.close(Instant::now()).await;
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 /// Tells the test a job opened the vault, then holds the job until the test releases it.
@@ -212,7 +212,7 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
     entered.recv().expect("the job is running");
     let captured = Captured::default();
     let _capturing = captured.install();
-    let close = accounts.close(Instant::now());
+    let close = accounts.close(Instant::now(), Instant::now());
     tokio::pin!(close);
     let past_deadline = async {
         while !captured.text().contains("still running at the deadline") {
@@ -297,7 +297,7 @@ async fn a_blocking_browser_launch_never_stalls_the_core_loop() {
             ..
         }
     ));
-    accounts.close(Instant::now()).await;
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 /// CAPS-116: the startup load runs on the credentials thread, and has ended once `spawn` returns.
@@ -325,7 +325,7 @@ async fn the_startup_load_runs_on_the_credentials_thread() {
         [ControlToShell::Account(SIGNED_OUT)],
         "loaded before spawn returned"
     );
-    accounts.close(Instant::now()).await;
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 /// Answers the token request, then moves the wall clock on while the identity check fetches
@@ -400,4 +400,238 @@ async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
         received.identity,
         Err(IdentityError::Status { status: 503 })
     ));
+}
+
+/// Answers the refresh-token grant with a rotated set that carries no identity token.
+struct Rotating;
+
+impl Http for Rotating {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let (status, body) = match request.endpoint {
+            Endpoint::Token => {
+                let tokens = json!({"access_token":"access-new", "refresh_token":"refresh-new", "token_type":"Bearer", "scope":"openid offline_access chatgpt.tokens.use.direct", "expires_in":3600});
+                (200, serde_json::to_vec(&tokens).expect("fixture"))
+            }
+            Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => (503, Vec::new()),
+        };
+        std::future::ready(Ok(Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(body)),
+        }))
+    }
+}
+
+/// Design §3 rule 3: a caller that stops waiting cancels only its wait. The refresh it started
+/// runs as its own task to the end, and the rotated set is saved.
+#[tokio::test]
+async fn a_dropped_wait_never_cancels_its_refresh() {
+    let scratch = Scratch::new("account-refresh-dropped");
+    let store = FakeStore::default();
+    let service = "test-accounts-refresh";
+    let reader = |name| {
+        let lock = scratch.db().with_file_name(name);
+        Vault::with_service(store.clone(), service, &lock).expect("vault")
+    };
+    let saved = reader("seed.lock").save_account(&Secret::new(Account {
+        client_id: Zeroizing::new("client-saved".to_owned()),
+        subject: Some(Zeroizing::new("subject-1".to_owned())),
+        email: None,
+        plan_enabled: true,
+        tokens: Some(Tokens {
+            access_token: Zeroizing::new("access-old".to_owned()),
+            refresh_token: Zeroizing::new("refresh-old".to_owned()),
+            id_token: None,
+            scope: Zeroizing::new("openid offline_access chatgpt.tokens.use.direct".to_owned()),
+            expires_at: 1_800_000_000,
+            pending_identity_validation: false,
+            refresh_sent: false,
+        }),
+    }));
+    assert!(matches!(saved, SaveResult::Committed { .. }));
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let opening = store.clone();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), service, &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let http = SharedHttp::new(Rotating);
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        ..test_support::net()
+    };
+    let mut accounts = Accounts::spawn(worker, net).expect("accounts");
+    let (wait, _) = accounts.access();
+    drop(wait);
+    let refresh_token = || {
+        let account = reader("reader.lock").load_account().expect("readable");
+        account
+            .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
+    };
+    // The pending flag, the sent mark, the refresh and the rotated set's save.
+    for _ in 0..4 {
+        let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        accounts.handle(input);
+    }
+    assert_eq!(refresh_token(), Some("refresh-new".to_owned()));
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+const SHUTDOWN_SERVICE: &str = "test-accounts-shutdown";
+
+/// Answers the refresh-token grant with a rotated set once released, and says when it's sent.
+struct Gated {
+    sent: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+/// A gated client, the signal that its request went out, and its release.
+fn gated() -> (SharedHttp, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (sent_tx, sent) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let http = SharedHttp::new(Gated {
+        sent: Mutex::new(Some(sent_tx)),
+        release: Mutex::new(Some(released)),
+    });
+    (http, sent, release)
+}
+
+impl Http for Gated {
+    fn execute(
+        &self,
+        _: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        if let Some(sent) = self.sent.lock().expect("gate").take() {
+            sent.send(()).ok();
+        }
+        let release = self.release.lock().expect("gate").take();
+        async move {
+            if let Some(release) = release {
+                release.await.ok();
+            }
+            let tokens = json!({"access_token":"access-new", "refresh_token":"refresh-new", "token_type":"Bearer", "scope":"openid offline_access chatgpt.tokens.use.direct", "expires_in":3600});
+            Ok(Response {
+                status: 200,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(
+                    serde_json::to_vec(&tokens).expect("fixture"),
+                )),
+            })
+        }
+    }
+}
+
+/// Saves an account whose bearer is due, then starts the account system on it with `http`.
+fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accounts {
+    let seed = scratch.db().with_file_name("seed.lock");
+    let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
+        .expect("vault")
+        .save_account(&Secret::new(Account {
+            client_id: Zeroizing::new("client-saved".to_owned()),
+            subject: Some(Zeroizing::new("subject-1".to_owned())),
+            email: None,
+            plan_enabled: true,
+            tokens: Some(Tokens {
+                access_token: Zeroizing::new("access-old".to_owned()),
+                refresh_token: Zeroizing::new("refresh-old".to_owned()),
+                id_token: None,
+                scope: Zeroizing::new("openid offline_access chatgpt.tokens.use.direct".to_owned()),
+                expires_at: 1_800_000_000,
+                pending_identity_validation: false,
+                refresh_sent: false,
+            }),
+        }));
+    assert!(matches!(saved, SaveResult::Committed { .. }));
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let opening = store.clone();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        ..test_support::net()
+    };
+    Accounts::spawn(worker, net).expect("accounts")
+}
+
+/// Asks for the bearer and runs the account system until its refresh is out.
+async fn send_refresh(accounts: &mut Accounts, sent: oneshot::Receiver<()>) {
+    let (wait, _) = accounts.access();
+    drop(wait);
+    // The pending flag, then the sent mark; then the refresh goes out.
+    for _ in 0..2 {
+        let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        accounts.handle(input);
+    }
+    timeout(PATIENCE, sent)
+        .await
+        .expect("in time")
+        .expect("the request went out");
+}
+
+/// The saved refresh token, and whether it's marked as sent.
+fn saved_refresh(scratch: &Scratch, store: &FakeStore) -> (String, bool) {
+    let lock = scratch.db().with_file_name("reader.lock");
+    let account = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &lock)
+        .expect("vault")
+        .load_account()
+        .expect("readable")
+        .expect("an account");
+    let tokens = account.expose().tokens.as_ref().expect("tokens");
+    (tokens.refresh_token.to_string(), tokens.refresh_sent)
+}
+
+/// CAPS-151 H3: a refresh out at shutdown runs to its end, and its rotated set is saved before
+/// the session lock is released, so no other instance can take the token meanwhile.
+#[tokio::test]
+async fn closing_saves_a_refresh_that_answers_in_time() {
+    let scratch = Scratch::new("account-close-refresh");
+    let store = FakeStore::default();
+    let (http, sent, release) = gated();
+    let mut accounts = due_account(&scratch, &store, http);
+    send_refresh(&mut accounts, sent).await;
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let close = accounts.close(Instant::now(), Instant::now() + PATIENCE);
+    tokio::pin!(close);
+    for _ in 0..8 {
+        tokio::select! {
+            biased;
+            () = &mut close => panic!("close returned while the refresh was out"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    assert!(
+        matches!(SessionLock::try_acquire(&lock), Err(SessionLockError::Busy)),
+        "the lock is held while the refresh is out"
+    );
+    release.send(()).expect("the refresh waits for its release");
+    close.await;
+    assert_eq!(
+        saved_refresh(&scratch, &store),
+        ("refresh-new".to_owned(), false)
+    );
+    drop(SessionLock::try_acquire(&lock).expect("released"));
+}
+
+/// CAPS-151 H3: past its deadline, closing releases the lock with the refresh still out; its
+/// token stays marked as sent, so the next start never sends it again.
+#[tokio::test]
+async fn closing_past_the_refresh_deadline_leaves_the_token_marked() {
+    let scratch = Scratch::new("account-close-refresh-late");
+    let store = FakeStore::default();
+    let (http, sent, release) = gated();
+    let mut accounts = due_account(&scratch, &store, http);
+    send_refresh(&mut accounts, sent).await;
+    accounts.close(Instant::now(), Instant::now()).await;
+    assert_eq!(
+        saved_refresh(&scratch, &store),
+        ("refresh-old".to_owned(), true)
+    );
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    drop(SessionLock::try_acquire(&lock).expect("released"));
+    drop(release);
 }

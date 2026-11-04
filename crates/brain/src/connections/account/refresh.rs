@@ -511,6 +511,21 @@ impl AccountState {
         self.ended = Some(self.generation);
     }
 
+    /// A refresh is out, or the lane still owns its result's save: shutdown waits for it, so a
+    /// rotated set the provider issued isn't lost.
+    #[must_use]
+    pub fn refresh_out(&self) -> bool {
+        matches!(
+            self.lane,
+            Lane::Refreshing { .. }
+                | Lane::Owning {
+                    save: Save::Rotated { .. } | Save::Discard(_),
+                    held: None,
+                    ..
+                }
+        )
+    }
+
     pub(super) fn session_ended(&self) -> bool {
         self.ended == Some(self.generation)
     }
