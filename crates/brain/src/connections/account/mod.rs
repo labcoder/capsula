@@ -219,6 +219,10 @@ type Verified = (Zeroizing<String>, Option<Zeroizing<String>>, u64);
 
 /// The pure account machine.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts: the lock, a load, a revocation pass owed, a renewal sent"
+)]
 pub struct AccountState {
     busy: bool,
     loading: bool,
@@ -603,11 +607,9 @@ impl AccountState {
                 return;
             }
         };
+        let expires_at = now.and_then(|now| now.checked_add(tokens.expires_in));
         let verdict = if current {
-            self.verdict(
-                identity,
-                now.and_then(|now| now.checked_add(tokens.expires_in)),
-            )
+            self.verdict(identity, expires_at)
         } else {
             Err(None)
         };
