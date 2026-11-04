@@ -205,4 +205,9 @@ on:
 
 Claude Code retries a cut request itself (`system:api_retry`, up to 10 times in 2.1.306) and
 streams only the attempt that finished, so a retry doesn't count as a second native request. No
-line's content is ever logged.
+line's content is ever logged, and every type here prints only kinds, lengths and counts in `Debug`.
+
+`Init` keeps `analytics_disabled` as reported (`None` when it's missing or not a boolean) for the
+connection to show; it's never a reason to refuse the route. The recordings in
+`fixtures/claude-code/` are checked by a normal test: no decoded string may hold a drive, UNC or
+`/`-rooted path, `Users\`, or a UUID other than the all-zero placeholder.

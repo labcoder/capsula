@@ -5,7 +5,9 @@
 //! `--include-partial-messages`; without that flag a question maps to an empty answer.
 //! `assistant` messages repeat the streamed text and are ignored.
 
-use serde::Deserialize;
+use std::fmt;
+
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use super::super::{ClaudeStreamFailure, EngineFailure, Finish, Tokens, TurnEvent, Usage};
@@ -18,11 +20,20 @@ pub(crate) const MAX_STDOUT: u64 = 16 << 20;
 pub(crate) const MAX_NATIVE_TURNS: u8 = 8;
 
 /// Splits stdout into lines, charging every byte to [`MAX_STDOUT`] before it's framed.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct LineFramer {
     buf: Vec<u8>,
     start: usize,
     charged: u64,
+}
+
+impl fmt::Debug for LineFramer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LineFramer")
+            .field("unread", &(self.buf.len() - self.start))
+            .field("charged", &self.charged)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LineFramer {
@@ -67,7 +78,7 @@ impl LineFramer {
     }
 }
 
-/// What one line meant.
+/// What one line meant. Its `Debug` is structural, as each payload's is.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Mapped {
     /// Part of the answer.
@@ -88,7 +99,7 @@ pub(crate) enum Mapped {
 }
 
 /// A control response: which request it answers and its body, which the audit reads.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(PartialEq, Deserialize)]
 pub(crate) struct ControlResponse {
     /// `success` or `error`.
     pub subtype: String,
@@ -100,7 +111,7 @@ pub(crate) struct ControlResponse {
 }
 
 /// `system:init`'s audited fields; nothing here is judged until the audit.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(PartialEq, Deserialize)]
 pub(crate) struct InitFacts {
     /// Claude Code's version.
     pub claude_code_version: String,
@@ -119,10 +130,18 @@ pub(crate) struct InitFacts {
     pub api_key_source: String,
     /// Agents.
     pub agents: Vec<String>,
+    /// Whether Claude Code reports its analytics as off; shown, never a reason to refuse the route.
+    /// Missing or not a boolean reads as `None`.
+    #[serde(default, deserialize_with = "bool_or_none")]
+    pub analytics_disabled: Option<bool>,
+}
+
+fn bool_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    Ok(Value::deserialize(deserializer)?.as_bool())
 }
 
 /// One MCP server in `system:init`.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(PartialEq, Deserialize)]
 pub(crate) struct McpServer {
     /// Its name.
     pub name: String,
@@ -131,12 +150,81 @@ pub(crate) struct McpServer {
 }
 
 /// One plugin in `system:init`.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(PartialEq, Deserialize)]
 pub(crate) struct Plugin {
     /// Its name.
     pub name: String,
     /// `builtin` for the ones Claude Code ships.
     pub path: String,
+}
+
+/// A JSON value's kind and size, never its content.
+struct Shape<'a>(&'a Value);
+
+impl fmt::Debug for Shape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::Null => f.write_str("null"),
+            Value::Bool(_) => f.write_str("bool"),
+            Value::Number(_) => f.write_str("number"),
+            Value::String(text) => write!(f, "string(len={})", text.len()),
+            Value::Array(items) => write!(f, "array(len={})", items.len()),
+            Value::Object(fields) => write!(f, "object(len={})", fields.len()),
+        }
+    }
+}
+
+/// A string's length, never its content.
+struct Len<'a>(&'a str);
+
+impl fmt::Debug for Len<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "len={}", self.0.len())
+    }
+}
+
+impl fmt::Debug for ControlResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ControlResponse")
+            .field("subtype", &Len(&self.subtype))
+            .field("request_id", &Len(&self.request_id))
+            .field("response", &Shape(&self.response))
+            .finish()
+    }
+}
+
+impl fmt::Debug for InitFacts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InitFacts")
+            .field("claude_code_version", &Len(&self.claude_code_version))
+            .field("tools", &self.tools.len())
+            .field("mcp_servers", &self.mcp_servers)
+            .field("plugins", &self.plugins)
+            .field("skills", &self.skills.len())
+            .field("slash_commands", &self.slash_commands.len())
+            .field("api_key_source", &Len(&self.api_key_source))
+            .field("agents", &self.agents.len())
+            .field("analytics_disabled", &self.analytics_disabled)
+            .finish()
+    }
+}
+
+impl fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpServer")
+            .field("name", &Len(&self.name))
+            .field("status", &Len(&self.status))
+            .finish()
+    }
+}
+
+impl fmt::Debug for Plugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Plugin")
+            .field("name", &Len(&self.name))
+            .field("path", &Len(&self.path))
+            .finish()
+    }
 }
 
 /// Maps lines to turn events for one question.
