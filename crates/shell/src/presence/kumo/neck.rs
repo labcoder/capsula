@@ -34,6 +34,8 @@ const BREAK_AT: f32 = 0.16;
 const STUB_FROM: f32 = BREAK_AT + 0.05;
 /// Goo tiles, pixels: a tile no capsule, fillet or body can reach is cleared without shading.
 const TILE: usize = 8;
+/// The tile mask's bit for the root fillet, above the capsules'.
+const ROOT: u16 = 1 << 15;
 /// The largest scale the goo is shaded at; above it GPUI scales the image up.
 pub(crate) const MAX_SCALE: f32 = 1.0;
 
@@ -458,7 +460,10 @@ impl GooShader {
         let tile = f32::from(u8::try_from(TILE).expect("a small tile"));
         let px = 1.0 / scale;
         let reach = tile * px * 0.75 + s * 0.06;
-        let seg_reach = tile * px * 0.75 + s * 0.15;
+        // Away from the body, a field only matters within a pixel and a half of the goo's edge:
+        // nearer, a pixel is drawn or is a drawn pixel's neighbour for its normal. Two pixels and
+        // a wider tile reach allow for the tapered field's slope.
+        let edge = tile * px * 0.9 + 2.0 * px;
         let tw = w.div_ceil(TILE);
         for (t, slot) in self.tiles[..tw * h.div_ceil(TILE)].iter_mut().enumerate() {
             let c = r.origin
@@ -469,16 +474,24 @@ impl GooShader {
                     ),
                     px,
                 );
+            let near_body = joins && (c - neck.body).len() < body_reach + reach;
+            // Near the body its fillet can pull the goo out further.
+            let seg_reach = if near_body {
+                tile * px * 0.75 + s * 0.15
+            } else {
+                edge
+            };
             let mut mask = 0_u16;
             for (k, &(a, b, ra, rb)) in segs.iter().enumerate() {
                 if tapered(c, a, b, ra, rb) < seg_reach {
                     mask |= 1 << k;
                 }
             }
-            let busy = mask != 0
-                || (joins && (c - neck.body).len() < body_reach + reach)
-                || (root_r > 0.0 && (c - neck.dock).len() - root_r * 2.2 < reach);
-            *slot = (busy, mask);
+            let dock = (c - neck.dock).len() - tile * px * 0.75;
+            if root_r > 0.0 && dock / 2.2 - root_r < seg_reach + s * 0.05 {
+                mask |= ROOT;
+            }
+            *slot = (mask != 0 || near_body, mask);
         }
         let (above, row) = (&mut self.above[..w], &mut self.row[..w]);
         row.fill(f32::MAX);
@@ -502,7 +515,7 @@ impl GooShader {
                             d = d.min(tapered(p, a, b, ra, rb));
                         }
                     }
-                    if root_r <= 0.0 {
+                    if mask & ROOT == 0 {
                         return d;
                     }
                     // A soft fillet where the neck leaves the line, so it grows out of the dock.
