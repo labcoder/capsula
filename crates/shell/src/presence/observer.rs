@@ -415,13 +415,13 @@ pub(super) fn begin(cx: &App) -> i64 {
     platform::performance_counter()
 }
 
-/// Records one mask upload of `proposal` into the proxy at `proxy`, begun at `begin_qpc` from
+/// Records one mask upload of `proposal`, or of an empty mask when it's `None`, into the proxy at `proxy`, begun at `begin_qpc` from
 /// [`begin`], right after it returned. Returns the accepted state the dock should name when it
 /// draws.
 pub(super) fn commit(
     cx: &mut App,
     begin_qpc: i64,
-    proposal: &LineFrame,
+    proposal: Option<&LineFrame>,
     proxy: [i32; 4],
     update: &Result<MaskUpdate, PresenceError>,
 ) -> Drawn {
@@ -431,7 +431,7 @@ pub(super) fn commit(
     let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
     let result = Commit::of(update);
-    let geometry = Geometry::of(proposal);
+    let geometry = proposal.map_or_else(Geometry::empty, Geometry::of);
     let (new, id, drawn) = observer.ledger.commit(&geometry, result);
     if new {
         if geometry.overflowed() {

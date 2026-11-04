@@ -310,9 +310,26 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
                 .find(|x| !geometry.contains_drawn([*x, y]))
                 .map(|x| [x, y])
         }),
-        "outside" => (commit.proxy[0]..commit.proxy[0] + commit.proxy[2])
-            .map(|x| [x, y])
-            .find(|point| !geometry.contains_owned(*point)),
+        "outside" => {
+            let middle = left.midpoint(right);
+            let below = geometry.origin_y + i32::try_from(geometry.rows.len()).ok()?;
+            let cover = [
+                cover.left,
+                cover.top,
+                cover.right - cover.left,
+                cover.bottom - cover.top,
+            ];
+            row.owned
+                .iter()
+                .flatten()
+                .flat_map(|[left, right]| [[left - 1, y], [*right, y]])
+                .chain([[middle, geometry.origin_y - 1], [middle, below]])
+                .find(|point| {
+                    !geometry.contains_owned(*point)
+                        && inside(*point, cover)
+                        && !inside(*point, panel)
+                })
+        }
         "external" => [
             [cover.right - 1, y],
             [cover.left, y],

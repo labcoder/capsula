@@ -39,7 +39,7 @@ fast pointer input; the fixture runs below have none.
 flowchart LR
     V["vsync: on_next_frame"] --> G{"since the last drawn frame<br/>≥ interval − refresh/2?"}
     G -- no --> S["ask for the next frame"]
-    G -- yes --> D["step the spring, reshape, repaint if a pixel changed"]
+    G -- yes --> D["step the animation, repaint if a pixel changed"]
     D --> S
 ```
 

@@ -98,7 +98,10 @@ flowchart LR
     Pos["Position choice"] --> Owner["Presence owner"]
     Owner --> Frame["LineFrame<br/>paint + hit band"]
     Frame --> Mask["Hit mask<br/>the band, one UpdateLayeredWindow"]
-    Mask -->|accepted| Dock["Dock<br/>draws paint"]
+    Mask -->|accepted| Overlay["Overlay window<br/>moves to the slot"]
+    Overlay -->|placed| Dock["Dock<br/>publishes the layout, draws paint"]
+    Mask -->|refused| Retry["Next frame<br/>at most three tries"]
+    Overlay -->|refused: mask put back| Retry
 ```
 
 - **The hit proxy** is a per-pixel-alpha layered window (`platform/windows/hit_mask.rs`).
@@ -107,14 +110,19 @@ flowchart LR
   `WS_EX_TRANSPARENT` or a region. Its bitmap is allocated once, sized to the dock's slot, and
   the proxy sits exactly on the band. Raw Input, the tray, the Esc hotkey and capture exclusion
   stay on this same window.
-- **Acceptance.** A `LineFrame` becomes current only after Windows accepts its mask, so the
-  line never shows where the mask isn't. A failed upload changes nothing on screen and is
-  retried on the next frame, at most three times in a row; a position choice tries again.
-  Windows may not report the mask moving under a still pointer, so after an accepted change the
-  owner checks whether the pointer's side of the band changed, and rechecks hover only then.
-- **Painting.** The dock window is the click-through overlay, placed once per position choice.
-  It repaints only when the accepted placement changes or Listening starts or ends, so a
-  settled dock costs nothing.
+- **Acceptance.** `Line` keeps the accepted placement apart from the requested one. A request
+  becomes current only when Windows accepts its mask and then the overlay move: only then are
+  the layout, the overlay's origin, the line and the tray's position published. If the mask is
+  refused nothing moves; if the overlay move is refused the accepted mask is put back first. So
+  a failed attempt changes nothing on screen, and the window stays where its accepted mask is.
+  A failed request is retried at the dock window's next frame, using that frame's own window,
+  at most three times in a row; a new position choice replaces it and gets three more. Windows
+  may not report the mask moving under a still pointer, so the owner rechecks hover after the
+  dock moves.
+- **Painting.** The dock window is the click-through overlay, placed once per accepted
+  placement. It repaints when the accepted placement changes and whenever the dock is refreshed:
+  Listening, a link change or a settings notice. A settled dock has none of these, so it costs
+  nothing.
 - **Listening** turns the line's fill to the theme's primary colour.
 - **Status panel.** Left-button-down on the band toggles the panel; hover does nothing. An
   open panel stays while the pointer is over the band or the shown panel, and the 80 ms grace

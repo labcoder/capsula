@@ -54,7 +54,7 @@ pub(crate) use diagnostics::Diagnostics;
 use diagnostics::PendingPaint;
 use geometry::{Layout, PanelVisibility, Position};
 pub(crate) use launch::Launch;
-use line::{Dock, Line};
+use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
 use paint::{Stamp, Target};
@@ -119,25 +119,27 @@ impl Presence {
         // shortcut: work-area changes need another position choice; slice 10 adds live settings updates.
         let area = platform::work_area()?;
         let physical = |value: f32| scaled(value, self.scale);
-        self.layout = position.layout(
+        let layout = position.layout(
             area,
             line::slot(self.scale),
             [physical(300.0), physical(140.0)],
             0,
         );
-        self.dock_window
-            .update(cx, |_, window, cx| {
-                platform::place_presence_window(window, self.layout.overlay)?;
-                window.bounds_changed(cx);
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
         let index = Position::ALL
             .iter()
             .position(|candidate| *candidate == position)
             .expect("every dock position has a menu entry");
-        self.place_line(cx);
-        self.native.show(index)?;
+        let frame = LineFrame::in_slot(layout.dock, self.scale);
+        if self.request_line(
+            Placement {
+                layout,
+                frame,
+                index,
+            },
+            cx,
+        )? {
+            self.native.show(index)?;
+        }
         self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         self.dismiss_threads(cx)?;
