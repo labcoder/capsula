@@ -248,6 +248,8 @@ fn outside_points_pass_through_just_beyond_a_filled_band() {
     assert_eq!(candidate(&data, "outside", dock, cover), Some([170, 23]));
     data.startup.as_mut().unwrap().panel = [0, 15, 1000, 30];
     assert_eq!(candidate(&data, "outside", dock, cover), Some([135, 10]));
+    data.startup.as_mut().unwrap().panel = [0, 0, 1000, 34];
+    assert_eq!(candidate(&data, "outside", dock, cover), Some([135, 34]));
     data.startup.as_mut().unwrap().panel = [0, 0, 1000, 100];
     assert_eq!(candidate(&data, "outside", dock, cover), None);
 }

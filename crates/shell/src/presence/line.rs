@@ -14,6 +14,7 @@ use super::geometry::Layout;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
 use super::{OpenError, Presence, platform};
+use crate::platform::{PresenceError, PresenceNative};
 
 /// The line's size, in logical pixels.
 const LINE: [f32; 2] = [56.0, 3.0];
@@ -92,24 +93,56 @@ pub(super) struct Placement {
     pub(super) index: usize,
 }
 
+/// The native surfaces a placement must bring into line: the hit proxy's mask, the overlay
+/// window and the proxy's visibility. Each call either does its whole change or none of it.
+pub(super) trait Surfaces {
+    type Error: std::fmt::Display;
+    /// Gives the proxy `frame`'s band.
+    fn upload(&mut self, frame: &LineFrame) -> Result<(), Self::Error>;
+    /// Moves the overlay to `overlay` and shows it.
+    fn move_overlay(&mut self, overlay: [i32; 4]) -> Result<(), Self::Error>;
+    /// Shows the proxy and checks `index` in the tray.
+    fn show(&mut self, index: usize) -> Result<(), Self::Error>;
+    /// Hides the overlay and the proxy.
+    fn hide(&mut self);
+}
+
+/// What Windows holds now, as far as the surfaces' last successful calls say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Held {
+    mask: Option<LineFrame>,
+    /// None while the overlay is hidden.
+    overlay: Option<[i32; 4]>,
+    /// The tray entry, None while the proxy is hidden.
+    shown: Option<usize>,
+}
+
 /// What one attempt at the requested placement did.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Attempt<E> {
     /// Nothing is requested, or its attempts ran out.
     Idle,
-    /// The mask and the overlay took it; it's current now.
+    /// The mask, the overlay and the proxy all hold it; it's current now.
     Placed(Placement),
-    /// It failed and nothing moved. `retry` says whether an attempt is left.
-    Failed { error: E, first: bool, retry: bool },
+    /// It failed. `retry` says whether an attempt is left; `closed` that the attempts ran out
+    /// with the surfaces apart, so the dock was hidden.
+    Failed {
+        error: E,
+        first: bool,
+        retry: bool,
+        closed: bool,
+    },
 }
 
-/// The dock's placement as Windows accepted it, and the one asked for since.
+/// The dock's placement as Windows accepted it, the one asked for since, and what Windows
+/// holds in between.
 #[derive(Debug, Default)]
 pub(super) struct Line {
-    /// Owned by the mask and drawn, with the overlay at its layout.
+    /// Held by the mask, the overlay and the proxy, and drawn.
     accepted: Option<Placement>,
     /// Asked for and not yet accepted.
     requested: Option<Placement>,
+    held: Held,
     /// Failed attempts at `requested` in a row.
     failed: u8,
 }
@@ -121,40 +154,88 @@ impl Line {
             .is_some_and(|placement| placement.frame.contains(point))
     }
 
-    pub(super) fn accepted(&self) -> Option<Placement> {
-        self.accepted
-    }
-
     /// A new choice replaces any pending one and gets a fresh run of attempts.
     pub(super) fn request(&mut self, placement: Placement) {
         self.requested = Some(placement);
         self.failed = 0;
     }
 
-    /// Tries the requested placement with `place`, which must leave the mask and the overlay
-    /// as they were when it fails. Only success makes the placement current.
-    pub(super) fn attempt<E>(
-        &mut self,
-        place: impl FnOnce(Placement) -> Result<(), E>,
-    ) -> Attempt<E> {
-        let Some(placement) = self.requested.filter(|_| self.failed < MAX_FAILED_UPLOADS) else {
+    /// Brings the surfaces to the requested placement, finishing from wherever an earlier
+    /// attempt left them. It's current only once all three hold it. When the last attempt
+    /// fails with the surfaces apart, the dock is hidden rather than left showing a line it
+    /// doesn't own or owning a band it doesn't show.
+    pub(super) fn attempt<S: Surfaces>(&mut self, surfaces: &mut S) -> Attempt<S::Error> {
+        let Some(target) = self.requested.filter(|_| self.failed < MAX_FAILED_UPLOADS) else {
             return Attempt::Idle;
         };
-        match place(placement) {
-            Ok(()) => {
-                self.accepted = self.requested.take();
-                self.failed = 0;
-                Attempt::Placed(placement)
+        if let Err(error) = self.converge(target, surfaces) {
+            self.failed += 1;
+            let first = self.failed == 1;
+            let retry = self.failed < MAX_FAILED_UPLOADS;
+            let closed = !retry && !self.coherent();
+            if closed {
+                surfaces.hide();
+                *self = Self::default();
             }
-            Err(error) => {
-                self.failed += 1;
-                Attempt::Failed {
-                    error,
-                    first: self.failed == 1,
-                    retry: self.failed < MAX_FAILED_UPLOADS,
-                }
-            }
+            return Attempt::Failed {
+                error,
+                first,
+                retry,
+                closed,
+            };
         }
+        self.accepted = self.requested.take();
+        self.failed = 0;
+        Attempt::Placed(target)
+    }
+
+    fn converge<S: Surfaces>(
+        &mut self,
+        target: Placement,
+        surfaces: &mut S,
+    ) -> Result<(), S::Error> {
+        if self.held.mask != Some(target.frame) {
+            surfaces.upload(&target.frame)?;
+            self.held.mask = Some(target.frame);
+        }
+        let overlay = target.layout.overlay;
+        if self.held.overlay != Some(overlay) {
+            if let Err(error) = surfaces.move_overlay(overlay) {
+                // Put the band back under the line still on screen; if that's refused too, the
+                // next attempt finishes the move under the mask Windows holds.
+                if let Some(accepted) = self.accepted
+                    && self.held.mask != Some(accepted.frame)
+                {
+                    match surfaces.upload(&accepted.frame) {
+                        Ok(()) => self.held.mask = Some(accepted.frame),
+                        Err(restore) => tracing::warn!(%restore, "can't put the hit mask back"),
+                    }
+                }
+                return Err(error);
+            }
+            self.held.overlay = Some(overlay);
+        }
+        if self.held.shown != Some(target.index) {
+            surfaces.show(target.index)?;
+            self.held.shown = Some(target.index);
+        }
+        Ok(())
+    }
+
+    /// Whether what Windows holds is the accepted placement, or nothing shown at all.
+    fn coherent(&self) -> bool {
+        self.held
+            == self.accepted.map_or(
+                Held {
+                    mask: self.held.mask,
+                    ..Held::default()
+                },
+                |accepted| Held {
+                    mask: Some(accepted.frame),
+                    overlay: Some(accepted.layout.overlay),
+                    shown: Some(accepted.index),
+                },
+            )
     }
 }
 
@@ -172,9 +253,50 @@ pub(super) fn on_next_frame<T: 'static>(
     });
 }
 
+/// The real surfaces: the proxy's mask and visibility, and the dock's overlay window.
+struct Desktop<'a> {
+    native: &'a mut PresenceNative,
+    window: &'a mut Window,
+    cx: &'a mut App,
+    /// The observer's state after the last accepted upload, which the dock names when it draws.
+    drawn: Drawn,
+}
+
+impl Surfaces for Desktop<'_> {
+    type Error = PresenceError;
+
+    fn upload(&mut self, frame: &LineFrame) -> Result<(), PresenceError> {
+        let begin_qpc = observer::begin(self.cx);
+        let update = self.native.reshape(frame.hit, |y| frame.row_spans(y));
+        let drawn = observer::commit(self.cx, begin_qpc, Some(frame), frame.hit, &update);
+        update?;
+        self.drawn = drawn;
+        Ok(())
+    }
+
+    fn move_overlay(&mut self, overlay: [i32; 4]) -> Result<(), PresenceError> {
+        platform::place_presence_window(self.window, overlay)?;
+        self.window.bounds_changed(self.cx);
+        Ok(())
+    }
+
+    fn show(&mut self, index: usize) -> Result<(), PresenceError> {
+        self.native.show(index)
+    }
+
+    fn hide(&mut self) {
+        if let Err(error) = platform::hide_presence_window(self.window) {
+            tracing::error!(%error, "can't hide the dock");
+        }
+        if let Err(error) = self.native.hide() {
+            tracing::error!(%error, "can't hide the dock's proxy");
+        }
+    }
+}
+
 impl Presence {
-    /// Asks for the dock at `placement` and tries it now. Returns whether it's current; if
-    /// not, the dock stays where it was and the next frames retry.
+    /// Asks for the dock at `placement` and tries it now; if it isn't current yet, the dock
+    /// stays as it was and the next frames retry.
     ///
     /// # Errors
     /// Fails when the dock window is gone.
@@ -182,57 +304,38 @@ impl Presence {
         &mut self,
         placement: Placement,
         cx: &mut Context<'_, Self>,
-    ) -> Result<bool, OpenError> {
+    ) -> Result<(), OpenError> {
         self.line.request(placement);
         let owner = cx.weak_entity();
         let handle = self.dock_window;
         handle
             .update(cx, |_, window, cx| self.try_line(owner, window, cx))
-            .map_err(|error| OpenError::Gpui(error.into()))
+            .map_err(|error| OpenError::Gpui(error.into()))?;
+        Ok(())
     }
 
     fn retry_line(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.try_line(cx.weak_entity(), window, cx) {
-            return;
-        }
-        if let Some(placement) = self.line.accepted()
-            && let Err(error) = self.native.show(placement.index)
+        if self.try_line(cx.weak_entity(), window, cx)
+            && let Err(error) = self.pointer_changed(cx)
         {
-            tracing::warn!(%error, "can't show the dock's proxy");
-        }
-        if let Err(error) = self.pointer_changed(cx) {
             tracing::debug!(%error, "can't recheck hover after the dock moved");
         }
     }
 
-    /// Uploads the requested band's mask, then moves the overlay to it. Only both together make
-    /// it current, with its layout and line published; otherwise the mask is put back, nothing
-    /// moves, and the next frame tries again while attempts are left.
+    /// One attempt at the requested placement. Returns whether it became current, with its
+    /// layout and line published.
     fn try_line(&mut self, owner: WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
-        let accepted = self.line.accepted().map(|placement| placement.frame);
-        let native = &mut self.native;
-        let mut drawn = Drawn::default();
-        let attempt = self.line.attempt(|placement| {
-            let frame = placement.frame;
-            let begin_qpc = observer::begin(cx);
-            let update = native.reshape(frame.hit, |y| frame.row_spans(y));
-            drawn = observer::commit(cx, begin_qpc, Some(&frame), frame.hit, &update);
-            update?;
-            if let Err(error) = platform::place_presence_window(window, placement.layout.overlay) {
-                let proxy = accepted.map_or(frame.hit, |frame| frame.hit);
-                let begin_qpc = observer::begin(cx);
-                let update = native.reshape(proxy, |y| {
-                    accepted.map_or([None; 2], |frame| frame.row_spans(y))
-                });
-                observer::commit(cx, begin_qpc, accepted.as_ref(), proxy, &update);
-                if let Err(restore) = update {
-                    tracing::warn!(%restore, "can't put the hit mask back under the line");
-                }
-                return Err(error);
-            }
-            window.bounds_changed(cx);
-            Ok(())
-        });
+        let mut surfaces = Desktop {
+            native: &mut self.native,
+            window,
+            cx,
+            drawn: self.drawn,
+        };
+        let attempt = self.line.attempt(&mut surfaces);
+        let Desktop {
+            window, cx, drawn, ..
+        } = surfaces;
+        self.drawn = drawn;
         match attempt {
             Attempt::Idle => false,
             Attempt::Placed(placement) => {
@@ -250,9 +353,17 @@ impl Presence {
                 error,
                 first,
                 retry,
+                closed,
             } => {
                 if first {
                     tracing::warn!(%error, "can't place the dock");
+                }
+                if closed {
+                    tracing::error!(%error, "the dock is hidden until the next position choice");
+                    self.dock.update(cx, |dock, cx| {
+                        dock.paint = None;
+                        cx.notify();
+                    });
                 }
                 if retry {
                     on_next_frame(window, owner, Self::retry_line);
@@ -344,7 +455,7 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_kit::{AppContext as _, Context, IntoElement, Render, Window, WindowOptions, div};
 
-    use super::{Attempt, Line, LineFrame, Placement, on_next_frame, slot};
+    use super::{Attempt, Line, LineFrame, Placement, Surfaces, on_next_frame, slot};
     use crate::presence::geometry::Layout;
 
     /// The first and last owned pixel on each side, and the pass-through pixel beyond each.
@@ -429,94 +540,199 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_failed_jump_leaves_the_overlay_and_the_owned_band_where_they_were() {
-        let (a, b) = (placement(0, 0), placement(400, 2));
-        let mut line = Line::default();
-        line.request(a);
-        assert_eq!(line.attempt(|_| Ok::<_, ()>(())), Attempt::Placed(a));
-        line.request(b);
-        let mut tried = None;
-        let failed = line.attempt(|placement| {
-            tried = Some(placement);
-            Err("refused")
-        });
-        assert_eq!(
-            failed,
-            Attempt::Failed {
-                error: "refused",
-                first: true,
-                retry: true
+    /// Windows as the surfaces see it: each call refuses when its script says so, and changes
+    /// nothing then.
+    #[derive(Default)]
+    struct Fake {
+        mask: Option<LineFrame>,
+        overlay: Option<[i32; 4]>,
+        shown: Option<usize>,
+        refuse_uploads: Vec<bool>,
+        refuse_moves: Vec<bool>,
+        refuse_shows: Vec<bool>,
+    }
+
+    fn refused(script: &mut Vec<bool>) -> bool {
+        !script.is_empty() && script.remove(0)
+    }
+
+    impl Surfaces for Fake {
+        type Error = &'static str;
+
+        fn upload(&mut self, frame: &LineFrame) -> Result<(), &'static str> {
+            if refused(&mut self.refuse_uploads) {
+                return Err("upload refused");
             }
-        );
-        assert_eq!(tried, Some(b));
-        let current = line.accepted().expect("A stays current");
-        assert_eq!((current.layout.overlay, current.index), ([0, 0, 58, 21], 0));
-        assert!(line.contains([1, 1]) && line.contains([56, 19]));
-        assert!(!line.contains([401, 1]) && !line.contains([456, 19]));
-        assert_eq!(line.attempt(|_| Ok::<_, ()>(())), Attempt::Placed(b));
-        let current = line.accepted().expect("B is current");
-        assert_eq!(
-            (current.layout.overlay, current.index),
-            ([400, 0, 58, 21], 2)
-        );
-        assert!(line.contains([401, 1]) && line.contains([456, 19]));
-        assert!(!line.contains([1, 1]));
+            self.mask = Some(*frame);
+            Ok(())
+        }
+
+        fn move_overlay(&mut self, overlay: [i32; 4]) -> Result<(), &'static str> {
+            if refused(&mut self.refuse_moves) {
+                return Err("move refused");
+            }
+            self.overlay = Some(overlay);
+            Ok(())
+        }
+
+        fn show(&mut self, index: usize) -> Result<(), &'static str> {
+            if refused(&mut self.refuse_shows) {
+                return Err("show refused");
+            }
+            self.shown = Some(index);
+            Ok(())
+        }
+
+        fn hide(&mut self) {
+            (self.overlay, self.shown) = (None, None);
+        }
+    }
+
+    impl Fake {
+        /// The line on screen at `placement`, with the band under it and the proxy showing it.
+        fn holds(&self, placement: Placement) -> bool {
+            self.mask == Some(placement.frame)
+                && self.overlay == Some(placement.layout.overlay)
+                && self.shown == Some(placement.index)
+        }
+
+        /// Nothing on screen and nothing taking clicks.
+        fn hidden(&self) -> bool {
+            self.overlay.is_none() && self.shown.is_none()
+        }
+    }
+
+    /// A line at A on a fake desktop.
+    fn at_a() -> (Line, Fake) {
+        let (mut line, mut fake) = (Line::default(), Fake::default());
+        line.request(placement(0, 0));
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(placement(0, 0)));
+        (line, fake)
+    }
+
+    fn failed([retry, closed]: [bool; 2]) -> impl Fn(&Attempt<&'static str>) -> bool {
+        move |attempt| matches!(attempt, Attempt::Failed { retry: r, closed: c, .. } if *r == retry && *c == closed)
     }
 
     #[test]
-    fn a_new_choice_replaces_a_failing_one_and_gets_a_fresh_run() {
-        let (a, b, c) = (placement(0, 0), placement(400, 2), placement(800, 5));
-        let mut line = Line::default();
-        line.request(a);
-        assert_eq!(line.attempt(|_| Ok::<_, ()>(())), Attempt::Placed(a));
+    fn a_refused_upload_leaves_the_dock_where_it_was_until_a_retry_moves_it() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        fake.refuse_uploads = vec![true];
         line.request(b);
-        let retries: Vec<_> = (0..3)
-            .map(|_| match line.attempt(|_| Err(())) {
-                Attempt::Failed { first, retry, .. } => (first, retry),
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(retries, [(true, true), (false, true), (false, false)]);
-        assert_eq!(
-            line.attempt(|_| -> Result<(), ()> { panic!("no attempts left") }),
-            Attempt::Idle
-        );
-        assert_eq!(line.accepted(), Some(a));
-        line.request(c);
-        let mut tried = None;
-        assert_eq!(
-            line.attempt(|placement| {
-                tried = Some(placement);
-                Ok::<_, ()>(())
-            }),
-            Attempt::Placed(c)
-        );
-        assert_eq!((tried, line.accepted()), (Some(c), Some(c)));
-        assert!(line.contains([801, 1]) && !line.contains([401, 1]));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(fake.holds(a), "Windows still holds A");
+        assert!(line.contains([1, 1]) && !line.contains([401, 1]));
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
+        assert!(line.contains([401, 1]) && !line.contains([1, 1]));
     }
 
-    /// The dock's retry without the native mask: each attempt takes the next scripted result.
+    #[test]
+    fn a_refused_overlay_move_puts_the_mask_back_under_the_line() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        fake.refuse_moves = vec![true];
+        line.request(b);
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(fake.holds(a));
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
+    }
+
+    #[test]
+    fn a_refused_rollback_is_finished_under_the_mask_windows_holds() {
+        let b = placement(400, 2);
+        let (mut line, mut fake) = at_a();
+        fake.refuse_moves = vec![true];
+        fake.refuse_uploads = vec![false, true];
+        line.request(b);
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert_eq!(
+            (fake.mask, fake.overlay),
+            (Some(b.frame), Some([0, 0, 58, 21])),
+            "the surfaces are apart"
+        );
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
+    }
+
+    #[test]
+    fn a_refused_show_is_retried_and_the_tray_follows() {
+        let b = placement(400, 2);
+        let (mut line, mut fake) = at_a();
+        fake.refuse_shows = vec![true];
+        line.request(b);
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert_eq!(fake.shown, Some(0));
+        assert!(
+            !line.contains([401, 1]),
+            "B isn't current while its proxy isn't shown"
+        );
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
+    }
+
+    #[test]
+    fn a_proxy_that_never_shows_hides_the_dock() {
+        let (mut line, mut fake) = (Line::default(), Fake::default());
+        fake.refuse_shows = vec![true; 3];
+        line.request(placement(0, 0));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([false, true])(&line.attempt(&mut fake)));
+        assert!(fake.hidden(), "no line shows without its band");
+        assert!(!line.contains([1, 1]));
+        assert_eq!(line.attempt(&mut fake), Attempt::Idle);
+    }
+
+    #[test]
+    fn a_refused_rollback_at_the_limit_hides_the_dock_until_a_new_choice() {
+        let (b, c) = (placement(400, 2), placement(800, 5));
+        let (mut line, mut fake) = at_a();
+        fake.refuse_uploads = vec![true, true, false, true];
+        fake.refuse_moves = vec![true];
+        line.request(b);
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([false, true])(&line.attempt(&mut fake)));
+        assert!(fake.hidden(), "no band at B under a line at A");
+        assert!(!line.contains([1, 1]) && !line.contains([401, 1]));
+        assert_eq!(line.attempt(&mut fake), Attempt::Idle);
+        line.request(c);
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
+        assert!(fake.holds(c));
+        assert!(line.contains([801, 1]));
+    }
+
+    #[test]
+    fn running_out_with_the_surfaces_together_keeps_the_dock_where_it_was() {
+        let (a, b, c) = (placement(0, 0), placement(400, 2), placement(800, 5));
+        let (mut line, mut fake) = at_a();
+        fake.refuse_uploads = vec![true; 3];
+        line.request(b);
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([false, false])(&line.attempt(&mut fake)));
+        assert!(fake.holds(a) && line.contains([1, 1]));
+        assert_eq!(line.attempt(&mut fake), Attempt::Idle);
+        line.request(c);
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
+        assert!(fake.holds(c));
+    }
+
+    /// The dock's retry on a fake desktop, driven by real frame callbacks.
     struct Probe {
         line: Line,
-        results: Vec<Result<(), &'static str>>,
-        tried: usize,
-        overlay: Option<[i32; 4]>,
+        fake: Fake,
+        attempts: usize,
     }
 
     impl Probe {
         fn step(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-            let results = &mut self.results;
-            let tried = &mut self.tried;
-            match self.line.attempt(|_| {
-                *tried += 1;
-                results.remove(0)
-            }) {
-                Attempt::Placed(placement) => self.overlay = Some(placement.layout.overlay),
-                Attempt::Failed { retry: true, .. } => {
-                    on_next_frame(window, cx.weak_entity(), Self::step);
-                }
-                Attempt::Failed { .. } | Attempt::Idle => {}
+            self.attempts += 1;
+            if let Attempt::Failed { retry: true, .. } = self.line.attempt(&mut self.fake) {
+                on_next_frame(window, cx.weak_entity(), Self::step);
             }
         }
     }
@@ -530,17 +746,16 @@ mod tests {
         }
     }
 
-    /// Requests B and runs frames until none is pending; returns the attempts, the overlay and
-    /// how many frames ran a retry.
-    fn retry(
-        cx: &mut TestAppContext,
-        results: Vec<Result<(), &'static str>>,
-    ) -> (usize, Option<[i32; 4]>, usize) {
+    /// Requests B with uploads refused per `refuse`, runs frames until none is pending, and
+    /// returns the attempts, whether Windows holds B, and how many frames ran a retry.
+    fn retry(cx: &mut TestAppContext, refuse: Vec<bool>) -> (usize, bool, usize) {
         let probe = cx.new(|_| Probe {
             line: Line::default(),
-            results,
-            tried: 0,
-            overlay: None,
+            fake: Fake {
+                refuse_uploads: refuse,
+                ..Fake::default()
+            },
+            attempts: 0,
         });
         let window = cx
             .update(|cx| cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Blank)))
@@ -561,22 +776,18 @@ mod tests {
         {
             frames += 1;
         }
-        probe.read_with(cx, |probe, _| (probe.tried, probe.overlay, frames))
+        probe.read_with(cx, |probe, _| {
+            (probe.attempts, probe.fake.holds(placement(400, 2)), frames)
+        })
     }
 
     #[gpui::test]
     fn two_failures_then_a_success_place_the_dock_through_frame_callbacks(cx: &mut TestAppContext) {
-        assert_eq!(
-            retry(cx, vec![Err("refused"), Err("refused"), Ok(())]),
-            (3, Some([400, 0, 58, 21]), 2)
-        );
+        assert_eq!(retry(cx, vec![true, true]), (3, true, 2));
     }
 
     #[gpui::test]
     fn three_failures_stop_retrying(cx: &mut TestAppContext) {
-        assert_eq!(
-            retry(cx, vec![Err("refused"), Err("refused"), Err("refused")]),
-            (3, None, 2)
-        );
+        assert_eq!(retry(cx, vec![true, true, true]), (3, false, 2));
     }
 }

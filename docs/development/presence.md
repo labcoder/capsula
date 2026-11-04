@@ -110,15 +110,21 @@ flowchart LR
   `WS_EX_TRANSPARENT` or a region. Its bitmap is allocated once, sized to the dock's slot, and
   the proxy sits exactly on the band. Raw Input, the tray, the Esc hotkey and capture exclusion
   stay on this same window.
-- **Acceptance.** `Line` keeps the accepted placement apart from the requested one. A request
-  becomes current only when Windows accepts its mask and then the overlay move: only then are
-  the layout, the overlay's origin, the line and the tray's position published. If the mask is
-  refused nothing moves; if the overlay move is refused the accepted mask is put back first. So
-  a failed attempt changes nothing on screen, and the window stays where its accepted mask is.
-  A failed request is retried at the dock window's next frame, using that frame's own window,
-  at most three times in a row; a new position choice replaces it and gets three more. Windows
-  may not report the mask moving under a still pointer, so the owner rechecks hover after the
-  dock moves.
+- **Acceptance.** `Line` keeps the accepted placement, the requested one, and what Windows
+  holds: the proxy's mask, the overlay's position and whether the proxy is shown. A request
+  becomes current only when all three hold it, in that order: the mask upload, the overlay
+  move, then showing the proxy and checking its tray entry. Only then are the layout, the
+  overlay's origin and the line published. A refused upload moves nothing. A refused overlay
+  move puts the accepted mask back first; if that's refused too, the surfaces are apart, and
+  the next attempt finishes the move under the mask Windows already holds. A refused show is
+  retried the same way. Each attempt carries on from what Windows holds, at the dock window's
+  next frame and with that frame's own window, at most three times in a row. A new position
+  choice replaces the request and gets three more. If the last attempt fails with the surfaces
+  apart, or with the proxy never shown, the dock fails closed: the overlay and the proxy are
+  hidden together, so no line shows without its band and no band takes clicks without its
+  line, until the next position choice. The surfaces sit behind a small `Surfaces` trait, so
+  the tests run every failure against a fake desktop. Windows may not report the mask moving
+  under a still pointer, so the owner rechecks hover after the dock moves.
 - **Painting.** The dock window is the click-through overlay, placed once per accepted
   placement. It repaints when the accepted placement changes and whenever the dock is refreshed:
   Listening, a link change or a settings notice. A settled dock has none of these, so it costs

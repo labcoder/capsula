@@ -56,7 +56,7 @@ sequenceDiagram
 | Effect | Shell action in slice 1 |
 |---|---|
 | Listening | The dock's line takes the accent colour until the gesture ends |
-| Resting | The dock shows the link status again |
+| Resting | The dock's line returns to its resting fill |
 | HoldStarted | Every Kumochi window gets `WDA_EXCLUDEFROMCAPTURE`, then the hold is logged. Slice 7 sends `HoldRecognized` only after this call returns |
 | HoldEnded | Capture exclusion is removed |
 | OpenInput | The typing panel opens and takes focus (see [Taking the front](#taking-the-front)) |

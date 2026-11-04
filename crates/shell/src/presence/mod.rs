@@ -100,8 +100,10 @@ struct Presence {
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
-    /// The dock's line as Windows accepted its mask.
+    /// The dock's placement as Windows accepted it.
     line: Line,
+    /// The observer's state after the last accepted mask upload, for the dock's paint stamp.
+    drawn: Drawn,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -130,16 +132,14 @@ impl Presence {
             .position(|candidate| *candidate == position)
             .expect("every dock position has a menu entry");
         let frame = LineFrame::in_slot(layout.dock, self.scale);
-        if self.request_line(
+        self.request_line(
             Placement {
                 layout,
                 frame,
                 index,
             },
             cx,
-        )? {
-            self.native.show(index)?;
-        }
+        )?;
         self.dismiss_settings(cx)?;
         self.dismiss_text(cx)?;
         self.dismiss_threads(cx)?;
@@ -776,6 +776,7 @@ pub(crate) fn open(
             error: None,
             refusal: None,
             line: Line::default(),
+            drawn: Drawn::default(),
         }
     });
     let status_panel = owner.read(cx).panel.clone();

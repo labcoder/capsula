@@ -320,6 +320,14 @@ impl PresenceNative {
         Ok(())
     }
 
+    /// Hides the proxy, so it takes no pointer input; Raw Input and the tray keep working.
+    ///
+    /// # Errors
+    /// Fails when Windows refuses the change.
+    pub(crate) fn hide(&mut self) -> Result<(), PresenceError> {
+        Ok(hide(self.hwnd)?)
+    }
+
     /// Sends every left Ctrl, left Alt and other key, from any app, to `deliver` on this
     /// thread, and arms the one-shot deadline it returns. Call once, before the brain connects.
     ///
