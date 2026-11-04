@@ -94,7 +94,7 @@ fn input_item(item: &InputItem) -> Result<Value, BodyError> {
             "call_id": call.as_str(),
             "output": output,
         }),
-        // Parsed only to be sent back as it came; it's never read or logged.
+        // Parsed only to be sent back as the same JSON value; it's never read or logged.
         InputItem::Reasoning(item) => {
             serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Reasoning)?
         }
@@ -116,6 +116,8 @@ struct Started {
     /// The provider's item id, which its argument events name.
     item: String,
     call: CallId,
+    /// The name it started with, which its done item must repeat.
+    name: String,
     args: String,
     ready: bool,
 }
@@ -187,8 +189,9 @@ impl Round {
             }
             "response.function_call_arguments.delta" => {
                 let delta = text(&value["delta"])?;
+                let at = self.open(&value["item_id"])?;
                 self.charge(0, delta.len())?;
-                let call = self.open(&value["item_id"])?;
+                let call = &mut self.calls[at];
                 call.args.push_str(delta);
                 let call = call.call.clone();
                 self.events.push(TurnEvent::ToolArgsDelta {
@@ -198,7 +201,8 @@ impl Round {
             }
             "response.function_call_arguments.done" => {
                 let args = text(&value["arguments"])?;
-                if self.open(&value["item_id"])?.args != args {
+                let at = self.open(&value["item_id"])?;
+                if self.calls[at].args != args {
                     return Err(Broken);
                 }
             }
@@ -218,57 +222,74 @@ impl Round {
         {
             return Err(Broken);
         }
-        self.charge(1, id.len() + call.as_str().len())?;
-        let name = match text(&item["name"])? {
-            "draw" => ToolName::Draw,
-            _ => ToolName::Unknown,
-        };
+        let name = text(&item["name"])?;
+        self.charge(1, id.len() + call.as_str().len() + name.len())?;
         self.events.push(TurnEvent::ToolCallStarted {
             call: call.clone(),
-            name,
+            name: match name {
+                "draw" => ToolName::Draw,
+                _ => ToolName::Unknown,
+            },
         });
         self.calls.push(Started {
             item: id.to_owned(),
             call,
+            name: name.to_owned(),
             args: String::new(),
             ready: false,
         });
         Ok(())
     }
 
+    /// A completed item: checked whole, kept and charged before either of its events is queued,
+    /// so a refused item never makes its call ready.
     fn done(&mut self, value: &Value) -> Result<(), Broken> {
         let index = value["output_index"]
             .as_u64()
             .and_then(|index| u32::try_from(index).ok())
             .ok_or(Broken)?;
         let item = &value["item"];
-        if item["type"] == "function_call" {
-            let args = text(&item["arguments"])?;
-            let call_id = text(&item["call_id"])?;
-            let call = self.open(&item["id"])?;
-            if call.call.as_str() != call_id || call.args != args {
+        let kind = item
+            .as_object()
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            .ok_or(Broken)?;
+        let ready = if kind == "function_call" {
+            let at = self.open(&item["id"])?;
+            let call = &self.calls[at];
+            if call.call.as_str() != text(&item["call_id"])?
+                || call.name != text(&item["name"])?
+                || call.args != text(&item["arguments"])?
+            {
                 return Err(Broken);
             }
+            Some(at)
+        } else {
+            None
+        };
+        let bytes = serde_json::to_vec(item).map_err(|_| Broken)?;
+        let size = bytes.len();
+        let item = Opaque::new(bytes).map_err(|_| Broken)?;
+        self.charge(1, size)?;
+        if let Some(at) = ready {
+            let call = &mut self.calls[at];
             call.ready = true;
             let ready = TurnEvent::ToolCallReady {
                 call: call.call.clone(),
-                args: args.to_owned(),
+                args: call.args.clone(),
             };
             self.events.push(ready);
         }
-        let bytes = serde_json::to_vec(item).map_err(|_| Broken)?;
-        self.charge(1, bytes.len())?;
-        let item = Opaque::new(bytes).map_err(|_| Broken)?;
         self.events.push(TurnEvent::OutputItem { index, item });
         Ok(())
     }
 
-    /// The started call `item_id` names, while it isn't ready.
-    fn open(&mut self, item_id: &Value) -> Result<&mut Started, Broken> {
+    /// Where the started call `item_id` names is, while it isn't ready.
+    fn open(&self, item_id: &Value) -> Result<usize, Broken> {
         let id = text(item_id)?;
         self.calls
-            .iter_mut()
-            .find(|call| call.item == id && !call.ready)
+            .iter()
+            .position(|call| call.item == id && !call.ready)
             .ok_or(Broken)
     }
 

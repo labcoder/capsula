@@ -164,7 +164,7 @@ fn protocol() -> TurnEvent {
 }
 
 #[test]
-fn a_recorded_tool_round_maps_in_order_with_the_name_before_any_delta() {
+fn the_fixture_tool_round_maps_in_order_with_the_name_before_any_delta() {
     let call = call_id("call_fixture");
     let expected = vec![
         item(
@@ -272,14 +272,18 @@ fn sse(events: &[Value]) -> Vec<u8> {
         .collect()
 }
 
-fn added(item: &str, call: &str) -> Value {
+fn added_as(item: &str, call: &str, name: &str, index: u32) -> Value {
     json!({
         "type": "response.output_item.added",
-        "output_index": 0,
+        "output_index": index,
         "item": {
-            "type": "function_call", "id": item, "call_id": call, "name": "look", "arguments": "",
+            "type": "function_call", "id": item, "call_id": call, "name": name, "arguments": "",
         },
     })
+}
+
+fn added(item: &str, call: &str) -> Value {
+    added_as(item, call, "look", 0)
 }
 
 fn args_delta(item: &str, delta: &str) -> Value {
@@ -292,15 +296,33 @@ fn args_done(item: &str, arguments: &str) -> Value {
     })
 }
 
-fn call_done(item: &str, call: &str, arguments: &str) -> Value {
+fn call_done_as(item: &str, call: &str, name: &str, arguments: &str, index: u32) -> Value {
     json!({
         "type": "response.output_item.done",
-        "output_index": 0,
+        "output_index": index,
         "item": {
-            "type": "function_call", "id": item, "call_id": call, "name": "look",
+            "type": "function_call", "id": item, "call_id": call, "name": name,
             "arguments": arguments,
         },
     })
+}
+
+fn call_done(item: &str, call: &str, arguments: &str) -> Value {
+    call_done_as(item, call, "look", arguments, 0)
+}
+
+fn ready(call: &str, args: &str) -> TurnEvent {
+    TurnEvent::ToolCallReady {
+        call: call_id(call),
+        args: args.to_owned(),
+    }
+}
+
+fn args_of(call: &str, delta: &str) -> TurnEvent {
+    TurnEvent::ToolArgsDelta {
+        call: call_id(call),
+        delta: delta.to_owned(),
+    }
 }
 
 fn completed() -> Value {
@@ -483,4 +505,175 @@ fn an_item_over_the_item_cap_fails_the_round() {
     });
     let stream = sse(&[big, completed()]);
     assert_eq!(play(&stream, usize::MAX), [protocol()]);
+}
+
+#[test]
+fn interleaved_calls_keep_their_own_arguments_and_indexes() {
+    let stream = sse(&[
+        added_as("fc_a", "call_a", "draw", 0),
+        added_as("fc_b", "call_b", "look", 1),
+        args_delta("fc_a", "{\"x\":"),
+        args_delta("fc_b", "[1"),
+        args_delta("fc_a", "1}"),
+        args_delta("fc_b", "]"),
+        args_done("fc_a", "{\"x\":1}"),
+        args_done("fc_b", "[1]"),
+        call_done_as("fc_b", "call_b", "look", "[1]", 1),
+        call_done_as("fc_a", "call_a", "draw", "{\"x\":1}", 0),
+        completed(),
+    ]);
+    let expected = vec![
+        TurnEvent::ToolCallStarted {
+            call: call_id("call_a"),
+            name: ToolName::Draw,
+        },
+        started("call_b"),
+        args_of("call_a", "{\"x\":"),
+        args_of("call_b", "[1"),
+        args_of("call_a", "1}"),
+        args_of("call_b", "]"),
+        ready("call_b", "[1]"),
+        item(
+            1,
+            &json!({
+                "type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "look",
+                "arguments": "[1]",
+            }),
+        ),
+        ready("call_a", "{\"x\":1}"),
+        item(
+            0,
+            &json!({
+                "type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "draw",
+                "arguments": "{\"x\":1}",
+            }),
+        ),
+        finished(Finish::Completed),
+    ];
+    for chunk in [stream.len(), 1, 5] {
+        assert_eq!(play(&stream, chunk), expected, "{chunk}-byte reads");
+    }
+}
+
+#[test]
+fn a_call_done_under_another_name_is_refused_before_it_is_ready() {
+    let stream = sse(&[
+        added_as("fc_1", "call_1", "draw", 0),
+        call_done_as("fc_1", "call_1", "look", "", 0),
+        completed(),
+    ]);
+    assert_eq!(
+        play(&stream, stream.len()),
+        [
+            TurnEvent::ToolCallStarted {
+                call: call_id("call_1"),
+                name: ToolName::Draw,
+            },
+            protocol()
+        ]
+    );
+}
+
+#[test]
+fn a_done_item_that_isnt_a_typed_object_fails_the_round() {
+    let shapes = [
+        None,
+        Some(Value::Null),
+        Some(json!(7)),
+        Some(json!("reasoning")),
+        Some(json!([])),
+        Some(json!({})),
+        Some(json!({ "type": 5 })),
+    ];
+    for shape in shapes {
+        let mut done = json!({ "type": "response.output_item.done", "output_index": 0 });
+        if let Some(item) = shape.clone() {
+            done["item"] = item;
+        }
+        let stream = sse(&[done, completed()]);
+        assert_eq!(play(&stream, stream.len()), [protocol()], "{shape:?}");
+    }
+}
+
+/// `item`'s done event with a `pad` field sized so the item serialises to exactly `size` bytes.
+fn padded(mut done: Value, size: usize) -> Value {
+    done["item"]["pad"] = json!("");
+    let base = serde_json::to_vec(&done["item"]).expect("json").len();
+    done["item"]["pad"] = json!("a".repeat(size - base));
+    assert_eq!(serde_json::to_vec(&done["item"]).expect("json").len(), size);
+    done
+}
+
+#[test]
+fn a_call_done_item_at_the_item_cap_is_ready_and_one_byte_over_is_refused_whole() {
+    let fits = padded(call_done("fc_1", "call_1", ""), Opaque::MAX);
+    let stream = sse(&[added("fc_1", "call_1"), fits.clone(), completed()]);
+    assert_eq!(
+        play(&stream, usize::MAX),
+        [
+            started("call_1"),
+            ready("call_1", ""),
+            item(0, &fits["item"]),
+            finished(Finish::Completed)
+        ]
+    );
+    let over = padded(call_done("fc_1", "call_1", ""), Opaque::MAX + 1);
+    let stream = sse(&[added("fc_1", "call_1"), over, completed()]);
+    assert_eq!(play(&stream, usize::MAX), [started("call_1"), protocol()]);
+}
+
+#[test]
+fn a_call_done_item_is_refused_whole_once_the_round_has_no_item_left() {
+    for (others, fits) in [(ROUND_ITEMS - 2, true), (ROUND_ITEMS - 1, false)] {
+        let mut events = vec![added("fc_1", "call_1")];
+        let mut expected = vec![started("call_1")];
+        for index in 1..=u32::try_from(others).expect("small") {
+            events.push(reasoning_done(index));
+            expected.push(item(index, &reasoning_done(index)["item"]));
+        }
+        events.push(call_done("fc_1", "call_1", ""));
+        events.push(completed());
+        if fits {
+            expected.push(ready("call_1", ""));
+            expected.push(item(0, &call_done("fc_1", "call_1", "")["item"]));
+            expected.push(finished(Finish::Completed));
+        } else {
+            expected.push(protocol());
+        }
+        assert_eq!(
+            play(&sse(&events), usize::MAX),
+            expected,
+            "{others} other items"
+        );
+    }
+}
+
+#[test]
+fn a_call_done_item_is_refused_whole_once_it_would_pass_the_byte_budget() {
+    // What the start keeps: "fc_1", "call_1" and "look".
+    let started_bytes = 14;
+    let call_bytes = serde_json::to_vec(&call_done("fc_1", "call_1", "")["item"])
+        .expect("json")
+        .len();
+    let fill = ROUND_BYTES - started_bytes - call_bytes;
+    for (extra, fits) in [(0, true), (1, false)] {
+        let mut events = vec![added("fc_1", "call_1")];
+        let mut expected = vec![started("call_1")];
+        for index in 1..=5 {
+            let size = fill / 5 + if index == 5 { fill % 5 + extra } else { 0 };
+            let done = padded(reasoning_done(index), size);
+            expected.push(item(index, &done["item"]));
+            events.push(done);
+        }
+        events.push(call_done("fc_1", "call_1", ""));
+        events.push(completed());
+        if fits {
+            expected.push(ready("call_1", ""));
+            expected.push(item(0, &call_done("fc_1", "call_1", "")["item"]));
+            expected.push(finished(Finish::Completed));
+        } else {
+            expected.push(protocol());
+        }
+        assert_eq!(play(&sse(&events), usize::MAX), expected, "{extra} over");
+    }
 }

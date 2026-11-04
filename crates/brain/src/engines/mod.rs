@@ -89,7 +89,7 @@ pub enum TurnEvent {
     OutputItem {
         /// Its place in the response's output, which replay follows.
         index: u32,
-        /// Its bytes as the provider sent them.
+        /// The provider's item as JSON: the same value it sent, though not always the same bytes.
         item: Opaque,
     },
     /// The round ended.
@@ -206,7 +206,7 @@ impl Opaque {
         self.0.len()
     }
 
-    /// Its bytes, to send back as they came.
+    /// Its bytes, to send back as the same JSON value.
     pub fn bytes(&self) -> &[u8] {
         &self.0
     }

@@ -84,7 +84,7 @@ body and feeds the stream, and engine selection arrives with it.
 `function`), `reasoning.effort`, `include: ["reasoning.encrypted_content"]`, `store: false` and
 `stream: true`. It never sends `context_management`, `max_output_tokens` or
 `prompt_cache_retention`. Input items are messages with their role, `function_call`,
-`function_call_output`, and stored reasoning items sent back exactly as they came. The serialised
+`function_call_output`, and stored reasoning items sent back as the same JSON value (its strings exact, its spacing and escapes not). The serialised
 body is checked against the 512 KiB bound again, and a stored reasoning item that isn't JSON
 builds nothing.
 
@@ -103,7 +103,10 @@ builds nothing.
 These fail the round as `Failed(Stream(Protocol))`: a delta or done for an item that wasn't
 started, an item id or call id started twice, a call id that isn't 1 to 64 ASCII bytes, arguments
 that differ from their deltas, a call done twice or naming another call id, a delta after its
-call was done, a completed response with a call still open, and a done item with no output index.
+call was done, a completed response with a call still open, a done item with no output index or that isn't an
+object with a string `type`, and a call done under another name than it started with. A done
+item is checked, charged and kept whole before its call is ready, so a refused item never makes
+its call ready.
 A round keeps at most 64 calls and items and 1 MiB of ids, arguments and items [guesses], charged
 before each is kept. A stream whose bytes run out has no ending of its own, so the round's pump
 reports it as `Truncated`.
