@@ -192,6 +192,14 @@ pub fn build() -> Result<Client, HttpError> {
 fn from_roots(
     roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
 ) -> Result<reqwest::Client, HttpError> {
+    connecting_within(roots, Duration::from_secs(15))
+}
+
+/// The client, with `connect` as its deadline for the connection and TLS handshake.
+fn connecting_within(
+    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
+    connect: Duration,
+) -> Result<reqwest::Client, HttpError> {
     let roots = roots.map_err(|error| {
         tracing::warn!(loader_error = ?error, "account trust roots unavailable");
         HttpError::TrustStoreUnavailable
@@ -224,7 +232,7 @@ fn from_roots(
         .https_only(true)
         .no_proxy()
         .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(15))
+        .connect_timeout(connect)
         .read_timeout(Duration::from_secs(60))
         .timeout(Duration::from_secs(120))
         .build()
@@ -303,10 +311,11 @@ async fn read_response(mut response: reqwest::Response) -> Result<Response, Http
 }
 
 fn transport_error(error: &reqwest::Error) -> HttpError {
-    if error.is_timeout() {
-        HttpError::Timeout
-    } else if error.is_connect() {
+    // A connect deadline is both: nothing was sent, so the connection decides.
+    if error.is_connect() {
         HttpError::Connect
+    } else if error.is_timeout() {
+        HttpError::Timeout
     } else {
         HttpError::Transport
     }

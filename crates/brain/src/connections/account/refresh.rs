@@ -11,8 +11,8 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey, UserError};
 use zeroize::Zeroizing;
 
-use super::lane::{Lane, Queued, Save, Waiting};
-use super::{AccountState, Denied, Effect, classify, identity_key};
+use super::lane::{Flight, Lane, Queued, Save, Waiting};
+use super::{AccountState, Denied, Effect, Job, classify, identity_key};
 use crate::connections::error::{Recovery, VaultError};
 use crate::connections::oauth::exchange::{ExchangeError, TokenSet};
 use crate::connections::oauth::id_token::{IdentityError, permits_plan};
@@ -77,8 +77,9 @@ impl AccountState {
         self.fresh(effects);
     }
 
-    /// Hands out the bearer, renewing it first when it's due, at most once a flight: a set that
-    /// came back already due is handed out, not renewed in a loop.
+    /// Hands out the bearer, renewing it first when it's due, at most once a flight. One still
+    /// expired after that renewal isn't handed out or renewed again: callers get a retryable
+    /// failure, and the newest refresh token stays saved for the next try.
     fn fresh(&mut self, effects: &mut Vec<Effect>) {
         let expires_at = self
             .loaded
@@ -86,12 +87,17 @@ impl AccountState {
             .as_ref()
             .and_then(|account| account.expose().tokens.as_ref())
             .map(|tokens| tokens.expires_at);
-        let due = expires_at.is_some_and(|expires_at| {
-            self.now
-                .is_none_or(|now| expires_at <= now.saturating_add(EARLY_SECONDS))
-        });
-        if due && !self.renewed && !self.tickets.is_empty() {
+        let now = self.now;
+        let within = |seconds: u64| {
+            expires_at.is_some_and(|expires_at| {
+                now.is_none_or(|now| expires_at <= now.saturating_add(seconds))
+            })
+        };
+        if within(EARLY_SECONDS) && !self.renewed && !self.tickets.is_empty() {
             return self.waiting.push_back(Waiting::Refresh(self.generation));
+        }
+        if within(0) {
+            return self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
         }
         self.granted(effects);
     }
@@ -354,6 +360,7 @@ impl AccountState {
                 self.hold(effects);
             }
             (Rotation::Verified(generation), SaveResult::Committed { .. }) => {
+                self.validating = None;
                 if generation != self.generation || self.leaving.is_some() {
                     return;
                 }
@@ -367,6 +374,7 @@ impl AccountState {
                 self.fresh(effects);
             }
             (Rotation::Verified(_), SaveResult::NotCommitted(failure)) => {
+                self.validating = None;
                 tracing::warn!(%failure, "a verified set stays pending until it's saved");
                 self.fail(
                     error_of(ErrorKey::CredentialsUnavailable, Action::Retry),
@@ -393,28 +401,36 @@ impl AccountState {
         if self.validating != Some(generation) {
             return;
         }
-        self.validating = None;
         self.now = now;
         match result {
-            Ok(()) => {
-                let Some(mut account) = self.loaded.account.as_ref().map(|a| a.expose().clone())
-                else {
-                    return;
-                };
-                if let Some(tokens) = account.tokens.as_mut() {
-                    tokens.pending_identity_validation = false;
-                }
-                self.jobs.push_back(Queued::Rotate(
-                    Secret::new(account),
-                    Rotation::Verified(generation),
-                ));
-            }
+            // The check's flight lasts until its save ends, so Access joins that save too.
+            Ok(()) => self.jobs.push_back(Queued::Verify(generation)),
             Err(IdentityError::OtherAccount | IdentityError::Token) => self.reject_set(effects),
             Err(failure) => {
+                self.validating = None;
                 tracing::warn!(%failure, "a rotated set's identity check failed; it stays pending");
                 self.fail(error_of(identity_key(failure), Action::Retry), effects);
             }
         }
+    }
+
+    /// The check's save for `generation`, built from the account as it is now with only its
+    /// verification added, so it can't undo a sent mark saved since; none once it was replaced.
+    pub(super) fn verify_save(&self, generation: u64) -> Option<(Flight, Job)> {
+        let account = self
+            .loaded
+            .account
+            .as_ref()
+            .filter(|_| generation == self.generation)?;
+        let mut account = account.expose().clone();
+        account.tokens.as_mut()?.pending_identity_validation = false;
+        Some((
+            Flight::Rotate(Rotation::Verified(generation)),
+            Job::Rotate {
+                account: Secret::new(account),
+                finish: false,
+            },
+        ))
     }
 
     /// Checks the pending set's identity token against the saved subject, off the lane.

@@ -84,6 +84,8 @@ pub(super) enum Queued {
     Leaving(Job),
     /// A save of the account outside the lane, for a refresh flight.
     Rotate(Secret<Account>, Rotation),
+    /// A check's save, built at dispatch from the account as it is then.
+    Verify(u64),
 }
 
 /// The credential job in flight.
@@ -226,7 +228,8 @@ impl AccountState {
             (Some(Flight::Relist(why)), Done::Relisted(result)) => {
                 self.relisted(why, result, effects);
             }
-            (Some(Flight::Rotate(why)), Done::Rotated(result)) => {
+            (Some(Flight::Rotate(why)), Done::Rotated(result, now)) => {
+                self.now = now;
                 self.rotated(why, result, effects);
             }
             (Some(Flight::Leaving), done) => self.left(done, effects),
@@ -421,14 +424,15 @@ impl AccountState {
                     Job::Marker(MarkerUpdate::RequestFinished { outcome_unknown }),
                 ),
                 // A save for a replaced account never overwrites its successor.
-                Queued::Rotate(
-                    _,
-                    Rotation::Verified(generation)
-                    | Rotation::Ended(generation)
-                    | Rotation::Unmarked(generation),
-                ) if generation != self.generation => {
+                Queued::Rotate(_, Rotation::Ended(generation) | Rotation::Unmarked(generation))
+                    if generation != self.generation =>
+                {
                     continue;
                 }
+                Queued::Verify(generation) => match self.verify_save(generation) {
+                    Some(flight) => flight,
+                    None => continue,
+                },
                 Queued::Rotate(account, why) => (
                     Flight::Rotate(why),
                     Job::Rotate {

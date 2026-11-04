@@ -123,8 +123,8 @@ pub enum Done {
     Checkpointed(Result<bool, VaultError>),
     /// Delete and Finish ended.
     SignedOut(Result<(), VaultError>),
-    /// A refresh flight's save.
-    Rotated(SaveResult),
+    /// A refresh flight's save, and the wall time it ended, for the bearer's expiry.
+    Rotated(SaveResult, Option<u64>),
 }
 
 /// What the vault held when it was read. Each record fails on its own, so one damaged record
@@ -194,9 +194,8 @@ impl<S: CredentialStore> Worker<S> {
         // Never before this process's own time, so a clock set back then corrected can't age an
         // entry out early (CAPS-130). shortcut: with no wall time an entry never ages out; only a
         // confirmed revocation or a sign-out removes it.
-        let added_at = self
-            .clock
-            .unix_seconds()
+        let now = self.clock.unix_seconds();
+        let added_at = now
             .max(self.started.0.map(|wall| wall.saturating_add(self.ran())))
             .unwrap_or(u64::MAX);
         let Some(vault) = self.vault.as_mut() else {
@@ -217,7 +216,7 @@ impl<S: CredentialStore> Worker<S> {
                 Job::Prepare => Done::Prepared(Err(VaultError::Busy)),
                 Job::Checkpoint(_) => Done::Checkpointed(Err(VaultError::Busy)),
                 Job::Finish => Done::SignedOut(Err(VaultError::Busy)),
-                Job::Rotate { .. } => Done::Rotated(refused()),
+                Job::Rotate { .. } => Done::Rotated(refused(), now),
             };
         };
         match job {
@@ -241,7 +240,7 @@ impl<S: CredentialStore> Worker<S> {
                     notice_cleared,
                 }
             }
-            Job::Rotate { account, finish } => Done::Rotated(rotate(vault, &account, finish)),
+            Job::Rotate { account, finish } => Done::Rotated(rotate(vault, &account, finish), now),
             Job::List { entry, finish } => {
                 let list = vault.load_revocations().map(|list| {
                     let mut list =
