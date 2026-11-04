@@ -88,6 +88,8 @@ pub enum Input {
     },
     /// The user typed a turn, in `thread` or in a new thread.
     Turn {
+        /// The submit's connection-local number.
+        turn: u32,
         /// The thread to continue, or `None` for a new one.
         thread: Option<ThreadId>,
         /// What the user typed.
@@ -566,7 +568,7 @@ impl Coordinator {
                 return Ok(vec![Effect::Store(op)]);
             }
             Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
-            Input::Turn { thread, text } => self.typed(thread, text, &mut effects),
+            Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
             Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
@@ -714,7 +716,13 @@ impl Coordinator {
         Ok(())
     }
 
-    fn turn(&mut self, thread: Option<ThreadId>, text: String, effects: &mut Vec<Effect>) {
+    fn turn(
+        &mut self,
+        turn: u32,
+        thread: Option<ThreadId>,
+        text: String,
+        effects: &mut Vec<Effect>,
+    ) {
         self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
@@ -762,6 +770,7 @@ impl Coordinator {
             thread,
             phase: Phase::Thinking,
             error: None,
+            origin: Some(kumochi_protocol::message::RunOrigin::Typed { turn }),
         }));
         effects.push(Effect::ArmDeadline {
             run,
@@ -821,6 +830,7 @@ impl Coordinator {
                 thread,
                 phase: Phase::Failed,
                 error: None,
+                origin: None,
             }));
             // Every ending but Done was already told, with its data's end.
             if ending.outcome == RunEnd::Done {
@@ -992,6 +1002,7 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         thread: run.thread,
         phase,
         error: run.error.clone().filter(|_| phase == Phase::Failed),
+        origin: None,
     })
 }
 

@@ -239,7 +239,7 @@ stateDiagram-v2
 |---|---|---|
 | `DeleteThread` | Control, shell to brain | `thread`, `after_turns` (the `TextSubmit`s this connection queued before it), `resend` |
 | `ThreadDeleted` | Control, brain to shell | `thread`, `outcome` (`NotHidden`, `Hidden` or `Removed`), `last_run` |
-| `TurnRefused` | Control, brain to shell | the `thread` the refused turn named |
+| `TurnRefused` | Control, brain to shell | `turn` and the `thread` the refused submit named |
 | `ScenesRemoved` | Data, brain to shell | the deleted thread's visible scenes |
 
 ```mermaid
@@ -332,6 +332,40 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
   a row only views it: explicit switches and per-turn selection revisions govern targeting,
   as described in [runs](runs.md#the-shells-input-target).
+
+## Hold and screen-choice wire contract
+
+The hold variants are appended to the control enums, and `Listening` is appended to `Phase`.
+Existing handshake bytes stay unchanged; the build-id check still rejects mixed binaries.
+`GestureId(u32)` and `LeaseGeneration(u32)` are shell-owned counters scoped to a connection;
+there is no hold sender yet. A display is a `DisplayRef(PhysicalRect)`, with an `[i32; 2]`
+physical desktop origin and `[u32; 2]` pixel size. Negative origins support displays left of
+or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or CGWindowID on macOS.
+
+| Direction | Control message | Fields |
+| --- | --- | --- |
+| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease` |
+| Shell to brain | `KeyUp`, `GestureCancel` | `gesture` |
+| Shell to brain | `FocusHint` | `gesture`, `hint`: `Region(PhysicalRect)` or `Window(WindowRef)` |
+| Shell to brain | `ExclusionLapsed` | `lease` |
+| Brain to shell | `CaptureDone` | `capture_for`: `Gesture(GestureId)` or `Turn(u32)` |
+| Brain to shell | `CaptureFailed` | `capture_for`, `reason`: `ExclusionUnavailable`, `Cancelled` or `Unavailable` |
+
+These controls are staged: the brain ignores hold controls and logs only their operation
+names until B2a supplies admission and capture tickets; the shell ignores capture results
+until it owns exclusion leases. The tap records only these controls' operation and payload
+length, never coordinates or native window references, even when dumping a forged payload.
+The largest hold control is 42 payload bytes, below the 64 KiB control cap.
+
+Each `TextSubmit` now carries `turn: u32`, counted from one per connection, and
+`screen: ScreenChoice`. The shell advances the count only after a successful enqueue and
+currently always sends `None`; `Include { lease }` is reserved for B3a's setting. The brain
+preserves FIFO admission and copies that submit's `turn` into `TurnRefused` or the admitted
+run's first `RunState.origin: Some(RunOrigin::Typed { turn })`. Later states have `origin: None`.
+`RunOrigin::Hold { gesture }` and `Phase::Listening` are reserved for hold admission. The shell
+still settles pending turns in FIFO order; B2a replaces that with keyed correlation.
+Slice 7 will append `t_qpc` to `HoldRecognized` and `KeyUp`, append `chunks` to `KeyUp`, and
+add `KeyDown`, `MicPcm` and `Transcribing` without renaming these types or allocating another run.
 
 ## Scene v1 wire contract
 

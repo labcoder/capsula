@@ -89,6 +89,7 @@ impl Coordinator {
     /// the shell sent before deleting it, or a blank one, is refused before it gets a run.
     pub(super) fn typed(
         &mut self,
+        turn: u32,
         thread: Option<ThreadId>,
         text: String,
         effects: &mut Vec<Effect>,
@@ -99,9 +100,9 @@ impl Coordinator {
         };
         self.turns_read = read;
         if self.admits(thread) && !text.trim().is_empty() {
-            self.turn(thread, text, effects);
+            self.turn(turn, thread, text, effects);
         } else {
-            let refused = ControlToShell::TurnRefused { thread };
+            let refused = ControlToShell::TurnRefused { turn, thread };
             effects.push(Effect::Control(refused));
         }
     }

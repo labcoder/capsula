@@ -85,6 +85,7 @@ fn told(thread: ThreadId, outcome: Deleted) -> Effect {
 fn sending(sources: &[ThreadId]) -> Coordinator {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -113,6 +114,7 @@ fn replace(core: &mut Coordinator) {
     .expect("current");
     core.handle(Input::RunStored { run: R }).expect("ending");
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(T),
         text: "again".to_owned(),
     })
@@ -156,6 +158,7 @@ fn two_deletes_held_by_one_lease_are_each_emitted_once() {
 fn a_delete_while_waiting_goes_out_and_the_body_is_rebuilt_unsent() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -181,6 +184,7 @@ fn a_delete_while_waiting_goes_out_and_the_body_is_rebuilt_unsent() {
 fn the_run_deadline_does_not_reset_on_rebuild_or_retry() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -320,6 +324,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
     core.handle(due(lease(R, 1, 1))).expect("granted");
     core.handle(Input::RunStored { run: R }).expect("ending");
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(T),
         text: "again".to_owned(),
     })
@@ -332,6 +337,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
             Effect::Rebuild(key(R2, 2)),
             Effect::CancelEngine { run: R2 },
             Effect::Control(ControlToShell::RunState {
+                origin: None,
                 run: R2,
                 thread: T,
                 phase: Phase::Failed,
@@ -359,6 +365,7 @@ fn deleting_the_sending_runs_own_task_settles_without_a_cycle() {
             Effect::CancelEngine { run: R },
             Effect::Revoke { run: R },
             Effect::Control(ControlToShell::RunState {
+                origin: None,
                 run: R,
                 thread: T,
                 phase: Phase::Interrupted,
