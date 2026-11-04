@@ -457,15 +457,23 @@ fn disconnect_removes_identity_errors_and_delivery_state_without_replaying_opera
 }
 
 #[test]
-fn settings_errors_do_not_replace_or_extend_an_account_error() {
+fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
     let mut accounts = Accounts::default();
     receive(&mut accounts, signed_out());
     let failure = UserError::from(ErrorKey::SignInFailed);
     accounts.error(&failure);
     receive(&mut accounts, signed_out());
-    for key in [ErrorKey::SettingsRefused, ErrorKey::ConfigUnreadable] {
-        accounts.error(&UserError::from(key));
+    for key in [
+        ErrorKey::SettingsRefused,
+        ErrorKey::ConfigUnreadable,
+        ErrorKey::UsageLimit,
+        ErrorKey::AccountRefused,
+        ErrorKey::RequestRefused,
+        ErrorKey::ResponseUnreadable,
+    ] {
+        accounts.error(&error(key, vec![Action::Retry]));
         assert_eq!(accounts.error, Some(failure.clone()));
+        assert_eq!(allowed(&accounts), vec![AccountOp::SignIn]);
     }
     receive(&mut accounts, AccountView::SigningIn);
     assert_eq!(accounts.error, None);
