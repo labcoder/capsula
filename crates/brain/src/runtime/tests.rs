@@ -658,7 +658,16 @@ async fn a_full_control_queue_still_applies_store_effects() {
     let effects = brain.coordinator.handle(stop).expect("current");
     assert!(brain.apply(effects, Some(&mut link)).is_err(), "full");
     // The outcome after the refused Interrupted still went to the store.
-    let reply = timeout(PATIENCE, brain.inputs.recv()).await;
+    // The build the stored turn started may answer first, in either order; Stop made it stale.
+    let reply = timeout(PATIENCE, async {
+        loop {
+            match brain.inputs.recv().await {
+                Some(Input::ContextBuilt(_)) => {}
+                other => break other,
+            }
+        }
+    })
+    .await;
     assert_eq!(reply.expect("answered"), Some(Input::RunStored { run }));
     brain.offline(Input::RunStored { run });
     brain.close().await;

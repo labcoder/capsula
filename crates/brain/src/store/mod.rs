@@ -6,7 +6,6 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
-#[cfg_attr(not(test), expect(dead_code, reason = "PR 12b calls the builder"))]
 pub(crate) mod context;
 mod drawing;
 mod pages;

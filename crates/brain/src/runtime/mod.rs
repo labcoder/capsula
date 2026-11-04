@@ -31,7 +31,8 @@ use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
-use crate::coordinator::{Coordinator, Effect, Input};
+use crate::context::{ConnectionTag, RunSnapshot};
+use crate::coordinator::{BuildContext, Coordinator, Effect, Input, StoreOp};
 use crate::engines::{self, Cancel, Engine};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -746,6 +747,21 @@ impl Brain {
         Ok(())
     }
 
+    /// A run's first build takes the names and default model as they are now, so a rename
+    /// applies from the next run.
+    fn seed(&self, build: &mut BuildContext) {
+        let view = self.config.view();
+        let origin = build.origin;
+        build.snapshot.get_or_insert_with(|| RunSnapshot {
+            origin,
+            assistant: view.assistant_name.clone(),
+            user: view.user_name.clone(),
+            choice: view.default_model.clone(),
+            // shortcut: no run records its connection yet; 13b tags each with the one it used.
+            connection: ConnectionTag(0),
+        });
+    }
+
     /// Applies effects in order. Frames go to `link`, or nowhere without a shell. Once the
     /// shell's control queue is full nothing more goes to the shell, but every store, engine and
     /// timer effect still applies, since the coordinator counts them as done; then it fails, as
@@ -760,7 +776,10 @@ impl Brain {
         let mut broken = None;
         for effect in effects {
             match effect {
-                Effect::Store(op) => {
+                Effect::Store(mut op) => {
+                    if let StoreOp::BuildContext(build) = &mut op {
+                        self.seed(build);
+                    }
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();
