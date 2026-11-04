@@ -35,9 +35,9 @@ fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
     assert_eq!(chain, 1);
     let observer = directory.join("observer.log");
     let mut log = String::from(
-        "geometry id=1 origin_y=-3 rows=10 trimmed=true spans=-,0:4,-;-,0:4,-;-,0:4,-;0:4,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-;-,0:4,-\n\
+        "geometry id=1 origin_y=-3 rows=10 trimmed=true spans=-,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-;0:4,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-;-,-,0:4,-,-,-\n\
          commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-3,4,10\n\
-         startup version=1 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n\
+         startup version=2 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n\
          paint frame=1 qpc=12 kind=dock hover=0 drawn_epoch=1 drawn_geometry=1 mask_epoch=1\n\
          drawn frame=1 qpc=14\n\
          click qpc=22 point=1,0 mask_epoch=1 marker=0x43505331\n\
@@ -102,8 +102,8 @@ fn sample_data() -> Observation {
             Geometry {
                 origin_y: 20,
                 rows: vec![Row {
-                    drawn: Some([0, right]),
-                    owned: [Some([0, right.max(130)]), None],
+                    drawn: [Some([0, right]), None],
+                    owned: [Some([0, right.max(130)]), None, None, None],
                 }],
             },
         );
@@ -227,8 +227,8 @@ fn outside_points_pass_through_just_beyond_a_filled_band() {
     let mut data = sample_data();
     let rows = (11..34)
         .map(|y| Row {
-            drawn: (21..24).contains(&y).then_some([100, 170]),
-            owned: [Some([100, 170]), None],
+            drawn: [(21..24).contains(&y).then_some([100, 170]), None],
+            owned: [Some([100, 170]), None, None, None],
         })
         .collect();
     data.geometries.insert(9, Geometry { origin_y: 11, rows });
@@ -350,12 +350,12 @@ fn drawing_demand_starts_only_on_changed_current_pixels_and_keeps_gaps() {
         origin_y: 19,
         rows: vec![
             Row {
-                drawn: None,
-                owned: [Some([0, 140]), None],
+                drawn: [None, None],
+                owned: [Some([0, 140]), None, None, None],
             },
             Row {
-                drawn: Some([0, 120]),
-                owned: [Some([0, 140]), None],
+                drawn: [Some([0, 120]), None],
+                owned: [Some([0, 140]), None, None, None],
             },
         ],
     };

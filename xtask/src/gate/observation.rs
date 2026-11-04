@@ -22,6 +22,11 @@ pub(super) struct Startup {
     pub(super) panel: [i32; 4],
 }
 
+/// Drawn spans per geometry row, one per shape.
+const DRAWN_SPANS: usize = 2;
+/// Owned spans per geometry row, as the shell's hit mask holds them.
+const OWNED_SPANS: usize = 4;
+
 #[derive(Debug)]
 pub(super) struct Geometry {
     pub(super) origin_y: i32,
@@ -30,8 +35,9 @@ pub(super) struct Geometry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Row {
-    pub(super) drawn: Option<[i32; 2]>,
-    pub(super) owned: [Option<[i32; 2]>; 2],
+    /// One span per shape: the line with its drip, then the body with its stub.
+    pub(super) drawn: [Option<[i32; 2]>; DRAWN_SPANS],
+    pub(super) owned: [Option<[i32; 2]>; OWNED_SPANS],
 }
 
 impl Geometry {
@@ -41,9 +47,12 @@ impl Geometry {
     }
 
     pub(super) fn contains_drawn(&self, [x, y]: [i32; 2]) -> bool {
-        self.row(y)
-            .and_then(|row| row.drawn)
-            .is_some_and(|[left, right]| (left..right).contains(&x))
+        self.row(y).is_some_and(|row| {
+            row.drawn
+                .iter()
+                .flatten()
+                .any(|[left, right]| (*left..*right).contains(&x))
+        })
     }
 
     pub(super) fn contains_owned(&self, [x, y]: [i32; 2]) -> bool {
@@ -312,7 +321,7 @@ impl Observation {
             ],
         )?;
         ensure!(
-            self.startup.is_none() && version == "1" && number::<u32>(pid)? == self.pid,
+            self.startup.is_none() && version == "2" && number::<u32>(pid)? == self.pid,
             "duplicate startup or wrong version/PID"
         );
         let handles = [hex(dock_hwnd)?, hex(panel_hwnd)?, hex(proxy_hwnd)?];
@@ -389,11 +398,16 @@ impl Observation {
                 .split(';')
                 .map(|text| {
                     let parts: Vec<_> = text.split(',').collect();
-                    ensure!(parts.len() == 3, "invalid geometry row");
-                    Ok(Row {
-                        drawn: span(parts[0])?,
-                        owned: [span(parts[1])?, span(parts[2])?],
-                    })
+                    ensure!(
+                        parts.len() == DRAWN_SPANS + OWNED_SPANS,
+                        "invalid geometry row"
+                    );
+                    let mut drawn = [None; DRAWN_SPANS];
+                    let mut owned = [None; OWNED_SPANS];
+                    for (slot, text) in drawn.iter_mut().chain(&mut owned).zip(&parts) {
+                        *slot = span(text)?;
+                    }
+                    Ok(Row { drawn, owned })
                 })
                 .collect::<Result<Vec<_>>>()?
         };
@@ -472,10 +486,10 @@ impl Observation {
         ensure!(
             band.origin_y == top
                 && band.rows.len() == usize::try_from(height)?
-                && band
-                    .rows
-                    .iter()
-                    .all(|row| row.owned == [Some([left, left + width]), None]),
+                && band.rows.iter().all(|row| {
+                    row.owned[0] == Some([left, left + width])
+                        && row.owned[1..].iter().all(Option::is_none)
+                }),
             "committed geometry does not own exactly the hit proxy"
         );
         let qpc = ordered(counter, previous.map_or(0, |value| value.qpc))?;
@@ -805,14 +819,17 @@ fn validate_ownership(geometry: &Geometry, previous: Option<&Geometry>) -> Resul
         let y = geometry.origin_y + i32::try_from(index)?;
         let old = previous
             .and_then(|value| value.row(y))
-            .and_then(|row| row.drawn);
+            .map_or([None; DRAWN_SPANS], |row| row.drawn);
         ensure!(
-            [row.drawn, old].into_iter().flatten().all(|[left, right]| {
-                row.owned
-                    .iter()
-                    .flatten()
-                    .any(|[owned_left, owned_right]| *owned_left <= left && right <= *owned_right)
-            }),
+            row.drawn
+                .iter()
+                .chain(&old)
+                .flatten()
+                .all(|&[left, right]| {
+                    row.owned.iter().flatten().any(|[owned_left, owned_right]| {
+                        *owned_left <= left && right <= *owned_right
+                    })
+                }),
             "geometry draws outside the band it owns"
         );
     }
@@ -820,7 +837,7 @@ fn validate_ownership(geometry: &Geometry, previous: Option<&Geometry>) -> Resul
         for (index, row) in previous.rows.iter().enumerate() {
             let y = previous.origin_y + i32::try_from(index)?;
             ensure!(
-                row.drawn.is_none() || geometry.row(y).is_some(),
+                row.drawn.iter().all(Option::is_none) || geometry.row(y).is_some(),
                 "geometry omits previously drawn row"
             );
         }

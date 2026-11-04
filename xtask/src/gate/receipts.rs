@@ -299,7 +299,7 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
     let row = geometry
         .rows
         .get(usize::try_from(y - geometry.origin_y).ok()?)?;
-    let [left, right] = row.drawn?;
+    let [left, right] = row.drawn[0]?;
     let point = match category {
         "center" => Some([left.midpoint(right), y]),
         "edge" => Some([left, y]),
@@ -349,7 +349,7 @@ fn candidate(data: &Observation, category: &str, dock: [i32; 4], cover: RECT) ->
             }) {
                 let old = data.geometries.get(&frame.geometry)?;
                 let old_row = old.rows.get(usize::try_from(y - old.origin_y).ok()?)?;
-                let old_right = old_row.drawn?[1];
+                let old_right = old_row.drawn[0]?[1];
                 if !retracting && old_right != right {
                     if old_right < right {
                         return None;
@@ -600,8 +600,8 @@ fn same_drawn(left: &Geometry, right: &Geometry) -> bool {
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| {
-                row.drawn.map(|span| {
+            .flat_map(|(index, row)| {
+                row.drawn.iter().flatten().map(move |&span| {
                     (
                         i64::from(geometry.origin_y)
                             + i64::try_from(index).expect("observer row count is bounded512"),
