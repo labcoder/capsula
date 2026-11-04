@@ -23,7 +23,7 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
-use crate::platform::SessionLock;
+use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::account::{Accounts, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
@@ -605,7 +605,10 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
         }
     }
     assert!(
-        SessionLock::try_acquire(&lock).is_err(),
+        matches!(
+            SessionLock::try_acquire(&lock),
+            Err(SessionLockError::Busy)
+        ),
         "the lock is held while the refresh is out"
     );
     release.send(()).expect("the refresh waits for its release");
