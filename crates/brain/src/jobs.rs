@@ -30,7 +30,10 @@ pub(crate) fn title_request(snapshot: &RunSnapshot, ask: &str) -> ModelRequest {
         &[
             ("{product}", DISPLAY_NAME),
             ("{assistant}", snapshot.assistant.as_str()),
-            ("{user}", snapshot.user.as_ref().map_or("", |user| user.as_str())),
+            (
+                "{user}",
+                snapshot.user.as_ref().map_or("", |user| user.as_str()),
+            ),
         ],
     );
     ModelRequest {
@@ -50,7 +53,10 @@ pub(crate) fn title_request(snapshot: &RunSnapshot, ask: &str) -> ModelRequest {
 /// A title from the model's answer: its first line that isn't blank, without control
 /// characters, trimmed and cut to [`MAX_TITLE_CHARS`] characters. `None` when nothing is left.
 pub(crate) fn clean_title(output: &str) -> Option<ThreadTitle> {
-    let line = output.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
     let kept: String = line
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'))
@@ -80,8 +86,14 @@ mod tests {
         assert_eq!(title(""), None);
         assert_eq!(title(" \n\t\n"), None);
         assert_eq!(title("\u{7}\u{1b}\u{0}"), None);
-        assert_eq!(title("\n  Trip plan  \nSecond line"), Some("Trip plan".to_owned()));
-        assert_eq!(title("Trip\u{7} plan\u{2028}"), Some("Trip plan".to_owned()));
+        assert_eq!(
+            title("\n  Trip plan  \nSecond line"),
+            Some("Trip plan".to_owned())
+        );
+        assert_eq!(
+            title("Trip\u{7} plan\u{2028}"),
+            Some("Trip plan".to_owned())
+        );
         let multibyte = format!("{}é", "t".repeat(79));
         assert_eq!(title(&format!("{multibyte}é")), Some(multibyte));
     }
@@ -103,7 +115,10 @@ mod tests {
         assert!(request.instructions.contains("Zqxassistant"));
         assert!(request.instructions.contains("Zqxuser"));
         assert!(!request.instructions.contains('{'));
-        assert_eq!(request.choice.map(|choice| choice.effort), Some(Effort::Low));
+        assert_eq!(
+            request.choice.map(|choice| choice.effort),
+            Some(Effort::Low)
+        );
         assert!(request.tools.is_empty());
         assert_eq!(
             request.input,

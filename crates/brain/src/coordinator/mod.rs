@@ -33,8 +33,8 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
-pub use job::{JobBuilt, JobKey, ReadTitle};
 pub(crate) use job::TitleAsk;
+pub use job::{JobBuilt, JobKey, ReadTitle};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::StoreOp;
 
@@ -570,7 +570,13 @@ impl Coordinator {
             } => self.job_ready(key, &mut effects),
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, title } => self.job_done(key, title, &mut effects)?,
-            Input::TitleSet { job, applied } => self.title_set(job, applied, &mut effects),
+            Input::TitleSet { job, applied } => {
+                // A committed title is news to the shell, whoever wrote it.
+                if applied {
+                    effects.push(Effect::Control(ControlToShell::ThreadsChanged));
+                }
+                self.title_written(job);
+            }
             Input::SignedIn { generation } => self.signed_in(generation)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,

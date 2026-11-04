@@ -18,6 +18,8 @@ mod deletes;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "job_tests.rs"]
+mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "scene_tests.rs"]

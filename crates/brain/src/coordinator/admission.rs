@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp};
+use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
 use crate::engines::RunRequest;
 use crate::store::Failure;
@@ -207,7 +207,7 @@ impl Coordinator {
         build.sources = made.sources;
         effects.push(Effect::StartEngine {
             request: RunRequest {
-                key,
+                key: SendKey::Build(key),
                 run: key.run,
                 thread,
                 origin: origin(thread, main),

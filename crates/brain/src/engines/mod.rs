@@ -418,9 +418,7 @@ async fn collect(
             }
         };
         match event {
-            TurnEvent::TextDelta(delta)
-                if text.len() + delta.len() <= crate::jobs::MAX_OUTPUT =>
-            {
+            TurnEvent::TextDelta(delta) if text.len() + delta.len() <= crate::jobs::MAX_OUTPUT => {
                 text.push_str(&delta);
             }
             TurnEvent::OutputItem { .. } => {}
@@ -595,6 +593,64 @@ mod tests {
         TurnEvent::TextDelta(delta.to_owned())
     }
 
+    /// What a title job's round of `events` reports.
+    async fn job_title(events: Vec<TurnEvent>, then: Then) -> Option<String> {
+        let (alive, _gone) = mpsc::channel(1);
+        let engine = Sends {
+            events,
+            then,
+            alive,
+        };
+        let key = JobKey {
+            thread: ThreadId(2),
+            serial: 3,
+        };
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let gate = SendGate::closed(request().key);
+        let _cancel = super::start_job(&engine, request(), key, inputs, gate);
+        let Some(Input::JobDone { key: done, title }) = received.recv().await else {
+            panic!("a job reports JobDone");
+        };
+        assert_eq!(done, key, "it reports its own key");
+        title.map(|title| title.as_str().to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
+        let completed = TurnEvent::Finished(Finish::Completed);
+        let item = TurnEvent::OutputItem {
+            index: 0,
+            item: Opaque::new(b"{}".to_vec()).expect("small"),
+        };
+        assert_eq!(
+            job_title(
+                vec![
+                    item,
+                    text("  Lisbon"),
+                    text(" trip\nmore"),
+                    completed.clone()
+                ],
+                Then::Hang
+            )
+            .await,
+            Some("Lisbon trip".to_owned())
+        );
+        let over = "x".repeat(crate::jobs::MAX_OUTPUT + 1);
+        let call = TurnEvent::ToolCallStarted {
+            call: CallId::new("call-1").expect("ascii"),
+            name: ToolName::Draw,
+        };
+        for events in [
+            vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
+            vec![text("Lisbon")],
+            vec![text(&over), completed.clone()],
+            vec![call, completed.clone()],
+            vec![text("\u{7}"), completed],
+        ] {
+            assert_eq!(job_title(events, Then::End).await, None);
+        }
+    }
+
     /// Plays `events` through a pump into a queue of `depth`; the last receiver closes once the
     /// round's future is gone.
     fn play(
@@ -728,13 +784,8 @@ mod tests {
         );
         assert_eq!(
             printed,
-<<<<<<< HEAD
             "RunRequest { key: Build(BuildKey { run: RunId(7), round: 1, attempt: 1 }), \
              run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
-=======
-            "RunRequest { key: BuildKey { run: RunId(7), round: 1, attempt: 1 }, run: RunId(7), \
-             thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
->>>>>>> origin/slice3/13a-responses-adapter
              choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
              ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
         );

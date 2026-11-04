@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-use crate::coordinator::{Coordinator, Effect, Input, JobKey, LeaseId, StoreOp};
+use crate::coordinator::{BuildContext, Coordinator, Effect, Input, JobKey, LeaseId, StoreOp};
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -778,8 +778,21 @@ impl Brain {
         Input::SendDeadline { lease }
     }
 
-    /// What a run's first build, or a job's read, takes: the names and default model as they
-    /// are now, so a rename applies from the next run.
+    /// A run's first build takes the names and default model as they are now, so a rename
+    /// applies from the next run.
+    fn seed(&self, build: &mut BuildContext) {
+        let origin = build.origin;
+        build.snapshot.get_or_insert_with(|| self.snapshot(origin));
+    }
+
+    /// Starts `job`'s request on the engine, replacing any job still running.
+    fn start_job(&mut self, job: JobKey, request: engines::RunRequest) {
+        let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+        let cancel = engines::start_job(&*self.engine, request, job, self.inputs_tx.clone(), gate);
+        self.job = Some((job, cancel));
+    }
+
+    /// What a run's first build, or a job's read, takes: the names and default model now.
     fn snapshot(&self, origin: Origin) -> RunSnapshot {
         let view = self.config.view();
         RunSnapshot {
@@ -807,14 +820,11 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(mut op) => {
-                    match &mut op {
-                        StoreOp::BuildContext(build) if build.snapshot.is_none() => {
-                            build.snapshot = Some(self.snapshot(build.origin));
-                        }
-                        StoreOp::ReadTitle(read) => {
-                            read.snapshot = Some(self.snapshot(Origin::Task(read.key.thread)));
-                        }
-                        _ => {}
+                    if let StoreOp::BuildContext(build) = &mut op {
+                        self.seed(build);
+                    }
+                    if let StoreOp::ReadTitle(read) = &mut op {
+                        read.snapshot = Some(self.snapshot(Origin::Task(read.key.thread)));
                     }
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
@@ -862,23 +872,8 @@ impl Brain {
                         engines::start(&*self.engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
                 }
-                Effect::StartJob { job, request } => {
-                    let gate =
-                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-                    let cancel = engines::start_job(
-                        &*self.engine,
-                        request,
-                        job,
-                        self.inputs_tx.clone(),
-                        gate,
-                    );
-                    self.job = Some((job, cancel));
-                }
-                Effect::CancelJob(job) => {
-                    if self.job.as_ref().is_some_and(|(held, _)| *held == job) {
-                        self.job = None;
-                    }
-                }
+                Effect::StartJob { job, request } => self.start_job(job, request),
+                Effect::CancelJob(job) => drop(self.job.take_if(|(held, _)| *held == job)),
                 Effect::Grant(lease) => {
                     let granted = SendLease::new(lease, self.inputs_tx.clone());
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));

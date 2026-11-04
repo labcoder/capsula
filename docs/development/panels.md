@@ -80,8 +80,10 @@ errors stay inline:
 A sent task rename is not a confirmed title. The shell rereads the authoritative list page and
 updates the displayed title only from that page; a send or an older in-flight read isn't a
 save acknowledgement. Kumo's displayed name changes only on the next `SettingsView`.
-The reread can race the rename across the two pipes and show the old title until the next
-refresh; PR 16's `ThreadsChanged` after every committed `SetTitle` will close that gap.
+The reread can race the rename across the two pipes and show the old title. The
+`ThreadsChanged` the brain sends after every committed title closes that gap: the list is read
+again, or the read in flight is marked stale and earns one more. A search shows it at its next
+read.
 If a delete invalidates an in-flight rename reread, its original page cursor is queued again
 before the first-page repair, so an offpage renamed task still gets confirmed without reviving
 the deleted row. A search change, refresh or hide discards these old-query rereads.

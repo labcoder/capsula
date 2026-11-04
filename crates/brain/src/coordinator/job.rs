@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::{ControlToShell, RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{RunId, ThreadId, ThreadTitle};
 
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp, Unbuilt};
 use crate::context::{Built, Origin, RunSnapshot};
@@ -228,17 +228,8 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A title write finished. A committed one tells the shell, whoever wrote it; only the
-    /// slot's own write empties the slot.
-    pub(super) fn title_set(
-        &mut self,
-        job: Option<JobKey>,
-        applied: bool,
-        effects: &mut Vec<Effect>,
-    ) {
-        if applied {
-            effects.push(Effect::Control(ControlToShell::ThreadsChanged));
-        }
+    /// A title write by `job` finished: only the slot's own write empties the slot.
+    pub(super) fn title_written(&mut self, job: Option<JobKey>) {
         if job.is_some_and(|key| {
             self.job
                 .as_ref()
