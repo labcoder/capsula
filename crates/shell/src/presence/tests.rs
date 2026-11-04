@@ -11,7 +11,7 @@ use kumochi_scene::{
 };
 
 use super::{EscapePanel, Presence, Runs};
-use crate::presenter::Presenter;
+use crate::presenter::{Effect, Presenter};
 
 fn mirrored_presenter() -> Presenter {
     deferred::start().expect("the dropper starts before intake");
@@ -52,7 +52,7 @@ fn mirrored_presenter() -> Presenter {
     let Record::Step(step) = parse_record(br#"{"step":{"id":"first","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,10,10]}}]}}"#).expect("step") else {
         panic!("step record");
     };
-    presenter
+    let effects = presenter
         .data(
             1,
             Deferred::new(
@@ -67,7 +67,23 @@ fn mirrored_presenter() -> Presenter {
             100,
             now,
         )
+        .expect("admit first step");
+    let mut admissions = effects.into_iter().filter_map(|effect| match effect {
+        Effect::Admit(job) => Some(job),
+        _ => None,
+    });
+    let job = admissions.next().expect("one admission");
+    assert!(admissions.next().is_none());
+    let effects = presenter
+        .completed(job.run(), now)
         .expect("mirror first step");
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Prepare(_)))
+            .count(),
+        1
+    );
     assert!(presenter.holds_scenes());
     presenter
 }

@@ -1,14 +1,17 @@
 //! The read-ahead window, eligibility deadlines and head-only consumption.
 
-use std::{sync::atomic::Ordering, time::Instant};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
 
 use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneFailure, SceneId};
-use kumochi_scene::{Admission, limits::MAX_RESIDENT_BYTES};
+use kumochi_scene::{DetachedCandidate, deferred::Deferred, limits::MAX_RESIDENT_BYTES};
 
 use super::super::{scene::WINDOW, window::ConsumeError};
 use super::{
     Completion, Effect, LIVE, PrepareJob, Presenter, RUN, Shaper, acknowledge, begin, commit,
-    commit_as, controls, exhausted, failed, jobs, live, ms, only_job, rect,
+    commit_as, controls, drained, exhausted, failed, jobs, live, ms, only_job, rect, settle,
 };
 
 fn answer(presenter: &mut Presenter, job: PrepareJob, at: Instant) -> Vec<Effect> {
@@ -37,6 +40,29 @@ fn prepared(count: u32) -> (Presenter, Instant) {
     (presenter, now)
 }
 
+/// A candidate admitted at the scene's current stamps, its snapshot already destroyed.
+fn probe(presenter: &Presenter) -> DetachedCandidate {
+    let candidate = presenter.scenes[&LIVE]
+        .state
+        .read()
+        .admit_detached(&rect("probe"))
+        .expect("a new probe");
+    let marker = Arc::new(());
+    drop(Deferred::new(Arc::clone(&marker), 0));
+    assert!(drained(&marker, 1), "the dropper destroyed the snapshot");
+    candidate
+}
+
+/// Installs a probe, which succeeds only while the scene keeps the stamps it was admitted at.
+fn install(presenter: &mut Presenter, probe: DetachedCandidate, unchanged: &str) {
+    let scene = presenter.scenes.get_mut(&LIVE).expect("the scene");
+    let read = scene.state.read();
+    scene
+        .state
+        .apply_detached(read, probe, &mut presenter.global)
+        .expect(unchanged);
+}
+
 fn positions(presenter: &Presenter) -> usize {
     let scene = &presenter.scenes[&LIVE];
     scene.ready.len() + usize::from(scene.running.is_some())
@@ -44,7 +70,7 @@ fn positions(presenter: &Presenter) -> usize {
 
 /// What a refused consumption or adoption must leave alone: budget, semantic state and charge.
 fn semantic(presenter: &Presenter) -> impl std::fmt::Debug + PartialEq + use<> {
-    let state = &presenter.scenes[&LIVE].state;
+    let state = presenter.scenes[&LIVE].state.view();
     (
         presenter.global.generation(),
         presenter.global.usage(),
@@ -107,6 +133,43 @@ fn a_consumption_frees_one_position_and_starts_the_waiting_step_from_then() {
 }
 
 #[test]
+fn a_step_started_by_a_freed_position_is_timed_from_that_consumption() {
+    for (at, tick) in [
+        (10_249, false),
+        (10_250, false),
+        (10_249, true),
+        (10_250, true),
+    ] {
+        let case = format!("{at} ms, tick {tick}");
+        let (mut presenter, now) = prepared(9);
+        let done = presenter
+            .consume_ready(LIVE, 0, ms(now, 10_000))
+            .expect("the head");
+        let job = only_job(done.effects.expect("a current scene"));
+        let cut = presenter.scenes[&LIVE].cut_now();
+        let effects = if tick {
+            presenter.tick(ms(now, at)).expect("a tick")
+        } else {
+            answer(&mut presenter, job, ms(now, at))
+        };
+        let late = ControlToBrain::StepFailed {
+            run: RUN,
+            scene: LIVE,
+            index: 8,
+            reason: SceneFailure::Timeout,
+            cut,
+        };
+        let (failures, ready): (&[&ControlToBrain], _) = match (at, tick) {
+            (10_249, false) => (&[], WINDOW),
+            (10_249, true) => (&[], WINDOW - 1),
+            _ => (&[&late], 0),
+        };
+        assert_eq!(controls(&effects), failures, "{case}");
+        assert_eq!(presenter.scenes[&LIVE].ready.len(), ready, "{case}");
+    }
+}
+
+#[test]
 fn a_scene_longer_than_the_window_is_consumed_through_its_end() {
     for count in [9, 20] {
         let (mut presenter, now) = live();
@@ -135,7 +198,7 @@ fn a_scene_longer_than_the_window_is_consumed_through_its_end() {
         }
         assert_eq!(widest, WINDOW, "{count} steps");
         let scene = &presenter.scenes[&LIVE];
-        assert_eq!(scene.state.activated(), count, "{count} steps");
+        assert_eq!(scene.state.view().activated(), count, "{count} steps");
         assert!(
             scene.ready.is_empty() && scene.queue.is_empty(),
             "{count} steps"
@@ -230,7 +293,7 @@ fn a_cut_s_revision_gap_does_not_hold_back_the_next_step() {
         .consume_ready(LIVE, 20, now)
         .expect("the first new successor");
     assert_eq!(done.step.step().index, 20);
-    assert_eq!(presenter.scenes[&LIVE].state.activated(), 21);
+    assert_eq!(presenter.scenes[&LIVE].state.view().activated(), 21);
 }
 
 #[test]
@@ -240,7 +303,8 @@ fn a_step_eligible_while_every_slot_is_held_spends_its_wait_from_the_same_deadli
         begin(&mut presenter, LIVE, now);
         assert!(jobs(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step")).is_empty());
         let zombie = zombies.pop().expect("a held slot");
-        let job = only_job(answer(&mut presenter, zombie, ms(now, 249)));
+        let effects = answer(&mut presenter, zombie, ms(now, 249));
+        let job = only_job(settle(&mut presenter, effects, ms(now, 249)).expect("an admission"));
         assert_eq!(presenter.deadline(), Some(ms(now, 250)));
         let effects = answer(&mut presenter, job, ms(now, at));
         assert_eq!(
@@ -262,7 +326,8 @@ fn the_watchdog_and_a_late_answer_fail_a_step_once_in_either_order() {
         begin(&mut presenter, LIVE, now);
         commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step");
         let zombie = zombies.pop().expect("a held slot");
-        let job = only_job(answer(&mut presenter, zombie, ms(now, 249)));
+        let effects = answer(&mut presenter, zombie, ms(now, 249));
+        let job = only_job(settle(&mut presenter, effects, ms(now, 249)).expect("an admission"));
         let done = job.run(&mut Shaper);
         let mut effects = Vec::new();
         if tick_first {
@@ -326,13 +391,7 @@ fn a_result_adopts_at_exactly_the_cap_and_fails_one_byte_over() {
         let delta = prepared.resident_bytes;
         let held = MAX_RESIDENT_BYTES - presenter.residency() - delta + over;
         presenter.returned.store(held, Ordering::Relaxed);
-        let Admission::New(stamp) = presenter.scenes[&LIVE]
-            .state
-            .admit(&rect("probe"), &presenter.global)
-            .expect("an admission predating adoption")
-        else {
-            panic!("a new probe");
-        };
+        let stamp = probe(&presenter);
         let before = semantic(&presenter);
         let effects = presenter.completed(done, now).expect("an answer");
         assert_eq!(semantic(&presenter), before, "{over} over");
@@ -346,13 +405,11 @@ fn a_result_adopts_at_exactly_the_cap_and_fails_one_byte_over() {
             );
             assert!(presenter.scenes[&LIVE].ready.is_empty());
         }
-        presenter
-            .scenes
-            .get_mut(&LIVE)
-            .expect("the scene")
-            .state
-            .commit(stamp, &mut presenter.global)
-            .expect("adoption leaves the mutation stamp unchanged");
+        install(
+            &mut presenter,
+            stamp,
+            "adoption leaves the mutation stamp unchanged",
+        );
         presenter.returned.store(0, Ordering::Relaxed);
     }
 }
@@ -404,25 +461,17 @@ fn a_consumption_fits_at_exactly_the_cap_and_is_refused_one_byte_over() {
         presenter
             .returned
             .store(MAX_RESIDENT_BYTES - after + over, Ordering::Relaxed);
-        let Admission::New(stamp) = presenter.scenes[&LIVE]
-            .state
-            .admit(&rect("probe"), &presenter.global)
-            .expect("an admission predating consumption")
-        else {
-            panic!("a new probe");
-        };
+        let stamp = probe(&presenter);
         let before = shape(&presenter);
         let result = presenter.consume_ready(LIVE, 0, now);
         if over == 1 {
             assert_eq!(result.expect_err("over the cap"), ConsumeError::Residency);
             assert_eq!(shape(&presenter), before);
-            presenter
-                .scenes
-                .get_mut(&LIVE)
-                .expect("the scene")
-                .state
-                .commit(stamp, &mut presenter.global)
-                .expect("refusal leaves the mutation stamp unchanged");
+            install(
+                &mut presenter,
+                stamp,
+                "refusal leaves the mutation stamp unchanged",
+            );
         } else {
             let done = result.expect("at the cap");
             assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);

@@ -26,8 +26,8 @@ pub use motion::{Frame, FrameItem, SceneView};
 pub use parse::parse_record;
 pub use record::{Begin, End, Op, Record, Step};
 pub use state::{
-    Admission, Admitted, CallState, Committed, Preparation, SceneEvent, SceneState, StaleAdmission,
-    StopCut, StopOutcome,
+    Admission, Admitted, BindingError, CallState, Committed, DetachedCandidate, Preparation,
+    SceneBinding, SceneEvent, SceneRead, SceneState, StaleAdmission, StopCut, StopOutcome,
 };
 pub use text::{Finite, Source, Text};
 pub use tokenize::{ClosedRecord, TokenError, Tokenizer};
