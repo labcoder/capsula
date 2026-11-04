@@ -194,7 +194,9 @@ effects. Credential jobs go, one at a time and in order, to a `credentials` thre
 vault and its session lock; the listener and the exchange are tokio tasks; every result comes back
 on one channel the core loop polls. The startup load runs there too, and the brain waits for it
 before it stores the instance capability or serves anything. On
-quit it waits for the job already dispatched, past the quit deadline if it must, before the instance
+quit or close, a refresh already out runs to its end and its save, for up to `REFRESH_WAIT`
+(5 s [guess]), with the session lock still held; past that the lock is released and the token
+stays marked as sent, so the next start never sends it again. Then it waits for the job already dispatched, past the quit deadline if it must, before the instance
 capability is deleted. The runtime delivers exactly one `Vault` result per dispatched job (the
 credentials thread sends one per job it runs) and one `Exchanged` per sent request (the exchange
 task's last step). No runtime test drives a full exchange yet, so the machine also ignores a

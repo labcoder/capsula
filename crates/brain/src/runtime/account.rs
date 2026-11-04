@@ -219,13 +219,27 @@ impl Accounts {
         frames
     }
 
-    /// Stops taking work and waits for the credential job already dispatched, past `deadline` if
-    /// it must, so it never overlaps the instance capability's delete; then the vault and its
-    /// session lock are gone. Jobs not yet dispatched are dropped: a pending flag they would
-    /// have cleared stays set, and the next start counts it as uncertainty.
-    pub(crate) async fn close(&mut self, deadline: Instant) {
+    /// Stops taking work. A refresh already out runs to its end, and its result's save, until
+    /// `refresh_by`, so a rotated set the provider issued isn't lost; past that its token stays
+    /// marked as sent, and the next start never sends it again. Then it waits for the credential
+    /// job already dispatched, past `deadline` if it must, so it never overlaps the instance
+    /// capability's delete; then the vault and its session lock are gone. Jobs not yet
+    /// dispatched are dropped: a pending flag they would have cleared stays set, and the next
+    /// start counts it as uncertainty.
+    pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
         if let Some(listener) = self.listener.take() {
             listener.abort();
+        }
+        let settled = tokio::time::timeout_at(refresh_by, async {
+            while self.state.refresh_out() {
+                let input = self.next().await;
+                // No shell hears it: the brain is closing.
+                self.handle(input);
+            }
+        })
+        .await;
+        if settled.is_err() {
+            tracing::warn!("a refresh is still out at shutdown; its token stays marked as sent");
         }
         self.jobs = None;
         let Some(mut released) = self.released.take() else {
