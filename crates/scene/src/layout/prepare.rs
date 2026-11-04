@@ -279,7 +279,7 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
-    edges::route(&mut after, &build, surface)?;
+    edges::route(&mut after, &build)?;
     update_group_bounds(&mut after);
     edge_labels::separate(&mut after, &build)?;
     for ((id, property), motion) in motions {

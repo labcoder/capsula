@@ -507,6 +507,17 @@ at least one has a label. The midpoint offset starts at half the node's perpendi
 extent plus 12 pixels; further parallel lanes use multiples of that offset, in wire-id
 order. Endpoints stay anchored and arrowheads follow the bowed tangent. The former
 144-pixel skipped-link gap is unnecessary and removed; existing nodes still never reflow.
+Self-links use a right-to-bottom quadratic outside their own node rather than a
+degenerate point under its text. The control point starts one node-size beyond
+its maximum corner and 24 pixels downward, widening further when needed to keep
+the midpoint chip at least 12 local pixels right of the node. Thus even a wrapped
+label cannot cover its own node. This is not general routing around other nodes.
+Every edge whose endpoints still exist is recomputed, even after its last labelled
+partner is removed, so a formerly bowed singleton straightens. Its prepared flow
+axis is retained beside its endpoint anchors; changing the host's default flow
+does not reroute old geometry. Detached edges keep their frozen curves.
+Arrowhead primitives are regenerated from the current head style and final tangent,
+without assuming the old head count. Unchanged curves and heads retain shared geometry.
 General routing around nodes or group title bands waits until after D1;
 cycles and cross-group links can still cross them. Diamond and circle ports intersect
 their inscribed outlines in the resolved axis-aligned bounds; other shapes retain
@@ -523,7 +534,8 @@ rectangles grow by 4 world pixels, so adjacent chips have a visible gap. The fra
 interior is not an obstacle. This placement moves labels, not the underlying routes.
 This includes parent and resting model transforms, and runs again after updates
 or removals without retaining a second label cache. The quarter-segment table's
-array length is tied to its subdivision count at compile time. If all 63 interior samples
+array length is tied to its subdivision count at compile time, and the procedural
+piece count must be positive and even. If all 63 interior samples
 are occupied, the label stays at the midpoint rather than disappearing; continuous
 placement and making extra routing room are deferred until after D1. Collision
 avoidance is for resting geometry, not crossings introduced by later animation.
