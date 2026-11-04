@@ -159,8 +159,8 @@ pub(super) struct Line {
     held: Held,
     /// Failed attempts at `requested` in a row.
     failed: u8,
-    /// A pull holds the overlay or the mask, and the dock may draw its picture: the line
-    /// takes neither back until the pull lets go.
+    /// A pull is under way, from its accepted grab until it hands the dock back: it uses this
+    /// line's coordinates and may hold the overlay and the mask, so the line takes no attempt.
     pulled: bool,
 }
 
@@ -168,6 +168,12 @@ impl Line {
     /// The line Windows last accepted.
     pub(super) fn accepted_frame(&self) -> Option<LineFrame> {
         self.accepted.map(|placement| placement.frame)
+    }
+
+    /// A grab was accepted: from now until the pull hands the dock back, it's drawn in this
+    /// line's coordinates, so the line takes no attempt.
+    pub(super) fn pull_started(&mut self) {
+        self.pulled = true;
     }
 
     /// A pull moved the overlay: the next attempt moves it back to the line's.
@@ -799,6 +805,42 @@ mod tests {
 
     fn failed([retry, closed]: [bool; 2]) -> impl Fn(&Attempt<&'static str>) -> bool {
         move |attempt| matches!(attempt, Attempt::Failed { retry: r, closed: c, .. } if *r == retry && *c == closed)
+    }
+
+    #[test]
+    fn a_position_chosen_after_a_grab_before_any_pull_frame_waits_and_never_fails_closed() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        line.pull_started();
+        line.request(b);
+        // Each attempt would move the band, have its overlay move refused, and fail to put the
+        // band back: the third would leave the surfaces apart and close the dock.
+        fake.refuse_uploads = vec![false, true, false, true, false, true];
+        fake.refuse_moves = vec![true; 3];
+        for _ in 0..3 {
+            assert_eq!(
+                line.attempt(&mut fake),
+                Attempt::Idle,
+                "the pull uses A's line"
+            );
+        }
+        assert!(
+            fake.holds(a),
+            "nothing on screen changed and the dock stays shown"
+        );
+        assert_eq!(
+            (fake.refuse_uploads.len(), fake.refuse_moves.len()),
+            (6, 3),
+            "no surface was touched"
+        );
+        (fake.refuse_uploads, fake.refuse_moves) = (Vec::new(), Vec::new());
+        line.reclaim();
+        assert_eq!(
+            line.attempt(&mut fake),
+            Attempt::Placed(b),
+            "placed at the hand-back"
+        );
+        assert!(fake.holds(b));
     }
 
     #[test]
