@@ -600,3 +600,36 @@ fn the_first_ask_reads_only_while_the_title_is_first_words_and_a_title_says_if_i
         "Kumo's title stays empty"
     );
 }
+
+#[test]
+fn titles_and_their_sources_survive_a_restart() {
+    let scratch = Scratch::new("title-restart");
+    let mut store = opened(&scratch);
+    let task = task(&mut store, "words");
+    drop(store);
+    let mut store = opened(&scratch);
+    assert_eq!(
+        title(&store, task),
+        Some(titled("words", "words")),
+        "a job that failed or was cancelled leaves the first words"
+    );
+    rename(
+        &mut store,
+        task,
+        "Model title",
+        TitleSource::Model(Generation(0)),
+    );
+    drop(store);
+    let mut store = opened(&scratch);
+    assert_eq!(title(&store, task), Some(titled("Model title", "model")));
+    rename(&mut store, task, "Mine", TitleSource::User);
+    let late = ThreadTitle::new("Late model").expect("valid");
+    assert!(
+        !store
+            .set_title(task, &late, TitleSource::Model(Generation(0)))
+            .expect("set")
+    );
+    drop(store);
+    let store = opened(&scratch);
+    assert_eq!(title(&store, task), Some(titled("Mine", "user")));
+}

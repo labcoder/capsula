@@ -651,6 +651,11 @@ mod tests {
             .await,
             Some("Lisbon trip".to_owned())
         );
+        assert_eq!(
+            job_title(vec![text(&"x".repeat(4096)), completed.clone()], Then::End).await,
+            Some("x".repeat(80)),
+            "exactly 4 KiB is taken"
+        );
         let over = "x".repeat(crate::jobs::MAX_OUTPUT + 1);
         let call = TurnEvent::ToolCallStarted {
             call: CallId::new("call-1").expect("ascii"),
@@ -660,6 +665,7 @@ mod tests {
             vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
             vec![text("Lisbon")],
             vec![text(&over), completed.clone()],
+            vec![text(&"x".repeat(4095)), text("yy"), completed.clone()],
             vec![call, completed.clone()],
             vec![text("\u{7}"), completed],
         ] {

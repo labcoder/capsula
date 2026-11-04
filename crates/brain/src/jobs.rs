@@ -130,7 +130,7 @@ mod tests {
         assert!(request.instructions.contains("Zqxuser"));
         assert!(!request.instructions.contains('{'));
         assert_eq!(
-            request.choice.map(|choice| choice.effort),
+            request.choice.as_ref().map(|choice| choice.effort),
             Some(Effort::Low)
         );
         assert!(request.tools.is_empty());
@@ -141,6 +141,24 @@ mod tests {
                 text: "a".repeat(ASK_CHARS),
             }]
         );
+        assert_eq!(
+            request.choice.map(|choice| choice.model),
+            Some(ModelSlug::new("gpt-test").expect("valid")),
+            "the task's own model"
+        );
+        for (ask, sent) in [
+            ("é".repeat(2001), "é".repeat(2000)),
+            ("é".repeat(2000), "é".repeat(2000)),
+        ] {
+            assert_eq!(
+                title_request(&snapshot, &ask).input,
+                vec![InputItem::Message {
+                    role: Role::User,
+                    text: sent,
+                }],
+                "cut at 2,000 characters, not bytes"
+            );
+        }
         let unnamed = RunSnapshot {
             user: None,
             ..snapshot
