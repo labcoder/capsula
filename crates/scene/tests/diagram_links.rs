@@ -346,9 +346,10 @@ fn a_detached_bowed_edge_keeps_its_curve_when_its_label_changes() {
 
 #[test]
 fn a_labelled_self_loop_runs_outside_its_node() {
-    for (label, width, middle_x) in [
-        ("retry", 48.0, 256.0),
-        ("a very long wrapped self loop label", 188.0, 326.0),
+    for (direction, label, width, middle_x) in [
+        ("right", "retry", 48.0, 256.0),
+        ("down", "retry", 48.0, 256.0),
+        ("right", "a very long wrapped self loop label", 188.0, 326.0),
     ] {
         let mut scene = new_scene("self_loop");
         let before = LayoutState::new(&scene);
@@ -357,7 +358,7 @@ fn a_labelled_self_loop_runs_outside_its_node() {
             &mut GlobalBudget::default(),
             &before,
             json!({"id":"loop","put":[
-                {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
+                {"diagram":{"id":"diagram","dir":direction,"box":[0,0,360,300]}},
                 {"node":{"id":"a","in":"diagram","label":"A"}},
                 {"edge":{"id":"loop","in":"diagram","from":"a","to":"a","label":label}}
             ]}),
@@ -382,6 +383,102 @@ fn a_labelled_self_loop_runs_outside_its_node() {
         assert_eq!(points[8], Vec2::new(middle_x, 83.0));
         assert_eq!(points[16], Vec2::new(180.0, 56.0));
     }
+}
+
+#[test]
+fn two_labelled_self_loops_have_wire_ordered_lanes() {
+    self_loop_lanes(2);
+}
+
+#[test]
+fn three_labelled_self_loops_have_wire_ordered_lanes() {
+    self_loop_lanes(3);
+}
+
+fn self_loop_lanes(count: usize) {
+    let mut scene = new_scene("loop_lanes");
+    let before = LayoutState::new(&scene);
+    let mut put = vec![
+        json!({"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}}),
+        json!({"node":{"id":"a","in":"diagram","label":"A"}}),
+    ];
+    for name in ["e3", "e2", "e1"].into_iter().skip(3 - count) {
+        put.push(json!({"edge":{"id":name,"in":"diagram","from":"a","to":"a","label":"retrying"}}));
+    }
+    let picture = prepared(
+        &mut scene,
+        &mut GlobalBudget::default(),
+        &before,
+        json!({"id":"lanes","put":put}),
+    );
+    let mut chips = Vec::new();
+    let node = Rect {
+        origin: Vec2::new(140.0, 16.0),
+        size: Vec2::new(80.0, 40.0),
+    };
+    for (name, y) in [("e1", 76.0), ("e2", 102.0), ("e3", 128.0)]
+        .into_iter()
+        .take(count)
+    {
+        let rect = chip(&picture.after, scene.handle(&id(name)).expect("loop"));
+        assert_eq!(
+            rect,
+            Rect {
+                origin: Vec2::new(232.0, y),
+                size: Vec2::new(72.0, 14.0)
+            },
+            "{name} in the {count}-loop scene"
+        );
+        assert!(!rect.intersects(node), "{name} covers its node");
+        assert!(
+            chips.iter().all(|other| !rect.intersects(*other)),
+            "{name} covers an earlier chip"
+        );
+        chips.push(rect);
+    }
+}
+
+#[test]
+fn a_cut_self_loop_keeps_its_primitives_when_its_node_survives() {
+    let mut scene = new_scene("cut_loop");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = prepared(
+        &mut scene,
+        &mut budget,
+        &before,
+        json!({"id":"loop","put":[
+            {"diagram":{"id":"diagram","dir":"right","box":[40,50,360,300]}},
+            {"node":{"id":"a","in":"diagram","label":"A"}},
+            {"edge":{"id":"loop","in":"diagram","from":"a","to":"a","label":"retrying"}},
+            {"anim":{"target":"diagram","track":"pos","keys":[[0,[40,50]]]}}
+        ]}),
+    );
+    let node = scene.handle(&id("a")).expect("node");
+    let handle = scene.handle(&id("loop")).expect("loop");
+    scene
+        .stop(
+            &StopCut {
+                activated: 1,
+                revealed: Bounded::new(vec![node, handle]).expect("cut"),
+            },
+            &mut budget,
+        )
+        .expect("stop");
+    let cut = first.after.cut(&scene).expect("cut layout");
+    let next = prepared(&mut scene, &mut budget, &cut, json!({"id":"noop"}));
+    let old = cut.items();
+    let new = next.after.items();
+    let old = old
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("old loop");
+    let new = new
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("new loop");
+    assert_eq!(old.primitives, new.primitives);
+    assert_eq!(old.transform, new.transform);
 }
 
 #[test]

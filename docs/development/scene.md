@@ -511,11 +511,18 @@ Self-links use a right-to-bottom quadratic outside their own node rather than a
 degenerate point under its text. The control point starts one node-size beyond
 its maximum corner and 24 pixels downward, widening further when needed to keep
 the midpoint chip at least 12 local pixels right of the node. Thus even a wrapped
-label cannot cover its own node. This is not general routing around other nodes.
+label cannot cover its own node. Self-links on the same node use separate downward
+lanes in wire-id order, spacing their midpoint chips by the tallest chip's height
+plus 12 pixels.
+This is not general routing around other nodes. The node-only fit can leave top-arc
+chips above the host margin and long self-loop labels past the inline host's right
+edge; check clipping with the native painter before expanding routing or the fit.
 Every edge whose endpoints still exist is recomputed, even after its last labelled
 partner is removed, so a formerly bowed singleton straightens. Its prepared flow
-axis is retained beside its endpoint anchors; changing the host's default flow
-does not reroute old geometry. Detached edges keep their frozen curves.
+axis is retained beside its endpoint anchors rather than read again from the host
+default. The Presenter currently holds one SurfaceGeometry for its lifetime, so a
+changed host default is not a shell-supported transition. Cut-detached edges keep
+their frozen curves, even when both endpoints survive.
 Arrowhead primitives are regenerated from the current head style and final tangent,
 without assuming the old head count. Unchanged curves and heads retain shared geometry.
 General routing around nodes or group title bands waits until after D1;

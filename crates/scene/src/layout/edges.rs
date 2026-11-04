@@ -175,6 +175,7 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
     let mut pairs = BTreeMap::<_, Vec<_>>::new();
     for (id, object) in &state.objects {
         if let Op::Edge(edge) = &*object.source
+            && object.item.transform == Affine::default()
             && state.objects.contains_key(&edge.from)
             && state.objects.contains_key(&edge.to)
         {
@@ -187,6 +188,14 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
         }
     }
     for ids in pairs.values() {
+        let lane_height = ids
+            .iter()
+            .flat_map(|id| state.objects[id].item.primitives.iter())
+            .filter_map(|primitive| match primitive {
+                Prim::Rect { rect, .. } => Some(rect.size.y),
+                _ => None,
+            })
+            .fold(0.0_f32, f32::max);
         let parallel = ids.len() > 1
             && ids.iter().any(
                 |id| matches!(&*state.objects[id].source, Op::Edge(edge) if edge.label.is_some()),
@@ -220,6 +229,8 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
                     _ => None,
                 });
             let points = if edge.from == edge.to {
+                // shortcut: the node-only fit can leave long loop labels past the host's right edge; include edge bounds or flip lanes when the native painter proves clipping.
+                let lane = f32::from(u16::try_from(index).expect("edge cap fits u16"));
                 quadratic(
                     [
                         Vec2::new(from.max().x, from.center().y),
@@ -230,7 +241,7 @@ pub(super) fn route(state: &mut LayoutState, build: &Build<'_>) -> Result<(), Pr
                             from.size.x.max(
                                 from.size.x * 0.25 + chip_size.map_or(0.0, |size| size.x) + 24.0,
                             ),
-                            from.size.y + 24.0,
+                            from.size.y + 24.0 + 2.0 * lane * (lane_height + 12.0),
                         ),
                 )
             } else {
