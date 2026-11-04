@@ -8,7 +8,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey};
 use zeroize::Zeroizing;
 
-use super::refresh::Rotation;
+use super::refresh::{Rotation, error_of};
 use super::{AccountState, Done, Effect, Job, Live, Step, Why, error, exchanges};
 use crate::connections::error::VaultError;
 use crate::connections::marker::MarkerUpdate;
@@ -115,6 +115,8 @@ pub(super) enum Waiting {
     Exchange(u64, Authorization),
     /// The refresh for a generation.
     Refresh(u64),
+    /// A refresh token for the list; none when no entry could hold it.
+    Discard(Option<Secret<Revocable>>),
 }
 
 impl AccountState {
@@ -314,6 +316,13 @@ impl AccountState {
             );
         }
         effects.push(error(ErrorKey::CredentialsUnavailable, Action::Retry));
+        // A refresh waiting behind the held set can't go out, so its callers are told now.
+        self.waiting
+            .retain(|waiting| !matches!(waiting, Waiting::Refresh(_)));
+        self.fail(
+            error_of(ErrorKey::CredentialsUnavailable, Action::Retry),
+            effects,
+        );
     }
 
     /// Moves work forward: a held set whose attempt moved on goes to the revocation list, the
@@ -329,6 +338,25 @@ impl AccountState {
             let (attempt, authorization) = match self.waiting.pop_front() {
                 None => break,
                 Some(Waiting::Exchange(attempt, authorization)) => (attempt, authorization),
+                Some(Waiting::Discard(entry)) => {
+                    let Some(entry) = entry.filter(|_| self.loaded.exchanges < MAX_EXCHANGES)
+                    else {
+                        tracing::warn!(
+                            "a discarded set no list slot can hold has an unknown outcome"
+                        );
+                        self.jobs.push_back(Queued::Finished {
+                            outcome_unknown: true,
+                        });
+                        continue;
+                    };
+                    self.lane = Lane::Owning {
+                        attempt: self.attempt,
+                        save: Save::List(entry),
+                        held: None,
+                    };
+                    self.jobs.push_back(Queued::Save);
+                    continue;
+                }
                 // A replaced account's refresh is never sent.
                 Some(Waiting::Refresh(generation)) => {
                     if generation == self.generation {
@@ -380,7 +408,19 @@ impl AccountState {
                     Flight::Finished,
                     Job::Marker(MarkerUpdate::RequestFinished { outcome_unknown }),
                 ),
-                Queued::Rotate(account, why) => (Flight::Rotate(why), Job::Rotate(account)),
+                // A save for a replaced account never overwrites its successor.
+                Queued::Rotate(_, Rotation::Verified(generation) | Rotation::Ended(generation))
+                    if generation != self.generation =>
+                {
+                    continue;
+                }
+                Queued::Rotate(account, why) => (
+                    Flight::Rotate(why),
+                    Job::Rotate {
+                        account,
+                        finish: false,
+                    },
+                ),
                 Queued::Save => {
                     let (current, generation_now) = (self.attempt, self.generation);
                     let Lane::Owning { attempt, save, .. } = &mut self.lane else {
@@ -419,7 +459,10 @@ impl AccountState {
                             account,
                         } => (
                             Flight::Rotate(Rotation::Rotated(*generation)),
-                            Job::Rotate(account.clone()),
+                            Job::Rotate {
+                                account: account.clone(),
+                                finish: true,
+                            },
                         ),
                     }
                 }

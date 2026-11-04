@@ -234,6 +234,9 @@ pub struct AccountState {
     validating: Option<u64>,
     /// Callers waiting for the refresh flight.
     tickets: Vec<u64>,
+    /// The generation a session the provider ended left: the registration and email stay, shown
+    /// as `SignInAgain` until the account moves again.
+    ended: Option<u64>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -263,6 +266,7 @@ impl AccountState {
             refreshing: None,
             validating: None,
             tickets: Vec::new(),
+            ended: None,
             jobs: VecDeque::new(),
             flight: None,
             shown: None,
@@ -294,18 +298,24 @@ impl AccountState {
             return AccountView::SigningIn;
         }
         match self.loaded.account.as_ref().map(Secret::expose) {
-            Some(account) if account.tokens.is_some() => AccountView::SignedIn {
-                email: account
-                    .email
-                    .as_ref()
-                    .and_then(|email| AccountEmail::new(email).ok()),
-                plan: if account.plan_enabled {
-                    PlanState::Enabled
-                } else {
-                    PlanState::Declined
-                },
-                recovery: self.held().then_some(AccountRecovery::Retry),
-            },
+            Some(account) if account.tokens.is_some() || self.session_ended() => {
+                AccountView::SignedIn {
+                    email: account
+                        .email
+                        .as_ref()
+                        .and_then(|email| AccountEmail::new(email).ok()),
+                    plan: if account.plan_enabled {
+                        PlanState::Enabled
+                    } else {
+                        PlanState::Declined
+                    },
+                    recovery: if self.session_ended() {
+                        Some(AccountRecovery::SignInAgain)
+                    } else {
+                        self.held().then_some(AccountRecovery::Retry)
+                    },
+                }
+            }
             _ => AccountView::SignedOut {
                 revocation_unconfirmed: self.loaded.notice,
             },

@@ -56,6 +56,27 @@ fn identity(subject: &str) -> Result<VerifiedIdentity, IdentityError> {
     })
 }
 
+/// What a session the provider ended leaves: the registration and its display email.
+fn ended() -> Account {
+    Account {
+        email: Some(Zeroizing::new(EMAIL.to_owned())),
+        ..registration()
+    }
+}
+
+fn full_list(vault: &mut Vault<FakeStore>) {
+    let entries = (0..MAX_EXCHANGES)
+        .map(|n| Revocable {
+            client_id: Zeroizing::new(CLIENT.to_owned()),
+            refresh_token: Zeroizing::new(format!("refresh-{n}")),
+            added_at: NOW,
+            origin: Origin::Exchange,
+        })
+        .collect();
+    let list = crate::connections::records::RevocationList { entries };
+    committed(&vault.save_revocations(&Secret::new(list)));
+}
+
 fn registration() -> Account {
     Account {
         client_id: Zeroizing::new(CLIENT.to_owned()),
@@ -252,11 +273,18 @@ fn a_session_the_provider_ended_keeps_only_the_registration() {
             [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))],
             "{code:?}"
         );
-        assert_eq!(h.account(), Some(registration()), "{code:?}");
-        assert_eq!(h.view(), &signed_out(), "{code:?}");
+        assert_eq!(h.account(), Some(ended()), "{code:?}");
+        assert_eq!(
+            h.view(),
+            &signed_in(PlanState::Declined, Some(AccountRecovery::SignInAgain)),
+            "{code:?}"
+        );
         assert_eq!(h.marker(), None, "{code:?}: a typed refusal issued nothing");
         h.access(2, NOW);
         assert_eq!(h.answers[1..], [(2, Err(Denied::Unusable))], "{code:?}");
+        h.op(AccountOp::SignOut);
+        assert_eq!(h.view(), &signed_out(), "{code:?}: nothing was listed");
+        assert_eq!(h.account(), Some(registration()), "{code:?}");
     }
 }
 
@@ -320,17 +348,112 @@ fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
 }
 
+/// A set whose token is for another subject, or is no valid token, ends the session, and its
+/// refresh token is listed as an exchange's would be; with the list full, it's unknown.
 #[test]
-fn a_rotated_set_for_another_subject_ends_the_session() {
-    let mut h = Harness::seeded("refresh-other", account_at(NOW, None));
+fn a_rotated_set_that_fails_its_check_is_listed_and_ends_the_session() {
+    for failure in [IdentityError::OtherAccount, IdentityError::Token] {
+        let mut h = Harness::seeded("refresh-other", account_at(NOW, None));
+        h.access(1, NOW);
+        h.refreshed(rotated(Some("id-new")));
+        h.validated(Err(failure.clone()));
+        assert_eq!(
+            h.answers,
+            [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))],
+            "{failure:?}"
+        );
+        assert_eq!(h.account(), Some(ended()), "{failure:?}");
+        assert_eq!(
+            h.revocations(),
+            [(
+                CLIENT.to_owned(),
+                "refresh-new".to_owned(),
+                NOW,
+                Origin::Exchange
+            )],
+            "{failure:?}"
+        );
+        assert_eq!(h.marker(), marker(&["sweep"]), "{failure:?}");
+    }
+    let mut h = Harness::seeded("refresh-other-full", |vault| {
+        account_at(NOW, None)(vault);
+        full_list(vault);
+    });
     h.access(1, NOW);
     h.refreshed(rotated(Some("id-new")));
     h.validated(Err(IdentityError::OtherAccount));
+    assert_eq!(h.revocations().len(), MAX_EXCHANGES);
+    assert_eq!(h.marker(), marker(&["sweep", "outcome_unknown"]));
+}
+
+/// H1: a check that lands while a sign-in's commit runs never overwrites the new account.
+#[test]
+fn a_check_that_lands_during_a_sign_in_commit_never_overwrites_it() {
+    let mut h = Harness::seeded("refresh-commit-race", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(rotated(Some("id-new")));
+    h.op(AccountOp::SignIn);
+    h.callback(CLIENT);
+    h.hold = true;
+    h.reply(received(Some("refresh-signed-in"), "subject-1", PLAN));
+    assert!(matches!(h.held, Some(Job::Commit(_))));
+    h.validated(identity("subject-1"));
+    h.release();
+    assert_eq!(h.refresh_token(), Some("refresh-signed-in".to_owned()));
+    assert_eq!(h.answers, [(1, Err(Denied::Unusable))]);
+}
+
+/// H2: the check's save is off the lane, so it never clears an exchange's pending flag.
+#[test]
+fn a_check_saved_while_a_sign_in_is_out_leaves_its_flag_set() {
+    let mut h = Harness::seeded("refresh-check-flag", account_at(NOW, None));
+    h.access(1, NOW);
+    h.refreshed(rotated(Some("id-new")));
+    h.op(AccountOp::SignIn);
+    h.callback(CLIENT);
+    assert_eq!(h.sent.len(), 1);
+    h.validated(identity("subject-1"));
+    assert_eq!(h.answers, [(1, bearer("access-new"))]);
+    assert_eq!(h.marker(), marker(&["request_pending"]));
+}
+
+/// M1: a held list save goes again at the next use, which then refreshes as usual.
+#[test]
+fn a_held_list_save_is_saved_again_at_the_next_use() {
+    let mut h = Harness::seeded("refresh-held-list", account_at(NOW, None));
+    h.access(1, NOW);
+    h.store.0.lock().expect("fake lock").refusing = true;
+    h.refreshed(Err(ExchangeError::Unusable {
+        refresh_token: Some(secret("refresh-unusable")),
+    }));
+    h.store.0.lock().expect("fake lock").refusing = false;
+    h.access(2, NOW);
     assert_eq!(
-        h.answers,
-        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
+        h.refreshes.len(),
+        2,
+        "the refresh goes once the list is saved"
     );
-    assert_eq!(h.account(), Some(registration()));
+    h.refreshed(rotated(None));
+    assert_eq!(h.answers[1..], [(2, bearer("access-new"))]);
+    assert_eq!(h.revocations()[0].1, "refresh-unusable");
+}
+
+/// A refresh out at sign-out that didn't rotate left the old token in place: nothing's unknown.
+#[test]
+fn a_refresh_out_at_sign_out_that_kept_its_token_leaves_nothing_unknown() {
+    let mut h = Harness::seeded("refresh-kept-at-sign-out", account_at(NOW, None));
+    h.access(1, NOW);
+    h.op(AccountOp::SignOut);
+    h.refreshed(Ok(TokenSet {
+        refresh_token: None,
+        ..rotated(None).expect("a set")
+    }));
+    assert_eq!(
+        run(&h.revoking[0]),
+        [("refresh-old".to_owned(), Origin::Account)]
+    );
+    h.sign_out_confirmed();
+    assert_eq!(h.view(), &signed_out());
 }
 
 #[test]
@@ -457,16 +580,7 @@ fn an_unusable_refresh_that_named_a_successor_lists_it() {
 
     let mut h = Harness::seeded("refresh-unusable-full", |vault| {
         account_at(NOW, None)(vault);
-        let entries = (0..MAX_EXCHANGES)
-            .map(|n| Revocable {
-                client_id: Zeroizing::new(CLIENT.to_owned()),
-                refresh_token: Zeroizing::new(format!("refresh-{n}")),
-                added_at: NOW,
-                origin: Origin::Exchange,
-            })
-            .collect();
-        let list = crate::connections::records::RevocationList { entries };
-        committed(&vault.save_revocations(&Secret::new(list)));
+        full_list(vault);
     });
     h.access(1, NOW);
     h.refreshed(unusable());

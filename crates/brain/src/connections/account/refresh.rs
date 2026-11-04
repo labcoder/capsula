@@ -9,14 +9,12 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{Action, ErrorKey, UserError};
 use zeroize::Zeroizing;
 
-use super::lane::{Lane, Queued, Save, Waiting, listed};
+use super::lane::{Lane, Queued, Save, Waiting};
 use super::{AccountState, Denied, Effect, classify, identity_key};
 use crate::connections::error::{Recovery, VaultError};
 use crate::connections::oauth::exchange::{ExchangeError, TokenSet};
 use crate::connections::oauth::id_token::{IdentityError, permits_plan};
-use crate::connections::records::{
-    Account, MAX_EXCHANGES, Origin, Record as _, Revocable, Tokens, entry_fits,
-};
+use crate::connections::records::{Account, Origin, Record as _, Revocable, Tokens, entry_fits};
 use crate::connections::vault::SaveResult;
 
 /// Local policy: refresh when the access token has this long left (design §6).
@@ -29,8 +27,8 @@ pub(super) enum Rotation {
     Rotated(u64),
     /// That set once verified, with its pending flag cleared.
     Verified(u64),
-    /// The registration a session that ended leaves.
-    Ended,
+    /// The registration a session that ended leaves, for the generation after it.
+    Ended(u64),
 }
 
 impl AccountState {
@@ -54,15 +52,19 @@ impl AccountState {
             return;
         }
         self.refreshing = Some(self.generation);
-        // A rotated set held by a refused save is saved again, never requested again.
+        // A held save goes again first; a held rotated set is never requested again, and its
+        // commit answers.
         if let Lane::Owning {
-            save: Save::Rotated { .. },
+            save,
             held: held @ Some(_),
             ..
         } = &mut self.lane
         {
             *held = None;
-            return self.jobs.push_back(Queued::Save);
+            self.jobs.push_back(Queued::Save);
+            if matches!(save, Save::Rotated { .. }) {
+                return;
+            }
         }
         if pending {
             return self.validate(effects);
@@ -149,19 +151,11 @@ impl AccountState {
             // An unusable answer that named a successor: the list owns it, as an exchange's.
             Err(ExchangeError::Unusable {
                 refresh_token: Some(token),
-            }) if self.loaded.exchanges < MAX_EXCHANGES
-                && entry_fits(client.expose(), token.expose()) =>
-            {
+            }) => {
                 if current {
                     self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
                 }
-                self.lane = Lane::Owning {
-                    attempt: self.attempt,
-                    save: listed(client.expose().clone(), token.expose().clone()),
-                    held: None,
-                };
-                self.jobs.push_back(Queued::Save);
-                return;
+                return self.discard(client.expose(), token.expose());
             }
             Err(failure) => {
                 let (outcome_unknown, key) = classify(&failure);
@@ -175,6 +169,7 @@ impl AccountState {
                 return;
             }
         };
+        let rotated = tokens.refresh_token.is_some();
         let save = if current {
             self.rotated_set(tokens, now).map(|account| Save::Rotated {
                 generation,
@@ -195,9 +190,10 @@ impl AccountState {
                 })
         };
         let Some(save) = save else {
-            tracing::warn!("a refreshed set can't be saved; its outcome is unknown");
+            tracing::warn!("a refreshed set can't be saved");
+            // A stale refresh that didn't rotate left the old token in place.
             self.jobs.push_back(Queued::Finished {
-                outcome_unknown: true,
+                outcome_unknown: current || rotated,
             });
             if current {
                 self.fail(error_of(ErrorKey::SignInFailed, Action::Retry), effects);
@@ -266,10 +262,6 @@ impl AccountState {
             (Rotation::Rotated(_), SaveResult::NotCommitted(failure)) => {
                 tracing::warn!(%failure, "a rotated set is held for another save");
                 self.hold(effects);
-                self.fail(
-                    error_of(ErrorKey::CredentialsUnavailable, Action::Retry),
-                    effects,
-                );
             }
             (Rotation::Verified(generation), SaveResult::Committed { .. }) => {
                 if generation != self.generation || self.leaving.is_some() {
@@ -291,10 +283,10 @@ impl AccountState {
                     effects,
                 );
             }
-            (Rotation::Ended, SaveResult::NotCommitted(failure)) => {
+            (Rotation::Ended(_), SaveResult::NotCommitted(failure)) => {
                 tracing::warn!(%failure, "an ended session's tokens stay on disk until the next refresh");
             }
-            (Rotation::Ended, SaveResult::Committed { .. }) => {}
+            (Rotation::Ended(_), SaveResult::Committed { .. }) => {}
         }
     }
 
@@ -322,7 +314,7 @@ impl AccountState {
                     Rotation::Verified(generation),
                 ));
             }
-            Err(IdentityError::OtherAccount) => self.end_session(effects),
+            Err(IdentityError::OtherAccount | IdentityError::Token) => self.reject_set(effects),
             Err(failure) => {
                 tracing::warn!(%failure, "a rotated set's identity check failed; it stays pending");
                 self.fail(error_of(identity_key(failure), Action::Retry), effects);
@@ -343,7 +335,7 @@ impl AccountState {
         });
         // A pending set with no verified subject or no token to check can never pass.
         let Some((client, subject, id_token)) = parts else {
-            return self.end_session(effects);
+            return self.reject_set(effects);
         };
         self.validating = Some(self.generation);
         effects.push(Effect::Validate {
@@ -367,20 +359,51 @@ impl AccountState {
     /// The session ended: the tokens go, the registration stays, and the account is replaced.
     fn end_session(&mut self, effects: &mut Vec<Effect>) {
         self.fail(error_of(ErrorKey::SessionEnded, Action::SignIn), effects);
-        if let Some(account) = &self.loaded.account {
-            let account = account.expose();
-            let registration = Secret::new(Account {
-                client_id: account.client_id.clone(),
-                subject: account.subject.clone(),
-                email: None,
-                plan_enabled: false,
-                tokens: None,
-            });
-            self.loaded.account = Some(registration.clone());
-            self.jobs
-                .push_back(Queued::Rotate(registration, Rotation::Ended));
-        }
         self.moved(effects);
+        let Some(account) = &self.loaded.account else {
+            return;
+        };
+        let account = account.expose();
+        let registration = Secret::new(Account {
+            plan_enabled: false,
+            tokens: None,
+            ..account.clone()
+        });
+        self.loaded.account = Some(registration.clone());
+        self.ended = Some(self.generation);
+        self.jobs.push_back(Queued::Rotate(
+            registration,
+            Rotation::Ended(self.generation),
+        ));
+    }
+
+    pub(super) fn session_ended(&self) -> bool {
+        self.ended == Some(self.generation)
+    }
+
+    /// A rotated set that can't be verified: its token goes to the list, and the session ends.
+    fn reject_set(&mut self, effects: &mut Vec<Effect>) {
+        let account = self.loaded.account.as_ref().map(Secret::expose);
+        if let Some((client, token)) = account.and_then(|account| {
+            let tokens = account.tokens.as_ref()?;
+            Some((account.client_id.clone(), tokens.refresh_token.clone()))
+        }) {
+            self.discard(&client, &token);
+        }
+        self.end_session(effects);
+    }
+
+    /// Hands a refresh token to the revocation list once the lane is free, as an exchange's set.
+    fn discard(&mut self, client: &Zeroizing<String>, token: &Zeroizing<String>) {
+        let entry = entry_fits(client, token).then(|| {
+            Secret::new(Revocable {
+                client_id: client.clone(),
+                refresh_token: token.clone(),
+                added_at: 0,
+                origin: Origin::Exchange,
+            })
+        });
+        self.waiting.push_front(Waiting::Discard(entry));
     }
 
     /// The account's token set is replaced or removed: anything for the old one is stale, and
@@ -406,7 +429,7 @@ impl AccountState {
         self.answer(&result, effects);
     }
 
-    fn fail(&mut self, failed: UserError, effects: &mut Vec<Effect>) {
+    pub(super) fn fail(&mut self, failed: UserError, effects: &mut Vec<Effect>) {
         self.answer(&Err(Denied::Failed(failed)), effects);
     }
 
@@ -426,7 +449,7 @@ impl AccountState {
     }
 }
 
-fn error_of(key: ErrorKey, action: Action) -> UserError {
+pub(super) fn error_of(key: ErrorKey, action: Action) -> UserError {
     UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
 }
 

@@ -320,20 +320,28 @@ sequenceDiagram
     M-->>C: bearer
 ```
 
-- The rotated set is saved before any further network work. A refused save holds it in memory
-  with the lane; the next `access` saves it again and never asks for another token.
+- The rotated set is saved before any further network work. A refused lane save holds its set
+  in memory and tells waiting callers `CredentialsUnavailable`. The next `access` saves any held
+  set again first, and never asks for another token for a held rotated set.
+- The identity check's save and an ended session's save run off the lane. They never clear the
+  lane's pending flag, and one queued for a generation that has since moved is dropped, so it
+  can't overwrite a newer sign-in.
 - `pending_identity_validation` is durable, so a set left pending by a crash is checked before
   its first use after the restart. A failed check leaves it pending and blocks access; the next
   `access` checks again without a second refresh. A refresh that leaves out the identity
   token or the refresh token keeps the saved one and isn't pending.
 - `verify_refreshed` binds the token to the subject this account already verified, with no
   nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
-  Another subject ends the session.
-- Ending a session (a `SignInAgain` code, another subject, or a pending set with nothing to
-  check) saves the registration alone, answers `SessionEnded` with Sign in, and moves the
-  generation.
+  Another subject or an invalid token, like a pending set with nothing to check, ends the session
+  and lists the set's refresh token as an exchange's would be (unknown when no slot is free).
+  Network, status, discovery and clock failures leave the set pending.
+- Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
+  email, answers `SessionEnded` with Sign in, and moves the generation. The view is
+  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out, in this process only:
+  after a restart it's `SignedOut`.
 - A result that arrives under an old generation never becomes the account: during a sign-out its
-  rotated token replaces the listed `Account` entry, so the successor is what gets revoked.
+  rotated token replaces the listed `Account` entry, so the successor is what gets revoked. One
+  that didn't rotate leaves the old token in place, so nothing is unknown.
 - An unusable answer that names a refresh token lists it as an exchange's would be, when an
   exchange slot is free and its entry fits; otherwise its outcome is unknown.
 - A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
