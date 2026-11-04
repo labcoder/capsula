@@ -44,6 +44,7 @@ const BODY_REACH: f32 = 0.5 + FILLET;
 const TILE: usize = 8;
 /// The tile mask's bit for the root fillet, above the capsules'.
 const ROOT: u16 = 1 << 15;
+const _: () = assert!(NECK <= 15, "the capsules' mask bits stay below ROOT's");
 /// The largest scale the goo is shaded at; above it GPUI scales the image up.
 pub(crate) const MAX_SCALE: f32 = 1.0;
 
@@ -512,11 +513,6 @@ impl GooShader {
         };
         let tile = f32::from(u8::try_from(TILE).expect("a small tile"));
         let px = 1.0 / scale;
-        let reach = tile * px * 0.75 + s * 0.06;
-        // Away from the body, a field only matters within a pixel and a half of the goo's edge:
-        // nearer, a pixel is drawn or is a drawn pixel's neighbour for its normal. Two pixels and
-        // a wider tile reach allow for the tapered field's slope.
-        let edge = tile * px * 0.9 + 2.0 * px;
         let tw = w.div_ceil(TILE);
         for (t, slot) in self.tiles[..tw * h.div_ceil(TILE)].iter_mut().enumerate() {
             let c = r.origin
@@ -527,24 +523,7 @@ impl GooShader {
                     ),
                     px,
                 );
-            let near_body = joins && (c - neck.body).len() < body_reach + reach;
-            // Near the body its fillet can pull the goo out further.
-            let seg_reach = if near_body {
-                tile * px * 0.75 + s * 0.15
-            } else {
-                edge
-            };
-            let mut mask = 0_u16;
-            for (k, &(a, b, ra, rb)) in segs.iter().enumerate() {
-                if tapered(c, a, b, ra, rb) < seg_reach {
-                    mask |= 1 << k;
-                }
-            }
-            let dock = (c - neck.dock).len() - tile * px * 0.75;
-            if root_r > 0.0 && dock / 2.2 - root_r < seg_reach + s * ROOT_BLEND {
-                mask |= ROOT;
-            }
-            *slot = (mask != 0 || near_body, mask);
+            *slot = tile_slot(neck, &segs, root_r, piece, px, c);
         }
         let (above, row) = (&mut self.above[..w], &mut self.row[..w]);
         row.fill(f32::MAX);
@@ -561,20 +540,7 @@ impl GooShader {
                 let p = r.origin + v2((index_f32(i) + 0.5) * px, (index_f32(j) + 0.5) * px);
                 let q = to_body(p);
                 let near_body = joins && (p - neck.body).len() < body_reach;
-                let neck_at = |p: Vec2| {
-                    let mut d = f32::MAX;
-                    for (k, &(a, b, ra, rb)) in segs.iter().enumerate() {
-                        if mask & (1 << k) != 0 {
-                            d = d.min(tapered(p, a, b, ra, rb));
-                        }
-                    }
-                    if mask & ROOT == 0 {
-                        return d;
-                    }
-                    // A soft fillet where the neck leaves the line, so it grows out of the dock.
-                    let rel = p - neck.dock;
-                    smin(d, v2(rel.x / 2.2, rel.y).len() - root_r, s * ROOT_BLEND)
-                };
+                let neck_at = |p: Vec2| neck_field(neck, &segs, root_r, mask, p);
                 let body_at = |p: Vec2| {
                     let q = squashed(to_body(p));
                     shape.sdf(v3(q.x, q.y, 0.0)) / units_per_px
@@ -665,6 +631,65 @@ fn index_f32(i: usize) -> f32 {
     i as f32
 }
 
+/// Whether the tile centred at `c` needs shading, and the capsules (bit `k` for capsule `k`)
+/// and root fillet ([`ROOT`]) whose field can matter in it.
+fn tile_slot(
+    neck: &Neck,
+    segs: &[Segment; NECK],
+    root_r: f32,
+    piece: Piece,
+    px: f32,
+    c: Vec2,
+) -> (bool, u16) {
+    let s = neck.body_size;
+    // The drip hangs from the line, apart from the body; the neck and the stub melt into it.
+    let joins = piece != Piece::Drip;
+    let tile = f32::from(u8::try_from(TILE).expect("a small tile"));
+    let near_body = joins && (c - neck.body).len() < s * BODY_REACH + tile * px * 0.75 + s * 0.06;
+    // Near the body its fillet can pull the goo out further. Away from it, a field only matters
+    // within a pixel and a half of the goo's edge: nearer, a pixel is drawn or is a drawn
+    // pixel's neighbour for its normal. Two pixels and a wider tile reach allow for the tapered
+    // field's slope.
+    let seg_reach = if near_body {
+        tile * px * 0.75 + s * 0.15
+    } else {
+        tile * px * 0.9 + 2.0 * px
+    };
+    // smin(a, b, k) ignores an operand once it's k above the other and dips at most k/4, so where
+    // the root blends in, either side can change a pixel out to the reach plus 5k/4.
+    let blend = s * ROOT_BLEND * 1.25;
+    let dock = (c - neck.dock).len() - tile * px * 0.75;
+    let root = root_r > 0.0 && dock / 2.2 - root_r < seg_reach + blend;
+    let reach = if root { seg_reach + blend } else { seg_reach };
+    let mut mask = if root { ROOT } else { 0 };
+    for (k, &(a, b, ra, rb)) in segs.iter().enumerate() {
+        if tapered(c, a, b, ra, rb) < reach {
+            mask |= 1 << k;
+        }
+    }
+    (mask != 0 || near_body, mask)
+}
+
+/// The neck's field at `p` from the capsules and root fillet `mask` keeps.
+fn neck_field(neck: &Neck, segs: &[Segment; NECK], root_r: f32, mask: u16, p: Vec2) -> f32 {
+    let mut d = f32::MAX;
+    for (k, &(a, b, ra, rb)) in segs.iter().enumerate() {
+        if mask & (1 << k) != 0 {
+            d = d.min(tapered(p, a, b, ra, rb));
+        }
+    }
+    if mask & ROOT == 0 {
+        return d;
+    }
+    // A soft fillet where the neck leaves the line, so it grows out of the dock.
+    let rel = p - neck.dock;
+    smin(
+        d,
+        v2(rel.x / 2.2, rel.y).len() - root_r,
+        neck.body_size * ROOT_BLEND,
+    )
+}
+
 /// Distance to a capsule whose radius tapers from `ra` at `a` to `rb` at `b`.
 fn tapered(p: Vec2, a: Vec2, b: Vec2, ra: f32, rb: f32) -> f32 {
     let ba = b - a;
@@ -679,8 +704,8 @@ fn tapered(p: Vec2, a: Vec2, b: Vec2, ra: f32, rb: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BREAK_AT, Curve, GooMismatch, GooShader, MAX_SCALE, Neck, Piece, Rect, SNAP_LEN, State,
-        pixels, tapered,
+        BODY_REACH, BREAK_AT, Curve, FILLET, GooMismatch, GooShader, MAX_SCALE, NECK, Neck, Piece,
+        ROOT, Rect, SNAP_LEN, State, TILE, neck_field, pixels, tapered, tile_slot,
     };
     use crate::presence::kumo::expression::Motion;
     use crate::presence::kumo::frame::FrameState;
@@ -884,6 +909,107 @@ mod tests {
             .filter(|&(.., a)| a > 0)
             .collect();
         assert!(clipped.is_empty(), "{r:?} clips {clipped:?}");
+    }
+
+    /// Where the culled field differs from one with every capsule and the root in every tile:
+    /// at each pixel that's drawn or near enough to join the body, at its left and upper
+    /// neighbours with their own tiles' masks, and at the forward samples its normal falls
+    /// back to. A drawn pixel in a tile left unshaded counts too.
+    fn culled_wrongly(neck: &Neck, piece: Piece, scale: f32) -> Vec<(f32, f32, f32, f32)> {
+        let (segs, root_r) = neck.piece(piece).expect("goo");
+        let r = neck.bounds(piece).expect("goo");
+        let (w, h) = GooShader::size(r, scale);
+        let px = 1.0 / scale;
+        let tile = super::index_f32(TILE);
+        let all = ((1_u16 << NECK) - 1) | if root_r > 0.0 { ROOT } else { 0 };
+        let at = |i: usize, j: usize| {
+            r.origin
+                + v2(
+                    (super::index_f32(i) + 0.5) * px,
+                    (super::index_f32(j) + 0.5) * px,
+                )
+        };
+        let slot = |i: usize, j: usize| {
+            let c = r.origin
+                + v2(
+                    (super::index_f32(i / TILE * TILE) + tile * 0.5) * px,
+                    (super::index_f32(j / TILE * TILE) + tile * 0.5) * px,
+                );
+            tile_slot(neck, &segs, root_r, piece, px, c)
+        };
+        let full = |p: Vec2| neck_field(neck, &segs, root_r, all, p);
+        let gate = neck.body_size * FILLET * 1.5;
+        let mut bad = Vec::new();
+        for j in 0..h {
+            for i in 0..w {
+                let p = at(i, j);
+                let near =
+                    piece != Piece::Drip && (p - neck.body).len() < neck.body_size * BODY_REACH;
+                if full(p) >= 0.5 * px && !(near && full(p) <= gate) {
+                    continue;
+                }
+                let (busy, mask) = slot(i, j);
+                if !busy {
+                    bad.push((p.x, p.y, f32::NAN, full(p)));
+                    continue;
+                }
+                let mut samples = vec![(p, mask), (p + v2(px, 0.0), mask), (p + v2(0.0, px), mask)];
+                if i > 0 {
+                    samples.push((at(i - 1, j), slot(i - 1, j).1));
+                }
+                if j > 0 {
+                    samples.push((at(i, j - 1), slot(i, j - 1).1));
+                }
+                for (q, m) in samples {
+                    let (got, want) = (neck_field(neck, &segs, root_r, m, q), full(q));
+                    if (got - want).abs() > 1e-3 {
+                        bad.push((q.x, q.y, got, want));
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn the_cull_keeps_every_operand_a_drawn_pixel_needs() {
+        let mut states = Vec::new();
+        // CAPS-146's reversing pull: settled one way, then a zero step to the other side.
+        let mut reversing = Neck::new(DOCK, BODY);
+        for _ in 0..144 {
+            reversing.update(FRAME, v2(294.0, 96.08));
+        }
+        reversing.update(0.0, v2(479.0, 74.08));
+        states.push((reversing, Piece::Neck));
+        // CAPS-145's settled 140 px diagonal pull, the dock at the origin.
+        let mut diagonal = Neck::new(v2(0.0, 0.0), BODY);
+        diagonal.ctrl = v2(-45.461_364, 64.428_41);
+        diagonal.body = v2(-90.922_73, 116.536_835);
+        states.push((diagonal, Piece::Neck));
+        states.push((pulled(140.0), Piece::Neck));
+        // Kept inside the snap circle, sideways as well as straight down.
+        for len in [0.0, 30.0, 60.0, 120.0] {
+            for dx in [-60.0, 0.0, 45.0] {
+                let mut neck = Neck::new(DOCK, BODY);
+                for _ in 0..72 {
+                    neck.update(FRAME, below(len) + v2(dx, 0.0));
+                }
+                states.push((neck, Piece::Neck));
+            }
+        }
+        for piece in [Piece::Drip, Piece::Stub] {
+            states.push((snapped(150.0), piece));
+        }
+        let mut bad = Vec::new();
+        for (k, (neck, piece)) in states.iter().enumerate() {
+            for scale in [0.5, MAX_SCALE] {
+                let wrong = culled_wrongly(neck, *piece, scale);
+                if !wrong.is_empty() {
+                    bad.push((k, *piece, scale, wrong.len(), wrong[0]));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     /// Every pixel with alpha that a 40 px wider image of `piece` on the same grid holds outside
