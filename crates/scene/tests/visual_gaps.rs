@@ -237,10 +237,14 @@ fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
     for index in [3, 4] {
         value["put"][index]["edge"]["to"] = json!("a");
     }
-    value["put"]
-        .as_array_mut()
-        .expect("put")
-        .push(json!({"anim":{"target":"b","track":"pos","keys":[[0,[0,-30]]]}}));
+    value["put"][4]["edge"]["in"] = json!("overlap");
+    value["put"][4]["edge"]["from"] = json!("c");
+    value["put"][4]["edge"]["to"] = json!("c");
+    value["put"].as_array_mut().expect("put").extend([
+        json!({"anim":{"target":"b","track":"pos","keys":[[0,[0,-30]]]}}),
+        json!({"diagram":{"id":"overlap","dir":"right","box":[0,0,360,300]}}),
+        json!({"node":{"id":"c","in":"overlap","label":"A"}}),
+    ]);
     let picture = prepared(&mut scene, &mut GlobalBudget::default(), &before, value);
     for name in ["e1", "e2"] {
         assert_eq!(
