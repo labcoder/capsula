@@ -356,7 +356,7 @@ fn a_rotated_set_that_fails_its_check_is_listed_and_ends_the_session() {
         let mut h = Harness::seeded("refresh-other", account_at(NOW, None));
         h.access(1, NOW);
         h.refreshed(rotated(Some("id-new")));
-        h.validated(Err(failure.clone()));
+        h.validated(Err(failure));
         assert_eq!(
             h.answers,
             [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))],
