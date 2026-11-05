@@ -3,7 +3,6 @@
 
 #[cfg(debug_assertions)]
 mod accounts_fixture;
-mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
 pub(crate) mod drag;
@@ -28,7 +27,6 @@ mod pull_dock;
 mod pull_picture;
 mod pulling;
 mod settings;
-mod settings_view;
 #[cfg(test)]
 mod tests;
 mod text;
