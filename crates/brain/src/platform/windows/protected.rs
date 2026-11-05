@@ -758,9 +758,8 @@ impl Security {
         let descriptor = Descriptor::new(sddl).expect("the SDDL parses");
         let (mut owner, mut defaulted) = (std::ptr::null_mut(), 0);
         // SAFETY: the descriptor is live and both outputs are writable locals.
-        let read = unsafe {
-            GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut defaulted)
-        };
+        let read =
+            unsafe { GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut defaulted) };
         assert_ne!(read, 0, "the owner reads");
         let (mut present, mut dacl): (_, *mut ACL) = (0, std::ptr::null_mut());
         // SAFETY: the descriptor is live and every output is a writable local.
