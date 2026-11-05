@@ -93,6 +93,10 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         text.typing.open();
+        self.chat.update(cx, |state, cx| {
+            state.show_for(self.runs.thread());
+            cx.notify();
+        });
         let draft = text
             .draft
             .take()
@@ -126,6 +130,7 @@ impl Presence {
             );
         }
         // The placeholder steps count as a drawing only while the panel shows them.
+        self.request_pages(cx);
         self.runs_changed(cx)
     }
 
@@ -231,6 +236,10 @@ impl Presence {
         if !text.typing.close(reason) {
             return Ok(());
         }
+        self.chat.update(cx, |state, cx| {
+            state.hide();
+            cx.notify();
+        });
         if cx.has_global::<Diagnostics>() {
             text.draft = Some(text.input.read(cx).value());
         }
@@ -319,7 +328,15 @@ impl Presence {
     }
 
     /// Shows the drawing's steps and the end of the newest answer in the typing panel.
-    pub(super) fn refresh_conversation(&self, cx: &mut Context<'_, Self>) {
+    pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
+        if self.text.as_ref().is_some_and(|text| text.typing.visible) {
+            self.chat.update(cx, |state, cx| {
+                if state.follow(self.runs.thread()) {
+                    cx.notify();
+                }
+            });
+            self.request_pages(cx);
+        }
         if let Some(panel) = &self.thread_panel {
             let target = self.runs.target();
             panel.view.update(cx, |view, cx| {
@@ -411,6 +428,21 @@ pub(super) struct TextView {
     notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
+}
+
+impl TextView {
+    pub(super) fn restore(
+        &self,
+        text: kumochi_protocol::message::Content,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.input.read(cx).value().is_empty() {
+            self.input.update(cx, |input, cx| {
+                input.set_value(text.into_string(), window, cx);
+            });
+        }
+    }
 }
 
 impl Render for TextView {
@@ -594,6 +626,29 @@ mod tests {
             cx.notify();
         });
         assert_eq!(drawn(cx, window), [false, false]);
+    }
+
+    #[gpui::test]
+    fn reconnect_restores_an_empty_composer_without_overwriting_a_new_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view) = open(cx, None);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.restore("Exact draft: café ✓".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), "Exact draft: café ✓");
+                    view.input
+                        .update(cx, |input, cx| input.set_value("newer draft", window, cx));
+                    view.restore("older failed turn".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), "newer draft");
+                    view.input
+                        .update(cx, |input, cx| input.set_value(" ", window, cx));
+                    view.restore("older failed turn".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), " ");
+                });
+            })
+            .expect("live typing window");
     }
 
     #[test]

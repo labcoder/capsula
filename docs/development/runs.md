@@ -25,6 +25,16 @@ Each submit captures the target in `TextSubmit` and queues the current revision 
 even for New task. Disconnect clears the main id and pending submissions, so a previous
 connection's id cannot be reused before the new view arrives.
 
+The shell also retains the submitted text until its named run ends. A named Failed state
+with SessionEnded, AccountRefused, SignInNeeded, ClaudeCodeSignedOut, AnthropicKeyRejected or
+RenewalUnconfirmed returns that text once, only while its captured selection revision and
+thread still match the current input target. The typing view restores it only into an empty
+input; even whitespace is a newer draft. No frame resends a turn automatically. General
+account errors and TurnRefused cannot restore text because neither identifies a failed run.
+Esc, a new submit attempt, a target change, disconnect, a new brain incarnation, confirmed
+deletion, success or interruption discard the recovery content. Duplicate terminal states
+cannot offer it again. Recovery carriers redact their text in Debug output.
+
 While `Target::New` has a submission pending at the current revision, another submit is
 refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
 stays, so after the first `RunState` adopts the task, retrying continues that task. Pending
@@ -123,6 +133,9 @@ sequenceDiagram
   once while it waits.
 - **Text goes out in pieces of at most 64 KiB**, split on character boundaries, so every frame
   fits the data pipe.
+- **A voice run** will show `Listening` while the key is held and `Transcribing` while speech
+  becomes text; both phases are reserved until hold admission lands. Its `Transcript`, `SegmentQueued` and `SpeechPcm` frames belong to the run, so
+  the shell fences them like `AssistantText`.
 - **Streamed text is stored with each step and with the outcome**, in the same transaction.
   shortcut: text after the last step is lost if the brain dies mid-run; store it on a timer once
   real engines stream long answers (slice 3).
@@ -164,7 +177,7 @@ never lost:
 | The shell took no data for 2 s | `interrupted(view_stalled)` | at once |
 | Its thread is being deleted | `interrupted(deleted)` | at once |
 | A budget ran out | `failed(budget)` | at once |
-| The engine failed, its round ended truncated or interrupted, or it sent an oversized step or a call nothing answers | `failed(engine)` | at once |
+| The engine failed, its round ended truncated or interrupted, or it sent an oversized step or a malformed call | `failed(engine)` | at once |
 | A store write failed | `failed(store)` | at once |
 
 `revealed` keeps only indices of steps already sent to the shell, each once, in order.
@@ -199,8 +212,8 @@ of visible text and 64 steps. Exceeding one ends the run as `failed(budget)`, an
 step that went over is never sent. The wall clock starts when the turn is accepted, so time a held
 turn spends waiting counts against it, and it stops applying once the engine says it's done, even
 while the run's last writes are still pending. The deadline and the text counter belong to the run,
-so they carry across rounds. Model rounds, tool calls and speech budgets arrive with the engines
-that use them.
+so they carry across rounds, and so do the tool loop's budgets: 8 model rounds and 16 tool calls
+[guesses] ([The tool loop](#the-tool-loop)). Speech budgets arrive with the engines that use them.
 
 ## Availability
 
@@ -263,17 +276,52 @@ flowchart LR
 - **The brain owns cancellation.** Dropping the round's `Cancel` aborts the pump and the engine's
   future with it, even while the pump waits on a full engine queue, so `Stop` under backpressure
   ends the run at once, and a local `Stop` is never reported as truncation.
-- **A round's end isn't the run's.** The coordinator decides. `Completed` ends the run as `done`;
-  `Truncated`, `Failed` and an engine's `Interrupted` fail an active run, since only the coordinator
-  interrupts runs. Only events for a run that already ended are stale.
-  shortcut: a completed round ends the run whatever calls it made, which only the fixture's
-  draw-only rounds rely on; the tool loop (slice 3's PR 13b) answers every call, a draw
-  included, and starts the next round. Until then a call to any tool but `draw`, or a second
-  call, fails the run.
+- **A round's end isn't the run's.** The coordinator decides, through the tool loop below.
+  `Truncated`, `Failed` and an engine's `Interrupted` fail an active run, since only the
+  coordinator interrupts runs. Only events for a run that already ended are stale.
 - **The draw call's arguments are split into steps** in `coordinator/run.rs`, one per closed
   line. The open line is charged against the 256-byte label cap before it grows, so arguments with
   no newline fail the run at the cap. `ToolCallReady` must match what streamed; a last line
   with no newline is one more step.
+
+## The tool loop
+
+`coordinator/tools.rs` answers a direct-provider engine's calls, one model round at a time:
+
+```mermaid
+flowchart LR
+  R[round completes] --> S{steps stored?}
+  S -->|not yet| W[wait for the last step's ack]
+  W --> S
+  S -->|yes| C{calls?}
+  C -->|yes, round 8| B[failed budget]
+  C -->|yes| I[RoundItems: text, items, results] -->|RoundStored| N[build the next round]
+  C -->|no, items| F[RoundItems] -->|RoundStored| D[done]
+  C -->|no items| D
+```
+
+- **Every call gets one result.** A call is charged when it starts, before anything of it is kept
+  (D13-M2), and the 17th in a run fails it `failed(budget)`. Only the offered `draw` call keeps
+  state (its steps); every other call keeps only its id, drops its arguments, and gets
+  `{"error":"unknown tool"}`, which names nothing the provider sent. A repeated call id, arguments
+  for a ready or unknown call, or a round that completes with a call not ready fails the run
+  `failed(engine)`. shortcut: the offered `draw` call gets no result and ends the loop, which only
+  the fixture's draw-only rounds rely on until B10 offers `draw` to a model.
+- **A round is stored before the next one is built.** `StoreOp::RoundItems` writes, in one
+  transaction, the text streamed since the last write, the round's native items in output order,
+  then each call's result in call order. `Input::RoundStored { run, round }` answers it, and only
+  then does the next round's build go out through admission, so it reads what was just stored.
+  The round counter is the build key's: a round that would be the 9th is refused before its build,
+  so no ninth ask or send happens. A delete's rebuild keeps `(run, round)` and the counters.
+- **A round with no calls** is stored too when it has native items, so the final message replays
+  natively; `done` waits for its acknowledgement. A round with neither ends the run at once.
+- **A late acknowledgement only confirms storage.** After a Stop, a sign-out, a replacement or the
+  deadline, `RoundStored` lets the ended run's outcome be written and never starts a build. A
+  failed round write ends the run `failed(store)` and its late acknowledgement is stale.
+- **The deadline still counts** while a round with calls is being stored. It stops counting only
+  for a round with no calls whose last writes are still pending.
+
+The builder replays stored rounds per run (engines.md, "What a request holds").
 
 **One run at a time.** The coordinator keeps one current run, and a new turn replaces it,
 whatever its thread. That's a limit of slice 3, not of the seam: engines, and everything new that

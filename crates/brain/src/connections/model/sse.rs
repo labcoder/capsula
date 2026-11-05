@@ -1,22 +1,24 @@
-//! The Responses event stream: a bounded server-sent-events framer, and the reader that ends the
-//! stream on its terminal event. It never touches the network; the transport feeds it bytes.
+//! The Responses event stream: the reader that reads the shared framer's events as Responses
+//! events and ends the stream on its terminal event. It never touches the network; the transport
+//! feeds it bytes.
 
 #[cfg(test)]
 mod tests;
 
 use std::fmt;
-use std::mem;
+use std::ops::ControlFlow;
 
 use serde_json::Value;
 
 use super::error::{Failure, ProviderError};
+use super::framer::{self, Framer, Limit};
 
 /// The longest line, its line feed excluded.
-pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+pub const MAX_LINE_BYTES: usize = framer::MAX_LINE_BYTES;
 /// The most data one event carries, its `data` lines joined by line feeds.
-pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
+pub const MAX_EVENT_BYTES: usize = framer::MAX_EVENT_BYTES;
 /// The most bytes one response stream carries.
-pub const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_STREAM_BYTES: usize = framer::MAX_STREAM_BYTES;
 /// The most visible text one response streams.
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -44,6 +46,11 @@ const KNOWN: [&str; 16] = [
 pub struct SseEvent(Value);
 
 impl SseEvent {
+    /// The event for `value`, when it's an object with a string `type`.
+    pub(in crate::connections) fn from_value(value: Value) -> Option<Self> {
+        value["type"].is_string().then_some(Self(value))
+    }
+
     /// The event's `type`.
     #[must_use]
     pub fn kind(&self) -> &str {
@@ -76,25 +83,25 @@ pub enum Progress {
     Completed,
 }
 
+impl From<Limit> for Failure {
+    fn from(_: Limit) -> Self {
+        Self::Protocol
+    }
+}
+
 /// Reads one response stream. Only `response.completed` succeeds; a failed, incomplete or
 /// error event, a cap passed, or bytes that aren't events end it with a [`Failure`]. A stream
 /// whose bytes end first is [`Failure::Truncated`].
 #[derive(Default)]
 pub struct Reader {
-    /// The line so far, when a chunk ended inside it.
-    line: Vec<u8>,
-    /// The event's data so far.
-    data: Vec<u8>,
-    /// The event has a `data` line, possibly empty.
-    has_data: bool,
-    received: usize,
+    framer: Framer,
     text: usize,
 }
 
 impl fmt::Debug for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reader")
-            .field("received", &self.received)
+            .field("received", &self.framer.received())
             .field("text", &self.text)
             .finish_non_exhaustive()
     }
@@ -108,121 +115,55 @@ impl Reader {
     /// The stream's end when it isn't a success, or a cap it passed.
     pub fn feed(
         &mut self,
-        mut bytes: &[u8],
+        bytes: &[u8],
         on_event: &mut impl FnMut(&SseEvent),
     ) -> Result<Progress, Failure> {
-        while let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
-            let (head, rest) = bytes.split_at(end);
-            bytes = &rest[1..];
-            self.consume(end + 1)?;
-            let progress = if self.line.is_empty() {
-                self.line_ended(head, on_event)?
-            } else {
-                let mut line = mem::take(&mut self.line);
-                if line.len() + head.len() > MAX_LINE_BYTES {
-                    return Err(Failure::Protocol);
-                }
-                line.extend_from_slice(head);
-                let progress = self.line_ended(&line, on_event);
-                line.clear();
-                self.line = line;
-                progress?
-            };
-            if progress == Progress::Completed {
-                return Ok(progress);
-            }
-        }
-        self.consume(bytes.len())?;
-        if self.line.len() + bytes.len() > MAX_LINE_BYTES {
-            return Err(Failure::Protocol);
-        }
-        self.line.extend_from_slice(bytes);
-        Ok(Progress::More)
+        let text = &mut self.text;
+        let flow = self
+            .framer
+            .feed(bytes, &mut |data| dispatch(data, text, on_event))?;
+        Ok(if flow.is_break() {
+            Progress::Completed
+        } else {
+            Progress::More
+        })
     }
+}
 
-    /// Counts bytes read, so the stream cap doesn't depend on what follows the terminal event.
-    fn consume(&mut self, bytes: usize) -> Result<(), Failure> {
-        self.received = self
-            .received
-            .checked_add(bytes)
-            .filter(|received| *received <= MAX_STREAM_BYTES)
-            .ok_or(Failure::Protocol)?;
-        Ok(())
+/// Reads one event's data: `[DONE]` is skipped, and anything else must be a typed JSON event.
+fn dispatch(
+    data: &[u8],
+    text: &mut usize,
+    on_event: &mut impl FnMut(&SseEvent),
+) -> Result<ControlFlow<()>, Failure> {
+    if data == b"[DONE]" {
+        return Ok(ControlFlow::Continue(()));
     }
-
-    fn line_ended(
-        &mut self,
-        line: &[u8],
-        on_event: &mut impl FnMut(&SseEvent),
-    ) -> Result<Progress, Failure> {
-        if line.len() > MAX_LINE_BYTES {
-            return Err(Failure::Protocol);
-        }
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            return self.dispatch(on_event);
-        }
-        let (field, value) = match line.iter().position(|&byte| byte == b':') {
-            Some(0) => return Ok(Progress::More),
-            Some(colon) => {
-                let value = &line[colon + 1..];
-                (&line[..colon], value.strip_prefix(b" ").unwrap_or(value))
-            }
-            None => (line, &[][..]),
-        };
-        // The JSON's own type names the event, so `event`, `id` and `retry` are ignored.
-        if field == b"data" {
-            let joined = usize::from(self.has_data) + value.len();
-            if self.data.len() + joined > MAX_EVENT_BYTES {
+    let event = serde_json::from_slice::<Value>(data)
+        .ok()
+        .and_then(SseEvent::from_value)
+        .ok_or(Failure::Protocol)?;
+    match event.kind() {
+        "response.output_text.delta" => {
+            let delta = event.0["delta"].as_str().ok_or(Failure::Protocol)?;
+            *text += delta.len();
+            if *text > MAX_TEXT_BYTES {
                 return Err(Failure::Protocol);
             }
-            if self.has_data {
-                self.data.push(b'\n');
-            }
-            self.data.extend_from_slice(value);
-            self.has_data = true;
         }
-        Ok(Progress::More)
+        "response.completed" => {
+            on_event(&event);
+            return Ok(ControlFlow::Break(()));
+        }
+        "response.failed" => {
+            return Err(Failure::Provider(ProviderError::streamed(
+                &event.0["response"]["error"],
+            )));
+        }
+        "response.incomplete" => return Err(Failure::Incomplete),
+        "error" => return Err(Failure::Provider(ProviderError::streamed(&event.0))),
+        _ => {}
     }
-
-    fn dispatch(&mut self, on_event: &mut impl FnMut(&SseEvent)) -> Result<Progress, Failure> {
-        if !mem::take(&mut self.has_data) {
-            return Ok(Progress::More);
-        }
-        let mut data = mem::take(&mut self.data);
-        let parsed = (data != b"[DONE]").then(|| serde_json::from_slice::<Value>(&data));
-        data.clear();
-        self.data = data;
-        let Some(value) = parsed else {
-            return Ok(Progress::More);
-        };
-        let event = value
-            .ok()
-            .filter(|value| value["type"].is_string())
-            .map(SseEvent)
-            .ok_or(Failure::Protocol)?;
-        match event.kind() {
-            "response.output_text.delta" => {
-                let delta = event.0["delta"].as_str().ok_or(Failure::Protocol)?;
-                self.text += delta.len();
-                if self.text > MAX_TEXT_BYTES {
-                    return Err(Failure::Protocol);
-                }
-            }
-            "response.completed" => {
-                on_event(&event);
-                return Ok(Progress::Completed);
-            }
-            "response.failed" => {
-                return Err(Failure::Provider(ProviderError::streamed(
-                    &event.0["response"]["error"],
-                )));
-            }
-            "response.incomplete" => return Err(Failure::Incomplete),
-            "error" => return Err(Failure::Provider(ProviderError::streamed(&event.0))),
-            _ => {}
-        }
-        on_event(&event);
-        Ok(Progress::More)
-    }
+    on_event(&event);
+    Ok(ControlFlow::Continue(()))
 }

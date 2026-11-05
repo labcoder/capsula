@@ -8,12 +8,13 @@
 //! Esc cancelled before it was named never shows anything.
 
 use std::collections::VecDeque;
+use std::fmt;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES,
-    MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow,
-    UserError,
+    Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
+    MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId,
+    ThreadKind, ThreadRow, UserError,
 };
 
 use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
@@ -22,6 +23,15 @@ use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
 const TEXT_KEPT: usize = 4096;
 /// Room in a data frame for a `TextSubmit`'s other fields [guess].
 const SUBMIT_OVERHEAD: usize = 64;
+/// Failures that mean the turn never reached a model, so its text may go back to the composer.
+const RECONNECT: [ErrorKey; 6] = [
+    ErrorKey::SessionEnded,
+    ErrorKey::AccountRefused,
+    ErrorKey::SignInNeeded,
+    ErrorKey::ClaudeCodeSignedOut,
+    ErrorKey::AnthropicKeyRejected,
+    ErrorKey::RenewalUnconfirmed,
+];
 
 /// Why a turn wasn't sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +47,7 @@ pub(crate) enum Refused {
 }
 
 /// The newest run on screen.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 pub(crate) struct Shown {
     pub(crate) run: RunId,
     /// Its thread, when its run was the live one as it began showing.
@@ -46,8 +56,18 @@ pub(crate) struct Shown {
     pub(crate) text: String,
 }
 
+impl fmt::Debug for Shown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Shown")
+            .field("run", &self.run)
+            .field("thread", &self.thread)
+            .field("text_len", &self.text.len())
+            .finish()
+    }
+}
+
 /// What applying a `RunState` asks of the caller.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 pub(crate) struct Applied {
     /// A `Stop` for a run Esc cancelled before it was named.
     pub(crate) stop: Option<ControlToBrain>,
@@ -55,6 +75,40 @@ pub(crate) struct Applied {
     pub(crate) credit: u32,
     /// The run isn't fenced off, by Esc or a delete, so its feedback may show.
     pub(crate) visible: bool,
+    /// The text of a turn that failed before reaching a model, given back once for an empty
+    /// composer.
+    pub(crate) restore: Option<Content>,
+}
+
+impl fmt::Debug for Applied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Applied")
+            .field("stop", &self.stop)
+            .field("credit", &self.credit)
+            .field("visible", &self.visible)
+            .field("restore_len", &self.restore.as_ref().map(|text| text.len()))
+            .finish()
+    }
+}
+
+/// A turn sent and not answered yet, then its named run's until that run's first terminal state.
+struct Submitted {
+    /// The selection it was typed at.
+    revision: u64,
+    /// The thread it continues; a New target's is the one its run names.
+    thread: Option<ThreadId>,
+    /// What was typed, until nothing may put it back.
+    text: Option<Content>,
+}
+
+impl fmt::Debug for Submitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Submitted")
+            .field("revision", &self.revision)
+            .field("thread", &self.thread)
+            .field("text_len", &self.text.as_ref().map(|text| text.len()))
+            .finish()
+    }
 }
 
 /// The newest named run, until both its terminal `RunState` and its `RunEnd` have been applied.
@@ -74,7 +128,7 @@ pub(crate) enum Target {
     New,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Runs {
     connected: bool,
     turns_sent: u32,
@@ -85,7 +139,9 @@ pub(crate) struct Runs {
     /// The highest run any `RunState` named: each new one answers the oldest pending turn.
     answered: RunId,
     /// Turns sent and not answered yet.
-    submitted: VecDeque<u64>,
+    submitted: VecDeque<Submitted>,
+    /// The newest named run's submission, until that run's first terminal `RunState`.
+    named: Option<(RunId, Submitted)>,
     /// How many of the oldest submitted turns Esc cancelled.
     cancelled: usize,
     /// Data frames, with their size, for runs not named yet. Their credit is withheld, so the
@@ -107,6 +163,30 @@ pub(crate) struct Runs {
     /// Threads hidden or removed while turns sent before were unanswered, with how many still
     /// are. Each holds one of the slots `deleting` shares.
     gone: Vec<(ThreadId, usize)>,
+}
+
+impl fmt::Debug for Runs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Runs")
+            .field("connected", &self.connected)
+            .field("turns_sent", &self.turns_sent)
+            .field("live", &self.live)
+            .field("fence", &self.fence)
+            .field("answered", &self.answered)
+            .field("submitted", &self.submitted)
+            .field("named", &self.named)
+            .field("cancelled", &self.cancelled)
+            .field("held", &self.held.len())
+            .field("target", &self.target)
+            .field("main", &self.main)
+            .field("revision", &self.revision)
+            .field("durable", &self.durable)
+            .field("shown", &self.shown)
+            .field("incarnation", &self.incarnation)
+            .field("deleting", &self.deleting)
+            .field("gone", &self.gone)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Runs {
@@ -133,6 +213,7 @@ impl Runs {
         };
         self.durable = thread.is_some();
         self.revision = self.revision.wrapping_add(1);
+        self.forget_texts(|_| true);
         true
     }
 
@@ -145,6 +226,16 @@ impl Runs {
         self.revision
     }
 
+    /// The lengths of the typed texts still held: pending turns oldest first, then the named run's.
+    #[cfg(test)]
+    pub(crate) fn kept(&self) -> Vec<usize> {
+        self.submitted
+            .iter()
+            .chain(self.named.as_ref().map(|(_, submitted)| submitted))
+            .filter_map(|submitted| submitted.text.as_ref().map(|text| text.len()))
+            .collect()
+    }
+
     pub(crate) fn settings(&mut self, main: ThreadId) {
         self.main = Some(main);
     }
@@ -153,9 +244,27 @@ impl Runs {
         self.target = Target::Kumo;
         self.durable = true;
         self.revision = self.revision.wrapping_add(1);
+        self.forget_texts(|_| true);
     }
 
-    fn thread(&self) -> Option<ThreadId> {
+    /// Drops the text of every submission, pending or named, whose captured thread `owned`
+    /// accepts, so nothing can put it back.
+    fn forget_texts(&mut self, owned: impl Fn(Option<ThreadId>) -> bool) {
+        for submitted in &mut self.submitted {
+            if owned(submitted.thread) {
+                submitted.text = None;
+            }
+        }
+        if self
+            .named
+            .as_ref()
+            .is_some_and(|(_, submitted)| owned(submitted.thread))
+        {
+            self.named = None;
+        }
+    }
+
+    pub(crate) fn thread(&self) -> Option<ThreadId> {
         match self.target {
             Target::Kumo => self.main,
             Target::Task(thread) => Some(thread),
@@ -167,7 +276,12 @@ impl Runs {
         if !self.connected || self.main.is_none() {
             return Err(Refused::Offline);
         }
-        if self.target == Target::New && self.submitted.contains(&self.revision) {
+        if self.target == Target::New
+            && self
+                .submitted
+                .iter()
+                .any(|submitted| submitted.revision == self.revision)
+        {
             return Err(Refused::Busy);
         }
         Ok((
@@ -211,6 +325,7 @@ impl Runs {
     /// finished entering), and returns the `Stop` to send after. A cancelled turn's `Stop`
     /// comes from [`Runs::apply_state`] once its run is named.
     pub(crate) fn stop(&mut self) -> Option<ControlToBrain> {
+        self.forget_texts(|_| true);
         self.cancelled = self.submitted.len();
         let run = self.stoppable()?;
         self.fence = run;
@@ -223,6 +338,7 @@ impl Runs {
     /// The second Esc, or Esc while nothing moves: clears the drawing, recovery included, and
     /// returns the `ClearDrawing` to send after. The text stays.
     pub(crate) fn clear(&mut self) -> Effect {
+        self.forget_texts(|_| true);
         self.drawing.clear()
     }
 
@@ -243,6 +359,7 @@ impl Runs {
     }
 
     /// Sends a typed turn through `send`, which says whether it went, unless it would be refused.
+    /// Every attempt, refused or not, ends any earlier turn's chance to have its text put back.
     ///
     /// # Errors
     /// [`Refused`] says why it wasn't sent.
@@ -251,6 +368,7 @@ impl Runs {
         text: &str,
         send: impl FnOnce(DataToBrain) -> bool,
     ) -> Result<(), Refused> {
+        self.forget_texts(|_| true);
         if text.trim().is_empty() {
             return Err(Refused::Blank);
         }
@@ -264,7 +382,11 @@ impl Runs {
         if !send(turn) {
             return Err(Refused::Offline);
         }
-        self.submitted.push_back(revision);
+        self.submitted.push_back(Submitted {
+            revision,
+            thread: self.thread(),
+            text: Some(text.into()),
+        });
         self.turns_sent += 1;
         Ok(())
     }
@@ -277,6 +399,7 @@ impl Runs {
         }
         self.answered = RunId(0);
         self.fence = RunId(0);
+        self.forget_texts(|_| true);
         // A new thread whose first turn the last brain never stored doesn't exist for this one.
         // shortcut: a new thread stopped or failed before answering loses its target here even
         // when its turn was stored; a stored-turn ack in RunState would keep it.
@@ -312,6 +435,7 @@ impl Runs {
             return false;
         }
         self.deleting.push(thread);
+        self.forget_texts(|owner| owner == Some(thread));
         if self.target == Target::Task(thread) {
             self.back_to_kumo();
         }
@@ -404,6 +528,7 @@ impl Runs {
         self.live = None;
         self.main = None;
         self.submitted.clear();
+        self.named = None;
         self.cancelled = 0;
         self.held.clear();
         self.gone.clear();
@@ -414,7 +539,9 @@ impl Runs {
     /// fenced or not, and is fenced before any of its output is applied if Esc cancelled that
     /// turn. Only a pending turn at the current revision can adopt a New target's thread.
     /// A `RunState` with the brain's reason: what applying it asks, and the notice to show, which
-    /// is withheld once Esc or a delete has fenced the run off.
+    /// is withheld once Esc or a delete has fenced the run off. A failure that means the turn
+    /// never reached a model restores its text once, only while its thread and selection are
+    /// current.
     pub(crate) fn apply_run_state(
         &mut self,
         run: RunId,
@@ -422,12 +549,23 @@ impl Runs {
         phase: Phase,
         error: Option<UserError>,
     ) -> (Applied, Option<UserError>) {
-        let applied = self.apply_state(run, thread, phase);
+        let applied = self.apply(run, thread, phase, error.as_ref());
         let notice = error.filter(|_| applied.visible);
         (applied, notice)
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) -> Applied {
+        self.apply(run, thread, phase, None)
+    }
+
+    fn apply(
+        &mut self,
+        run: RunId,
+        thread: ThreadId,
+        phase: Phase,
+        error: Option<&UserError>,
+    ) -> Applied {
         let mut applied = Applied::default();
         if run > self.answered {
             self.answered = run;
@@ -436,8 +574,8 @@ impl Runs {
             if deleted {
                 self.fence = self.fence.max(run);
             }
-            if let Some(revision) = self.submitted.pop_front() {
-                if revision == self.revision && self.target == Target::New && !deleted {
+            if let Some(mut submitted) = self.submitted.pop_front() {
+                if submitted.revision == self.revision && self.target == Target::New && !deleted {
                     self.target = if Some(thread) == self.main {
                         Target::Kumo
                     } else {
@@ -453,6 +591,9 @@ impl Runs {
                         revealed: Vec::new(),
                     });
                 }
+                // A New target's turn belongs to the thread its run names; any other must match.
+                let owned = *submitted.thread.get_or_insert(thread) == thread;
+                self.named = (owned && run > self.fence).then_some((run, submitted));
             }
             if run > self.fence {
                 self.live = Some(Live {
@@ -468,6 +609,17 @@ impl Runs {
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
+            // The first terminal state uses the submission up, so a duplicate finds nothing.
+            if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
+                && phase == Phase::Failed
+                && run > self.fence
+                && error.is_some_and(|error| RECONNECT.contains(&error.key()))
+                && submitted.revision == self.revision
+                && submitted.thread == Some(thread)
+                && self.thread() == Some(thread)
+            {
+                applied.restore = submitted.text;
+            }
         }
         applied.credit = self.release();
         applied.visible = run > self.fence;
@@ -521,7 +673,8 @@ impl Runs {
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
-            DataToShell::ThreadList { .. }
+            DataToShell::IssueCard(_)
+            | DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
@@ -531,9 +684,13 @@ impl Runs {
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. } => {
+            | DataToShell::Models { .. }
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_) => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
                 // shortcut: the catalog is credited and dropped until PR 18b's picker shows it.
+                // shortcut: voice frames are credited and dropped until slice 7's PR 6 plays them.
             }
         }
     }
@@ -584,7 +741,10 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
     match message {
         DataToShell::AssistantText { run, .. }
         | DataToShell::StepCommit { run, .. }
-        | DataToShell::RunEnd { run } => Some(*run),
+        | DataToShell::RunEnd { run }
+        | DataToShell::SegmentQueued { run, .. } => Some(*run),
+        DataToShell::Transcript(transcript) => Some(transcript.run),
+        DataToShell::SpeechPcm(pcm) => Some(pcm.run),
         DataToShell::ThreadList { .. }
         | DataToShell::Page { .. }
         | DataToShell::PageFailed { .. }
@@ -598,7 +758,7 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
             // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             None
         }
-        DataToShell::Models { .. } => None,
+        DataToShell::Models { .. } | DataToShell::IssueCard(_) => None,
     }
 }
 
@@ -616,6 +776,9 @@ fn keep_end(text: &mut String, max: usize) {
 
 #[cfg(test)]
 mod delete_tests;
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests;

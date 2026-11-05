@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::os::windows::io::{AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -14,15 +14,15 @@ use windows_sys::Win32::Foundation::{
     FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
@@ -92,6 +92,20 @@ impl Job {
             return Err(io::Error::last_os_error());
         }
         Ok(info.ActiveProcesses)
+    }
+
+    /// Whether `process` runs in this job or a job nested in it.
+    ///
+    /// # Errors
+    /// Fails when the handle lacks query rights.
+    pub fn contains(&self, process: BorrowedHandle<'_>) -> io::Result<bool> {
+        let mut inside = FALSE;
+        // SAFETY: both handles are open for the borrow and `inside` is a writable BOOL.
+        if unsafe { IsProcessInJob(process.as_raw_handle(), self.raw(), &raw mut inside) } == FALSE
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(inside != FALSE)
     }
 
     /// Ends every process in this job and the jobs nested in it, then waits until none is left.
@@ -265,6 +279,19 @@ impl Helper {
             Ok(true) => Ok(()),
             _ => Err(error),
         }
+    }
+
+    /// The exit code of a process that has exited.
+    ///
+    /// # Errors
+    /// Fails when the OS can't report it.
+    pub fn exit_code(&self) -> io::Result<u32> {
+        let mut code = 0;
+        // SAFETY: the process handle is open for the borrow and `code` is a valid out pointer.
+        if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &raw mut code) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(code)
     }
 
     /// Whether the process exits within `timeout`.

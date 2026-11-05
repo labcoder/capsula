@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
     MaxFrameRate, PlanState, SettingsView as Snapshot, ThreadId, UserError,
 };
 
-use super::{OpenError, settings_view::SettingsView};
+use super::{OpenError, settings::SettingsView};
 use crate::settings::{Field, Settings, Update};
 use crate::strings::{Strings, Text};
 
@@ -39,6 +39,7 @@ pub(crate) enum State {
     Unavailable,
     Retry,
     SignInAgain,
+    ProviderSignIn,
     SigningOut,
     Refused,
     RefusedUnconfirmed,
@@ -64,6 +65,7 @@ impl State {
             "unavailable" => Self::Unavailable,
             "retry" => Self::Retry,
             "sign-in-again" => Self::SignInAgain,
+            "provider-sign-in" => Self::ProviderSignIn,
             "signing-out" => Self::SigningOut,
             "refused" => Self::Refused,
             "refused-unconfirmed" => Self::RefusedUnconfirmed,
@@ -92,6 +94,8 @@ impl State {
                     main_thread: ThreadId(1),
                     max_frame_rate: MaxFrameRate::AUTOMATIC,
                     default_model: None,
+                    dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+                    show_in_taskbar: false,
                 },
                 Update::Unsolicited
             ),
@@ -153,12 +157,18 @@ impl State {
         let error = match self {
             Self::Backlog => Some(ErrorKey::RevocationBacklog),
             Self::Retry => Some(ErrorKey::AccountOffline),
+            Self::ProviderSignIn => Some(ErrorKey::AccountRefused),
             _ => None,
         };
         if let Some(key) = error {
+            let action = if self == Self::ProviderSignIn {
+                Action::SignIn
+            } else {
+                Action::Retry
+            };
             model
                 .accounts
-                .error(&UserError::new(key, Vec::new(), vec![Action::Retry]).expect("fixed error"));
+                .error(&UserError::new(key, Vec::new(), vec![action]).expect("fixed error"));
         }
         model
     }
@@ -293,6 +303,7 @@ mod tests {
             ("unavailable", State::Unavailable),
             ("retry", State::Retry),
             ("sign-in-again", State::SignInAgain),
+            ("provider-sign-in", State::ProviderSignIn),
             ("signing-out", State::SigningOut),
             ("refused", State::Refused),
             ("refused-unconfirmed", State::RefusedUnconfirmed),
@@ -341,6 +352,25 @@ mod tests {
 
     #[test]
     fn recovery_fixtures_include_the_authoritative_error() {
+        let provider = State::ProviderSignIn.model();
+        assert_eq!(
+            provider.accounts.view,
+            Some(AccountView::SignedIn {
+                email: Some(AccountEmail::new("person@example.invalid").expect("fixed email")),
+                plan: PlanState::Enabled,
+                recovery: None,
+            })
+        );
+        assert_eq!(
+            provider.accounts.error,
+            Some(
+                UserError::new(ErrorKey::AccountRefused, Vec::new(), vec![Action::SignIn])
+                    .expect("bounded error")
+            )
+        );
+        for invalid in ["provider-sign-i", "provider-sign-in ", "Provider-sign-in"] {
+            assert_eq!(State::parse(invalid), None);
+        }
         let backlog = State::Backlog.model();
         assert_eq!(
             backlog.accounts.view,

@@ -9,8 +9,8 @@ use tracing::Level;
 
 use super::phonon::{Job, start_pool};
 use super::{
-    CONFIG, Engine, MAX_SAY_BYTES, Speak, TOKENIZER, TtsBusy, TtsError, TtsEvent, TtsHandle, VOICE,
-    WEIGHTS, to_pcm,
+    CONFIG, Engine, MAX_SAY_BYTES, SAMPLE_RATE, Speak, TOKENIZER, TtsBusy, TtsError, TtsEvent,
+    TtsHandle, VOICE, WEIGHTS, to_pcm,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -174,11 +174,16 @@ impl Harness {
     }
 
     fn speak(&self, text: &str, capacity: usize) -> mpsc::Receiver<TtsEvent> {
+        self.speak_at(text, capacity, SAMPLE_RATE)
+    }
+
+    fn speak_at(&self, text: &str, capacity: usize, rate: u32) -> mpsc::Receiver<TtsEvent> {
         let (out, events) = mpsc::channel(capacity);
         self.handle
             .try_speak(Speak {
                 segment: 7,
                 generation: self.handle.generation(),
+                rate,
                 text: text.into(),
                 out,
             })
@@ -299,6 +304,7 @@ fn unload_while_full_rejects_the_waiting_speak_and_drops_the_model() {
         harness.handle.try_speak(Speak {
             segment: 9,
             generation: harness.handle.generation(),
+            rate: SAMPLE_RATE,
             text: "third".into(),
             out,
         }),
@@ -457,6 +463,97 @@ fn unload_and_dropping_the_handle_drop_the_model() {
 }
 
 #[test]
+fn audio_is_resampled_to_the_speak_rate_and_counted_there() {
+    let harness = Harness::loaded();
+    let script = harness.script();
+    let mut events = harness.speak_at("hello", 8, 48_000);
+    script.send(Ok(vec![0.0; 240]));
+    drop(script.frames);
+    let mut samples = 0;
+    let done = loop {
+        match harness.next(&mut events) {
+            Some(TtsEvent::Pcm { samples: pcm, .. }) => samples += pcm.len(),
+            other => break other,
+        }
+    };
+    assert_eq!(samples, 480);
+    assert_eq!(
+        done,
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 480
+        })
+    );
+
+    // 30 s at 8 kHz is the limit; the resampler's tail brings both totals to it, or past it.
+    for (input, end) in [
+        (
+            720_000,
+            Some(TtsEvent::Done {
+                segment: 7,
+                total: 240_000,
+            }),
+        ),
+        (720_003, Some(failed(TtsError::TooLong))),
+    ] {
+        let script = harness.script();
+        let mut events = harness.speak_at("hello", 8, 8_000);
+        script.send(Ok(vec![0.0; input]));
+        drop(script.frames);
+        assert!(matches!(
+            harness.next(&mut events),
+            Some(TtsEvent::Pcm { .. })
+        ));
+        let last = match harness.next(&mut events) {
+            Some(TtsEvent::Pcm { .. }) => harness.next(&mut events),
+            other => other,
+        };
+        assert_eq!(last, end, "{input}");
+        assert_eq!(harness.next(&mut events), None);
+    }
+}
+
+#[test]
+fn a_cancelled_waiting_speak_is_replaced_unanswered() {
+    let (started, loading) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let harness = Harness::gated(
+        Ok(()),
+        Some(Gate {
+            started,
+            release: released,
+        }),
+    );
+    harness.handle.load("models".into());
+    loading
+        .recv_timeout(WAIT)
+        .expect("the owner is inside the load");
+    let mut stale = harness.speak("first", 4);
+    harness.handle.cancel();
+    let script = harness.script();
+    let mut events = harness.speak("second", 4);
+    release.send(()).expect("the load is waiting");
+    assert_eq!(harness.next(&mut stale), None, "replaced, never answered");
+    drop(script.frames);
+    assert_eq!(
+        harness.next(&mut events),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 0
+        })
+    );
+}
+
+#[test]
+fn an_event_prints_no_audio() {
+    let marker = vec![12_345i16; 3];
+    let printed = format!("{:?}", pcm(marker.clone()));
+    assert_eq!(printed, "Pcm { segment: 7, samples: 3 }");
+    assert!(!printed.contains("12345"));
+    assert!(!printed.contains(&format!("{:?}", marker[0].to_le_bytes())));
+}
+
+#[test]
 fn the_pool_must_be_eight_wide_with_every_worker() {
     let start = |spawned: usize, width: usize| {
         move |config: xn::threadpool::PoolConfig, spawn: &dyn Fn(Job)| {
@@ -546,6 +643,7 @@ fn measure_phonon() {
             .try_speak(Speak {
                 segment: 0,
                 generation: handle.generation(),
+                rate: SAMPLE_RATE,
                 text: text.into(),
                 out,
             })

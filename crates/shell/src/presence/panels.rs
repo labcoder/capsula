@@ -67,6 +67,10 @@ impl Presence {
             pulling: self.kumo.read(cx).pull_live(),
             ..self.activity
         };
+        if activity.pulling {
+            self.line.pull_started();
+            self.want_pull_frames(cx);
+        }
         if activity != self.activity {
             self.activity = activity;
             self.sync_escape(cx)?;

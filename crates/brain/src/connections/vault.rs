@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::constants::CREDENTIAL_SERVICE;
+use kumochi_protocol::constants::{ACCOUNT_CHUNKED_RECORDS, CREDENTIAL_SERVICE, account_target};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -51,8 +51,8 @@ enum Chunked {
 impl Chunked {
     const fn name(self) -> &'static str {
         match self {
-            Self::Account => "chatgpt",
-            Self::Revoke => "revoke",
+            Self::Account => ACCOUNT_CHUNKED_RECORDS[0],
+            Self::Revoke => ACCOUNT_CHUNKED_RECORDS[1],
         }
     }
 
@@ -89,6 +89,52 @@ impl<S: CredentialStore> fmt::Debug for Vault<S> {
 }
 
 impl<S: CredentialStore> Vault<S> {
+    pub(crate) fn anthropic(
+        &mut self,
+        op: super::anthropic::KeyOp,
+    ) -> Result<Option<Secret<super::anthropic::key::AnthropicKey>>, super::anthropic::KeyError>
+    {
+        use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
+        use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
+        let active = anthropic_key_target(&self.service);
+        let staged = anthropic_staging_target(&self.service);
+        if matches!(op, KeyOp::Remove) {
+            let first = self.store.delete(&active);
+            let second = self.store.delete(&staged);
+            first.and(second).map_err(VaultError::from)?;
+            return Ok(None);
+        }
+        let read = if matches!(op, KeyOp::Adopt) {
+            self.store.get_recent(&staged)
+        } else {
+            self.store.get(&staged)
+        };
+        let adopting = !matches!(read, Ok(None));
+        if adopting {
+            let result = (|| {
+                let bytes = read.map_err(VaultError::from)?.ok_or(VaultError::from(
+                    crate::platform::credential::CredentialStoreError::Unsettled,
+                ))?;
+                let key = AnthropicKey::parse(bytes).map_err(KeyError::Rejected)?;
+                let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
+                self.store.set(&active, &bytes).map_err(VaultError::from)?;
+                Ok(Some(key))
+            })();
+            let cleanup = self.store.delete(&staged).map_err(VaultError::from);
+            cleanup?;
+            return result;
+        }
+        if matches!(op, KeyOp::Adopt) {
+            self.store.delete(&staged).map_err(VaultError::from)?;
+        }
+        self.store
+            .get(&active)
+            .map_err(VaultError::from)?
+            .map(AnthropicKey::parse)
+            .transpose()
+            .map_err(KeyError::Rejected)
+    }
+
     /// Takes account-session ownership without reading any credential yet.
     ///
     /// # Errors
@@ -385,7 +431,7 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     fn target(&self, entry: &str) -> String {
-        format!("{}/{entry}", self.service)
+        account_target(&self.service, entry)
     }
 
     fn manifest(&self, record: Chunked) -> Result<Option<Manifest>, VaultError> {

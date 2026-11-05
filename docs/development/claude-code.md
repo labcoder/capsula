@@ -30,8 +30,9 @@ sequenceDiagram
   Otherwise it sends nothing and exits 1.
 - **Lines.** A stdin line holds at most 512 KiB. A longer one gets `-32600` with a null id, and the
   rest of it is discarded up to the next newline. Batches, a missing or wrong `jsonrpc`, and an id
-  that is null, an object, a float, past `i64`, or a string over 29 bytes are `-32600`; an
-  unknown method is `-32601`; bad JSON is `-32700`.
+  that is null, an object, a float, past `i64`, or a string over 29 bytes are `-32600`, and so
+  is a request whose `params` are present but neither an object nor an array; an unknown method
+  is `-32601`; bad JSON is `-32700`. A notification is never answered, whatever its params.
 - **Ids** go back by value: a number as itself, a string re-escaped from its decoded value. On the
   pipe a call is keyed `m:n:<number>` or `m:s:<hex of the string's bytes>`, so the two never
   collide.
@@ -49,6 +50,12 @@ sequenceDiagram
   the deadline in `Hello` passes, the call in flight gets `-32603` and the bridge exits 1. Every
   wait counts against that deadline, pipe writes included: a brain that stops reading can't hold
   the bridge past it, and a write it cut short ends the connection rather than being retried.
+- **stdin's end wins over waiting.** The stdin thread raises a flag the moment a read sees EOF,
+  before it queues its last lines, and the `Hello` wait, every pipe write and every wait for
+  stdout space end on it. Lines still queued then are dropped: nobody is left to read their
+  replies. The exit is 0, or 1 when stdout can't take its last lines within the flush wait. The
+  guarantee covers only an end the reader has seen: a reader blocked on a full line queue (16
+  lines behind a stalled write) can't read the EOF, and the deadline ends that case.
 - **Stdout is bounded.** At most four lines wait for stdout. When a reader stops reading, the
   relay waits instead of queueing, and at the end the bridge gives stdout one second to take its
   last lines before it exits 1.
@@ -58,6 +65,48 @@ sequenceDiagram
   hook installed.
 - **Threads.** stdin and stdout run on their own threads. The pipe runs on a current-thread tokio
   runtime, because synchronous Windows pipe I/O serializes reads and writes on one file object.
+
+## The listener
+
+The brain's end of a launch's pipe (`bridge::listener`). C5a creates it for each launch, before it
+writes `mcp.json`, under a fresh `LaunchId`; it's never recreated for the same launch.
+
+- **One instance, one client.** The pipe is owner-only, refuses remote clients, and is created as
+  the first and only instance of its name (`Instance::Only`, an OS maximum of one), so a taken
+  name fails the launch and nobody can add a second server instance. `serve` consumes the
+  listener: the first connection uses up the session, refusals included.
+- **The client checks**, on one process handle opened from the pid the pipe reports, before any
+  byte is written: the process hasn't exited, it runs the brain's executable, and it's inside this
+  launch's own run job. Any failure ends the session with no `Hello`, and C5a fails the launch.
+- **What the checks prove** (Captain's ruling, 2026-11-05). The DACL admits only the owner's
+  account, and code running as that account can already read its Credential Manager entries and
+  open Kumochi's processes. So the checks turn away stray and unrelated connections (another app,
+  an earlier launch's bridge, another executable, a process outside the launch's job); they aren't
+  a defence against same-user code. They don't prove the connection's opener is the process the
+  pid now names: the opener can exit and its pid be reused, or hand its pipe handle to another
+  process. Job membership proves a process came from the run, not that it's the one bridge, so
+  execution stays gated by the audit, the bind and revocation.
+- **Requests.** One at a time, every read and write raced against the launch's deadline. A
+  request's first chunk fixes its key, which must be one the bridge makes (`m:n:<i64>` or
+  `m:s:<hex>` of at most 29 bytes), and its method; a chunk that doesn't continue it, an
+  `initialized` inside it, or the pipe's end inside it ends the session `Broken`. A request over
+  512 KiB gets one `-32603` when its last chunk arrives, and the session goes on.
+- **Methods.** `initialize` echoes a protocol version it knows, or offers `2025-06-18`.
+  `tools/list` gives the launch's frozen tools whatever the gate says, so the audit can see them.
+  `tools/call` takes named params only (`name`, `arguments`, `_meta`); anything else, or a tool
+  outside the frozen set, is `-32602` with fixed text.
+- **Admission.** For a well-formed call, the listener reads the launch's `Binding` (set once, at
+  bind), checks the deadline, then loads C3's `AuditGate`, with no wait in between. That load is
+  the instant of admission: a `fail()` before it refuses the call, and one after it doesn't undo it.
+  A refused call gets an error result and is dropped, never held for a later bind. Revocation
+  (C5a: Disconnect, the route turned off, thread deletion) must fail the gate before it ends the
+  launch, since killing the job doesn't stop input already in the pipe.
+- **No tool runs yet.** An admitted call gets the error result "This tool isn't available over MCP
+  yet." C4b-2 hands its origin (`McpOrigin { run, launch, key }`) to the dispatcher.
+- **Nothing the client sent is printed.** Error bodies are fixed; `McpOrigin` and `SessionEnd`
+  print kinds, ids and lengths only.
+- **macOS counterpart:** the peer pid through `LOCAL_PEERPID` and a process-group check, which is
+  weaker (unverified).
 
 ## The launch policy
 
@@ -90,6 +139,60 @@ version: its launch policy and the facts its audit expects. Any other version is
   or reads them. Only "file not found" or "path not found" is absent; anything else counts as
   present. Server-managed policy from a Team or Enterprise organization can't be seen, so it's
   disclosed instead (`ServerManaged::Disclosed`).
+
+## Discovery and the lane
+
+`engines/claude_code/lane.rs` is the only code that starts `claude`. It runs one call at a time on
+its own thread; `runtime/claude.rs` asks it for work and turns the results into
+`ClaudeCodeView`.
+
+```mermaid
+sequenceDiagram
+    participant R as runtime (Claude)
+    participant L as lane thread
+    participant C as claude.exe
+    R->>L: Version (generation n)
+    Note over L: fence, find, guard, managed sources, owned folders
+    L->>C: --version
+    C-->>L: 2.1.306 (Claude Code)
+    L-->>R: Done(n, Version)
+    R->>L: Status (generation n)
+    Note over L: fence, the reviewed row's may_launch, owned folders
+    L->>C: auth status --json
+    C-->>L: loggedIn, configDirectory
+    L-->>R: Done(n, Status)
+```
+
+- **Finding.** Only `CLAUDE_CODE_PATHS` under the user's profile, never `PATH`. A path that isn't
+  a native `.exe`, or that runs through `node_modules`, is `Unsupported::Shim` before anything is
+  looked at. The version is `--version`'s first word, and it must have a reviewed row.
+- **Before every start.** The lane needs this brain's own lock on `claude-code.lock`, beside the
+  vault's, and takes it on its first call only while the account worker reports the vault lock
+  held. Before Version every managed-policy source must be absent; before Status the reviewed
+  row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
+  held from the volume root. A refusal starts nothing and makes no folder.
+- **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
+  as `configDirectory`, byte for byte; anything else fails closed.
+- **One job per process,** nested in the brain job. A call ends only when its root has exited, its
+  job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
+  empty the lane is stuck: it refuses everything and never lets the lock go.
+- **Bounds.** The queue holds 4 jobs and refuses more without waiting. stdout is capped at 4 KiB for
+  Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
+  A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
+  read is retried.
+- **Time.** A call gets 10 seconds [guess] to exit, then it's ended. Ending it is bounded but
+  separate: up to 5 seconds for its job to be confirmed empty, then about a second for each pipe
+  to end. The lock stays held throughout, so a call can take up to about 17 seconds.
+- **The fence.** Each job carries the generation it was queued under, and a job from an older
+  generation does nothing. Finds asked for while one runs coalesce into one more.
+- **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
+  running call's processes end, queued jobs are dropped, and the lock goes only once every job was
+  confirmed empty.
+- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect does
+  nothing, and a signed-out install shows `Unsupported(SignInStore)`. Connect, Cancel and
+  Disconnect come with C2b.
+- **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
+  half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
 
 ## The audit
 

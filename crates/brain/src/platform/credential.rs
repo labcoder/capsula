@@ -16,7 +16,7 @@ pub type SecretBytes = Secret<Zeroizing<Vec<u8>>>;
 /// The storage design's chunk size, below Windows' 2,560-byte generic credential limit.
 pub const CHUNK_SIZE: usize = 2_000;
 /// The storage design's maximum chunks in one record slot.
-pub const MAX_CHUNKS: usize = 64;
+pub use kumochi_protocol::constants::ACCOUNT_MAX_CHUNKS as MAX_CHUNKS;
 
 /// A credential operation failed; no target name or secret is carried in an error.
 #[derive(Debug, thiserror::Error)]

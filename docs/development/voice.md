@@ -52,7 +52,8 @@ loopback TLS fixtures; the ignored `measure_download_head` requires explicit per
 
 ## Spoken replies
 
-`brain::voice::tts` turns text into 24 kHz mono PCM with Phonon 31M (Q8) and the Juniper voice.
+`brain::voice::tts` turns text into mono PCM with Phonon 31M (Q8) and the Juniper voice. Phonon makes
+24 kHz; each Speak names the output device's rate, and every frame is resampled to it.
 One thread, `voice-tts`, owns the model and every open stream. The handle never waits on it.
 
 ```mermaid
@@ -68,9 +69,12 @@ flowchart LR
   short warm-up. A failed load leaves voice output unloaded; nothing retries on its own.
 - **A Speak during a load** waits for it, as the one waiting request: it's spoken if the load
   succeeds and gets `NotLoaded` if the load fails. Unload rejects it, and a cancel makes it stale.
-- **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame gets a fixed +5.5 dB
-  gain, is clipped and converted to `i16`. A NaN or infinity fails the segment, and so does
-  passing 30 seconds. `Done` carries the total sample count.
+  A stale waiting Speak is replaced unanswered by the next one, so a cancel never leaves TTS busy;
+  only a waiting Speak of the current generation makes `try_speak` answer busy.
+- **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame is resampled, gets a
+  fixed +5.5 dB gain, and is clipped and converted to `i16`. A NaN or infinity fails the segment,
+  and so does passing 30 seconds at the Speak's rate. `Done` carries the total sample count at
+  that rate.
 - **Cancel:** `cancel` moves a generation. The owner checks it before and after each frame, and
   while it waits for room in a full output channel, so it never blocks on a slow consumer.
   Returning drops Phonon's stream, which stops and joins its two workers on the owner thread.
@@ -94,6 +98,74 @@ flowchart LR
   refused thread aborts a release brain. Fallible spawns are a follow-up before release.
 - **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
   their messages can carry paths or text. Errors map to content-free `TtsError` values.
+
+### Segments and the reply
+
+A spoken run has two pure parts. Neither does any I/O; slice 7's 7b wires them into the coordinator.
+
+**`voice::segment`** cuts the run's streamed answer into sentences:
+- A segment ends at `.`, `!` or `?` followed by whitespace. Past 120 characters, `,`, `;` or `:` followed by whitespace also ends one.
+- Past 240 characters the segment is cut at its last whitespace, or on a character boundary inside one long token.
+- A mark at the end of a delta waits for the next character, so `3.` then `5` stays `3.5`.
+- A step's `say` first ends the text before it, so speech keeps the answer's order.
+- The producer's close flushes the tail once. Whitespace on its own is never spoken.
+
+**`voice::reply`** holds one run's speech: its segments, the one TTS is making, the audio the shell holds unplayed, and finality.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Open: Queued
+  Open --> Last: TTS done or failed (final chunk sent)
+  Open --> Dropped: its scene failed
+  Last --> Played: SegmentPlayed with the total
+  Last --> Dropped: its scene failed
+```
+
+- **The window.** At most one Speak is out at a time. A new one goes out only while the unplayed audio is under 20 s and at most two segments lie beyond the playing one.
+- **Credit.** The pump reads TTS only on credit, which keeps forwarded audio inside the window. `SpeechProgress` gives credit back as it plays, so a 30 s segment streams through the 20 s window.
+- **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.
+- **Finality.** Speech is final when the producer has closed, nothing is being spoken, and every surviving segment has played. After a revoke it's final once the shell's `SpeechStopped` arrives instead.
+- **Revoke.** A revoke stops the run's speech for good, and nothing more goes out for the run, a later scene failure included. A Stop from the shell isn't told back to it; any revoke from the brain sends `SpeechRevoked`. A new output-device generation mid-run revokes too: the text stays, and nothing is replayed at the new rate.
+- **Refused reports.** A report that can't be true is refused: an unknown segment, one out of order, a total that isn't the samples sent, a quiet answer nobody asked for, or a quiet cursor that skips a segment whose audio hadn't all gone or falls behind what already played. A late report for a dropped segment is ignored.
+- **The stall timer.** Every move of a draining run re-arms it, under a new epoch, and only the latest epoch counts. A repeated or backward progress report, or a scene failure that drops nothing, doesn't re-arm it.
+- **Heard point.** It's the furthest played sample, with the answer's byte offset where heard speech ends. A text segment counts as heard to its end only when TTS finished it and all of it played, including by a quiet cursor at its total; one TTS failed counts only to its start. The quiet answer is the last word: later progress and played reports don't move the point.
+
+### The pump and the resampler
+
+**`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and
+forwards audio only while the run's reply has granted credit, so a full channel parks the TTS
+thread, never the core loop.
+
+```mermaid
+flowchart LR
+  R["Reply (credit)"] -->|"credit / cancel / revoke"| P["Pump"]
+  P -->|"try_speak (rate)"| T["voice-tts owner"]
+  T -->|"Pcm / Done / Failed, 4 deep"| P
+  P -->|"next() on credit"| L["core loop"]
+```
+
+- **One run at a time.** Only a Speak picks the run: a Speak for another run stops the held one and
+  starts over at zero credit. Credit for a run the pump doesn't serve is ignored, so a late grant
+  from a replaced run can't take the pump back.
+- **Credit** is samples granted minus samples forwarded. A TTS event may overshoot it; at zero, the
+  next audio waits, read ahead as the one held event. `Done`, a failure and a closed stream need no
+  credit, so a full window never hides a segment's end, but none passes audio still waiting.
+  `next` is cancel-safe.
+- **Cancel** stops the current Speak, drops any held event and keeps the run's credit for its next
+  one. **Revoke** does the same and zeroes the credit. The reply, not the pump, keeps a revoked run
+  silent for good.
+- **A stream that closes without `Done`**, including a Speak TTS was too busy to take, comes back as
+  a `Synthesis` failure for its segment.
+
+**`voice::resample`** converts a stream between any two rates with a Blackman-windowed sinc:
+16 zero crossings a side, a 128-point-per-crossing table interpolated linearly, and a cutoff at
+19/20 of the lower rate's Nyquist.
+- Each output sits at its exact rational position in the input, so lengths and timing never
+  drift: n inputs make ceil(n * to / from) outputs, however the input is cut into frames.
+- It waits for the input it needs on both sides, so there's no delay to trim. `finish` pads with
+  silence and flushes the tail.
+- Equal rates pass the audio through untouched.
+- Per-frame cost on Rez is in the PR (the pump around it, 24 kHz to 48 kHz).
 
 ## Provenance
 

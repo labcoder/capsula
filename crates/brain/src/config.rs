@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView, ThreadId,
-    UserName,
+    AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView,
+    ThreadId, UserName,
 };
 use toml::{Table, Value};
 
@@ -20,6 +20,9 @@ const USER_NAME: &str = "user_name";
 const ONBOARDED: &str = "onboarded";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
+const CLAUDE_CODE: &str = "claude_code";
+const DOCK_POSITION: &str = "dock_position";
+const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +132,23 @@ impl Config {
         &self.view
     }
 
+    /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
+    /// couldn't be read, turns it off, because it may have said so.
+    pub(crate) fn claude_code_enabled(&self) -> bool {
+        let Ok(table) = &self.table else {
+            return false;
+        };
+        match table.get(CLAUDE_CODE) {
+            None => true,
+            Some(Value::Table(section)) => match section.get("enabled") {
+                None => true,
+                Some(Value::Boolean(enabled)) => *enabled,
+                Some(_) => false,
+            },
+            Some(_) => false,
+        }
+    }
+
     /// Stages `op` on top of the current table, changing nothing yet.
     ///
     /// # Errors
@@ -164,6 +184,13 @@ impl Config {
             SettingsOp::SetDefaultModel(choice) => {
                 let value = Value::try_from(choice).expect("a model choice is two strings");
                 table.insert(DEFAULT_MODEL.to_owned(), value);
+            }
+            SettingsOp::SetDockPosition(position) => {
+                let value = Value::try_from(position).expect("a dock position is a string");
+                table.insert(DOCK_POSITION.to_owned(), value);
+            }
+            SettingsOp::SetTaskbar(shown) => {
+                table.insert(SHOW_IN_TASKBAR.to_owned(), Value::Boolean(shown));
             }
         }
         let view = view_of(&table, self.view.main_thread);
@@ -236,6 +263,21 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
     let default_model = table.get(DEFAULT_MODEL).and_then(|value| {
         (value.clone().try_into::<ModelChoice>().ok()).or_else(|| invalid(DEFAULT_MODEL))
     });
+    let dock_position = table
+        .get(DOCK_POSITION)
+        .and_then(|value| {
+            value
+                .clone()
+                .try_into::<DockPosition>()
+                .ok()
+                .or_else(|| invalid(DOCK_POSITION))
+        })
+        .unwrap_or_default();
+    let show_in_taskbar = match table.get(SHOW_IN_TASKBAR) {
+        None => false,
+        Some(Value::Boolean(shown)) => *shown,
+        Some(_) => invalid(SHOW_IN_TASKBAR).unwrap_or(false),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -243,6 +285,8 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         main_thread,
         max_frame_rate,
         default_model,
+        dock_position,
+        show_in_taskbar,
     }
 }
 

@@ -1,10 +1,12 @@
-//! Spoken replies: one owner thread, `voice-tts`, turns text into 24 kHz PCM with Phonon,
-//! frame by frame, and stops promptly when the generation moves.
+//! Spoken replies: one owner thread, `voice-tts`, turns text into PCM with Phonon at 24 kHz,
+//! frame by frame, resamples it to the output's rate, and stops promptly when the generation
+//! moves.
 
 mod phonon;
 #[cfg(test)]
 mod tests;
 
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -13,10 +15,11 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 
+use super::resample::Resampler;
+use kumochi_protocol::message::MAX_SEGMENT_SECONDS;
+
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
-/// shortcut: PR 1 owns the protocol's bound; this local copy goes when it lands.
-pub(crate) const MAX_SAY_BYTES: usize = 1_024;
-const MAX_SAMPLES: usize = 30 * 24_000;
+pub(crate) use kumochi_protocol::message::MAX_SAY_BYTES;
 /// +5.5 dB [S5]; the owner's feel session tunes it.
 const GAIN: f32 = 1.883_649;
 
@@ -45,14 +48,14 @@ pub(crate) enum TtsError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TtsBusy;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum TtsEvent {
-    /// 24 kHz mono, one Phonon frame.
+    /// Mono at the Speak's rate: one Phonon frame, resampled.
     Pcm {
         segment: u32,
         samples: Vec<i16>,
     },
-    /// The authoritative length in samples (M7).
+    /// The authoritative length in samples at the Speak's rate (M7).
     Done {
         segment: u32,
         total: u32,
@@ -68,6 +71,8 @@ pub(crate) enum TtsEvent {
 pub(crate) struct Speak {
     pub segment: u32,
     pub generation: u32,
+    /// The output rate the audio is resampled to; a checked rate.
+    pub rate: u32,
     pub text: String,
     pub out: mpsc::Sender<TtsEvent>,
 }
@@ -130,7 +135,7 @@ impl TtsHandle {
         Self::spawn_with(runtime, phonon::Phonon::load)
     }
 
-    fn spawn_with<E: Engine>(
+    pub(super) fn spawn_with<E: Engine>(
         runtime: Handle,
         load: impl FnMut(&Path) -> Result<E, TtsError> + Send + 'static,
     ) -> io::Result<Self> {
@@ -184,9 +189,16 @@ impl TtsHandle {
         }
     }
 
+    /// A waiting Speak of an older generation is replaced unanswered, so a cancel never leaves
+    /// the next Speak busy while the owner is loading.
     pub(crate) fn try_speak(&self, speak: Speak) -> Result<(), TtsBusy> {
+        let current = self.generation();
         self.control.update(|state| {
-            if state.waiting.is_some() {
+            if state
+                .waiting
+                .as_ref()
+                .is_some_and(|waiting| waiting.generation == current)
+            {
                 return Err(TtsBusy);
             }
             state.waiting = Some(speak);
@@ -278,6 +290,7 @@ impl Owner {
         let Speak {
             segment,
             generation: mine,
+            rate,
             text,
             out,
         } = speak;
@@ -302,7 +315,9 @@ impl Owner {
                 return;
             }
         };
-        let mut total = 0usize;
+        let most = usize::try_from(rate * MAX_SEGMENT_SECONDS).unwrap_or(usize::MAX);
+        let mut resampler = Resampler::new(SAMPLE_RATE, rate);
+        let (mut total, mut audio) = (0usize, Vec::new());
         loop {
             if self.moved(mine) || out.is_closed() {
                 return;
@@ -311,28 +326,43 @@ impl Owner {
             if self.moved(mine) {
                 return;
             }
-            let failure = match frame {
-                None => break,
-                Some(Err(error)) => Some(error),
-                Some(Ok(frame)) => match to_pcm(&frame) {
-                    None => Some(TtsError::NonFinite),
-                    Some(samples) => {
-                        total += samples.len();
-                        if total > MAX_SAMPLES {
-                            Some(TtsError::TooLong)
-                        } else if samples.is_empty()
-                            || self.deliver(&out, mine, TtsEvent::Pcm { segment, samples })
-                        {
-                            None
-                        } else {
-                            return;
-                        }
-                    }
-                },
+            audio.clear();
+            let ended = match frame {
+                None => {
+                    resampler.finish(&mut audio);
+                    true
+                }
+                Some(Ok(frame)) if frame.iter().all(|sample| sample.is_finite()) => {
+                    resampler.push(&frame, &mut audio);
+                    false
+                }
+                Some(Ok(_)) => {
+                    self.deliver(&out, mine, failed(segment, TtsError::NonFinite));
+                    return;
+                }
+                Some(Err(error)) => {
+                    self.deliver(&out, mine, failed(segment, error));
+                    return;
+                }
+            };
+            total += audio.len();
+            let pcm = to_pcm(&audio);
+            let failure = match &pcm {
+                _ if total > most => Some(TtsError::TooLong),
+                None => Some(TtsError::NonFinite),
+                Some(_) => None,
             };
             if let Some(error) = failure {
-                self.deliver(&out, mine, TtsEvent::Failed { segment, error });
+                self.deliver(&out, mine, failed(segment, error));
                 return;
+            }
+            if let Some(samples) = pcm.filter(|samples| !samples.is_empty())
+                && !self.deliver(&out, mine, TtsEvent::Pcm { segment, samples })
+            {
+                return;
+            }
+            if ended {
+                break;
             }
         }
         if !self.moved(mine) {
@@ -363,6 +393,32 @@ impl Owner {
                 true
             }
             _ => false,
+        }
+    }
+}
+
+fn failed(segment: u32, error: TtsError) -> TtsEvent {
+    TtsEvent::Failed { segment, error }
+}
+
+impl fmt::Debug for TtsEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pcm { segment, samples } => f
+                .debug_struct("Pcm")
+                .field("segment", segment)
+                .field("samples", &samples.len())
+                .finish(),
+            Self::Done { segment, total } => f
+                .debug_struct("Done")
+                .field("segment", segment)
+                .field("total", total)
+                .finish(),
+            Self::Failed { segment, error } => f
+                .debug_struct("Failed")
+                .field("segment", segment)
+                .field("error", error)
+                .finish(),
         }
     }
 }

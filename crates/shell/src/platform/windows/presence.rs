@@ -55,6 +55,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
+use crate::platform::host::{HostChange, WatchGen};
 use crate::platform::input;
 
 /// The tray's callback message to the proxy window.
@@ -100,6 +101,11 @@ pub(crate) enum PresenceEvent {
     },
     /// The outermost button release returned while a drained capture loss waited for it.
     Reconcile,
+    /// A watched perch host changed; `w` is the watch's generation.
+    HostChanged {
+        w: WatchGen,
+        change: HostChange,
+    },
 }
 
 /// The localized text of the tray icon and its menu.
@@ -155,6 +161,9 @@ pub(crate) enum PresenceError {
     FrameId,
     #[error("no selection surface is bound")]
     SelectionSurface,
+    /// A perch host's watch couldn't be installed, or two are already alive.
+    #[error("can't watch the host window")]
+    HostWatch,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
@@ -795,7 +804,6 @@ impl Drop for Menu {
 }
 
 /// Shows the tray menu at `[x, y]` and returns what the user picked, if anything.
-// shortcut: the tray owns dock positioning until slice 10 adds Settings → General.
 fn pick_from_tray_menu(
     hwnd: HWND,
     state: &ProxyState,
@@ -859,7 +867,7 @@ fn pick_from_tray_menu(
 }
 
 /// Queues an event for the UI thread; the queue is unbounded, so this never blocks.
-fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
+pub(super) fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
     if events.try_send(event).is_err() {
         tracing::debug!("the UI stopped listening to presence events");
     }

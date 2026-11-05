@@ -71,7 +71,7 @@ impl Connect for Tls {
 
 /// Model connections through `C`, keeping one idle connection for the next request.
 pub struct ModelClient<C: Connect> {
-    pub(super) connect: C,
+    pub(in crate::connections) connect: C,
     idle: Mutex<Option<(C::Io, Instant)>>,
 }
 
@@ -116,7 +116,7 @@ fn quiet(io: &mut (impl AsyncRead + Unpin)) -> bool {
 
 /// How the upload ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Upload {
+pub(in crate::connections) enum Upload {
     /// Every request byte was written and flushed.
     Flushed,
     /// A final head other than a success arrived first, so writing stopped.
@@ -124,10 +124,10 @@ pub(super) enum Upload {
 }
 
 /// One request's use of a connection.
-pub(super) struct ModelConn<Io> {
+pub(in crate::connections) struct ModelConn<Io> {
     pub(super) io: Io,
     /// Response bytes read but not yet consumed.
-    pub(super) buf: Vec<u8>,
+    pub(in crate::connections) buf: Vec<u8>,
     wire: usize,
     /// Interim heads read so far.
     interim: usize,
@@ -145,7 +145,7 @@ impl<Io> fmt::Debug for ModelConn<Io> {
 }
 
 impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
-    pub(super) fn new(io: Io) -> Self {
+    pub(in crate::connections) fn new(io: Io) -> Self {
         Self {
             io,
             buf: Vec::new(),
@@ -158,7 +158,10 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
     /// Writes and flushes `request`. Interim heads that arrive meanwhile are skipped and a
     /// success head is kept for [`Self::head`], so writing goes on; any other final head stops it
     /// for good.
-    pub(super) async fn upload(&mut self, request: &[u8]) -> Result<Upload, Failure> {
+    pub(in crate::connections) async fn upload(
+        &mut self,
+        request: &[u8],
+    ) -> Result<Upload, Failure> {
         let mut written = 0;
         poll_fn(|cx| {
             while self.answer.is_none() {
@@ -196,7 +199,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
     }
 
     /// The final head, past any interim ones; each read waits at most `idle`.
-    pub(super) async fn head(&mut self, idle: Duration) -> Result<Head, Failure> {
+    pub(in crate::connections) async fn head(&mut self, idle: Duration) -> Result<Head, Failure> {
         if let Some(head) = self.answer.take() {
             return Ok(head);
         }
@@ -227,7 +230,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
     }
 
     /// The length of the body's next data at the front of `buf`, or `None` at its end.
-    pub(super) async fn next(
+    pub(in crate::connections) async fn next(
         &mut self,
         body: &mut Body,
         idle: Duration,

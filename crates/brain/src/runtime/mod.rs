@@ -6,6 +6,8 @@
 //! writer is blocked on a shell that stopped reading.
 
 pub(crate) mod account;
+pub(crate) mod claude;
+mod connections;
 mod controls;
 mod data;
 mod recovery;
@@ -22,9 +24,10 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
+    Transcript,
 };
-use kumochi_protocol::tap::Direction;
+use kumochi_protocol::tap::{Direction, Tapped as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
@@ -33,7 +36,7 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
@@ -126,7 +129,7 @@ pub(crate) enum Quit {
 #[derive(Debug)]
 pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     Fixture(Box<dyn Engine>),
     /// The account's engine answers, so runs need a usable account. Its rounds ask for the
     /// bearer on `asks`.
@@ -144,7 +147,7 @@ pub(crate) struct Brain {
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     fixture: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
@@ -179,6 +182,8 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    /// Claude Code's connection; its calls run on its own lane.
+    claude: claude::Claude,
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
@@ -238,12 +243,12 @@ impl Brain {
         config: Config,
         account: Accounts,
     ) -> std::io::Result<Self> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
             Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),
             Selected::Account { engine, asks } => (engine, asks, false),
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let Selected::Account {
             engine,
             asks: access,
@@ -271,7 +276,7 @@ impl Brain {
             coordinator,
             store: Some(store),
             engine,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             fixture,
             inputs_tx,
             inputs,
@@ -291,6 +296,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
             #[cfg(test)]
@@ -312,16 +318,21 @@ impl Brain {
         Ok(brain)
     }
 
+    /// Gives Claude Code's connection its lane, or its off switch.
+    pub(crate) fn attach_claude(&mut self, claude: claude::Claude) {
+        self.claude = claude;
+    }
+
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
     /// nothing.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let now = if self.fixture {
             Availability::Ready(Ready::fixture())
         } else {
             self.account.availability()
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
         let effects = self
             .coordinator
@@ -425,6 +436,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -466,6 +481,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -489,6 +508,11 @@ impl Brain {
                 }
                 input = self.account.next() => {
                     let applied = self.account_input(input, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    continue;
+                }
+                done = self.claude.next() => {
+                    let applied = self.claude_done(done, None);
                     debug_assert!(applied.is_ok(), "applying without a shell can't fail");
                     continue;
                 }
@@ -729,6 +753,12 @@ impl Brain {
                     }
                     continue;
                 }
+                done = self.claude.next() => {
+                    if self.claude_done(done, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 Some(ask) = self.access.recv() => {
                     if self.access_asked(ask, Some(&mut link)).is_err() {
                         return Ended::Lost;
@@ -790,6 +820,12 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
+        let connected = self.account.connections.connected();
+        link.control(&self.composed(&connected))
+            .map_err(|Full| Ended::Lost)?;
+        if let Some(models) = self.account.connections.models_unsent() {
+            link.data(&models).map_err(|Full| Ended::Lost)?;
+        }
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
@@ -922,10 +958,8 @@ impl Brain {
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
-                        if let Some(failure) = failure {
-                            let failed = self.inputs_tx.send(failure);
-                            debug_assert!(failed.is_ok(), "the brain holds its own receiver");
-                        }
+                        let failed = self.inputs_tx.send(failure);
+                        debug_assert!(failed.is_ok(), "the brain holds its own receiver");
                     }
                 }
                 Effect::Control(message) => {
@@ -1056,6 +1090,16 @@ async fn read_data(
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some(DataToBrain::MicPcm(chunk))) if chunk.check().is_err() => {
+                return Ended::Broken("a microphone chunk out of bounds");
+            }
+            // shortcut: slice 7's PR 5 buffers a hold's audio.
+            Ok(Some(DataToBrain::MicPcm(_))) => {}
+            Ok(Some(
+                message @ (DataToBrain::IssueEdit { .. } | DataToBrain::IssueCards { .. }),
+            )) => {
+                tracing::debug!(op = message.op(), "issue data ignored");
+            }
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
@@ -1181,11 +1225,16 @@ impl<'a, 't> Link<'a, 't> {
         let owner = match message {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
-            | DataToShell::RunEnd { run } => Owner::Run(*run),
+            | DataToShell::RunEnd { run }
+            | DataToShell::SegmentQueued { run, .. }
+            | DataToShell::Transcript(Transcript { run, .. })
+            | DataToShell::SpeechPcm(SpeechPcm { run, .. }) => Owner::Run(*run),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::ScenesRemoved { .. } | DataToShell::Models { .. } => Owner::Marker,
+            DataToShell::ScenesRemoved { .. }
+            | DataToShell::Models { .. }
+            | DataToShell::IssueCard(_) => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }

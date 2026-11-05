@@ -3,7 +3,6 @@
 
 #[cfg(debug_assertions)]
 mod accounts_fixture;
-mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
 pub(crate) mod drag;
@@ -17,6 +16,7 @@ mod kumo_view;
 mod launch;
 mod line;
 mod link;
+mod messages;
 pub(crate) mod observer;
 mod overlay_input;
 mod paint;
@@ -25,9 +25,12 @@ mod paint_paths;
 #[cfg(test)]
 mod paint_work_fixture;
 mod panels;
+mod perch;
+mod position;
+mod pull_dock;
+mod pull_picture;
 mod pulling;
 mod settings;
-mod settings_view;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -67,7 +70,6 @@ use crate::threads::Threads;
 #[cfg(debug_assertions)]
 pub(crate) use accounts_fixture::run as run_accounts_fixture;
 pub(crate) use diagnostics::Diagnostics;
-use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
@@ -100,6 +102,7 @@ struct Presence {
     settings_panel: Option<SettingsPanel>,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
+    chat: Entity<Threads>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
@@ -126,6 +129,7 @@ struct Presence {
     drawn: Drawn,
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
+    pull_dock: pull_dock::PullDock,
     /// The one source of animation frames.
     frames: FrameLoop,
     /// Retries deletes the control queue had no room for.
@@ -137,49 +141,6 @@ struct Presence {
 }
 
 impl Presence {
-    fn position(
-        &mut self,
-        position: Position,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
-        // shortcut: work-area changes need another position choice; slice 10 adds live settings updates.
-        let area = platform::work_area()?;
-        self.end_selection(
-            crate::presenter::overlay_input::ExitCause::DisplayChanged,
-            cx,
-        );
-        let physical = |value: f32| scaled(value, self.scale);
-        // Kumo and its gap sit beside the 300 px the details had before the peek; the peek is
-        // only as tall as its content.
-        let layout = position.layout(
-            area,
-            line::slot(self.scale),
-            [physical(380.0), physical(PEEK_HEIGHT)],
-            0,
-        );
-        let index = Position::ALL
-            .iter()
-            .position(|candidate| *candidate == position)
-            .expect("every dock position has a menu entry");
-        let frame = LineFrame::in_slot(layout.dock, self.scale);
-        self.request_line(
-            Placement {
-                layout,
-                frame,
-                index,
-            },
-            cx,
-        )?;
-        self.dismiss_settings(cx)?;
-        self.dismiss_text(cx)?;
-        self.dismiss_threads(cx)?;
-        self.set_panel(PanelVisibility::Hidden, cx)?;
-        if let Err(error) = self.pointer_changed(cx) {
-            tracing::debug!(%error, "can't recheck the pointer after moving the dock");
-        }
-        Ok(())
-    }
-
     fn set_panel(
         &mut self,
         visibility: PanelVisibility,
@@ -835,13 +796,7 @@ pub(crate) fn open(
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, |_, _| false);
-        cx.new(|_| Dock {
-            pending_paint: PendingPaint::default(),
-            paint: None,
-            origin: [0; 2],
-            drawn: Drawn::default(),
-            listening: false,
-        })
+        cx.new(|_| Dock::new())
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
     let mut input_windows = platform::OverlayWindows::default();
@@ -854,12 +809,12 @@ pub(crate) fn open(
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
-    let native = PresenceNative::new(presence_labels(cx), events.clone(), line::slot(scale))?;
+    let mask = pull_picture::largest_area(line::slot(scale), scale);
+    let native = PresenceNative::new(presence_labels(cx), events.clone(), mask)?;
     input_windows.proxy(native.input_proxy());
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
     // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
     let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
@@ -885,7 +840,8 @@ pub(crate) fn open(
             thread_panel: None,
             settings_panel: None,
             settings,
-            threads,
+            threads: cx.new(|_| Threads::default()),
+            chat: cx.new(|_| Threads::chat()),
             events,
             link,
             session: None,
@@ -908,6 +864,7 @@ pub(crate) fn open(
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
+            pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
         }
     });
@@ -973,13 +930,16 @@ fn listen(
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
                     // Hover opens the peek; a press does nothing until C2a's pull starts there.
-                    PresenceEvent::DockPressed { .. } => {}
+                    // shortcut: no host watch is armed until C2b-2's carry, which handles these.
+                    PresenceEvent::DockPressed { .. } | PresenceEvent::HostChanged { .. } => {}
                     PresenceEvent::PointerChanged { entered_qpc } => {
                         this.pointer_moved(entered_qpc, cx)?;
                     }
                     PresenceEvent::Position(index) => {
-                        if let Some(position) = Position::ALL.get(index) {
-                            this.position(*position, cx)?;
+                        if let Some(position) =
+                            kumochi_protocol::message::DockPosition::ALL.get(index)
+                        {
+                            this.pick_dock_position(*position, cx)?;
                         }
                     }
                     PresenceEvent::Retry => {

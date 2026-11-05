@@ -5,6 +5,8 @@ use std::sync::Arc;
 use kumochi_protocol::message::{Deleted, RunId, ThreadId, ThreadKind};
 use rusqlite::Connection;
 
+use crate::context::ConnectionTag;
+use crate::engines::{CallId, Opaque};
 use crate::test_support::Scratch;
 
 use super::{
@@ -68,6 +70,18 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
             }],
         )
         .expect("text");
+    // A stored round: a native item and a result, each holding the marker.
+    let item = format!(r#"{{"type":"message","content":"{MARKER}"}}"#);
+    let call = CallId::new("call-1").expect("short");
+    store
+        .append_round(
+            (thread, run),
+            ConnectionTag(7),
+            None,
+            &[Opaque::new(item.into_bytes()).expect("small")],
+            &[(&call, MARKER)],
+        )
+        .expect("round");
     // A scene of one step: its `scene_begin`, a `scene_step` whose label is the marker, and its
     // `scene_cleared`.
     let scene = store
@@ -166,7 +180,7 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 4
+            known: 5
         })
     ));
 }

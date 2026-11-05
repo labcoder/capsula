@@ -146,7 +146,24 @@ flowchart LR
 - **Speech waits for its picture.** A step's sentence plays only once the shell has prepared the step, after a wait of up to 250 ms. A step that isn't prepared by then shows as failed and is never spoken, and the rest of that drawing's queued speech is dropped.
 - **Caps** are checked on expanded work before anything is allocated, and nothing is silently truncated.
 
-**3D** draws through GPUI paths, because GPUI on Windows has no depth buffer for element content. This CPU path is a design choice for the restricted tier, not the only possible one. Opaque solids rasterise on the CPU against a per-texel depth buffer, so intersecting solids need no ordering structure; translucent faces follow, sorted back to front by centroid depth and depth-tested without writing, which can blend interpenetrating translucent solids in the wrong order (OSC-218). Edges are supersampled when a view comes to rest. Moving solids rebuild off the UI thread, and the shell swaps in a new pose only when its drawing and picking data are both complete. Faces crossing the near plane are clipped, not dropped. Picking ray-casts against the same fragments on screen, ordered by camera-space depth, so an unlabelled box in front blocks a click on the part behind it. The camera is constrained, so orbiting can't enter the model.
+**3D** uses a CPU depth-buffered raster; the planned shell host paints its BGRA image because
+GPUI on Windows has no depth buffer for element content. Opaque solids write per-sample depth;
+translucent polygons follow in centroid order without writing depth, which can blend intersecting
+translucent geometry in the wrong order (OSC-218). Rest frames supersample edges. The scene frame
+stage transforms indexed source geometry at the sampled, attachment-composed pose, culls back
+faces, clips near and guard planes in f64, projects, snaps and shades into reserved raster scratch.
+Every source face shares one reciprocal-depth plane across its triangles. Camera defaults target
+the 3D bounds' centre; authored cameras can enter geometry, and clipping rather than a distance
+clamp handles that case. The near plane includes a world-coordinate precision floor. These scene
+primitives exist and scene admission charges 3D steps, but the brain refuses them at its ingress
+until the shell host lands. Scene picking reads an
+owned `DisplayedFrame`: ids, camera, sampled poses, geometry revision, solid-to-part handles and
+the frozen logical destination/DPI/exact integer raster dimensions. Each pointer axis maps
+independently; labelled geometry returns a part, unlabelled geometry blocks and background misses.
+An edge neighbourhood of one internal texel can differ from an exact ray; translucent ids follow
+the approximate painted order. The later host must publish the image and this entire snapshot
+together at accepted paint, never on worker completion alone. A worker writes only the other
+owned id buffer; failed, skipped or superseded paints leave the displayed pair unchanged.
 
 ## Esc
 

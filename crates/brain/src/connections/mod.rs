@@ -1,6 +1,7 @@
 //! Brain-local account records; no credentials are part of the shell protocol.
 
 pub mod account;
+pub mod anthropic;
 pub mod catalog;
 pub mod clock;
 pub mod error;

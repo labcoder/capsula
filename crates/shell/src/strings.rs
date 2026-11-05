@@ -80,6 +80,9 @@ pub(crate) enum Text {
     SettingsUnavailable,
     SettingsNotSaved,
     SettingsSaveHelp,
+    SettingsVersion,
+    SettingsCopyBuild,
+    SettingsPositionUnavailable,
     DockBrainError,
     MaxFrameRate,
     FrameRateAutomatic,
@@ -132,7 +135,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 118] = [
+    const ALL: [Self; 121] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -203,6 +206,9 @@ impl Text {
         Self::SettingsUnavailable,
         Self::SettingsNotSaved,
         Self::SettingsSaveHelp,
+        Self::SettingsVersion,
+        Self::SettingsCopyBuild,
+        Self::SettingsPositionUnavailable,
         Self::DockBrainError,
         Self::MaxFrameRate,
         Self::FrameRateAutomatic,
@@ -271,6 +277,9 @@ impl Text {
     )]
     const fn id(self) -> &'static str {
         match self {
+            Self::SettingsVersion => "settings-version",
+            Self::SettingsCopyBuild => "settings-copy-build",
+            Self::SettingsPositionUnavailable => "settings-position-unavailable",
             Self::AccountProvider => "accounts-provider",
             Self::AccountWaiting => "accounts-waiting",
             Self::AccountOffline => "accounts-offline",
@@ -407,6 +416,12 @@ impl std::fmt::Debug for Strings {
 impl Global for Strings {}
 
 impl Strings {
+    pub(crate) fn taskbar(&self) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        self.format("settings-taskbar", Some(&args))
+    }
+
     /// Loads the English catalog compiled into the binary.
     pub(crate) fn english() -> Self {
         let resource = FluentResource::try_new(ENGLISH.to_owned())
@@ -430,6 +445,12 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    pub(crate) fn issue_draft(&self, title: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("title", title);
+        self.format("thread-issue-draft", Some(&args))
     }
 
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
@@ -516,6 +537,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ClaudeCodeInputUnsupported => "error-claude-code-input-unsupported",
         ErrorKey::ClaudeCodeBudget => "error-claude-code-budget",
         ErrorKey::ClaudeCodeCleanupPending => "error-claude-code-cleanup-pending",
+        ErrorKey::RenewalUnconfirmed => "error-renewal-unconfirmed",
     }
 }
 
@@ -524,6 +546,17 @@ mod tests {
     use super::{Strings, Text, error_id};
     use fluent_bundle::{FluentBundle, FluentResource};
     use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
+
+    #[test]
+    fn the_taskbar_label_uses_the_product_name() {
+        assert_eq!(
+            Strings::english().taskbar(),
+            format!(
+                "Also show {} in the taskbar",
+                kumochi_protocol::constants::DISPLAY_NAME
+            )
+        );
+    }
 
     #[test]
     fn every_text_is_in_the_catalog() {
@@ -592,6 +625,14 @@ mod tests {
         assert_eq!(strings.assistant("Cloud"), "Cloud");
         assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
         assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+    }
+
+    #[test]
+    fn issue_history_fills_the_title_without_interpreting_it() {
+        assert_eq!(
+            Strings::english().issue_draft("Fix {layout} — 窓"),
+            "Issue draft: Fix {layout} — 窓"
+        );
     }
 
     #[test]

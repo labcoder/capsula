@@ -8,8 +8,8 @@ use crate::{
     display::dash_bound,
     limits::{
         MAX_CHART_SERIES, MAX_COMPOSED_SCALE, MAX_COORD, MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES,
-        MAX_GLOBAL_DASH_PIECES, MAX_KEYS, MAX_LIVE_OBJECTS, MAX_OBJECT_DEPTH, MAX_TABLE_ROWS,
-        MAX_TRACKS,
+        MAX_GLOBAL_DASH_PIECES, MAX_KEYS, MAX_LIVE_OBJECTS, MAX_MOVING_TRIANGLES, MAX_OBJECT_DEPTH,
+        MAX_SOLIDS, MAX_TABLE_ROWS, MAX_TRACKS, MAX_TRIANGLES, MAX_VIEWS,
     },
     record::{ChartKind, Point},
 };
@@ -271,6 +271,7 @@ pub(super) fn charge<'a>(
         return Err(ErrorCode::OverBudget(Budget::LiveObjects));
     }
     let mut groups = BTreeMap::<Option<&WireId>, [usize; 4]>::new();
+    let mut views = BTreeMap::<&WireId, (usize, bool)>::new();
     let mut usage = Usage {
         scenes: 1,
         ..Usage::default()
@@ -279,6 +280,13 @@ pub(super) fn charge<'a>(
         usage = usage.add(*work);
         usage.tracks += motions.len();
         usage.keys += motions.values().map(|m| m.keys).sum::<usize>();
+        if object.kind == Kind::Solid
+            && let Some(view) = &object.parent
+        {
+            let (triangles, moving) = views.entry(view).or_default();
+            *triangles += work.triangles;
+            *moving |= motions.contains_key("pos3") || motions.contains_key("rot3");
+        }
         let group = groups.entry(object.parent.as_ref()).or_default();
         match object.kind {
             Kind::Node => group[0] += 1,
@@ -302,6 +310,21 @@ pub(super) fn charge<'a>(
                 return Err(ErrorCode::OverBudget(budget));
             }
         }
+    }
+    for (actual, cap, budget) in [
+        (usage.views, MAX_VIEWS, Budget::Views),
+        (usage.solids, MAX_SOLIDS, Budget::Solids),
+        (usage.triangles, MAX_TRIANGLES, Budget::Triangles),
+    ] {
+        if actual > cap {
+            return Err(ErrorCode::OverBudget(budget));
+        }
+    }
+    if views
+        .values()
+        .any(|&(triangles, moving)| moving && triangles > MAX_MOVING_TRIANGLES)
+    {
+        return Err(ErrorCode::OverBudget(Budget::MovingTriangles));
     }
     if usage.tracks > MAX_TRACKS {
         return Err(ErrorCode::OverBudget(Budget::Tracks));

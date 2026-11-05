@@ -16,11 +16,49 @@ pub const SHELL_EXE: &str = "kumochi.exe";
 pub const BRAIN_EXE: &str = "kumochid.exe";
 
 /// The folder under `%LOCALAPPDATA%` (logs, store, models) and `%APPDATA%` (config).
-pub const DATA_DIR: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev"
-} else {
-    "Kumochi"
-};
+pub const DATA_DIR: &str = ProductIdentity::ACTIVE.data_dir;
+
+/// Stored namespaces, selectable independently of the caller's build profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProductIdentity {
+    /// The data and configuration folder.
+    pub data_dir: &'static str,
+    /// The account credential service.
+    pub credential_service: &'static str,
+    /// The instance capability service.
+    pub instance_service: &'static str,
+    /// The per-session kernel object prefix.
+    pub object_prefix: &'static str,
+    /// The shell's single-instance lock prefix.
+    pub shell_lock: &'static str,
+}
+
+impl ProductIdentity {
+    /// Installed product namespaces, even when selected by debug-built tooling.
+    pub const RELEASE: Self = Self {
+        data_dir: "Kumochi",
+        credential_service: "Kumochi",
+        instance_service: "Kumochi instance",
+        object_prefix: "kumochi",
+        shell_lock: "kumochi-shell",
+    };
+
+    /// Isolated development namespaces.
+    pub const DEV: Self = Self {
+        data_dir: "Kumochi Dev",
+        credential_service: "Kumochi Dev",
+        instance_service: "Kumochi Dev instance",
+        object_prefix: "kumochi-dev",
+        shell_lock: "kumochi-dev-shell",
+    };
+
+    /// Names used by the running app, unchanged from the profile-dependent aliases.
+    pub const ACTIVE: Self = if cfg!(debug_assertions) {
+        Self::DEV
+    } else {
+        Self::RELEASE
+    };
+}
 
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
@@ -48,37 +86,77 @@ pub const SHELL_LOG: &str = "kumochi-shell";
 pub const BRIDGE_PIPE: &str = "claude-bridge";
 
 /// Prefix of every per-session kernel object name: pipes and mutexes.
-pub const OBJECT_PREFIX: &str = if cfg!(debug_assertions) {
-    "kumochi-dev"
-} else {
-    "kumochi"
-};
+pub const OBJECT_PREFIX: &str = ProductIdentity::ACTIVE.object_prefix;
 
 /// Credential Manager service for the user's credentials (accounts and keys, from slice 3).
-pub const CREDENTIAL_SERVICE: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev"
-} else {
-    "Kumochi"
-};
+pub const CREDENTIAL_SERVICE: &str = ProductIdentity::ACTIVE.credential_service;
 
 /// Credential Manager service for the rotating instance capability.
-pub const INSTANCE_SERVICE: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev instance"
-} else {
-    "Kumochi instance"
-};
+pub const INSTANCE_SERVICE: &str = ProductIdentity::ACTIVE.instance_service;
 
 /// The shell's single-instance lock file, `<SHELL_LOCK>-<session id>.lock` in the [`DATA_DIR`]
 /// folder under `%LOCALAPPDATA%`: one shell per Windows session.
-pub const SHELL_LOCK: &str = if cfg!(debug_assertions) {
-    "kumochi-dev-shell"
-} else {
-    "kumochi-shell"
-};
+pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
 /// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
+
+/// The vault's maximum number of chunks in one record slot.
+pub const ACCOUNT_MAX_CHUNKS: usize = 64;
+
+/// The vault's chunked records, account first, revocations second.
+pub const ACCOUNT_CHUNKED_RECORDS: [&str; 2] = ["chatgpt", "revoke"];
+
+/// An exact raw-store target; unlike keyring entries, the vault uses slash joining.
+#[must_use]
+pub fn account_target(service: &str, entry: &str) -> String {
+    format!("{service}/{entry}")
+}
+
+/// Every account/key target, including both vault slots and the shell's key staging record.
+pub fn account_targets(service: &str) -> impl Iterator<Item = String> + '_ {
+    ["host", "signout"]
+        .into_iter()
+        .map(move |entry| account_target(service, entry))
+        .chain(ACCOUNT_CHUNKED_RECORDS.into_iter().flat_map(move |record| {
+            std::iter::once(account_target(service, record)).chain((0..2).flat_map(move |slot| {
+                (0..ACCOUNT_MAX_CHUNKS)
+                    .map(move |index| account_target(service, &format!("{record}/{slot}/{index}")))
+            }))
+        }))
+        .chain([
+            anthropic_key_target(service),
+            anthropic_staging_target(service),
+        ])
+}
+
+/// The keyring account for a Windows session's capability.
+#[must_use]
+pub fn instance_entry(session: u32) -> String {
+    format!("{INSTANCE_ACCOUNT}-{session}")
+}
+
+/// Parses only canonical account names emitted by [`instance_entry`], not stored targets.
+#[must_use]
+pub fn parse_instance_entry(account: &str) -> Option<u32> {
+    let digits = account.strip_prefix(INSTANCE_ACCOUNT)?.strip_prefix('-')?;
+    if digits.is_empty()
+        || digits.len() > 10
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The Windows Credential Manager target used by keyring for an instance capability.
+#[must_use]
+pub fn instance_target(service: &str, session: u32) -> String {
+    // keyring's Windows backend joins the account and service with a dot, not a slash.
+    format!("{}.{service}", instance_entry(session))
+}
 
 /// The `dwExtraInfo` the approved input-session harness puts on every input it injects, so the
 /// shell's gate observer and the harness's own fixture tell it from the user's input.
@@ -91,9 +169,13 @@ pub const FOCUS_INPUT_MARKER: usize = 0x4350_5346;
 /// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
 pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
 
-/// Kumochi's own Claude Code configuration folder (`CLAUDE_CONFIG_DIR`), in the [`DATA_DIR`]
-/// folder under `%LOCALAPPDATA%`. Claude Code keeps its sign-in there; Kumochi never opens it.
+/// Kumochi's own Claude Code folder, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`: its
+/// `config` folder is `CLAUDE_CONFIG_DIR`, where Claude Code keeps its sign-in and Kumochi never
+/// looks, beside the profile, application data, temporary and working folders it's given.
 pub const CLAUDE_CODE_DIR: &str = "claude-code";
+/// The lock a brain holds, beside [`CLAUDE_CODE_DIR`], for as long as any `claude` it started
+/// may still be running, so no other brain starts one against the same folder.
+pub const CLAUDE_CODE_LOCK: &str = "claude-code.lock";
 /// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
 /// `%LOCALAPPDATA%`.
 pub const ENGINE_DIR: &str = "engine";
@@ -103,6 +185,18 @@ pub const MCP_SERVER_NAME: &str = "kumochi";
 pub const ANTHROPIC_KEY_ACCOUNT: &str = "anthropic-key";
 /// The account the shell stages a pasted key in, for the brain to check and move.
 pub const ANTHROPIC_STAGING_ACCOUNT: &str = "anthropic-key-staged";
+
+/// The exact active-key target shared by the vault and purge inventory.
+#[must_use]
+pub fn anthropic_key_target(service: &str) -> String {
+    format!("{ANTHROPIC_KEY_ACCOUNT}.{service}")
+}
+
+/// The exact staging target shared by the shell, vault and purge inventory.
+#[must_use]
+pub fn anthropic_staging_target(service: &str) -> String {
+    format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}")
+}
 /// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
 pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
@@ -124,17 +218,20 @@ pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";
 
 #[cfg(test)]
+mod identity_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
-        for one in logs {
-            for other in logs {
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG];
+        for (index, one) in logs.iter().enumerate() {
+            for other in &logs[index + 1..] {
                 assert!(
-                    one == other || !one.starts_with(other),
-                    "{one} starts with {other}"
+                    !one.starts_with(other) && !other.starts_with(one),
+                    "{one} and {other} overlap"
                 );
             }
         }

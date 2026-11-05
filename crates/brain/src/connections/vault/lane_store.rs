@@ -32,13 +32,12 @@ impl<S: CredentialStore> LaneStore<S> {
     fn written(&self) -> MutexGuard<'_, BTreeSet<String>> {
         self.written.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
 
-impl<S: CredentialStore> CredentialStore for LaneStore<S> {
-    fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
-        if !self.written().contains(target) {
-            return self.store.get(target);
-        }
+    /// Retry absence after a recent write, including staging written by the shell.
+    pub(super) fn get_recent(
+        &self,
+        target: &str,
+    ) -> Result<Option<SecretBytes>, CredentialStoreError> {
         for attempt in 0..TRIES {
             if attempt > 0 {
                 thread::sleep(WAIT);
@@ -47,7 +46,18 @@ impl<S: CredentialStore> CredentialStore for LaneStore<S> {
                 return Ok(Some(value));
             }
         }
-        Err(CredentialStoreError::Unsettled)
+        Ok(None)
+    }
+}
+
+impl<S: CredentialStore> CredentialStore for LaneStore<S> {
+    fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
+        if !self.written().contains(target) {
+            return self.store.get(target);
+        }
+        self.get_recent(target)?
+            .map(Some)
+            .ok_or(CredentialStoreError::Unsettled)
     }
 
     fn set(&self, target: &str, secret: &SecretBytes) -> Result<(), CredentialStoreError> {

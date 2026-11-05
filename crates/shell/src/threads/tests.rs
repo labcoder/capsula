@@ -1,6 +1,245 @@
 use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
+#[test]
+fn chat_follows_the_input_target_not_the_browsed_task() {
+    let mut runs = crate::runs::Runs::default();
+    runs.settings(ThreadId(1));
+    assert!(runs.select_thread(Some(ThreadId(3))));
+    let mut panel = Threads::default();
+    panel.select(Some(ThreadId(4)));
+    let mut chat = Threads::chat();
+    chat.show_for(runs.thread());
+    assert_eq!(chat.open, Some(ThreadId(3)));
+    panel.select(Some(ThreadId(5)));
+    assert!(!chat.follow(runs.thread()));
+    assert_eq!(panel.open, Some(ThreadId(5)));
+    assert_eq!(chat.open, Some(ThreadId(3)));
+    runs.back_to_kumo();
+    assert!(chat.follow(runs.thread()));
+    assert_eq!(chat.open, Some(ThreadId(1)));
+    assert!(runs.select_thread(None));
+    assert!(chat.follow(runs.thread()));
+    assert_eq!(chat.open, None);
+    assert_eq!(panel.open, Some(ThreadId(5)));
+}
+
+#[test]
+fn panel_and_chat_allocate_disjoint_ids_through_hide_and_reconnect() {
+    for (mut state, first, second, reopened, reconnected) in [
+        (Threads::default(), 2, 4, [6, 8], [10, 12]),
+        (Threads::chat(), 1, 3, [5, 7], [9, 11]),
+    ] {
+        state.show_for(Some(ThreadId(3)));
+        state.connected();
+        let requests = state.requests();
+        assert_eq!(
+            requests.iter().map(request_id).collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert!(state.owns_request(first));
+        assert!(!state.owns_request(first + 1));
+        state.hide();
+        for request in requests {
+            state.apply(DataToShell::PageFailed {
+                request: request_id(&request),
+            });
+        }
+        state.show_for(Some(ThreadId(3)));
+        assert_eq!(
+            state.requests().iter().map(request_id).collect::<Vec<_>>(),
+            reopened
+        );
+        state.disconnected();
+        state.connected();
+        assert_eq!(
+            state.requests().iter().map(request_id).collect::<Vec<_>>(),
+            reconnected
+        );
+    }
+}
+
+#[test]
+fn request_wrap_preserves_both_owners_parity() {
+    let panel = Threads {
+        counter: u32::MAX - 3,
+        ..Threads::default()
+    };
+    let mut chat = Threads::chat();
+    chat.counter = u32::MAX - 2;
+    for (mut state, expected) in [(panel, [u32::MAX - 1, 0]), (chat, [u32::MAX, 1])] {
+        state.show_for(Some(ThreadId(3)));
+        state.connected();
+        assert_eq!(
+            state.requests().iter().map(request_id).collect::<Vec<_>>(),
+            expected
+        );
+        for request in expected {
+            assert!(state.owns_request(request));
+            assert!(!state.owns_request(request ^ 1));
+        }
+    }
+}
+
+#[test]
+fn reopening_the_same_focus_reads_first_not_older_events() {
+    let mut state = Threads::chat();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    let requests = state.requests();
+    state.apply(reply(request_id(&requests[0]), &[3], None));
+    state.apply(DataToShell::Page {
+        request: 3,
+        thread: ThreadId(3),
+        events: vec![event(8)],
+        before: Some(EventId(8)),
+    });
+    assert!(!state.follow(Some(ThreadId(3))));
+    assert_eq!(state.events, [event(8)]);
+    assert_eq!(state.requests(), []);
+    state.hide();
+    assert_eq!(state.requests(), []);
+    state.show_for(Some(ThreadId(3)));
+    assert_eq!(state.open, Some(ThreadId(3)));
+    assert_eq!(state.events, []);
+    assert_eq!(state.before, None);
+    assert!(!state.loaded);
+    assert_eq!(
+        state.requests(),
+        [
+            list_request(5),
+            DataToBrain::PageRequest {
+                request: 7,
+                page: PageOf::Events {
+                    thread: ThreadId(3),
+                    before: None
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
+    let mut panel = Threads::default();
+    let mut chat = Threads::chat();
+    panel.connected();
+    chat.connected();
+    panel.show_for(Some(ThreadId(3)));
+    chat.show_for(Some(ThreadId(3)));
+    let panel_requests = panel.requests();
+    let chat_requests = chat.requests();
+    assert_eq!(
+        panel_requests.iter().map(request_id).collect::<Vec<_>>(),
+        [2, 4]
+    );
+    assert_eq!(
+        chat_requests.iter().map(request_id).collect::<Vec<_>>(),
+        [1, 3]
+    );
+    panel.search("panel search");
+    chat.search("chat search");
+    assert!(panel.follow(Some(ThreadId(2))));
+    assert!(chat.follow(Some(ThreadId(1))));
+    panel.changed();
+    chat.changed();
+    assert_eq!(panel.requests(), []);
+    assert_eq!(chat.requests(), []);
+    for (request, thread) in [(4, ThreadId(3)), (3, ThreadId(3))] {
+        let owner = if panel.owns_request(request) {
+            &mut panel
+        } else {
+            &mut chat
+        };
+        owner.apply(DataToShell::Page {
+            request,
+            thread,
+            events: vec![event(99)],
+            before: None,
+        });
+        assert_eq!(owner.events, []);
+        assert!(!owner.loaded);
+    }
+    panel.apply(reply(2, &[99], None));
+    chat.apply(reply(1, &[99], None));
+    assert_eq!(panel.rows, []);
+    assert_eq!(chat.rows, []);
+    assert_eq!(
+        panel.requests(),
+        [
+            DataToBrain::PageRequest {
+                request: 6,
+                page: PageOf::Threads {
+                    search: Some("panel search".to_owned()),
+                    after: None
+                }
+            },
+            DataToBrain::PageRequest {
+                request: 8,
+                page: PageOf::Events {
+                    thread: ThreadId(2),
+                    before: None
+                }
+            },
+        ]
+    );
+    assert_eq!(
+        chat.requests(),
+        [
+            DataToBrain::PageRequest {
+                request: 5,
+                page: PageOf::Threads {
+                    search: Some("chat search".to_owned()),
+                    after: None
+                }
+            },
+            DataToBrain::PageRequest {
+                request: 7,
+                page: PageOf::Events {
+                    thread: ThreadId(1),
+                    before: None
+                }
+            },
+        ]
+    );
+    assert_eq!(panel.requests(), []);
+    assert_eq!(chat.requests(), []);
+}
+
+#[test]
+fn delete_and_committed_rename_fanout_update_both_reducers() {
+    for mut state in [Threads::default(), Threads::chat()] {
+        state.connected();
+        state.show_for(Some(ThreadId(3)));
+        let requests = state.requests();
+        state.apply(reply(request_id(&requests[0]), &[3, 2], None));
+        state.renamed(ThreadId(2), "committed title");
+        let rename = state.requests().remove(0);
+        state.changed();
+        state.apply(reply(request_id(&rename), &[3, 2], None));
+        let committed_read = state.requests().remove(0);
+        let mut committed = row(2);
+        committed.title = "committed title".to_owned();
+        state.apply(DataToShell::ThreadList {
+            request: request_id(&committed_read),
+            threads: vec![row(3), committed.clone()],
+            next: None,
+        });
+        assert_eq!(state.row(ThreadId(2)), Some(&committed));
+        state.deleted(ThreadId(3));
+        state.apply(DataToShell::Page {
+            request: request_id(&requests[1]),
+            thread: ThreadId(3),
+            events: vec![event(99)],
+            before: None,
+        });
+        assert_eq!(state.open, None);
+        assert_eq!(state.events, []);
+        assert_eq!(state.rows, [committed]);
+        assert_eq!(state.row(ThreadId(3)), None);
+    }
+}
+
 fn settings(name: &str) -> SettingsView {
     SettingsView {
         assistant_name: kumochi_protocol::message::AssistantName::new(name).expect("valid"),
@@ -9,6 +248,8 @@ fn settings(name: &str) -> SettingsView {
         main_thread: ThreadId(1),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     }
 }
 
@@ -43,7 +284,7 @@ fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
     assert_eq!(
         reread,
         DataToBrain::PageRequest {
-            request: 3,
+            request: 6,
             page: PageOf::Threads {
                 search: None,
                 after: cursor
@@ -112,7 +353,7 @@ fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_d
     assert_eq!(
         state.requests(),
         [DataToBrain::PageRequest {
-            request: 4,
+            request: 8,
             page: PageOf::Threads {
                 search: None,
                 after: Some(ThreadCursor {
@@ -124,14 +365,14 @@ fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_d
         }]
     );
     state.apply(DataToShell::ThreadList {
-        request: 4,
+        request: 8,
         threads: vec![renamed.clone()],
         next: None,
     });
     assert_eq!(state.row(ThreadId(1)), Some(&renamed));
     assert_eq!(state.rows, [row(3), row(2), renamed.clone()]);
-    assert_eq!(state.requests(), [list_request(5)]);
-    state.apply(reply(5, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(10)]);
+    state.apply(reply(10, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2), renamed]);
     assert_eq!(state.row(ThreadId(0)), None);
     assert_eq!(state.requests(), []);
@@ -150,14 +391,14 @@ fn a_search_before_delete_does_not_requeue_an_old_rename_cursor() {
     assert_eq!(
         state.requests(),
         [DataToBrain::PageRequest {
-            request: 4,
+            request: 8,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None,
             },
         }]
     );
-    state.apply(reply(4, &[8], None));
+    state.apply(reply(8, &[8], None));
     assert_eq!(state.rows, [row(8)]);
     assert_eq!(state.requests(), []);
 }
@@ -171,8 +412,8 @@ fn a_refresh_after_delete_discards_the_old_rename_cursor() {
     state.refresh();
     state.apply(reply(request_id(&old), &[1, 0], None));
     assert_eq!(state.row(ThreadId(0)), None);
-    assert_eq!(state.requests(), [list_request(4)]);
-    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(8)]);
+    state.apply(reply(8, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -189,8 +430,8 @@ fn hiding_after_delete_discards_the_old_rename_cursor() {
     assert!(state.reread.is_empty());
     assert_eq!(state.requests(), []);
     state.show();
-    assert_eq!(state.requests(), [list_request(4)]);
-    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(8)]);
+    state.apply(reply(8, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -207,8 +448,8 @@ fn a_delete_while_hidden_does_not_requeue_an_old_rename_cursor() {
     assert!(state.reread.is_empty());
     assert_eq!(state.requests(), []);
     state.show();
-    assert_eq!(state.requests(), [list_request(4)]);
-    state.apply(reply(4, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(8)]);
+    state.apply(reply(8, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -419,7 +660,7 @@ fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     assert_eq!(
         request[0],
         DataToBrain::PageRequest {
-            request: first + 1,
+            request: first + 2,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None
@@ -428,7 +669,7 @@ fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     );
     state.apply(reply(first, &[3], None));
     assert!(state.rows.is_empty());
-    state.apply(reply(first + 1, &[2], None));
+    state.apply(reply(first + 2, &[2], None));
     assert_eq!(state.rows, vec![row(2)]);
 }
 
@@ -456,7 +697,7 @@ fn loading_more_sends_each_cursor_only_once_until_answered() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: 2,
+            request: 4,
             page: PageOf::Threads {
                 search: None,
                 after: state.next
@@ -465,7 +706,7 @@ fn loading_more_sends_each_cursor_only_once_until_answered() {
     );
     state.more_threads();
     assert!(state.requests().is_empty());
-    state.apply(reply(2, &[1], None));
+    state.apply(reply(4, &[1], None));
     assert_eq!(state.rows, vec![row(3), row(2), row(1)]);
     state.more_threads();
     assert!(state.requests().is_empty());
@@ -485,7 +726,7 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: old + 1,
+            request: old + 2,
             page: PageOf::Threads {
                 search: None,
                 after: None
@@ -495,7 +736,7 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
     assert_eq!(
         requests[1],
         DataToBrain::PageRequest {
-            request: old + 2,
+            request: old + 4,
             page: PageOf::Events {
                 thread: ThreadId(2),
                 before: None
@@ -698,7 +939,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: first + 1,
+            request: first + 2,
             page: PageOf::Events {
                 thread: ThreadId(3),
                 before: Some(EventId(4))
@@ -708,7 +949,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
     state.older_events();
     assert!(state.requests().is_empty());
     state.apply(DataToShell::Page {
-        request: first + 1,
+        request: first + 2,
         thread: ThreadId(3),
         events: vec![event(3)],
         before: None,
@@ -824,8 +1065,8 @@ fn nothing_is_read_while_the_panel_is_closed() {
     state.run_state(ThreadId(4));
     assert_eq!(state.requests(), Vec::new());
     state.show();
-    assert_eq!(state.requests(), vec![list_request(1)]);
-    state.apply(reply(1, &[4], None));
+    assert_eq!(state.requests(), vec![list_request(2)]);
+    state.apply(reply(2, &[4], None));
     state.select(Some(ThreadId(4)));
     state.hide();
     state.run_state(ThreadId(5));
@@ -897,7 +1138,7 @@ fn a_superseded_event_read_that_fails_frees_its_slot_without_the_error() {
     assert_eq!(
         state.requests(),
         vec![DataToBrain::PageRequest {
-            request: old + 1,
+            request: old + 2,
             page: PageOf::Events {
                 thread: ThreadId(2),
                 before: None,
@@ -911,14 +1152,14 @@ fn a_replaced_search_that_fails_frees_its_slot_without_the_error() {
     let mut state = Threads::default();
     state.show();
     state.connected();
-    assert_eq!(state.requests(), vec![list_request(1)]);
+    assert_eq!(state.requests(), vec![list_request(2)]);
     state.search("new query");
-    state.apply(DataToShell::PageFailed { request: 1 });
+    state.apply(DataToShell::PageFailed { request: 2 });
     assert!(!state.failed);
     assert_eq!(
         state.requests(),
         vec![DataToBrain::PageRequest {
-            request: 2,
+            request: 4,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None,

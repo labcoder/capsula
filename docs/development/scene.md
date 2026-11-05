@@ -58,9 +58,10 @@ Screen/capture anchors are absent, not ignored.
 
 ### 3D records
 
-The decoder accepts the following records, but admission refuses every `view3d`,
-`solid`, `pos3` track and `rot3` track as `Unsupported` at `put[i]` until slice 5's
-3D admission lands. No 3D objects commit, lay out or animate yet. `pos3` and `rot3`
+Scene admission validates and charges the following records (see 3D admission). Until shell
+views can prepare them, the brain's one drawing ingress calls `refuse_three_dimensional`, which
+refuses the first `view3d`, `solid`, `pos3` track or `rot3` track as `Unsupported` at `put[i]`
+(`shortcut:`, removed in slice 5 PR 6). `pos3` and `rot3`
 use three-component keys; existing tracks retain their existing key types.
 
 | Record | Fields and decode bounds |
@@ -92,13 +93,13 @@ then checks counts and radius relations:
 | `cylinder` | Required `r`, `h`. |
 | `cone` | Required `r`, `h`; optional `r2` defaults to zero. |
 | `torus` | Required `r`, `r2`, with 0.001 ≤ `r2` < `r`. |
-| `extrude` | Required `points` (3..=128), `depth`. |
+| `extrude` | Required `points` (3..=64), `depth`. |
 | `lathe` | Required `points` (2..=512), with nonnegative radii in the first component. |
 | `tube` | Required `path` (2..=512), `r2` ≥ 0.001. |
 
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
-All lists decode at most 512 points; extrude counts above 128 are
+All lists decode at most 512 points; extrude counts above 64 are
 `OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
@@ -108,7 +109,7 @@ later requires an explicit wire-version decision, not rewritten goldens.
 `three::size::triangles` validates one decoded solid and returns its candidate
 triangle capacity without allocating. This count does not depend on world transforms.
 Triangle generation is a separate module; sizing alone does not establish world-space
-representability. Admission still refuses 3D until its later slice lands.
+representability. Admission charges this count (see 3D admission).
 
 Let n be `segments` (default 24), k the retained outline count, p the retained
 profile count and q the retained path count:
@@ -121,13 +122,13 @@ profile count and q the retained path count:
 | cone, top zero | 2n − 2 | 4 / 94 |
 | cone, top positive | 4n − 4 | 8 / 188 |
 | torus | 2n² | 18 / 4,608 |
-| extrude | 4k − 4 | 508 at k = 128 |
+| extrude | 4k − 4 | 252 at k = 64 |
 | lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
 | tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
 
 Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
 Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
-count at 49,148. Counts over the future per-view triangle budget remain legal here.
+count at 49,148. Sizing allows counts over the triangle budget; admission refuses them.
 Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
 
 The shared numeric policy is `three::REL = 1e-6` and
@@ -149,6 +150,42 @@ tangent dot product strictly below `−1 + REL` is refused. These failures are t
 `MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
 original typed field and code. `ErrorCode::Degenerate` is appended for the later
 admission boundary, which alone will convert these errors into sanitized paths.
+
+### 3D admission
+
+A `view3d` is a root object and at most one lives in a scene, a pending removal included.
+A `solid` names its view with `in`, and `attach` names an earlier solid (lower revision, or
+the same revision and a lower slot) in the same view; attachment counts toward depth 16 and a
+removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
+`pos3` and `rot3`; a view owns no `color`; 2D tracks and `ref` anchors to 3D objects are
+refused. Admission sizes each solid with `three::size::triangles` and `three::size::reach`
+(the farthest local vertex from the solid's origin) and never tessellates: that runs off
+the admission path. Outline checks do run here, and they grow with the square of the point
+count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
+profile with a lathe, or split a detailed shape into several extrudes.
+
+| Budget | Limit | Error |
+|---|---|---|
+| Views | 1 per scene | `OverBudget(Views)` |
+| Solids | 160 per scene | `OverBudget(Solids)` |
+| Triangles | 24,000 per scene and across visible scenes | `OverBudget(Triangles)` |
+| Moving view | 6,000 triangles in a view with any `pos3` or `rot3` track | `OverBudget(MovingTriangles)` |
+
+Like 2D charges, these recompute from the after, pending and changed versions, so a removed
+solid releases its triangles only at retirement and a refusal moves no counter.
+
+**Coordinate bound.** 3D admission refuses a solid unless the sum of its chain's translation
+lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its
+`pos3` envelope, both multiplied by the ancestors' composed scale; summing lengths ignores
+cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is refused. The
+`pos3` envelope is the largest key length plus, for `spring`, the overshoot
+`|b − a| × SPRING_OVERSHOOT` per key pair (both directions with `yoyo`), taken over every
+charged version of the solid, so a delayed replacement cannot hide an earlier envelope.
+Rotation preserves lengths and adds nothing. Non-finite compositions fail with
+`TransformOverflow`, the bound with `OutOfRange`.
+
+**Stop.** A 3D object never re-roots: after a cut it survives only when its view and its whole
+attachment chain survive.
 
 ### 3D tessellation
 
@@ -203,8 +240,9 @@ flowchart LR
   edge function under 2^45.
 - **Depth.** The plane gives 1/z over texel coordinates, evaluated in f64 and narrowed to f32; it
   must be finite and positive at every vertex. Keys clear the 3 lowest mantissa bits and compare
-  strictly, so depths within about 1e-6 relative tie and the earlier input wins, coplanar faces
-  included.
+  strictly, so depths in one 8-ulp bin (about 1e-6 wide) tie and the earlier input wins. That is
+  a bin, not a tolerance: depths one ulp apart across a bin boundary don't tie, so coplanar
+  stability rests on PR 4 building shared planes identically.
 - **Translucency.** Polygons under opacity 1 are sorted farthest first by their centroid's camera
   depth (ties by input order) with an in-place sort, depth-tested against opaque samples and
   blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
@@ -224,6 +262,98 @@ flowchart LR
 
 Nothing allocates once the caller holds the scratch, band and target. Targets are 1 to 4,096
 texels per axis; anything else, or a band narrower than the target, is `RasterError::Size`.
+
+### 3D camera and frames
+
+`three::camera` owns validated numeric camera and light state. The camera defaults to yaw 30°,
+pitch 20°, vertical fov 40°, distance three bounding radii and the centre of the **world-space 3D
+bounds**, not the layout rectangle. Authored distance is retained, including inside geometry.
+Orbit applies −0.4° per horizontal logical pixel and +0.4° per vertical pixel, clamps pitch to
+±85° and distance to 1.2–6 radii. These feel values are provisional. Camera inputs must be finite,
+distance positive and fov 10–120°. Eye and angle-derived basis stay in f64, so a tiny camera
+distance at a translated target never relies on subtracting a rounded f32 eye.
+
+`three::frame::frame` takes borrowed indexed `Solid`s, each with shared local vertices, source
+`Face`s, a theme-resolved colour/opacity and a composed sampled f64 `Transform`. Preparation must
+preserve original vertex indices and one stable three-vertex plane anchor per source face across
+its tessellations; triangle soup alone cannot satisfy those contracts. A face's triangles tessellate
+one source plane before f32 vertex rounding. The caller composes attachments before the call;
+the frame transforms vertices at the sampled pose rather than rebuilding geometry. This input is
+the seam for later preparation, not a live shell host or a new admission path.
+
+```mermaid
+flowchart LR
+  P["indexed source faces + composed pose"] --> C["f64 camera transform<br/>face plane + backface cull"]
+  C --> N["near, left, right, top, bottom clips"]
+  N --> S["project + snap once to 1/256 texel"]
+  S --> R["flat shade + Fragment → FrameScratch"]
+```
+
+The near distance is `max(0.05·distance, 1e-4·radius, 8·ulp(largest world coordinate)·focal_px)`.
+Focal length uses the exact internal raster height; the floor itself is a world-space distance. It
+keeps one f32 world-coordinate ulp below 1/8 texel at the nearest drawn depth. It also prevents
+approaching translated content arbitrarily closely: at coordinate 20,000 and height 1,440 with
+40° fov, it is about 30.9 world units. Nothing closer is drawn or writes an id.
+
+Clipping uses camera-space halfspaces, including the homogeneous equivalents of the four
+projected guard edges. That is perspective-equivalent to projecting then clipping, but keeps
+all intersections in f64 camera coordinates. Planes always apply near, left, right, top, bottom.
+An edge's endpoint order is the original solid vertex index, then lexicographic coordinates for
+equal indices; generated endpoints inherit the lower index. Intersections clamp the f64 parameter
+to [0,1], and on-plane endpoints are included once without an extra intersection. Consecutive and
+closing exact duplicates are removed before projection; raster push removes snapped duplicates
+and collinearity. Eight inline vertices suffice: three plus at most one per plane. No clip or
+output write grows a buffer.
+
+The reciprocal-depth plane is derived **once per source face**, in f64, then narrowed once and
+shared by every triangle. This makes a source face's depth independent of its triangulation,
+including across the raster's 8-ulp key boundaries. It is not a general tolerance between
+unrelated nearly coplanar faces. Flat shading uses
+`ambient + (1 − ambient)·max(0, normal·−light_dir)`, default direction (−1,−2,−1), ambient 0.35.
+The translucent key is the clipped polygon vertices' mean camera z, not a per-solid key.
+
+The frame refuses more than 160 solids or 24,000 triangles, invalid indices, non-finite geometry,
+invalid opacity or sizes outside 1–4,096 per axis. Numeric failures include unrepresentable depth
+planes; raster push checks positive finite depth at the snapped vertices. Cancellation polls at
+each face and every 1,024 vertex/index/triangle visits. Any error clears the whole output; the
+host must retain its previous displayed frame. Frame construction allocates nothing with reserved
+`FrameScratch`. Shell integration and publication remain staged.
+
+### 3D picking
+
+`three::pick::DisplayedFrame` owns the completed raster's ids and `FrameState`: geometry revision,
+camera, composed sampled pose per solid, frozen `Mapping` and solid-index-to-`Handle` map. Parts
+carry existing host handles, not user labels; handles retain their original commit identities.
+Construction checks the exact width × height id length, at most 160 matching poses/parts and
+every one-based solid id. That scan visits every id, so the raster worker builds the frame, not
+the UI thread. Background is 0. There are no mutable accessors; retirement consumes
+the frame with `into_parts` to return the id allocation for reuse.
+
+`Mapping` snapshots the logical destination origin/extent, effective DPI (physical pixels per
+logical pixel) and exact integer raster dimensions, each 1–4,096. Rectangle ends must be finite
+and greater than their origins; extents and DPI must be finite and positive. `pick(&frame, at)`
+takes a pointer in that same logical coordinate space. It rejects non-finite pointers and points
+outside the half-open rectangle, then uses `(at - origin) / extent × texels` **per axis**.
+DPI is not applied twice. Integer rounding can make the two ratios different, including in
+scaled and half-resolution motion frames. A labelled id returns `Part(handle)`, an unlabelled id
+returns `Blocked` and background returns `Miss`. A pick performs no allocation or ray traversal.
+
+Ids already encode raster coverage and opacity: an opaque unlabelled solid blocks, material
+below authored opacity 0.5 passes, and 0.5 blocks. Near-clipped geometry has no id. Rest chooses
+the most frequent of four sample ids, background included, with ties won by the lowest first
+sample index. Translucent ids follow the last qualifying polygon in the approximate painted
+centroid order, **not necessarily the nearest geometric surface** (OSC-218). A pick within one
+**internal texel** of an edge, mapped separately through both frozen axis ratios and including
+bilinear filtering, can differ from an exact ray. This is not a one-display-pixel tolerance.
+The scaled pointer/oracle fixtures reuse the frame's independent f64 ray oracle and omit only
+that edge neighbourhood and the declared 1e-6 relative depth ambiguity.
+
+The host must publish the same image and `DisplayedFrame` together at accepted paint, not on
+worker completion. Until then picks read the old pair, even if the desired camera, pose, DPI,
+rectangle or geometry revision changed. A skipped, failed, stale or superseded paint cannot
+advance picking. Unique ownership keeps the displayed ids unavailable for worker writes; the
+other buffer can belong to the running job or ready candidate, never both. Host job admission,
+image lifetime and the actual paint transaction belong to PR 6/10, not this scene primitive.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
@@ -499,11 +629,12 @@ Prepared residency remains the preparation layer's separate limit.
 | Prepared residency | Charged at preparation, independent of admission | 64 MiB |
 | Decoded images | Reserved for capture/image support | 64 MiB |
 | Visible scenes | — | 4 |
+| 3D | 1 view, 160 solids, 24,000 triangles; 6,000 in a moving view | 24,000 triangles |
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
 24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
-the depth-buffered raster (3D raster below), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
-and no 3D geometry is built yet.
+the depth-buffered raster (3D raster above), so there are no ordering budgets. 3D admission
+charges them (see 3D admission).
 
 ## Preparation
 

@@ -35,6 +35,8 @@ mod drawings;
 mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
+#[path = "loop_tests.rs"]
+mod loops;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
@@ -59,14 +61,79 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
             }),
             thread: Some(ThreadId(1)),
             lease,
+            t_qpc: u64::MAX,
         },
-        ControlToBrain::KeyUp { gesture },
+        ControlToBrain::KeyDown { gesture, t_qpc: 1 },
+        ControlToBrain::KeyUp {
+            gesture,
+            t_qpc: 2,
+            chunks: 3,
+        },
         ControlToBrain::GestureCancel { gesture },
         ControlToBrain::FocusHint {
             gesture,
             hint: FocusHint::Window(WindowRef(17)),
         },
         ControlToBrain::ExclusionLapsed { lease },
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
+fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
+    use kumochi_protocol::message::{DraftId, GitHubOp, IssueOp};
+
+    for message in [
+        ControlToBrain::GitHub(GitHubOp::Connect),
+        ControlToBrain::Issue(IssueOp::Discard { draft: DraftId(9) }),
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
+fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_connection() {
+    use kumochi_protocol::message::{Cursor, OutputGeneration, SegmentId};
+    let (run, segment) = (RunId(1), SegmentId(2));
+    for (rate, ok) in [
+        (7_999, false),
+        (8_000, true),
+        (192_000, true),
+        (192_001, false),
+    ] {
+        let output = ControlToBrain::AudioOutput {
+            rate,
+            generation: OutputGeneration(1),
+        };
+        let expected = if ok {
+            Ok(None)
+        } else {
+            Err(super::Ended::Broken("an output rate out of bounds"))
+        };
+        assert_eq!(
+            super::controls::control_input(output),
+            expected,
+            "{rate} Hz"
+        );
+    }
+    for message in [
+        ControlToBrain::SpeechProgress {
+            run,
+            segment,
+            sample: 3,
+            t_qpc: 4,
+        },
+        ControlToBrain::SpeechStopped { run, cursor: None },
+        ControlToBrain::SpeechStopped {
+            run,
+            cursor: Some(Cursor { segment, sample: 5 }),
+        },
+        ControlToBrain::SegmentPlayed {
+            run,
+            segment,
+            samples: 6,
+        },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));
     }
@@ -208,7 +275,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     async fn unaccounted(&mut self) -> std::io::Result<Option<ControlToShell>> {
         loop {
             match self.next_control().await {
-                Ok(Some(ControlToShell::Account(_))) => {}
+                Ok(Some(ControlToShell::Account(_) | ControlToShell::Connections(_))) => {}
                 other => return other.map_err(std::io::Error::other),
             }
         }
@@ -241,7 +308,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
-                Some(ControlToShell::Account(_)) => {}
+                Some(ControlToShell::Account(_) | ControlToShell::Connections(_)) => {}
                 other => return other,
             }
         }
@@ -273,7 +340,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
                 ControlToShell::Settings { view, .. } => self.views.push(view),
-                ControlToShell::Account(_) => {}
+                ControlToShell::Account(_) | ControlToShell::Connections(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }

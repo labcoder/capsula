@@ -143,6 +143,8 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         main_thread: ThreadId(9),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     frame::write(
         &mut &link.control,
@@ -216,7 +218,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         Some(request)
     );
     let list = DataToShell::ThreadList {
-        request: 1,
+        request: 2,
         threads: vec![ThreadRow {
             id: ThreadId(3),
             title: "a private title".to_owned(),
@@ -641,6 +643,107 @@ fn pings_are_answered_and_run_states_passed_on() {
 }
 
 #[test]
+fn model_write_results_are_accepted_without_ending_the_link() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    let link = attended("model-result");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    for applied in [false, true] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::ThreadModelSet {
+                thread: ThreadId(3),
+                choice: ModelChoice {
+                    model: ModelSlug::new("private-model").expect("valid"),
+                    effort: Effort::High,
+                    connection: ConnectionKind::ChatGpt,
+                },
+                applied,
+            },
+            Pipe::Control,
+        )
+        .expect("model result");
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+            .expect("ping after result");
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+            Some(ControlToBrain::Pong)
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
+    use kumochi_protocol::message::{
+        ActionState, ContentHash, DraftId, GitHubView, IssueBody, IssueCard, IssueRefused,
+        IssueTitle, StateVersion,
+    };
+
+    let link = attended("staged-issues");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for message in [
+        ControlToShell::GitHub(GitHubView::Requesting),
+        ControlToShell::ActionState {
+            draft: DraftId(9),
+            version: StateVersion(1),
+            state: ActionState::Draft,
+            approval: None,
+        },
+        ControlToShell::IssueRefused {
+            draft: DraftId(9),
+            reason: IssueRefused::NotAllowedNow,
+        },
+        ControlToShell::Ping,
+    ] {
+        frame::write(&mut &link.control, &message, Pipe::Control).expect("written");
+    }
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong)
+    );
+    let card = DataToShell::IssueCard(IssueCard {
+        draft: DraftId(9),
+        thread: ThreadId(3),
+        repo: None,
+        account: None,
+        title: IssueTitle::new("Fix layout").expect("title"),
+        body: IssueBody::new("Private details").expect("body"),
+        hash: ContentHash([0; 32]),
+        approval: None,
+        version: StateVersion(1),
+        state: ActionState::Draft,
+    });
+    let size = frame::encode(&card, Pipe::Data).expect("frame").len();
+    frame::write(&mut &*link.data, &card, Pipe::Data).expect("written");
+    let LinkEvent::Data {
+        generation,
+        message,
+        bytes,
+    } = next(&events)
+    else {
+        panic!("only the card reaches the UI")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(message, card);
+    assert_eq!(usize::try_from(bytes).expect("small"), size);
+    let mut runs = Runs::default();
+    let credit = runs.apply_data(message, bytes);
+    assert_eq!(credit, bytes);
+    assert_eq!(runs.shown(), None);
+    session.grant(credit);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::Credit { bytes })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn the_ui_s_messages_go_out_on_their_pipes_and_credit_adds_up() {
     let link = attended("outbox");
     let events = patient(link.events);
@@ -731,6 +834,8 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         main_thread: ThreadId(9),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     for message in [
         ControlToShell::Welcome {

@@ -18,7 +18,7 @@ use kumochi_protocol::message::{Deleted, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::coordinator::{Input, StoreOp};
+use crate::coordinator::{Input, StoreOp, UNKNOWN_TOOL};
 use crate::store::{
     Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
 };
@@ -595,10 +595,44 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::SummaryStored { owner, applied });
             purger.op_arrived(store);
         }
+        StoreOp::CommitCall(call) => {
+            purger.op_arriving();
+            let committed = store
+                .reconnect()
+                .and_then(|()| store.commit_call(&call))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("a tool call wasn't stored");
+                    false
+                });
+            answer(
+                acks,
+                Input::CallCommitted {
+                    key: call.key,
+                    committed,
+                },
+            );
+            purger.op_arrived(store);
+        }
         StoreOp::SetModel { thread, choice } => {
-            unanswered(store, purger, thread, "model choice", |store| {
-                store.set_model(thread, &choice)
-            });
+            purger.op_arriving();
+            let applied = if let Ok(applied) = store
+                .reconnect()
+                .and_then(|()| store.set_model(thread, &choice))
+            {
+                applied
+            } else {
+                tracing::warn!("a model choice wasn't stored");
+                false
+            };
+            answer(
+                acks,
+                Input::ModelSet {
+                    thread,
+                    choice,
+                    applied,
+                },
+            );
+            purger.op_arrived(store);
         }
         StoreOp::BeginTurn {
             thread,
@@ -625,6 +659,25 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                     index,
                     step,
                     scene,
+                })
+        }),
+        StoreOp::RoundItems(round) => write(store, purger, acks, round.run, "round", |store| {
+            let results: Vec<_> = round
+                .calls
+                .iter()
+                .map(|call| (call, UNKNOWN_TOOL))
+                .collect();
+            store
+                .append_round(
+                    (round.thread, round.run),
+                    round.connection,
+                    round.text.as_deref(),
+                    &round.items,
+                    &results,
+                )
+                .map(|()| Input::RoundStored {
+                    run: round.run,
+                    round: round.round,
                 })
         }),
         StoreOp::EndRun {
@@ -722,22 +775,6 @@ fn write(
         Ok(Ok(stored)) => stored,
     };
     answer(acks, reply);
-    purger.op_arrived(store);
-}
-
-/// Runs a write nothing waits on, holding off the purge meanwhile. A failure is logged by kind
-/// and thread id only.
-fn unanswered(
-    store: &mut Store,
-    purger: &mut Purger,
-    thread: ThreadId,
-    what: &'static str,
-    op: impl FnOnce(&mut Store) -> Result<(), StoreError>,
-) {
-    purger.op_arriving();
-    if let Err(error) = store.reconnect().and_then(|()| op(store)) {
-        tracing::warn!(%error, thread = thread.0, what, "a thread change wasn't stored");
-    }
     purger.op_arrived(store);
 }
 

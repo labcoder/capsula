@@ -3734,6 +3734,7 @@ dependencies = [
  "fluent-bundle",
  "getrandom 0.3.4",
  "httparse",
+ "image",
  "keyring",
  "kumochi-protocol",
  "kumochi-scene",
@@ -3743,6 +3744,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -3757,6 +3759,7 @@ dependencies = [
  "unic-langid",
  "url",
  "webbrowser",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "xn",
  "zeroize",
@@ -3804,6 +3807,7 @@ dependencies = [
  "tracing-subscriber",
  "unic-langid",
  "windows 0.62.2",
+ "zeroize",
 ]
 
 [[package]]

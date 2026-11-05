@@ -42,7 +42,7 @@ after the last handle has closed doesn't respawn, so shutdown can't start a work
 
 Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic`.
 The environment switch applies on the next request of every respawn; neither path exists in a
-release worker. No capture, UI Automation or OCR is implemented here yet.
+release worker. No UI Automation or OCR is implemented here yet.
 
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
@@ -73,10 +73,19 @@ no operation that reads or exports them.
   smaller frame shrinks the logical length, so an old tail is never part of the image, while the
   CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
   about COM or GPU allocations, which happen per capture.
-- **Platforms.** No platform captures yet, so `Capture` answers `Fault` with `E_NOTIMPL`'s
-  code. A2b adds Windows Graphics Capture behind the `Capturer` seam; macOS will use
-  `SCScreenshotManager` with Kumochi excluded from the content filter. A platform that can't
-  show its capture stopped makes the worker answer `Fault` and exit.
+- **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
+  thread. Per ticket: the monitor must have exactly the requested physical bounds
+  (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
+  with the cursor off. Border suppression is best-effort: Windows can accept it and still draw its
+  yellow border on screen. Frames and the map poll at 1 ms, and a result that is ready at or
+  after expiry is released and refused, and nothing late is published. Frame, session and pool
+  close once the GPU copy into a staging texture is issued, so the CPU copy runs after capture has
+  stopped. All three close on every path; if a close fails the worker
+  answers `Fault` and exits, so no capture can keep running. A lost device
+  (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
+  ticket gets a fresh device. Foreign failures are HRESULT codes.
+- **macOS.** `SCScreenshotManager` with Kumochi excluded from the content filter, not built yet;
+  other platforms answer `Fault` with `E_NOTIMPL`'s code.
 - The supervisor's `capture` accepts only a `Captured` for its own capture id and display, maps
   `Refused` through, and treats any other reply as `WorkerLost`.
 
@@ -92,6 +101,44 @@ sequenceDiagram
   W->>W: expiry and size checks, then publish
   W-->>B: Captured(FrameMeta) or Refused
 ```
+
+## Masking and encoding
+
+The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every
+`MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
+`SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
+Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
+generation; sanitizing again applies all masks idempotently before another encode.
+
+Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
+frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
+`Partial`, or `Unknown` with an availability reason); an empty set never implies a completed
+walk. Both publishing a mask and finishing the walk bump the generation. The first finish wins:
+a late `Complete` can't overwrite `Unknown` or `Partial`. Encoded images also
+carry their capture id and generation: A6 must never stage a superseded generation.
+
+The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
+fills it, but invalidates the image before lending its buffer. Read access to a committed image
+is restricted to `screen/` through `image_mut` and `sanitize`; sanitized fields are private.
+Rust's visibility rules enforce this boundary; no test checks it.
+
+The overview uses exact area weights (a box filter), rounding channel averages to the nearest
+byte with halves upward. It fits within 1280×720, preserves the aspect ratio to integer-pixel
+rounding, and never enlarges. The focus crop clips to the display, then centres a native-pixel
+window within that intersection, capped at 1024×576; it never scales. Empty intersections are
+refused. Both encode RGB JPEG at quality 85 through `image`, with no platform encoder.
+
+`CaptureTransform` carries the display origin, DPI, overview size and optional crop rectangle.
+Overview coordinates scale per axis to physical desktop pixels; logical coordinates subtract
+the display origin and multiply by 96/DPI. Inverse overview mapping rounds to the nearest pixel
+(halves away from zero). Crop coordinates add the crop origin. Coordinate spaces have distinct
+protocol types; physical-to-overview mapping refuses points outside the display. External
+floating-point coordinates must be validated as finite by their first parser. Image Debug
+output contains only dimensions, byte counts and mask generations,
+and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
+
+These entry points have no production caller yet: A6 owns scheduling, staged replies and
+generation checks. Nothing here exports images or captures another frame.
 
 ## Deadline evidence on Rez
 

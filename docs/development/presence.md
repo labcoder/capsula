@@ -204,10 +204,14 @@ sequenceDiagram
     Proxy->>W: drawn frame=F (dispatched after)
 ```
 
-`main` creates the file, a bounded queue of 256 fixed-size records and the writer thread before
-GPUI starts. The UI thread only stamps the performance counter and moves a record into the
-queue without waiting; the writer formats it and flushes whenever it catches up. Each record
-is one line:
+`main` creates the file, a bounded queue of 256 fixed-size records, 256 spare row tables and the
+writer thread before GPUI starts. The UI thread only stamps the performance counter and moves a
+record into the queue without waiting; the writer formats it and flushes whenever it catches up.
+A record is a few words. A geometry's 512-row table stays on the heap: the UI thread fills its
+own table, swaps it for a spare and moves only the pointer through the queue, and the writer
+hands the table back once it's written. So a commit allocates nothing and never copies a row
+table on the stack; with no spare left, the geometry is dropped and counted like a full queue.
+Each record is one line:
 
 - `startup version=2 pid= dock_hwnd= panel_hwnd= proxy_hwnd= scale= position= work_area= dock= overlay=
   panel= qpc_frequency= row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331`. It
@@ -293,3 +297,37 @@ it the steps it lets through.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
+
+## Perch hosts
+
+The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry,
+and nothing calls them yet.
+
+- `platform::host` holds the plain data: `PhysicalRect`, `HostId`, `WatchGen`, `HostChange`,
+  the raw caption `Facts` and `Label`. A `Label` is another app's window title, so it's screen
+  text. It sits in an inline buffer of 64 UTF-16 units, cut at a unit boundary without half of a
+  surrogate pair, and its `Debug` prints only its length. Nothing logs it or sends it to the brain.
+- `platform::windows::host::host_at` walks the z-order under a point, skipping Kumochi's own
+  windows and any hidden, minimized, cloaked or click-through ones. The desktop and the
+  taskbars end the walk with no host. It reads the window rectangle, the DWM frame, the
+  monitor's work area and effective DPI, the host's own DPI, the title bar, DWM's caption-button
+  bounds, and the standard top inset and button width. A host without `WS_CAPTION` gets a
+  standard resizable window's metrics at its DPI instead of its own zero inset. The title comes
+  from `GetWindowTextW`, which for another process's window reads the copy the system keeps
+  and sends no message into that app's thread.
+- `watch_host` installs five out-of-context `SetWinEventHook`s (location change, minimize,
+  hide, cloak and destroy), filtered to the host's process and thread. They deliver
+  `PresenceEvent::HostChanged { w, change }` on the UI thread's message loop. If any hook fails,
+  the ones before it are removed in reverse order. Dropping the watch unhooks every hook before
+  its route is cleared.
+- `presence::perch::caption` applies §10.4's caption rules. When the reported title bar and
+  buttons agree, the caption is the bar left of the leftmost exclusion. Otherwise it's the
+  standard band, scaled from host units by `monitor_dpi / layout_dpi` and rounded up, cut to the
+  frame and the work area. For a host without a caption, the band runs from the frame's top
+  (revision 12's guess). A usable reported button always stays an exclusion, and while the two
+  DPIs differ it's read both as physical pixels and as host units.
+- `presence::perch::place` sits the body above the title bar if the work area has room, and
+  otherwise just below the caption inside the frame, with the card beside the body. Sizes
+  convert at the host monitor's scale. A placement counts only if the body and the card stay
+  in the work area and 4 px clear of every exclusion along the whole straight settle from the
+  drop point.

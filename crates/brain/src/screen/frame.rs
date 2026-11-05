@@ -18,12 +18,13 @@ pub(crate) struct RawFrame {
 
 impl RawFrame {
     /// Drops the held image and returns exactly `width * height * 4` bytes to fill.
+    /// This write-only capture seam invalidates the image before lending its buffer.
     ///
     /// # Errors
     /// `Invalid` for an empty side, a side over [`MAX_SIDE`] or an overflowing length.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "A2b's Windows adapter fills it")
+        not(any(test, windows)),
+        expect(dead_code, reason = "only the Windows adapter fills it")
     )]
     pub(crate) fn begin(&mut self, width: u32, height: u32) -> Result<&mut [u8], Refusal> {
         self.valid = None;
@@ -39,7 +40,7 @@ impl RawFrame {
     }
 
     /// Publishes the image only when the copy filled exactly the requested size.
-    pub(super) fn commit(&mut self, meta: FrameMeta) -> Result<(), Refusal> {
+    pub(crate) fn commit(&mut self, meta: FrameMeta) -> Result<(), Refusal> {
         if self.filled != meta.display.size {
             self.invalidate();
             return Err(Refusal::DisplayChanged);
@@ -48,8 +49,12 @@ impl RawFrame {
         Ok(())
     }
 
+    pub(super) fn image_mut(&mut self) -> Option<(FrameMeta, &mut [u8])> {
+        self.valid.map(|meta| (meta, self.bgra.as_mut_slice()))
+    }
+
     #[cfg(test)]
-    pub(super) fn image(&self) -> Option<(FrameMeta, &[u8])> {
+    pub(crate) fn image(&self) -> Option<(FrameMeta, &[u8])> {
         self.valid.map(|meta| (meta, self.bgra.as_slice()))
     }
 
