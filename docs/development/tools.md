@@ -65,6 +65,25 @@ flowchart TD
   joins it. A failed write fails the run as `failed(store)`. An acknowledgement for a run that ended
   confirms storage only. One for a launch no longer authorized answers nobody.
 
+## A round's calls
+
+The model's calls stream in with the round. When the engine finishes the round, the loop hands
+each call to the dispatcher in call order, and the round is stored once every call has its
+answer: at once for a refusal or a finished call, on `CallCommitted` for a new one. The round's
+write holds one result per call, tagged as in [Results](#results), and the next round is built
+from the store.
+
+- **Ids.** A round refuses a second call with an id it already has, which fails the run. The same
+  id in a later round is the same ledger key: identical arguments get the stored answer with no
+  second write, and others get `Reused`.
+- **A voided build.** When the first call finds that a delete reached a thread the build rendered,
+  the round's calls, items and unstored text are dropped, and the round is built again. Steps the
+  response drew and text already on screen stay (a `shortcut:` until B10).
+- **Stop.** A stop while a call's write is pending ends the run; the write's late acknowledgement
+  is stale, and no round is stored.
+- **Failure.** A failed call write fails the run as `failed(store)`. The store reports it as
+  `StoreError::Call`, which carries no SQLite text.
+
 ## The ledger
 
 The run holds its ledger in memory, and it's dropped with the run. The run's 16-call budget bounds

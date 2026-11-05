@@ -10,9 +10,16 @@ impl Store {
     /// thread is live. False, with nothing written, when the thread is being deleted or gone.
     ///
     /// # Errors
-    /// Fails when SQLite fails, the key is already recorded, or the output is over the column's
-    /// cap; nothing is written.
+    /// [`StoreError::Call`], with no SQLite text, when SQLite fails, the key is already
+    /// recorded, or the output is over the column's cap; nothing is written.
     pub(crate) fn commit_call(&mut self, call: &CommitCall) -> Result<bool, StoreError> {
+        self.record_call(call).map_err(|error| match error {
+            StoreError::Sql(_) => StoreError::Call,
+            other => other,
+        })
+    }
+
+    fn record_call(&mut self, call: &CommitCall) -> Result<bool, StoreError> {
         let thread = sql_id(call.thread.0, StoreError::NoThread)?;
         let run = sql_id(call.key.run.0, StoreError::NoThread)?;
         let tx = self.conn.transaction()?;
