@@ -122,6 +122,7 @@ impl DockIntent {
 #[derive(Default)]
 pub(crate) struct Settings {
     pub(crate) accounts: crate::accounts::Accounts,
+    pub(crate) native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,
     notice_slot: Option<Slot>,
@@ -383,6 +384,12 @@ impl Settings {
             } else {
                 TaskbarChoice::Hidden
             }))
+    }
+
+    pub(crate) fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> Option<Text>) {
+        if let Some(choice) = self.taskbar_choice() {
+            self.native_taskbar_notice = apply(choice);
+        }
     }
 
     pub(crate) fn send_taskbar(

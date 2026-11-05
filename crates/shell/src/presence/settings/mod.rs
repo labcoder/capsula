@@ -30,7 +30,8 @@ pub(super) struct SettingsView {
     focus: FocusHandle,
     editing: Option<Field>,
     tab: usize,
-    general_notice: Option<Text>,
+    dock_notice: Option<Text>,
+    taskbar_notice: Option<Text>,
     pub(super) stop: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
@@ -125,7 +126,8 @@ impl SettingsView {
             focus: cx.focus_handle().tab_stop(true),
             editing: None,
             tab: 0,
-            general_notice: None,
+            dock_notice: None,
+            taskbar_notice: None,
             stop: false,
             _events: subscriptions,
             _watch: watch,
@@ -153,7 +155,8 @@ impl SettingsView {
     }
 
     pub(super) fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.general_notice = None;
+        self.dock_notice = None;
+        self.taskbar_notice = None;
         self.confirmation = None;
         window.close_all_dialogs(cx);
         self.editing = None;
@@ -221,6 +224,8 @@ impl Render for SettingsView {
                         .child(Tab::new().label(strings.get(Text::General)))
                         .child(Tab::new().label(strings.get(Text::Accounts)))
                         .on_click(cx.listener(|view, tab, window, cx| {
+                            view.dock_notice = None;
+                            view.taskbar_notice = None;
                             view.confirmation = None;
                             window.close_all_dialogs(cx);
                             view.tab = *tab;
