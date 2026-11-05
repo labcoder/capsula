@@ -21,6 +21,8 @@ mod deletes;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "inline_tests.rs"]
+mod inline;
 #[path = "job_tests.rs"]
 mod jobs;
 #[path = "lease_tests.rs"]

@@ -214,15 +214,33 @@ uses the thread's newest summary in place of every event through `last_event`. T
   task keeps that text, as Kumo's replies do (OSC-161), so no summary records its sources; a
   delete accepted while Kumo's compaction is reading or sending voids it like any job.
 
-Inline compaction, for a run whose own build doesn't fit, comes in a later PR.
+**Inline (B5).** A build is `TooLarge { room }`, where `room` is what the bound leaves for the
+summary after the fixed parts and the current run, `None` when those alone don't fit. With
+`None` the run ends as `failed(budget)` and spends no request. With room, the run compacts once
+per admission episode (the round, until a build is admitted), so a delete's rebuild can't start a
+second one:
+
+1. A fresh build attempt of the same round, `StoreOp::CompactContext`, reads the summary in one
+   read transaction and returns the request and its sources, exposed to deletes from its start.
+2. Admission against those sources, then a send lease under `SendKey::Build`, so a delete between
+   the read and the grant gets `Rebuild`; the rebuild is a normal build.
+3. The request asks for the summary rewritten within the room left, at most `MAX_SUMMARY`. Its
+   text is collected, never shown, and goes through the same budget and deadline as the run. The
+   answer is cut on a character boundary until its summary item fits the room as the bound counts
+   it, escapes included, and to `MAX_SUMMARY` raw bytes.
+4. `StoreSummary` and its acknowledgement are owned by that build's key; only the current run's
+   own acknowledgement starts the next normal build. After Stop or a replacement it's stale.
+5. A second `TooLarge` ends the run as `failed(budget)`.
 
 ## The bound
 
 A request is held to 512 KiB [guess], counted as its JSON body would be: every string escaped,
 plus a fixed allowance for each item's and the body's own fields. 13a checks the serialised body
 again. The current run, the summary, the instructions and the tools must fit. If they don't, the
-build ends with `BuildError::TooLarge`, and the run ends as `failed(budget)` rather than send
-(shortcut: the shell shows the generic failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
+build ends with `BuildError::TooLarge`. When the current run fits without the summary, the run
+rewrites the summary inline once ([Compaction](#compaction)); otherwise, or when that doesn't
+help, the run ends as `failed(budget)` rather than send (shortcut: the shell shows the generic
+failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
 context size yet, so the byte bound is the only one.
 
 ## What builds nothing
@@ -233,7 +251,7 @@ context size yet, so the byte bound is the only one.
 | `Origin` | The origin doesn't match the thread. |
 | `NoTurn` | The run's turn isn't stored. |
 | `InvalidCut` | A tool call is apart from its result, or an item repeats. |
-| `TooLarge` | The parts that can't be dropped are over the bound. |
+| `TooLarge { room }` | The parts that can't be dropped are over the bound; `room` is what's left for a summary when the current run fits without one. |
 | `Store` | The read failed. |
 
 No error and no `Debug` output carries message text or names.

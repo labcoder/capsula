@@ -2,9 +2,12 @@
 //! before it, so a delete sent first is always seen.
 
 use crate::context::build::{Turn, build};
-use crate::context::compact::compaction;
+use crate::context::compact::{compaction, rewrite};
 use crate::context::{BOUND, BuildError, Built, Supplied};
-use crate::coordinator::{BuildContext, ContextBuilt, JobAsk, JobBuilt, JobKind, ReadJob, Unbuilt};
+use crate::coordinator::{
+    BuildContext, CompactBuilt, CompactContext, ContextBuilt, JobAsk, JobBuilt, JobKind, ReadJob,
+    Unbuilt,
+};
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
 
@@ -55,7 +58,7 @@ pub(super) fn read(
     };
     let result = match built {
         Ok(Ok(built)) => Ok(built),
-        Ok(Err(BuildError::TooLarge)) => Err(Unbuilt::TooLarge),
+        Ok(Err(BuildError::TooLarge { room })) => Err(Unbuilt::TooLarge { room }),
         Ok(Err(error)) => {
             tracing::warn!(%error, run = key.run.0, "a context build failed");
             Err(Unbuilt::Failed)
@@ -70,6 +73,60 @@ pub(super) fn read(
         snapshot: Some(snapshot),
         result,
     }
+}
+
+/// Reads an inline compaction's request on `side`, or fails it when the store closed before its
+/// turn (`None`): the thread's summary, rewritten to fit the room its run's turn leaves, in one
+/// read transaction. Failures are logged by kind only.
+pub(super) fn read_compact(
+    side: Option<&Side>,
+    job: CompactContext,
+    #[cfg(test)] hold: impl FnOnce(),
+) -> CompactBuilt {
+    let CompactContext {
+        key,
+        thread,
+        snapshot,
+        room,
+    } = job;
+    let Some(snapshot) = snapshot else {
+        tracing::error!("an inline compaction reached the store without its snapshot");
+        return CompactBuilt {
+            key,
+            result: Err(Unbuilt::Failed),
+        };
+    };
+    let read = side.map_or(Err(StoreError::Closed), |side| {
+        side.read(|conn| {
+            let read = Snapshot::begin(conn)?;
+            #[cfg(test)]
+            hold();
+            let found = rewrite(&read, &snapshot, thread, room);
+            read.end()?;
+            Ok(found)
+        })
+    });
+    let result = match read {
+        Ok(Ok(found)) => Ok(found.map(|(found, allowance)| {
+            (
+                JobAsk {
+                    generation: found.generation,
+                    built: found.built,
+                    covers: Some(found.covers),
+                },
+                allowance,
+            )
+        })),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, run = key.run.0, "an inline compaction's read failed");
+            Err(Unbuilt::Failed)
+        }
+        Err(error) => {
+            tracing::warn!(%error, run = key.run.0, "an inline compaction's read failed");
+            Err(Unbuilt::Failed)
+        }
+    };
+    CompactBuilt { key, result }
 }
 
 /// Reads a background job's request on `side`, or fails it when the store closed before its turn

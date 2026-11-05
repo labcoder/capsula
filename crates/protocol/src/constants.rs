@@ -36,8 +36,14 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const BRAIN_LOG: &str = "kumochi-brain";
 /// See [`BRAIN_LOG`]; the screen worker's own file.
 pub const SCREEN_LOG: &str = "kumochi-screen";
+/// See [`BRAIN_LOG`]; Claude Code's MCP bridge, in the launch's own folder.
+pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
+
+/// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`], the session and a
+/// dash, and before the launch's value.
+pub const BRIDGE_PIPE: &str = "claude-bridge";
 
 /// Prefix of every per-session kernel object name: pipes and mutexes.
 pub const OBJECT_PREFIX: &str = if cfg!(debug_assertions) {
