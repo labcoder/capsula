@@ -284,7 +284,8 @@ pub enum ControlToBrain {
     },
     /// Change a setting; answered by exactly one [`ControlToShell::Settings`].
     Settings(SettingsOp),
-    /// Rename a task or set a thread's model; nothing answers it.
+    /// Rename a task or set a thread's model; model writes receive
+    /// [`ControlToShell::ThreadModelSet`], including refused writes.
     ThreadOp(ThreadOp),
     /// A scene-wide Stop, applied even when a later run appended to one of its scenes.
     StopScenes {
@@ -551,6 +552,15 @@ pub enum ControlToShell {
         draft: DraftId,
         /// A content-free refusal.
         reason: IssueRefused,
+    },
+    /// The committed result of one `ThreadOp::SetModel`, including a refused write.
+    ThreadModelSet {
+        /// The requested thread.
+        thread: ThreadId,
+        /// The requested choice, echoed unchanged.
+        choice: ModelChoice,
+        /// A live row matched and the write committed.
+        applied: bool,
     },
 }
 

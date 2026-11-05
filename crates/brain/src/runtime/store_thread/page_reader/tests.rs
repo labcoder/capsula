@@ -267,6 +267,14 @@ fn a_first_build_takes_the_threads_model_and_a_delete_sent_before_a_build_fails_
         choice: choice("thread-model"),
     };
     assert!(running.thread.send(picked));
+    assert_eq!(
+        running.ack(),
+        Input::ModelSet {
+            thread: ThreadId(2),
+            choice: choice("thread-model"),
+            applied: true,
+        }
+    );
     let mut first = build(2, 1, Some(choice("default-model")));
     let mut later = build(2, 2, None);
     for (op, is_first) in [(&mut first, true), (&mut later, false)] {

@@ -122,6 +122,50 @@ fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
 }
 
 #[test]
+fn a_model_result_round_trips_but_never_records_its_choice() {
+    use crate::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    const MODEL: &str = "private-model-sentinel";
+    for applied in [false, true] {
+        let result = ControlToShell::ThreadModelSet {
+            thread: ThreadId(8),
+            choice: ModelChoice {
+                model: ModelSlug::new(MODEL).expect("valid"),
+                effort: Effort::XHigh,
+                connection: ConnectionKind::ChatGpt,
+            },
+            applied,
+        };
+        let bytes = encode(&result, Pipe::Control).expect("encodes");
+        assert_eq!(
+            crate::frame::read::<ControlToShell>(&mut bytes.as_slice(), Pipe::Control)
+                .expect("decodes"),
+            Some(result.clone())
+        );
+        let debug = format!("{result:?}");
+        assert!(!debug.contains(MODEL), "{debug}");
+        assert!(
+            !debug.contains(&format!("{:?}", MODEL.as_bytes())),
+            "{debug}"
+        );
+        let record = record(Direction::ToShell, &result);
+        assert_eq!(record.payload, None);
+        let file = recording(&[record]);
+        assert!(!contains(&file, MODEL.as_bytes()));
+        assert!(!format!("{file:?}").contains(&format!("{:?}", MODEL.as_bytes())));
+        let mut out = Vec::new();
+        dump(&mut file.as_slice(), &mut out).expect("dumps");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            format!(
+                "    0 Control brain -> shell  ThreadModelSet ({} bytes)\n1 frames\n",
+                wire_len(&result, Pipe::Control)
+            )
+        );
+    }
+}
+
+#[test]
 fn a_rename_keeps_only_its_op_name_and_length() {
     const TITLE: &str = "Zqxrenamedtitle";
     let rename = ControlToBrain::ThreadOp(ThreadOp::Rename {
