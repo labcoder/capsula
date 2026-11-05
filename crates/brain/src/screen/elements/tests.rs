@@ -486,13 +486,14 @@ fn empty_password_rectangles_leave_masks_partial() {
 #[test]
 fn off_display_and_excluded_images_are_unavailable() {
     let now = Instant::now();
-    let mut job = job(1, now + Duration::from_secs(1));
+    let mut off_display = job(1, now + Duration::from_secs(1));
+    let excluded = job(1, now + Duration::from_secs(1));
     let mut source = FakeSource::flat(1);
-    job.display.origin = [1, 0];
+    off_display.display.origin = [1, 0];
     assert_eq!(
         walk(
             &mut source,
-            &job,
+            &off_display,
             &LIMITS,
             &|| now,
             &mut FakePlatform(false)
@@ -500,18 +501,27 @@ fn off_display_and_excluded_images_are_unavailable() {
         .unwrap(),
         unavailable(CaptureId(1), Unavailable::NoWindow)
     );
-    job.display = RECT;
     assert_eq!(
-        walk(&mut source, &job, &LIMITS, &|| now, &mut FakePlatform(true)).unwrap(),
+        walk(
+            &mut source,
+            &excluded,
+            &LIMITS,
+            &|| now,
+            &mut FakePlatform(true)
+        )
+        .unwrap(),
         unavailable(CaptureId(1), Unavailable::Excluded)
     );
     assert_eq!(source.reads.get(), 0);
-    assert_eq!(job.masks.lock().unwrap().rects(), []);
-    assert_eq!(job.masks.lock().unwrap().generation(), 2);
-    assert_eq!(
-        job.masks.lock().unwrap().completeness(),
-        Completeness::Unknown(Unavailable::Excluded)
-    );
+    for (job, why) in [
+        (&off_display, Unavailable::NoWindow),
+        (&excluded, Unavailable::Excluded),
+    ] {
+        let masks = job.masks.lock().unwrap();
+        assert_eq!(masks.rects(), []);
+        assert_eq!(masks.generation(), 1);
+        assert_eq!(masks.completeness(), Completeness::Unknown(why));
+    }
     for (name, expected) in [
         ("C:\\app\\KUMOCHI.EXE", true),
         ("/app/Kumochid.exe", true),
