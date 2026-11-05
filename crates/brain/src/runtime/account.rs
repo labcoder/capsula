@@ -561,7 +561,9 @@ impl Brain {
         let Some(link) = link else {
             return Ok(());
         };
-        frames.iter().try_for_each(|frame| link.control(frame))?;
+        frames
+            .iter()
+            .try_for_each(|frame| link.control(&self.composed(frame)))?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models)?;
         }

@@ -20,10 +20,15 @@ pub(crate) enum Kind {
     Row,
     Chart,
     Series,
+    View3d,
+    Solid,
 }
 impl Kind {
     fn container(self) -> bool {
         matches!(self, Self::Diagram | Self::Table | Self::Chart)
+    }
+    pub(crate) fn three_dimensional(self) -> bool {
+        matches!(self, Self::View3d | Self::Solid)
     }
 }
 
@@ -80,6 +85,24 @@ pub(crate) fn visual(op: &Op) -> Option<Visual<'_>> {
     }
 }
 
+/// Every identity admission owns: 2D visuals, which layout places, plus 3D views and solids.
+pub(crate) fn model(op: &Op) -> Option<Visual<'_>> {
+    let three = |id, kind, name, parent| Visual {
+        id,
+        kind,
+        name,
+        parent,
+        opacity: None,
+        delay: None,
+        dur: None,
+    };
+    match op {
+        Op::View3d(r) => Some(three(&r.id, Kind::View3d, "view3d", None)),
+        Op::Solid(r) => Some(three(&r.id, Kind::Solid, "solid", Some(&r.parent))),
+        _ => visual(op),
+    }
+}
+
 struct Reference<'a> {
     id: &'a WireId,
     field: &'static str,
@@ -87,7 +110,7 @@ struct Reference<'a> {
 }
 fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
     let mut refs = Vec::new();
-    if let Some(parent) = visual(op).and_then(|v| v.parent) {
+    if let Some(parent) = model(op).and_then(|v| v.parent) {
         refs.push(Reference {
             id: parent,
             field: "in",
@@ -126,6 +149,15 @@ fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
             }
         }
         Op::Highlight(r) => anchor(&r.target, "target"),
+        Op::Solid(r) => {
+            if let Some(attach) = &r.attach {
+                refs.push(Reference {
+                    id: attach,
+                    field: "attach",
+                    anchor: false,
+                });
+            }
+        }
         Op::Edge(r) => {
             refs.push(Reference {
                 id: &r.from,
@@ -180,7 +212,7 @@ pub(super) fn validate_op(
     if let Op::Anim(anim) = op {
         return validate_anim(anim, index, step, objects, removed);
     }
-    let Some(v) = visual(op) else {
+    let Some(v) = model(op) else {
         return Err(StepError::in_step(
             &step.id,
             path(index, "mermaid"),
@@ -203,6 +235,7 @@ pub(super) fn validate_op(
         Kind::Node | Kind::Edge => Some(Kind::Diagram),
         Kind::Row => Some(Kind::Table),
         Kind::Series => Some(Kind::Chart),
+        Kind::Solid => Some(Kind::View3d),
         _ => None,
     };
     if required_parent.is_some() && v.parent.is_none() {
@@ -216,10 +249,21 @@ pub(super) fn validate_op(
         let Some(target) = objects.get(reference.id) else {
             return Err(StepError::in_step(&step.id, field, ErrorCode::UnknownRef));
         };
+        if reference.anchor && target.kind.three_dimensional() {
+            return Err(StepError::in_step(&step.id, field, ErrorCode::Unsupported));
+        }
+        if reference.field == "attach" {
+            let own = objects[v.id].handle;
+            if (target.handle.revision(), target.handle.slot()) >= (own.revision(), own.slot()) {
+                return Err(StepError::in_step(&step.id, field, ErrorCode::ForwardRef));
+            }
+        }
         let valid = if reference.field == "in" {
             required_parent.map_or_else(|| target.kind.container(), |kind| target.kind == kind)
         } else if v.kind == Kind::Edge {
             target.kind == Kind::Node
+        } else if reference.field == "attach" {
+            target.kind == Kind::Solid && target.parent.as_ref() == v.parent
         } else {
             true
         };
@@ -391,12 +435,14 @@ fn validate_change(
         ),
         (
             change.label.is_some(),
-            matches!(kind, Kind::Shape | Kind::Node | Kind::Edge),
+            matches!(kind, Kind::Shape | Kind::Node | Kind::Edge | Kind::Solid),
             "label",
         ),
         (change.cells.is_some(), kind == Kind::Row, "cells"),
         (change.data.is_some(), kind == Kind::Series, "data"),
         (change.emphasis.is_some(), kind == Kind::Row, "emphasis"),
+        (change.info.is_some(), kind == Kind::Solid, "info"),
+        (change.color.is_some(), kind != Kind::View3d, "color"),
     ] {
         if present && !owned {
             return Err(StepError::in_step(
@@ -425,6 +471,11 @@ fn validate_anim(
         return Err(fail("target", ErrorCode::UnknownRef));
     };
     if anim.track == Track::Draw && !matches!(target.kind, Kind::Line | Kind::Path | Kind::Edge) {
+        return Err(fail("track", ErrorCode::PropertyNotOwned));
+    }
+    if matches!(anim.track, Track::Pos3 | Track::Rot3) != (target.kind == Kind::Solid)
+        || target.kind == Kind::View3d
+    {
         return Err(fail("track", ErrorCode::PropertyNotOwned));
     }
     if anim.keys.is_empty() || anim.repeat < -1 {
@@ -566,7 +617,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_dimensional_pairing_is_checked_behind_the_admission_gate() {
+    fn three_dimensional_tracks_pair_with_three_component_keys() {
         for track in ["pos3", "rot3"] {
             for (key, valid) in [("[1,2,3]", true), ("[1,2]", false), ("1", false)] {
                 let source = format!(
@@ -581,7 +632,7 @@ mod tests {
                     Object {
                         work: super::super::work::Work::default(),
                         handle: Handle::new(1, 0).expect("handle"),
-                        kind: Kind::Text,
+                        kind: Kind::Solid,
                         parent: None,
                         references: Box::default(),
                     },

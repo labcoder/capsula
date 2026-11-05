@@ -102,6 +102,44 @@ sequenceDiagram
   W-->>B: Captured(FrameMeta) or Refused
 ```
 
+## Masking and encoding
+
+The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every
+`MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
+`SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
+Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
+generation; sanitizing again applies all masks idempotently before another encode.
+
+Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
+frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
+`Partial`, or `Unknown` with an availability reason); an empty set never implies a completed
+walk. Both publishing a mask and finishing the walk bump the generation. The first finish wins:
+a late `Complete` can't overwrite `Unknown` or `Partial`. Encoded images also
+carry their capture id and generation: A6 must never stage a superseded generation.
+
+The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
+fills it, but invalidates the image before lending its buffer. Read access to a committed image
+is restricted to `screen/` through `image_mut` and `sanitize`; sanitized fields are private.
+Rust's visibility rules enforce this boundary; no test checks it.
+
+The overview uses exact area weights (a box filter), rounding channel averages to the nearest
+byte with halves upward. It fits within 1280×720, preserves the aspect ratio to integer-pixel
+rounding, and never enlarges. The focus crop clips to the display, then centres a native-pixel
+window within that intersection, capped at 1024×576; it never scales. Empty intersections are
+refused. Both encode RGB JPEG at quality 85 through `image`, with no platform encoder.
+
+`CaptureTransform` carries the display origin, DPI, overview size and optional crop rectangle.
+Overview coordinates scale per axis to physical desktop pixels; logical coordinates subtract
+the display origin and multiply by 96/DPI. Inverse overview mapping rounds to the nearest pixel
+(halves away from zero). Crop coordinates add the crop origin. Coordinate spaces have distinct
+protocol types; physical-to-overview mapping refuses points outside the display. External
+floating-point coordinates must be validated as finite by their first parser. Image Debug
+output contains only dimensions, byte counts and mask generations,
+and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
+
+These entry points have no production caller yet: A6 owns scheduling, staged replies and
+generation checks. Nothing here exports images or captures another frame.
+
 ## Deadline evidence on Rez
 
 CI uses the injected-clock deadline fixture, not a scheduler-speed assertion. Build the integration
@@ -116,3 +154,30 @@ binary=$(ls -t target/debug/deps/screen-*.exe | head -n 1)
 
 Remove the lock afterward. The strict fixture asserts 1,500–1,600 ms and prints the measured time;
 record Rez's scale with that result.
+
+## Portable element data and walk
+
+The control-view data and walk are implemented independently of the worker operation; A3a2
+connects them to capture authority and a bounded reader thread, and A3b supplies Windows UIA.
+Nothing in production calls the walk yet, and no new worker operation is served by this layer.
+
+One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
+bytes of element JSON. The byte cap usually binds first. A cut records Elements, Depth, Bytes,
+Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
+carry physical desktop and window-relative rectangles from the same cached properties. Names
+never appear in Debug or errors. Password names are discarded, their rectangles are published
+immediately, and password subtrees are never descended into.
+
+A source validates the root window and pid and returns its owning pid; the portable layer rejects
+roots off the captured display and excludes Kumochi's process-image names case-insensitively for
+every target, including Foreground. Each capture owns a fresh mask sink with its capture id,
+generation and completeness. Publishing a rectangle and finishing
+the walk both advance generation. A full walk is Complete unless a password rectangle has a zero
+side, which leaves masks Partial while retaining that rectangle. A cut is Partial, and unavailability
+is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
+needs masking: image consumers must withhold or flag those frames, not call them fully masked.
+
+Offline fake-source fixtures cover exact limits, Unicode names, provider/budget cuts, relative
+geometry, excluded roots and password/descendant sentinels. No real window or platform timing
+is exercised by these tests. Cancellation, worker authority and late/hung-thread handling belong
+to A3a2/A6 rather than this portable walk.

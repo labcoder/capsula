@@ -18,7 +18,7 @@ use kumochi_protocol::message::{Deleted, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::coordinator::{Input, StoreOp, UNKNOWN_TOOL};
+use crate::coordinator::{Input, StoreOp};
 use crate::store::{
     Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
 };
@@ -595,6 +595,24 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::SummaryStored { owner, applied });
             purger.op_arrived(store);
         }
+        StoreOp::CommitCall(call) => {
+            purger.op_arriving();
+            let committed = store
+                .reconnect()
+                .and_then(|()| store.commit_call(&call))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("a tool call wasn't stored");
+                    false
+                });
+            answer(
+                acks,
+                Input::CallCommitted {
+                    key: call.key,
+                    committed,
+                },
+            );
+            purger.op_arrived(store);
+        }
         StoreOp::SetModel { thread, choice } => {
             purger.op_arriving();
             let applied = if let Ok(applied) = store
@@ -644,18 +662,13 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 })
         }),
         StoreOp::RoundItems(round) => write(store, purger, acks, round.run, "round", |store| {
-            let results: Vec<_> = round
-                .calls
-                .iter()
-                .map(|call| (call, UNKNOWN_TOOL))
-                .collect();
             store
                 .append_round(
                     (round.thread, round.run),
                     round.connection,
                     round.text.as_deref(),
                     &round.items,
-                    &results,
+                    &round.calls,
                 )
                 .map(|()| Input::RoundStored {
                     run: round.run,

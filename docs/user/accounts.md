@@ -38,3 +38,15 @@ The panel labels the local risk **On this computer** and an unconfirmed remote o
 
 Your sign-in is held in the system credential store, never in the settings file. Development
 builds use their own account storage, separate from an installed copy.
+
+## Turning off Claude Code
+
+Kumochi looks for an installed Claude Code when it starts. To stop that, add this to
+`config.toml` in `%APPDATA%\Kumochi` and restart Kumochi:
+
+```toml
+[claude_code]
+enabled = false
+```
+
+Turning it off doesn't sign Claude Code out or delete anything.

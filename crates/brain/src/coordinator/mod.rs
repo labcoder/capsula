@@ -11,6 +11,7 @@
 
 mod admission;
 mod availability;
+mod calls;
 mod delete;
 mod drawing;
 mod inline;
@@ -42,7 +43,6 @@ pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::{StoreOp, SummaryText};
-pub(crate) use tools::UNKNOWN_TOOL;
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -266,6 +266,13 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs can be answered changed.
     Engines(Availability),
+    /// A `CommitCall` finished.
+    CallCommitted {
+        /// The call.
+        key: crate::dispatch::LedgerKey,
+        /// Its write and ledger row committed.
+        committed: bool,
+    },
 }
 
 /// Something for the systems around the coordinator to do, in order.
@@ -386,6 +393,12 @@ struct Run {
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
+    /// The run's tool calls, one entry per key.
+    ledger: crate::dispatch::Ledger,
+    /// The Claude Code launch authorized to call tools for this run; C4b-2 sets it.
+    mcp: Option<crate::bridge::LaunchId>,
+    /// Calls answered on their write's acknowledgement, for the tool loop to take.
+    answered: Vec<(crate::dispatch::Caller, crate::dispatch::ToolOutput)>,
     /// The run's calls and the current round's native items.
     tools: tools::Loop,
     /// The engine's round completed while steps or its items' write were pending; the round
@@ -721,6 +734,14 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
+            Input::CallCommitted {
+                key,
+                committed: true,
+            } => self.call_committed(&key, &mut effects)?,
+            Input::CallCommitted {
+                key,
+                committed: false,
+            } => self.call_failed(&key, &mut effects)?,
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
@@ -821,6 +842,9 @@ impl Coordinator {
             compacted: None,
             draw: None,
             error: None,
+            ledger: crate::dispatch::Ledger::default(),
+            mcp: None,
+            answered: Vec::new(),
             tools: tools::Loop::default(),
             finishing: false,
             ending: None,

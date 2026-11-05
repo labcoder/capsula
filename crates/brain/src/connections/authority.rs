@@ -1,0 +1,597 @@
+//! The credential authority (OSC-233): a small SQLite file that alone says which write-once
+//! generation of each credential is current and which are removed. Credential Manager keeps the
+//! bytes, and nothing it returns changes what this file says, so a stale, resurrected or missing
+//! name can hide a credential but never authorize one.
+
+pub(crate) mod io;
+#[cfg(test)]
+mod tests;
+
+use std::fmt;
+use std::path::Path;
+
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
+
+use super::marker::SignOutMarker;
+use super::records::MAX_RECORD_BYTES;
+use crate::platform::SessionLock;
+use crate::platform::credential::{CHUNK_SIZE, CredentialStoreError};
+use io::Verified;
+
+/// The authority's file in the data folder; not the history store, so no purge touches it.
+pub(crate) const FILE: &str = "credentials.db";
+/// The newest schema this build knows; a newer file is refused, never downgraded.
+const VERSION: i64 = 1;
+/// The sign-out marker's JSON bound, as the vault had it.
+const MARKER_BYTES: usize = 200;
+
+/// Version 1. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
+const SCHEMA: &str = "
+CREATE TABLE heads (
+    kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic')),
+    revision INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+INSERT INTO heads (kind, revision) VALUES ('host', 0), ('chatgpt', 0), ('revoke', 0), ('anthropic', 0);
+CREATE TABLE generations (
+    generation BLOB NOT NULL UNIQUE CHECK (length(generation) = 16),
+    kind TEXT NOT NULL REFERENCES heads (kind),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'removed', 'swept')),
+    chunks INTEGER CHECK (chunks BETWEEN 1 AND 64),
+    bytes INTEGER CHECK (bytes BETWEEN 0 AND 49152),
+    deleted_in INTEGER,
+    CHECK ((state = 'swept') = (chunks IS NULL)),
+    CHECK ((chunks IS NULL) = (bytes IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX one_active ON generations (kind) WHERE state = 'active';
+CREATE UNIQUE INDEX one_pending ON generations (kind) WHERE state = 'pending';
+CREATE INDEX removed ON generations (state) WHERE state = 'removed';
+CREATE TABLE control (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    lifetime INTEGER NOT NULL CHECK (lifetime >= 0),
+    marker TEXT NOT NULL
+) STRICT;
+";
+
+/// Why the authority refused; no name, generation or secret is carried.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AuthorityError {
+    /// SQLite refused or failed an operation.
+    #[error("credential authority is unavailable")]
+    Unavailable(#[from] rusqlite::Error),
+    /// A row is missing or doesn't hold a valid value.
+    #[error("credential authority is unreadable")]
+    Corrupt,
+    /// The file was written by a newer build.
+    #[error("credential authority is from a newer build")]
+    NewerSchema,
+    /// The head moved, or the candidate is no longer pending, since the operation began.
+    #[error("credential authority changed since this operation began")]
+    Conflict,
+    /// The current generation's names didn't all read back whole.
+    #[error("credential is not settled")]
+    Unsettled,
+    /// A value exceeds its bound.
+    #[error("credential exceeds its bounds")]
+    Bounds,
+    /// Credential Manager refused an operation.
+    #[error("credential operation failed")]
+    Store(#[from] CredentialStoreError),
+    /// No randomness for a new generation.
+    #[error("credential randomness is unavailable")]
+    Random(#[from] getrandom::Error),
+}
+
+/// One credential, with its own head; the label is its name segment and its SQL key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Host,
+    Account,
+    Revocations,
+    AnthropicKey,
+}
+
+impl Kind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Account => "chatgpt",
+            Self::Revocations => "revoke",
+            Self::AnthropicKey => "anthropic",
+        }
+    }
+
+    fn parse(label: &str) -> Result<Self, AuthorityError> {
+        [
+            Self::Host,
+            Self::Account,
+            Self::Revocations,
+            Self::AnthropicKey,
+        ]
+        .into_iter()
+        .find(|kind| kind.label() == label)
+        .ok_or(AuthorityError::Corrupt)
+    }
+}
+
+/// A fresh random identity, never reused, that names one write-once set of chunks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Generation([u8; 16]);
+
+impl Generation {
+    fn fresh() -> Result<Self, AuthorityError> {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes)?;
+        Ok(Self(bytes))
+    }
+
+    fn from_sql(bytes: &[u8]) -> Result<Self, AuthorityError> {
+        Ok(Self(bytes.try_into().map_err(|_| AuthorityError::Corrupt)?))
+    }
+
+    /// The generation's name segment: 32 lowercase hex digits.
+    pub(crate) fn hex(self) -> String {
+        use std::fmt::Write as _;
+        self.0
+            .iter()
+            .fold(String::with_capacity(32), |mut hex, byte| {
+                write!(hex, "{byte:02x}").expect("writing into a String cannot fail");
+                hex
+            })
+    }
+}
+
+impl fmt::Debug for Generation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Generation(***)")
+    }
+}
+
+/// A value's chunk count and total length, derived from the length alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Layout {
+    chunks: usize,
+    bytes: usize,
+}
+
+impl Layout {
+    /// # Errors
+    /// Refuses a value over the record bound.
+    pub(crate) fn for_len(bytes: usize) -> Result<Self, AuthorityError> {
+        if bytes > MAX_RECORD_BYTES {
+            return Err(AuthorityError::Bounds);
+        }
+        Ok(Self {
+            chunks: bytes.div_ceil(CHUNK_SIZE).max(1),
+            bytes,
+        })
+    }
+
+    pub(crate) fn chunks(self) -> usize {
+        self.chunks
+    }
+
+    pub(crate) fn bytes(self) -> usize {
+        self.bytes
+    }
+
+    /// The exact length chunk `index` holds: full chunks, then whatever completes the value.
+    pub(crate) fn chunk_len(self, index: usize) -> usize {
+        if index + 1 < self.chunks {
+            CHUNK_SIZE
+        } else {
+            self.bytes - CHUNK_SIZE * (self.chunks - 1)
+        }
+    }
+
+    fn from_sql(chunks: Option<i64>, bytes: Option<i64>) -> Result<Self, AuthorityError> {
+        let (Some(chunks), Some(bytes)) = (chunks, bytes) else {
+            return Err(AuthorityError::Corrupt);
+        };
+        let layout = Self::for_len(usize::try_from(bytes).map_err(|_| AuthorityError::Corrupt)?)
+            .map_err(|_| AuthorityError::Corrupt)?;
+        if usize::try_from(chunks).ok() != Some(layout.chunks) {
+            return Err(AuthorityError::Corrupt);
+        }
+        Ok(layout)
+    }
+
+    fn sql(self) -> Result<(i64, i64), AuthorityError> {
+        let convert = |value: usize| i64::try_from(value).map_err(|_| AuthorityError::Bounds);
+        Ok((convert(self.chunks)?, convert(self.bytes)?))
+    }
+}
+
+/// The one generation of a kind that may be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActiveRef {
+    pub(crate) kind: Kind,
+    pub(crate) generation: Generation,
+    pub(crate) layout: Layout,
+}
+
+/// A kind's head: its revision, which every change bumps, and its Active generation, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Current {
+    pub(crate) revision: u64,
+    pub(crate) active: Option<ActiveRef>,
+}
+
+/// A Pending generation's one chance to be written; not Clone, so it can't be written twice.
+#[derive(Debug)]
+#[must_use = "an unwritten plan stays Pending until the next open retires it"]
+pub(crate) struct WritePlan {
+    kind: Kind,
+    generation: Generation,
+    layout: Layout,
+    base: u64,
+}
+
+/// What a sweep of a retired generation's names found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Observed {
+    /// Every name read absent after its delete.
+    Absent,
+    /// A delete failed or a name still read present.
+    Remains,
+}
+
+/// A Removed generation whose names a sweep still owes; only [`Authority::retired`] makes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Retired {
+    kind: Kind,
+    generation: Generation,
+    layout: Layout,
+    /// Its place in the backlog, so the next pass starts after it.
+    row: i64,
+}
+
+/// The open authority, held by the credential worker under its session lock.
+pub(crate) struct Authority {
+    conn: Connection,
+    /// This open's count; a sweep in a later one is what turns Removed into Swept.
+    lifetime: i64,
+}
+
+impl fmt::Debug for Authority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Authority")
+    }
+}
+
+impl Authority {
+    /// Opens or creates the file, then retires every Pending generation: a candidate from an
+    /// earlier process is never activated. The lock proves the caller owns the account session.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure, a file from a newer build, or missing or invalid rows.
+    pub(crate) fn open(path: &Path, _session: &SessionLock) -> Result<Self, AuthorityError> {
+        let mut conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        if mode != "wal" {
+            return Err(AuthorityError::Corrupt);
+        }
+        conn.execute_batch(
+            "PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;",
+        )?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        match version {
+            0 => {
+                tx.execute_batch(SCHEMA)?;
+                tx.execute(
+                    "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
+                    [marker_json(SignOutMarker::default())?],
+                )?;
+                tx.execute_batch("PRAGMA user_version = 1")?;
+            }
+            VERSION => {}
+            newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
+            _ => return Err(AuthorityError::Corrupt),
+        }
+        let lifetime = tx
+            .query_row(
+                "UPDATE control SET lifetime = lifetime + 1 WHERE id = 1 RETURNING lifetime",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AuthorityError::Corrupt)?;
+        tx.execute(
+            "UPDATE generations SET state = 'removed' WHERE state = 'pending'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(Self { conn, lifetime })
+    }
+
+    /// # Errors
+    /// Fails on a SQLite failure or a missing or invalid row.
+    pub(crate) fn current(&self, kind: Kind) -> Result<Current, AuthorityError> {
+        current(&self.conn, kind)
+    }
+
+    /// Commits a fresh Pending generation for a value of `len` bytes, retiring any older
+    /// candidate of the kind. The committed head is unchanged until [`Self::activate`].
+    ///
+    /// # Errors
+    /// Conflict when the head's revision isn't `expected`; Bounds for an oversized value.
+    pub(crate) fn begin(
+        &mut self,
+        kind: Kind,
+        expected: u64,
+        len: usize,
+    ) -> Result<WritePlan, AuthorityError> {
+        let layout = Layout::for_len(len)?;
+        let (chunks, bytes) = layout.sql()?;
+        let generation = Generation::fresh()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if current(&tx, kind)?.revision != expected {
+            return Err(AuthorityError::Conflict);
+        }
+        tx.execute(
+            "UPDATE generations SET state = 'removed' WHERE kind = ?1 AND state = 'pending'",
+            [kind.label()],
+        )?;
+        tx.execute(
+            "INSERT INTO generations (generation, kind, state, chunks, bytes)
+             VALUES (?1, ?2, 'pending', ?3, ?4)",
+            params![generation.0.as_slice(), kind.label(), chunks, bytes],
+        )?;
+        tx.commit()?;
+        Ok(WritePlan {
+            kind,
+            generation,
+            layout,
+            base: expected,
+        })
+    }
+
+    /// Makes a verified candidate the kind's only Active generation and retires its predecessor,
+    /// with the marker, if given, in the same transaction.
+    ///
+    /// # Errors
+    /// Conflict when the head moved or the candidate was retired since `begin`.
+    pub(crate) fn activate(
+        &mut self,
+        verified: Verified,
+        marker: Option<SignOutMarker>,
+    ) -> Result<ActiveRef, AuthorityError> {
+        let plan = verified.into_plan();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending = tx
+            .query_row(
+                "SELECT 1 FROM generations WHERE generation = ?1 AND kind = ?2 AND state = 'pending'",
+                params![plan.generation.0.as_slice(), plan.kind.label()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !pending || current(&tx, plan.kind)?.revision != plan.base {
+            return Err(AuthorityError::Conflict);
+        }
+        tx.execute(
+            "UPDATE generations SET state = 'removed' WHERE kind = ?1 AND state = 'active'",
+            [plan.kind.label()],
+        )?;
+        tx.execute(
+            "UPDATE generations SET state = 'active' WHERE generation = ?1",
+            [plan.generation.0.as_slice()],
+        )?;
+        bump(&tx, plan.kind)?;
+        if let Some(marker) = marker {
+            write_marker(&tx, marker)?;
+        }
+        tx.commit()?;
+        Ok(ActiveRef {
+            kind: plan.kind,
+            generation: plan.generation,
+            layout: plan.layout,
+        })
+    }
+
+    /// Removes every Active and Pending generation of these kinds, for good, with the marker, if
+    /// given, in the same transaction. Nothing is read first, so an unsettled store never blocks it.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure or a missing head.
+    pub(crate) fn remove(
+        &mut self,
+        kinds: &[Kind],
+        marker: Option<SignOutMarker>,
+    ) -> Result<(), AuthorityError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for kind in kinds {
+            tx.execute(
+                "UPDATE generations SET state = 'removed'
+                 WHERE kind = ?1 AND state IN ('active', 'pending')",
+                [kind.label()],
+            )?;
+            bump(&tx, *kind)?;
+        }
+        if let Some(marker) = marker {
+            write_marker(&tx, marker)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The sign-out marker; a malformed one fails closed, and a missing row is never the default.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure or a missing control row.
+    pub(crate) fn marker(&self) -> Result<SignOutMarker, AuthorityError> {
+        let json: String = self
+            .conn
+            .query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(AuthorityError::Corrupt)?;
+        if json.len() > MARKER_BYTES {
+            return Ok(SignOutMarker::fail_closed());
+        }
+        Ok(match serde_json::from_str::<SignOutMarker>(&json) {
+            Ok(marker) if marker.valid() => marker,
+            _ => SignOutMarker::fail_closed(),
+        })
+    }
+
+    /// # Errors
+    /// Fails on a SQLite failure, a missing control row or an oversized marker.
+    pub(crate) fn set_marker(&mut self, marker: SignOutMarker) -> Result<(), AuthorityError> {
+        write_marker(&self.conn, marker)
+    }
+
+    /// The oldest Removed generations after `after`, at most `limit`, so a sweep pass is bounded
+    /// however many were ever made and still reaches the newest. An empty list ends a round; the
+    /// next round starts from `None` and revisits what remained. A cursor is for this open only.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure or an invalid row.
+    pub(crate) fn retired(
+        &self,
+        after: Option<&Retired>,
+        limit: usize,
+    ) -> Result<Vec<Retired>, AuthorityError> {
+        let limit = i64::try_from(limit).map_err(|_| AuthorityError::Bounds)?;
+        let mut statement = self.conn.prepare(
+            "SELECT generation, kind, chunks, bytes, rowid FROM generations
+             WHERE state = 'removed' AND rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows =
+            statement.query_map(params![after.map_or(0, |after| after.row), limit], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+        rows.map(|row| {
+            let (generation, kind, chunks, bytes, row) = row?;
+            Ok(Retired {
+                kind: Kind::parse(&kind)?,
+                generation: Generation::from_sql(&generation)?,
+                layout: Layout::from_sql(chunks, bytes)?,
+                row,
+            })
+        })
+        .collect()
+    }
+
+    /// Records a sweep of `retired`: absent names, deleted in an earlier open, make it Swept for
+    /// good; anything else records this open as its latest delete.
+    ///
+    /// # Errors
+    /// Conflict when it's no longer Removed; otherwise a SQLite failure.
+    pub(crate) fn observed(
+        &mut self,
+        retired: &Retired,
+        observed: Observed,
+    ) -> Result<(), AuthorityError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted_in: Option<i64> = tx
+            .query_row(
+                "SELECT deleted_in FROM generations WHERE generation = ?1 AND state = 'removed'",
+                [retired.generation.0.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AuthorityError::Conflict)?;
+        if observed == Observed::Absent && deleted_in.is_some_and(|deleted| deleted < self.lifetime)
+        {
+            tx.execute(
+                "UPDATE generations SET state = 'swept', chunks = NULL, bytes = NULL
+                 WHERE generation = ?1",
+                [retired.generation.0.as_slice()],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE generations SET deleted_in = ?1 WHERE generation = ?2",
+                params![self.lifetime, retired.generation.0.as_slice()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn current(conn: &Connection, kind: Kind) -> Result<Current, AuthorityError> {
+    let revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM heads WHERE kind = ?1",
+            [kind.label()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(AuthorityError::Corrupt)?;
+    let active = conn
+        .query_row(
+            "SELECT generation, chunks, bytes FROM generations WHERE kind = ?1 AND state = 'active'",
+            [kind.label()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(generation, chunks, bytes)| {
+            Ok::<_, AuthorityError>(ActiveRef {
+                kind,
+                generation: Generation::from_sql(&generation)?,
+                layout: Layout::from_sql(chunks, bytes)?,
+            })
+        })
+        .transpose()?;
+    Ok(Current {
+        revision: u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)?,
+        active,
+    })
+}
+
+fn bump(conn: &Connection, kind: Kind) -> Result<(), AuthorityError> {
+    let changed = conn.execute(
+        "UPDATE heads SET revision = revision + 1 WHERE kind = ?1",
+        [kind.label()],
+    )?;
+    if changed != 1 {
+        return Err(AuthorityError::Corrupt);
+    }
+    Ok(())
+}
+
+fn marker_json(marker: SignOutMarker) -> Result<String, AuthorityError> {
+    let json = serde_json::to_string(&marker).map_err(|_| AuthorityError::Bounds)?;
+    if json.len() > MARKER_BYTES {
+        return Err(AuthorityError::Bounds);
+    }
+    Ok(json)
+}
+
+fn write_marker(conn: &Connection, marker: SignOutMarker) -> Result<(), AuthorityError> {
+    let changed = conn.execute(
+        "UPDATE control SET marker = ?1 WHERE id = 1",
+        [marker_json(marker)?],
+    )?;
+    if changed != 1 {
+        return Err(AuthorityError::Corrupt);
+    }
+    Ok(())
+}

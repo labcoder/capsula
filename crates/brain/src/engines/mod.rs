@@ -367,6 +367,12 @@ pub enum ToolName {
     Draw,
     /// A name Kumochi doesn't offer.
     Unknown,
+    /// The dispatcher's test tool that writes.
+    #[cfg(test)]
+    Probe,
+    /// The dispatcher's test tool that returns history references.
+    #[cfg(test)]
+    Recall,
 }
 
 /// A native output item's bytes, never parsed or logged.

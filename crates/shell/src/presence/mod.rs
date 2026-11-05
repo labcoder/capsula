@@ -21,6 +21,7 @@ pub(crate) mod observer;
 mod overlay_input;
 mod paint;
 mod panels;
+mod perch;
 mod position;
 mod pull_dock;
 mod pull_picture;
@@ -931,7 +932,8 @@ fn listen(
                 match event {
                     PresenceEvent::ShowStatus => this.set_panel(PanelVisibility::Visible, cx)?,
                     // Hover opens the peek; a press does nothing until C2a's pull starts there.
-                    PresenceEvent::DockPressed { .. } => {}
+                    // shortcut: no host watch is armed until C2b-2's carry, which handles these.
+                    PresenceEvent::DockPressed { .. } | PresenceEvent::HostChanged { .. } => {}
                     PresenceEvent::PointerChanged { entered_qpc } => {
                         this.pointer_moved(entered_qpc, cx)?;
                     }
