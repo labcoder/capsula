@@ -504,7 +504,8 @@ async fn read_pages_and_text(
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. }) => {
+            | DataToShell::Models { .. }
+            | DataToShell::IssueCard(_)) => {
                 panic!("unexpected {other:?}")
             }
         }
