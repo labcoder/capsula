@@ -201,10 +201,19 @@ pub const MAX_PENDING_TURNS: usize = 64;
 
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// What the step shows, at most [`MAX_STEP_LABEL`] bytes.
     pub label: String,
+}
+
+/// The label is model text, so only its length prints.
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step")
+            .field("label_len", &self.label.len())
+            .finish()
+    }
 }
 
 /// Where a run is, as the shell shows it.
