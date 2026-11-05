@@ -3,9 +3,9 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, WeakEntity, Window, div, list, px,
+    App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
+    ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, Styled as _,
+    Subscription, WeakEntity, Window, div, list, px,
 };
 use kumochi_protocol::message::{EventId, PageEventKind, ThreadId};
 
@@ -165,7 +165,10 @@ impl Render for Messages {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::{AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point, size};
+    use gpui_kit::{
+        AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point,
+        size,
+    };
     use kumochi_protocol::message::{PageEvent, RunId};
 
     fn event(id: u64) -> PageEvent {
