@@ -13,6 +13,9 @@ mod account;
 mod connections;
 mod content;
 mod error;
+#[macro_use]
+mod github;
+mod issues;
 mod pages;
 mod scenes;
 #[macro_use]
@@ -30,6 +33,14 @@ pub use connections::{
 pub use content::Content;
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
+};
+pub use github::{
+    GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+};
+pub use issues::{
+    ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
+    IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult, MAX_ISSUE_BODY_BYTES,
+    MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -201,10 +212,19 @@ pub const MAX_PENDING_TURNS: usize = 64;
 
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// What the step shows, at most [`MAX_STEP_LABEL`] bytes.
     pub label: String,
+}
+
+/// The label is model text, so only its length prints.
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step")
+            .field("label_len", &self.label.len())
+            .finish()
+    }
 }
 
 /// Where a run is, as the shell shows it.
@@ -387,6 +407,10 @@ pub enum ControlToBrain {
         /// The device's generation.
         generation: OutputGeneration,
     },
+    /// The user's operation on Kumochi's GitHub connection.
+    GitHub(GitHubOp),
+    /// Consent or another explicit issue-card action.
+    Issue(IssueOp),
 }
 
 /// What a thread's delete came to.
@@ -508,6 +532,26 @@ pub enum ControlToShell {
         /// The run.
         run: RunId,
     },
+    /// GitHub connection presentation, never credentials.
+    GitHub(GitHubView),
+    /// A versioned action transition, independent of data-pipe delivery.
+    ActionState {
+        /// The action.
+        draft: DraftId,
+        /// Its monotonic presentation version.
+        version: StateVersion,
+        /// The authoritative state.
+        state: ActionState,
+        /// The current approval, when offered.
+        approval: Option<ApprovalRev>,
+    },
+    /// A refused operation; it never changes the card's state.
+    IssueRefused {
+        /// The action whose operation was refused.
+        draft: DraftId,
+        /// A content-free refusal.
+        reason: IssueRefused,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -541,6 +585,22 @@ pub enum DataToBrain {
     },
     /// 20 ms of a recognized hold's microphone audio.
     MicPcm(MicPcm),
+    /// A pending edit, answered later by an authoritative card.
+    IssueEdit {
+        /// The action to edit.
+        draft: DraftId,
+        /// The proposed title.
+        title: IssueTitle,
+        /// The proposed canonical body.
+        body: IssueBody,
+        /// The selected repository, if any.
+        repo: Option<RepoName>,
+    },
+    /// Read back at most sixteen authoritative cards.
+    IssueCards {
+        /// The action ids to read.
+        drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
+    },
 }
 
 /// Brain to shell, on the data pipe.
@@ -675,6 +735,8 @@ pub enum DataToShell {
     },
     /// Audio of a queued segment.
     SpeechPcm(SpeechPcm),
+    /// An authoritative card; its body belongs on the data pipe.
+    IssueCard(IssueCard),
 }
 
 #[cfg(test)]
@@ -688,6 +750,10 @@ mod hold_frame_tests;
 #[cfg(test)]
 #[path = "message/content_tests.rs"]
 mod content_tests;
+
+#[cfg(test)]
+#[path = "message/issue_tests.rs"]
+mod issue_tests;
 
 #[cfg(test)]
 mod tests {

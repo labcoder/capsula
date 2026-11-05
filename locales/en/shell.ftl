@@ -39,6 +39,7 @@ threads-close = Close
 thread-user = You
 thread-assistant = { $assistant }
 thread-step = Drawing step
+thread-issue-draft = Issue draft: { $title }
 threads-offline = Reconnect to load tasks.
 threads-search-too-long = That search is too long to send.
 threads-failed = Couldn't load tasks. Close this panel and open it again to retry.

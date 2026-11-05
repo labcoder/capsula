@@ -35,6 +35,8 @@ mod drawings;
 mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
+#[path = "loop_tests.rs"]
+mod loops;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
@@ -73,6 +75,18 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
             hint: FocusHint::Window(WindowRef(17)),
         },
         ControlToBrain::ExclusionLapsed { lease },
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
+fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
+    use kumochi_protocol::message::{DraftId, GitHubOp, IssueOp};
+
+    for message in [
+        ControlToBrain::GitHub(GitHubOp::Connect),
+        ControlToBrain::Issue(IssueOp::Discard { draft: DraftId(9) }),
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));
     }

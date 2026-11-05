@@ -432,6 +432,12 @@ impl Strings {
         self.format(Text::ThreadAssistant.id(), Some(&args))
     }
 
+    pub(crate) fn issue_draft(&self, title: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("title", title);
+        self.format("thread-issue-draft", Some(&args))
+    }
+
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
@@ -593,6 +599,14 @@ mod tests {
         assert_eq!(strings.assistant("Cloud"), "Cloud");
         assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
         assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+    }
+
+    #[test]
+    fn issue_history_fills_the_title_without_interpreting_it() {
+        assert_eq!(
+            Strings::english().issue_draft("Fix {layout} — 窓"),
+            "Issue draft: Fix {layout} — 窓"
+        );
     }
 
     #[test]
