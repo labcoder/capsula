@@ -118,6 +118,10 @@ struct Segment {
     played: u32,
     chunks: u32,
     end: End,
+    /// Its final chunk went out; a dropped segment's waits for every earlier one's.
+    marked: bool,
+    /// TTS failed it, so playing all its audio isn't hearing all its text.
+    failed: bool,
 }
 
 /// One spoken run's speech state, owned by the coordinator's run.
@@ -230,45 +234,44 @@ impl Reply {
         if self.speaking != Some(index(segment)) {
             return;
         }
-        let stop = failure == Failure::Run;
-        if stop {
+        if failure == Failure::Run {
             self.synthesis = Synthesis::Stopped;
         }
+        self.segments[index(segment)].failed = true;
         self.end_speaking(out);
-        if stop {
-            for at in 0..self.segments.len() {
-                if self.segments[at].end == End::Open {
-                    self.end(at, out);
-                }
-            }
-        }
         self.pump(out);
     }
 
     /// `scene` failed: its say segments are dropped, and audio already sent for them stops
-    /// counting against the window.
+    /// counting against the window. Once the run's speech is revoked nothing more goes out.
     pub(crate) fn step_failed(&mut self, scene: SceneId, out: &mut Vec<Speech>) {
+        if self.synthesis == Synthesis::Revoked {
+            return;
+        }
+        let mut changed = false;
         for at in 0..self.segments.len() {
-            let segment = &self.segments[at];
+            let segment = &mut self.segments[at];
             let Source::Say(step) = segment.source else {
                 continue;
             };
             if step.scene != scene || matches!(segment.end, End::Played | End::Dropped) {
                 continue;
             }
+            let unplayed = u64::from(segment.sent - segment.played);
+            segment.end = End::Dropped;
+            segment.text = None;
+            self.unplayed -= unplayed;
+            changed = true;
             if self.speaking == Some(at) {
                 self.speaking = None;
                 out.push(Speech::Cancel);
             }
-            if self.segments[at].end == End::Open {
-                self.end(at, out);
-            }
-            let segment = &mut self.segments[at];
-            self.unplayed -= u64::from(segment.sent - segment.played);
-            segment.end = End::Dropped;
         }
-        self.progressed(out);
-        self.pump(out);
+        if changed {
+            self.finals(out);
+            self.progressed(out);
+            self.pump(out);
+        }
     }
 
     /// The shell played `sample` samples of `segment`, which must be the one playing.
@@ -281,6 +284,9 @@ impl Reply {
         sample: u32,
         out: &mut Vec<Speech>,
     ) -> Result<(), Refused> {
+        if self.quiet {
+            return Ok(());
+        }
         let Some(at) = self.playing_report(segment)? else {
             return Ok(());
         };
@@ -309,6 +315,9 @@ impl Reply {
         samples: u32,
         out: &mut Vec<Speech>,
     ) -> Result<(), Refused> {
+        if self.quiet {
+            return Ok(());
+        }
         let Some(at) = self.playing_report(segment)? else {
             return Ok(());
         };
@@ -349,10 +358,12 @@ impl Reply {
         });
     }
 
-    /// The shell's quiet answer after a revoke, with where playback stopped.
+    /// The shell's quiet answer after a revoke, with where playback stopped. It's the last word
+    /// on the heard point: later progress and played reports change nothing.
     ///
     /// # Errors
-    /// [`Refused`] when nothing was revoked, the answer came twice, or the cursor can't be true.
+    /// [`Refused`] when nothing was revoked, the answer came twice, or the cursor can't be true:
+    /// past a segment whose audio hadn't all gone, or behind what already played.
     pub(crate) fn stopped(&mut self, cursor: Option<Cursor>) -> Result<(), Refused> {
         if self.synthesis != Synthesis::Revoked || self.quiet {
             return Err(Refused::OutOfOrder);
@@ -363,6 +374,15 @@ impl Reply {
             if cursor.sample > found.sent {
                 return Err(Refused::Total);
             }
+            let (earlier, later) = (&self.segments[..at], &self.segments[at + 1..]);
+            if cursor.sample < found.played
+                || earlier.iter().any(|segment| segment.end == End::Open)
+                || later
+                    .iter()
+                    .any(|segment| segment.played > 0 || segment.end == End::Played)
+            {
+                return Err(Refused::OutOfOrder);
+            }
             for earlier in &mut self.segments[..at] {
                 if earlier.end == End::Last {
                     earlier.played = earlier.sent;
@@ -370,7 +390,10 @@ impl Reply {
                 }
             }
             let found = &mut self.segments[at];
-            found.played = found.played.max(cursor.sample);
+            found.played = cursor.sample;
+            if found.end == End::Last && cursor.sample == found.sent {
+                found.end = End::Played;
+            }
         }
         self.quiet = true;
         Ok(())
@@ -406,7 +429,7 @@ impl Reply {
                 continue;
             }
             if let Source::Text(range) = &segment.source {
-                text = if segment.end == End::Played {
+                text = if segment.end == End::Played && !segment.failed {
                     range.end
                 } else {
                     text.max(range.start)
@@ -447,6 +470,8 @@ impl Reply {
             played: 0,
             chunks: 0,
             end: End::Open,
+            marked: false,
+            failed: false,
         });
     }
 
@@ -521,7 +546,25 @@ impl Reply {
     fn end_speaking(&mut self, out: &mut Vec<Speech>) {
         if let Some(at) = self.speaking.take() {
             self.end(at, out);
+            self.finals(out);
             self.progressed(out);
+        }
+    }
+
+    /// Sends the final chunks owed, in segment order: a dropped segment's, or once synthesis
+    /// stopped an open one's, waits for every earlier segment's.
+    fn finals(&mut self, out: &mut Vec<Speech>) {
+        for at in 0..self.segments.len() {
+            let segment = &self.segments[at];
+            if segment.marked {
+                continue;
+            }
+            let owed = segment.end == End::Dropped
+                || self.synthesis == Synthesis::Stopped && segment.end == End::Open;
+            if !owed || self.speaking == Some(at) {
+                return;
+            }
+            self.end(at, out);
         }
     }
 
@@ -538,7 +581,10 @@ impl Reply {
         }));
         segment.chunks += 1;
         segment.text = None;
-        segment.end = End::Last;
+        segment.marked = true;
+        if segment.end == End::Open {
+            segment.end = End::Last;
+        }
     }
 
     /// Anything that moves a draining run along re-arms its stall timer.

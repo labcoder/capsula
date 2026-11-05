@@ -23,7 +23,8 @@ pub const MAX_POLY_VERTICES: usize = 8;
 pub const BAND_ROWS: u32 = 32;
 /// Samples between cancellation polls inside a polygon, plus at most one row span.
 pub const POLL_SAMPLES: u32 = 1 << 16;
-/// Depth keys drop the three lowest mantissa bits, so depths within about 1e-6 relative tie.
+/// Depth keys drop the three lowest mantissa bits, so depths in one 8-ulp bin (about 1e-6 wide)
+/// tie; adjacent depths on either side of a bin boundary don't.
 const DEPTH_MASK: u32 = !0b111;
 const MOTION: [[i32; 2]; 1] = [[128, 128]];
 /// Rotated-grid offsets from the texel origin: (∓1/8, ∓3/8) and (±3/8, ∓1/8) about its centre.
@@ -386,9 +387,11 @@ pub fn raster(
             offsets,
         };
         for poly in frame.polys.iter().filter(|p| p.opaque) {
+            work.poll()?;
             fill(poly, &region, band, &mut work)?;
         }
         for &(_, index) in &frame.keys {
+            work.poll()?;
             fill(&frame.polys[us(index)], &region, band, &mut work)?;
         }
         resolve(&region, band, color, ids, &mut work)?;
@@ -434,7 +437,6 @@ fn fill(
     band: &mut BandScratch,
     work: &mut Work<'_>,
 ) -> Result<(), RasterError> {
-    work.poll()?;
     let n = usize::from(poly.len);
     let points = &poly.points[..n];
     let (mut lo, mut hi) = (points[0], points[0]);
@@ -648,4 +650,54 @@ fn bleed(
 )]
 fn us(v: u32) -> usize {
     v as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BandScratch, Fragment, FrameScratch, MOTION, POLL_SAMPLES, RasterError, Region, SUBTEXEL,
+        Work, fill,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    /// Fills one opaque polygon `rows` texel rows tall across a 4,096-texel band with the cancel
+    /// flag already set, so only the span loop's quantum can stop it.
+    fn fill_cancelled(rows: i32) -> (Result<(), RasterError>, usize) {
+        let (w, h) = (4096 * SUBTEXEL, rows * SUBTEXEL);
+        let mut frame = FrameScratch::with_capacity(1);
+        let fragment = Fragment {
+            points: &[[0, 0], [w, 0], [w, h], [0, h]],
+            plane: [0.0, 0.0, 0.5],
+            rgb: [255, 0, 0],
+            opacity: 1.0,
+            solid: 1,
+            centroid_z: 2.0,
+        };
+        assert_eq!(frame.push(&fragment), Ok(true), "the polygon is kept");
+        let mut band = BandScratch::new(4096).expect("band");
+        let region = Region {
+            width: 4096,
+            y0: 0,
+            rows: 32,
+            offsets: &MOTION,
+        };
+        let cancel = AtomicBool::new(true);
+        let mut work = Work {
+            cancel: &cancel,
+            left: POLL_SAMPLES,
+        };
+        let result = fill(&frame.polys[0], &region, &mut band, &mut work);
+        (result, band.depth.iter().filter(|&&d| d != 0).count())
+    }
+
+    #[test]
+    fn a_polygon_stops_once_its_sample_quantum_runs_out() {
+        // 15 rows of 4,096 samples fit in the 65,536-sample quantum; the 16th row's span polls.
+        assert_eq!(fill_cancelled(32), (Err(RasterError::Cancelled), 61_440));
+        assert_eq!(
+            fill_cancelled(15),
+            (Ok(()), 61_440),
+            "inside one quantum, no poll"
+        );
+    }
 }

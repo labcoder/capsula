@@ -155,7 +155,7 @@ impl Runs {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    fn thread(&self) -> Option<ThreadId> {
+    pub(crate) fn thread(&self) -> Option<ThreadId> {
         match self.target {
             Target::Kumo => self.main,
             Target::Task(thread) => Some(thread),

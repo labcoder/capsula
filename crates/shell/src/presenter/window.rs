@@ -117,6 +117,7 @@ impl Presenter {
             .retire(expected_index, &mut self.global)
             .expect("a prepared step was committed under this budget, and no admission reads it");
         let Ready { step, full_after } = scene.ready.pop_front().expect("the head was just read");
+        // shortcut: test-only consumption keeps its old view; replace and charge it atomically when B6 wires activation
         let old = std::mem::replace(&mut scene.rest, step.after.clone());
         drop(Deferred::new(old, scene.retained));
         scene.retained = full_after;
