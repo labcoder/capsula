@@ -163,6 +163,16 @@ impl Reply {
         }
     }
 
+    /// The output rate the run's speech is made at.
+    pub(crate) fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// Whether the run's speech was revoked.
+    pub(crate) fn revoked(&self) -> bool {
+        self.synthesis == Synthesis::Revoked
+    }
+
     /// The engine's text delta.
     pub(crate) fn text(&mut self, delta: &str, out: &mut Vec<Speech>) {
         if self.closed {

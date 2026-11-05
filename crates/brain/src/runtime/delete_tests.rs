@@ -342,22 +342,24 @@ async fn a_hide_that_never_committed_leaves_the_thread_for_the_next_start() {
 }
 
 /// Serves a connection whose shell sends a delete for T and then quits; the quit's outcome.
-async fn delete_then_quit(brain: Brain) -> Quit {
-    let mut brain = brain;
-    let ((control, data), mut shell) = duplex();
-    let mut tap = Tap::from_env();
-    let client = async {
-        shell.scenes().await;
-        shell.send(&delete(0)).await;
-        shell.send(&ControlToBrain::Quitting).await;
-        drop(shell);
-    };
-    let served = async { tokio::join!(brain.serve(control, data, &mut tap), client).0 };
-    let ended = timeout(PATIENCE, served).await.expect("in time");
-    let Ended::Quit { deadline } = ended else {
-        panic!("expected a quit, got {ended:?}");
-    };
-    brain.quit(deadline).await
+/// Boxed, because the future holds the whole brain.
+fn delete_then_quit(mut brain: Brain) -> std::pin::Pin<Box<impl Future<Output = Quit>>> {
+    Box::pin(async move {
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            shell.scenes().await;
+            shell.send(&delete(0)).await;
+            shell.send(&ControlToBrain::Quitting).await;
+            drop(shell);
+        };
+        let served = async { tokio::join!(brain.serve(control, data, &mut tap), client).0 };
+        let ended = timeout(PATIENCE, served).await.expect("in time");
+        let Ended::Quit { deadline } = ended else {
+            panic!("expected a quit, got {ended:?}");
+        };
+        brain.quit(deadline).await
+    })
 }
 
 /// A brain whose store already holds T, from one finished run.
