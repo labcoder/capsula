@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{ActiveTheme as _, Theme as UiTheme, theme::ThemeMode};
 use gpui_kit::{AppContext as _, Context, IntoElement, Render, Styled as _, Window, canvas};
 use kumochi_protocol::message::MaxFrameRate;
 use kumochi_scene::{
@@ -34,6 +34,7 @@ type PaintUnit = (FrameItem, Arc<[Prim]>);
 
 #[derive(Clone, Copy)]
 enum Mode {
+    Dry,
     Rest,
     Animated,
     Capped,
@@ -63,7 +64,7 @@ fn resting(
     };
     let step = match mode {
         Mode::Capped => crate::presenter::tests::cap_measurements::drawing(0, 40),
-        Mode::Rest | Mode::Animated => {
+        Mode::Dry | Mode::Rest | Mode::Animated => {
             let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
                 panic!("a step record");
             };
@@ -144,6 +145,13 @@ impl Probe {
         if seconds < END {
             on_next_frame(window, cx.weak_entity(), Self::frame);
         } else {
+            println!(
+                "overlay_demand active=false seconds={seconds:.6} unix_ms={}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("wall clock")
+                    .as_millis()
+            );
             self.frames.idle();
             cx.notify();
         }
@@ -198,7 +206,12 @@ impl Render for Probe {
     reason = "one bounded native probe and its content-free samples"
 )]
 fn run(mode: Mode) {
-    let animated = !matches!(mode, Mode::Rest);
+    let animated = matches!(mode, Mode::Animated | Mode::Capped);
+    let lifetime = if matches!(mode, Mode::Dry) {
+        Duration::from_secs(5)
+    } else {
+        LIFETIME
+    };
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
         std::process::exit(124);
@@ -216,6 +229,7 @@ fn run(mode: Mode) {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            UiTheme::change(ThemeMode::Dark, None, cx);
             cx.set_global(crate::Strings::english());
             let display = cx.primary_display().expect("primary display").bounds().size;
             let mut measure = crate::presenter::Measure::new(
@@ -267,6 +281,7 @@ fn run(mode: Mode) {
                     window
                         .update(cx, |_, window, cx| {
                             probe.update(cx, |probe, cx| {
+                                println!("overlay_demand active=true seconds={:.6} unix_ms={}", probe.picture.borrow().epoch.elapsed().as_secs_f32(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("wall clock").as_millis());
                                 probe.frames.want(Instant::now());
                                 on_next_frame(window, cx.weak_entity(), Probe::frame);
                                 cx.notify();
@@ -277,7 +292,7 @@ fn run(mode: Mode) {
                 .detach();
             }
             cx.spawn(async move |cx| {
-                cx.background_executor().timer(LIFETIME).await;
+                cx.background_executor().timer(lifetime).await;
                 cx.update(|cx| cx.quit());
             })
             .detach();
@@ -309,7 +324,8 @@ fn run(mode: Mode) {
     }
     assert_eq!(between(END + 1.0, f32::MAX), 0, "no frames after motion");
     println!(
-        "diagnostic-only animated painter fixture={animated} fixed_seconds=60 max_frame_rate=automatic backdrop=opaque_theme_background; no conductor, activation, StepShown, connection, RSS or presentation claim"
+        "diagnostic-only animated painter fixture={animated} fixed_seconds={} max_frame_rate=automatic backdrop=opaque_dark_theme_background; no conductor, activation, StepShown, connection, RSS or presentation claim",
+        lifetime.as_secs()
     );
 }
 
@@ -366,6 +382,12 @@ fn the_capped_painter_fixture_reuses_the_full_native_preparation_workload() {
             .count(),
         44
     );
+}
+
+#[test]
+#[ignore = "manual input-free five-second native item-painter dry run; numbers do not count"]
+fn smoke_primary_overlay() {
+    run(Mode::Dry);
 }
 
 #[test]

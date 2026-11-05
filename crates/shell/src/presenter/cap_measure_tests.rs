@@ -10,6 +10,15 @@ use kumochi_scene::{
 use super::{LIVE, Shaper, begin, commit, controls, live, only_job, step};
 
 pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
+    let source = format!(
+        r#"{{"step":{{"id":"cap","put":[{}]}}}}"#,
+        drawing_put(iteration, extra_labels).join(",")
+    );
+    assert!(source.len() <= kumochi_scene::limits::MAX_RECORD_BYTES);
+    step(&source)
+}
+
+fn drawing_put(iteration: usize, extra_labels: usize) -> Vec<String> {
     let label = |index| {
         format!(
             "stage {iteration:03} label {index:02} {}",
@@ -45,9 +54,7 @@ pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
     for index in 0..extra_labels {
         put.push(format!(r#"{{"text":{{"id":"text{index}","at":[100,800],"text":"{}","max_width":240,"bold":{}}}}}"#,label(index + 4),index % 2 == 0));
     }
-    let source = format!(r#"{{"step":{{"id":"cap","put":[{}]}}}}"#, put.join(","));
-    assert!(source.len() <= kumochi_scene::limits::MAX_RECORD_BYTES);
-    step(&source)
+    put
 }
 
 struct Timed<M> {
@@ -171,6 +178,165 @@ fn measure_native_full_preparation_at_paint_caps() {
             4 + extra
         );
     }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one legal four-scene eight-window ownership cycle"
+)]
+fn window_residency(measure: &mut dyn TextMeasure) -> usize {
+    use kumochi_protocol::message::SceneId;
+    use kumochi_scene::{SceneView, limits::MAX_RESIDENT_BYTES};
+
+    let (mut presenter, now) = live();
+    let mut running = Vec::new();
+    for offset in 0..4_u64 {
+        let id = SceneId(100 + offset);
+        begin(&mut presenter, id, now);
+        let mut put = if offset == 0 {
+            drawing_put(0, 40)
+        } else {
+            Vec::new()
+        };
+        for index in 0..(375 - put.len()) {
+            put.push(format!(
+                r#"{{"line":{{"id":"line{index}","from":[0,0],"to":[1,1]}}}}"#
+            ));
+        }
+        let initial: Vec<_> = put
+            .chunks(64)
+            .enumerate()
+            .map(|(index, put)| {
+                let encoded = format!(
+                    r#"{{"step":{{"id":"initial{index}","put":[{}]}}}}"#,
+                    put.join(",")
+                );
+                assert!(encoded.len() <= kumochi_scene::limits::MAX_RECORD_BYTES);
+                step(&encoded)
+            })
+            .collect();
+        for index in 0..64 {
+            let source = if let Some(initial) =
+                initial.get(usize::try_from(index).expect("prefix index"))
+            {
+                initial.clone()
+            } else {
+                let target = if offset == 0 { "box0" } else { "line0" };
+                let color = if index % 2 == 0 { "red" } else { "blue" };
+                step(&format!(
+                    r#"{{"step":{{"id":"change{index}","set":[{{"target":"{target}","color":"{color}"}}]}}}}"#
+                ))
+            };
+            running.extend(super::jobs(
+                commit(&mut presenter, id, index, source, now).expect("admit"),
+            ));
+        }
+    }
+    while let Some(job) = running.pop() {
+        let effects = presenter
+            .completed(job.run(measure), now)
+            .expect("prepared");
+        assert!(controls(&effects).is_empty());
+        running.extend(super::jobs(effects));
+    }
+    assert_eq!(
+        (presenter.scenes.len(), presenter.global.usage().objects),
+        (4, 1500)
+    );
+    let work = presenter.paint_work();
+    assert_eq!(
+        (work.dash_pieces, work.fill_vertices, work.outline_points),
+        (512, 512, 512)
+    );
+    for scene in presenter.scenes.values() {
+        assert_eq!((scene.ready.len(), scene.queue.len()), (8, 56));
+    }
+    let mut peak = presenter.residency();
+    let mut previous = [None, None, None, None];
+    for index in 0..64 {
+        for (offset, prior) in previous.iter_mut().enumerate() {
+            let id = SceneId(100 + u64::try_from(offset).expect("four scenes"));
+            let consumed = presenter.consume_ready(id, index, now).expect("ready head");
+            assert_eq!(consumed.step.step().index, index);
+            presenter.frames.borrow_mut().replaced(id);
+            let scene = presenter.scenes.get_mut(&id).expect("scene");
+            scene.view = SceneView::new(&scene.rest, scene.state.view().activated());
+            scene.view_bytes = scene.view.resident_bytes();
+            let (sample, effects) = presenter.sample(0);
+            assert!(sample.visible);
+            assert!(effects.is_empty());
+            peak = peak.max(presenter.residency());
+            drop(prior.replace(consumed.step));
+            running.extend(super::jobs(consumed.effects.expect("current scene")));
+            while let Some(job) = running.pop() {
+                let effects = presenter
+                    .completed(job.run(measure), now)
+                    .expect("successor");
+                assert!(controls(&effects).is_empty());
+                running.extend(super::jobs(effects));
+                peak = peak.max(presenter.residency());
+            }
+            assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
+        }
+    }
+    for scene in presenter.scenes.values() {
+        assert_eq!(scene.state.view().activated(), 64);
+        assert_eq!((scene.ready.len(), scene.queue.len()), (0, 0));
+    }
+    let mut items = 0;
+    assert!(!presenter.frames.borrow().paint(|frame| {
+        items += frame.items().len();
+        Ok::<_, std::fmt::Error>(())
+    }));
+    assert_eq!(items, 1500);
+    drop(previous);
+    assert_eq!(
+        presenter
+            .returned
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    drop(presenter.clear(now).expect("clear"));
+    assert_eq!(presenter.residency(), 0);
+    assert!(peak <= MAX_RESIDENT_BYTES);
+    peak
+}
+
+#[test]
+fn the_paint_cap_window_fixture_fills_eight_ready_slots_and_consumes_every_prefix() {
+    window_residency(&mut Shaper);
+}
+
+#[test]
+#[ignore = "exact isolated quiet-Rez native eight-window charge at paint/object caps, no input"]
+fn measure_native_eight_window_residency_at_paint_caps() {
+    let _timeout = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(180));
+        std::process::exit(124);
+    });
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            let text = std::sync::Arc::clone(cx.text_system());
+            let family = cx.theme().font_family.clone();
+            let worker = cx.background_executor().spawn(async move {
+                window_residency(&mut super::super::Measure::new(text, family))
+            });
+            cx.spawn(async move |cx| {
+                sender.send(worker.await).expect("receiver");
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    let peak = receiver
+        .recv_timeout(Duration::from_secs(150))
+        .expect("native windows");
+    println!(
+        "native_paint_cap_windows scenes=4 objects=1500 dash=512 fill=512 outline=512 labels=44 chars_per_label=400 lifetime_prefixes=256 ready_per_scene=8 consumed=256 peak_charge_bytes={peak} allowance_bytes={}; reserved and sampled frames plus one prior returned owner per scene; not maximal cells/marks/source bytes, production activation, RSS or heap peak",
+        kumochi_scene::limits::MAX_RESIDENT_BYTES
+    );
 }
 
 fn disposal_fixture() -> (super::Presenter, Instant) {
