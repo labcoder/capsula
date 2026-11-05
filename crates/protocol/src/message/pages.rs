@@ -93,6 +93,11 @@ pub enum PageEventKind {
     AssistantText,
     /// A committed drawing step.
     SceneStep,
+    /// An issue draft or outcome, read back by its durable draft id.
+    Issue {
+        /// The durable action to read back.
+        draft: super::DraftId,
+    },
 }
 
 /// An event as the thread panel reads it.
