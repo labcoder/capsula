@@ -198,7 +198,7 @@ sequenceDiagram
   running call's processes end, queued jobs are dropped, and the lock goes only once every job was
   confirmed empty.
 - **The sign-in store** is option a (owner call 1, 2026-11-05), so `SIGN_IN` ships
-  `FileWithDacl`. It's the one exception to keeping secrets only in Credential Manager: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never opens, copies or relays it, and Disconnect removes it (logout, then delete).
+  `FileWithDacl`. It's the one exception to keeping secrets only in Credential Manager: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents. It opens handles only to check the file's metadata and permissions, and to delete it. Disconnect removes it (logout, then delete).
   Connect, Cancel and Disconnect work as "Signing in and out" below describes. `Undecided`, the
   off position, stays for tests: Connect, Cancel and Disconnect do nothing, a signed-out install
   shows `Unsupported(SignInStore)`, and a sign-in found in the owned folder is shown but never
