@@ -14,8 +14,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
-/// shortcut: PR 1 owns the protocol's bound; this local copy goes when it lands.
-pub(crate) const MAX_SAY_BYTES: usize = 1_024;
+pub(crate) use kumochi_protocol::message::MAX_SAY_BYTES;
 const MAX_SAMPLES: usize = 30 * 24_000;
 /// +5.5 dB [S5]; the owner's feel session tunes it.
 const GAIN: f32 = 1.883_649;

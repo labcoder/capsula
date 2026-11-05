@@ -461,7 +461,10 @@ async fn read_pages_and_text(
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. }) => {
+            | DataToShell::Models { .. }
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_)) => {
                 panic!("unexpected {other:?}")
             }
         }
