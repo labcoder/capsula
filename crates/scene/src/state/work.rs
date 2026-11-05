@@ -660,4 +660,10 @@ mod tests {
         assert!((envelope.min[0] - 0.109_216_23).abs() < 1e-6);
         assert_eq!(envelope.max[0].to_bits(), 1.0_f32.to_bits());
     }
+
+    #[test]
+    fn narrowing_a_reach_never_understates_it() {
+        assert_eq!(round_up(f64::from(16_777_216.0_f32) + 1.0), 16_777_218.0);
+        assert_eq!(round_up(1.5), 1.5);
+    }
 }

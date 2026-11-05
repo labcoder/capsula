@@ -148,12 +148,13 @@ A redundant collinear outline vertex is accepted. Profiles and paths need two
 retained points; a lathe needs a retained off-axis point. A tube turn with unit
 tangent dot product strictly below `−1 + REL` is refused. These failures are typed
 `MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
-original typed field and code. `ErrorCode::Degenerate` is appended for the later
-admission boundary, which alone will convert these errors into sanitized paths.
+original typed field and code. Scene admission converts these errors into
+`ErrorCode::Degenerate` at sanitized paths.
 
 ### 3D admission
 
-A `view3d` is a root object and at most one lives in a scene, a pending removal included.
+A `view3d` is a root object and at most one lives in a scene, a pending removal included;
+its `box`, like a 2D box, needs a positive width and height.
 A `solid` names its view with `in`, and `attach` names an earlier solid (lower revision, or
 the same revision and a lower slot) in the same view; attachment counts toward depth 16 and a
 removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
@@ -178,9 +179,10 @@ solid releases its triangles only at retirement and a refusal moves no counter.
 lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its
 `pos3` envelope, both multiplied by the ancestors' composed scale; summing lengths ignores
 cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is refused. The
-`pos3` envelope is the largest key length plus, for `spring`, the overshoot
-`|b − a| × SPRING_OVERSHOOT` per key pair (both directions with `yoyo`), taken over every
-charged version of the solid, so a delayed replacement cannot hide an earlier envelope.
+`pos3` envelope is the largest length of any key and, for `spring`, of each key pair's
+overshoot endpoint `b + (b − a) × SPRING_OVERSHOOT` (and `a + (a − b) × SPRING_OVERSHOOT`
+with `yoyo`), where the first pair starts at rest. It is taken over every charged version of
+the solid, so a replacement cannot hide an earlier envelope before it retires.
 Rotation preserves lengths and adds nothing. Non-finite compositions fail with
 `TransformOverflow`, the bound with `OutOfRange`.
 
