@@ -154,7 +154,7 @@ fn workloads() -> Vec<(&'static str, DataToShell)> {
             "assistant_text",
             DataToShell::AssistantText {
                 run: RunId(1),
-                delta: "delta ".repeat(4),
+                delta: "delta ".repeat(4).into(),
             },
         ),
         ("commit_rect1", commit(tiny)),

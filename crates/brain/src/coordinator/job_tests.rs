@@ -35,7 +35,7 @@ fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec
     core.handle(Input::Turn {
         turn: 1,
         thread,
-        text: "Plan a trip".to_owned(),
+        text: "Plan a trip".into(),
     })
     .expect("a turn is never stale");
     admit(core, run);
@@ -337,7 +337,7 @@ fn a_new_run_cancels_the_job_and_its_late_answers_are_stale() {
         .handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "More".to_owned(),
+            text: "More".into(),
         })
         .expect("a turn is never stale");
     assert_eq!(effects.first(), Some(&Effect::CancelJob(key(2))));
@@ -428,7 +428,7 @@ fn a_done_whose_write_failed_starts_no_job() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "Plan a trip".to_owned(),
+        text: "Plan a trip".into(),
     })
     .expect("a turn is never stale");
     admit(&mut core, R);

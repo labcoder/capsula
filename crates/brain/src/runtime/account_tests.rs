@@ -29,6 +29,7 @@ use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
+use crate::engines::responses::Bearer;
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
@@ -674,7 +675,7 @@ async fn answered(
     })
     .await
     .expect("answered in time");
-    answer.map(|bearer| bearer.expose().to_string())
+    answer.map(|bearer| bearer.token.expose().to_string())
 }
 
 fn failed(key: ErrorKey, action: Action) -> Result<String, Denied> {
@@ -911,6 +912,118 @@ async fn availability_is_the_saved_connection_until_a_sign_out_is_accepted() {
     assert_eq!(
         accounts.availability(),
         Availability::Unavailable(sign_in.expect("valid"))
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// A round's ask gets the bearer only for the ready connection it names, so a round never sends
+/// on an account its run wasn't bound to.
+#[tokio::test]
+async fn a_rounds_ask_gets_the_bearer_only_of_the_connection_it_names() {
+    let scratch = Scratch::new("account-access-for");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    for (wanted, bearer) in [
+        (Some(ConnectionTag(SEEDED + 1)), Err(Denied::Unusable)),
+        (None, Err(Denied::Unusable)),
+        (Some(ConnectionTag(SEEDED)), Ok("access-old".to_owned())),
+    ] {
+        let (answer, wait) = oneshot::channel();
+        accounts.access_for(wanted, answer);
+        assert_eq!(answered(&mut accounts, wait).await, bearer, "{wanted:?}");
+    }
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Answers the model list with a 401 and the refresh-token grant with a rotated set, counting
+/// the grants.
+struct RefusingModels(Arc<AtomicU64>);
+
+impl Http for RefusingModels {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let refused = matches!(request.endpoint, Endpoint::Models(_));
+        if matches!(request.endpoint, Endpoint::Token) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        let rotated = Rotating.execute(request);
+        async move {
+            if !refused {
+                return rotated.await;
+            }
+            Ok(Response {
+                status: 401,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(Vec::new())),
+            })
+        }
+    }
+}
+
+/// Runs the account system until `wait` is answered with a bearer.
+async fn granted(accounts: &mut Accounts, mut wait: oneshot::Receiver<Access>) -> Bearer {
+    timeout(PATIENCE, async {
+        loop {
+            if let Ok(answer) = wait.try_recv() {
+                return answer.expect("a bearer");
+            }
+            let input = accounts.next().await;
+            accounts.handle(input);
+        }
+    })
+    .await
+    .expect("answered in time")
+}
+
+/// OSC-223: a bearer the provider refused marks its set as due, so the next access refreshes it
+/// once, though it isn't near its expiry. A late refusal of the set it replaced, or one naming
+/// a generation that never was, marks nothing.
+#[tokio::test]
+async fn a_refused_bearer_is_refreshed_on_the_next_access() {
+    let scratch = Scratch::new("account-refused");
+    let store = FakeStore::default();
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let http = SharedHttp::new(RefusingModels(Arc::clone(&refreshes)));
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]);
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline.expect("valid"))],
+        "the catalog's 401"
+    );
+    let (wait, _) = accounts.access();
+    let rotated = granted(&mut accounts, wait).await;
+    assert_eq!(rotated.token.expose().as_str(), "access-new");
+    accounts.handle(Input::Refused {
+        generation: rotated
+            .generation
+            .checked_sub(1)
+            .expect("a rotation moved it"),
+    });
+    let (wait, _) = accounts.access();
+    assert_eq!(
+        answered(&mut accounts, wait).await,
+        Ok("access-new".to_owned())
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "one refresh in all");
+    accounts.close(Instant::now(), Instant::now()).await;
+
+    let scratch = Scratch::new("account-refused-stale");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    let (wait, _) = accounts.access();
+    let generation = granted(&mut accounts, wait).await.generation;
+    accounts.handle(Input::Refused {
+        generation: generation + 1,
+    });
+    let (wait, _) = accounts.access();
+    assert_eq!(
+        answered(&mut accounts, wait).await,
+        Ok("access-old".to_owned())
     );
     accounts.close(Instant::now(), Instant::now()).await;
 }

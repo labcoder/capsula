@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
+    Content, ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
 
 use super::{Coordinator, Effect, Input, Notify, Stale, StoreOp};
@@ -91,7 +91,7 @@ impl Coordinator {
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
-        text: String,
+        text: Content,
         effects: &mut Vec<Effect>,
     ) {
         let Some(read) = self.turns_read.checked_add(1) else {

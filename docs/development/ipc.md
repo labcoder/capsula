@@ -147,6 +147,9 @@ flowchart LR
   task's title if it alone overflows the frame. A search ranks the main thread like any other.
 - `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
   Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
+- Typed text and the assistant's answer travel as `Content`, a plain string on the wire whose
+  `Debug` prints only its length, so `TextSubmit`, `AssistantText` and the brain's inputs, effects
+  and store writes that carry them never print it.
 
 ## Account
 

@@ -1,5 +1,6 @@
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step, ThreadId,
+    Content, ControlToShell, DataToShell, MAX_STEP_LABEL, MAX_STEPS, Phase, RunId, SceneId, Step,
+    ThreadId,
 };
 
 use super::{
@@ -186,7 +187,7 @@ fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
     Effect::Store(StoreOp::CommitStep {
         thread: T,
         run: R,
-        text: text.map(str::to_owned),
+        text: text.map(Content::from),
         scene: SceneTarget::Existing(S),
         index,
         step: step(label),
@@ -205,7 +206,7 @@ fn run_end(run: RunId) -> Effect {
 fn text(delta: &str) -> Effect {
     Effect::Data(DataToShell::AssistantText {
         run: R,
-        delta: delta.to_owned(),
+        delta: delta.into(),
     })
 }
 
@@ -214,7 +215,7 @@ fn end_run(text: Option<&str>, revealed: Option<Vec<u32>>, end: RunEnd) -> Effec
     Effect::Store(StoreOp::EndRun {
         thread: T,
         run: R,
-        text: text.map(str::to_owned),
+        text: text.map(Content::from),
         revealed,
         clear: None,
         end,
@@ -245,7 +246,7 @@ fn started() -> Coordinator {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     admit(&mut core, R);
@@ -259,7 +260,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
         .handle(Input::Turn {
             turn: 1,
             thread: None,
-            text: "  \n  Draw a cat\nplease".to_owned(),
+            text: "  \n  Draw a cat\nplease".into(),
         })
         .expect("turn");
     assert_eq!(
@@ -267,9 +268,9 @@ fn a_turn_is_stored_before_the_engine_starts() {
         vec![
             Effect::Store(StoreOp::BeginTurn {
                 thread: T,
-                title: Some("Draw a cat".to_owned()),
+                title: Some("Draw a cat".into()),
                 run: R,
-                text: "  \n  Draw a cat\nplease".to_owned(),
+                text: "  \n  Draw a cat\nplease".into(),
             }),
             state(R, T, Phase::Thinking),
             Effect::ArmDeadline {
@@ -301,7 +302,7 @@ fn a_step_is_sent_only_once_it_is_committed() {
         vec![Effect::Store(StoreOp::CommitStep {
             thread: T,
             run: R,
-            text: Some("a cat".to_owned()),
+            text: Some("a cat".into()),
             scene: SceneTarget::New { evict: None },
             index: 0,
             step: step("head"),
@@ -324,7 +325,7 @@ fn text_waits_behind_a_pending_step() {
         vec![Effect::Store(StoreOp::CommitStep {
             thread: T,
             run: R,
-            text: Some("before".to_owned()),
+            text: Some("before".into()),
             scene: SceneTarget::New { evict: None },
             index: 0,
             step: step("a"),
@@ -441,7 +442,7 @@ fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(ThreadId(2)),
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("turn");
     assert_eq!(
@@ -477,7 +478,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         .handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "again".to_owned(),
+            text: "again".into(),
         })
         .expect("turn");
     assert_eq!(
@@ -492,7 +493,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
                 thread: T,
                 title: None,
                 run: RunId(11),
-                text: "again".to_owned(),
+                text: "again".into(),
             }),
         ]
     );
@@ -592,7 +593,7 @@ fn a_repeated_step_ack_changes_nothing() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("turn");
     assert_eq!(
@@ -660,7 +661,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(T),
-        text: "again".to_owned(),
+        text: "again".into(),
     })
     .expect("turn");
     assert_eq!(
@@ -672,7 +673,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
                 thread: T,
                 title: None,
                 run: RunId(11),
-                text: "again".to_owned(),
+                text: "again".into(),
             }),
         ],
         "the old run's step failed while its replacement waits"
@@ -779,7 +780,7 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(ThreadId(99)),
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("turn");
     assert_eq!(
@@ -888,7 +889,7 @@ fn the_engine_is_heard_only_once_its_turn_is_stored() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("turn");
     assert_eq!(
@@ -932,7 +933,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
             thread: T,
             title: None,
             run,
-            text: text.to_owned(),
+            text: text.into(),
         })
     };
     let mut core = started();
@@ -943,7 +944,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         core.handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "b".to_owned(),
+            text: "b".into(),
         })
         .expect("turn"),
         vec![
@@ -976,7 +977,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         core.handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "c".to_owned(),
+            text: "c".into(),
         })
         .expect("turn"),
         vec![
@@ -1016,4 +1017,45 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         core.handle(Input::TurnStored { run: c }).expect("current"),
         vec![build_context(c, T, 2)]
     );
+}
+
+/// H159-1: neither the typed prompt nor the answer's text prints through the input or the
+/// outermost effects that carry them: the turn's write, the answer's frames and its last write.
+#[test]
+fn formatting_a_runs_carriers_shows_lengths_never_text() {
+    const SENTINEL: &str = "zqxprivateanswer";
+    let mut core = fresh();
+    let turn = Input::Turn {
+        turn: 1,
+        thread: None,
+        text: SENTINEL.into(),
+    };
+    let mut effects = core.handle(turn.clone()).expect("a turn is never stale");
+    effects.extend(admit(&mut core, R));
+    effects.extend(
+        core.handle(engine(R, TurnEvent::TextDelta(SENTINEL.to_owned())))
+            .expect("current"),
+    );
+    effects.extend(
+        core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+            .expect("current"),
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Store(StoreOp::BeginTurn { title: Some(_), .. })
+    )));
+    assert!(effects.contains(&text(SENTINEL)));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { text: Some(_), .. })))
+    );
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    let byte_list = byte_list.trim_matches(['[', ']']);
+    let length = format!("Content(len={})", SENTINEL.len());
+    for shown in [format!("{turn:?}"), format!("{effects:?}")] {
+        assert!(!shown.contains(SENTINEL), "the text leaked: {shown}");
+        assert!(!shown.contains(byte_list), "the bytes leaked");
+        assert!(shown.contains(&length), "the length is missing");
+    }
 }

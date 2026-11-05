@@ -49,7 +49,7 @@ impl Presence {
                     thread,
                     phase,
                     error,
-                } => self.run_state(run, thread, phase, error.as_ref(), cx),
+                } => self.run_state(run, thread, phase, error, cx),
                 LinkEvent::Data {
                     generation,
                     message,
@@ -117,15 +117,13 @@ impl Presence {
         run: RunId,
         thread: ThreadId,
         phase: Phase,
-        error: Option<&UserError>,
+        error: Option<UserError>,
         cx: &mut Context<'_, Self>,
     ) {
-        let applied = self.runs.apply_state(run, thread, phase);
+        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
-        if applied.visible
-            && let Some(error) = error
-        {
-            self.show_error(error, cx);
+        if let Some(error) = notice {
+            self.show_error(&error, cx);
         }
         if let Some(stop) = applied.stop {
             self.stop_run(stop, cx);

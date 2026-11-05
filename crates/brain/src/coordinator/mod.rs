@@ -27,8 +27,8 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
-    UserError,
+    Content, ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId,
+    ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -95,7 +95,7 @@ pub enum Input {
         /// The thread to continue, or `None` for a new one.
         thread: Option<ThreadId>,
         /// What the user typed.
-        text: String,
+        text: Content,
     },
     /// The shell stopped `run` locally; `revealed` are the steps that stayed on screen.
     Stop {
@@ -350,7 +350,7 @@ struct Run {
     /// The scene the first step's write evicts, until it's acknowledged.
     evict: Option<SceneId>,
     /// Steps after the first, with the text streamed before each, until the scene has its id.
-    waiting: VecDeque<(Option<String>, u32, Step)>,
+    waiting: VecDeque<(Option<Content>, u32, Step)>,
     /// One entry per pending step: the frames the engine produced after it, sent once it's
     /// acknowledged, so the shell sees the engine's order.
     held: VecDeque<Vec<DataToShell>>,
@@ -744,7 +744,7 @@ impl Coordinator {
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
-        text: String,
+        text: Content,
         effects: &mut Vec<Effect>,
     ) {
         self.cancel_job(effects);
@@ -758,7 +758,7 @@ impl Coordinator {
             (thread, None)
         } else {
             self.last_thread = ThreadId(self.last_thread.0 + 1);
-            (self.last_thread, Some(title(&text)))
+            (self.last_thread, Some(title(&text).into()))
         };
         let begin = StoreOp::BeginTurn {
             thread,
@@ -1039,8 +1039,8 @@ fn told(run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
 }
 
 /// The text streamed since the last write, taken for the next one.
-fn unstored(run: &mut Run) -> Option<String> {
-    (!run.unstored.is_empty()).then(|| std::mem::take(&mut run.unstored))
+fn unstored(run: &mut Run) -> Option<Content> {
+    (!run.unstored.is_empty()).then(|| std::mem::take(&mut run.unstored).into())
 }
 
 /// A new thread's title: the first line of its first turn, cut to [`TITLE_CHARS`].

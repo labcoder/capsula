@@ -461,7 +461,7 @@ fn turn_in(thread: ThreadId) -> Vec<u8> {
         turn: 1,
         screen: kumochi_protocol::message::ScreenChoice::None,
         thread: Some(thread),
-        text: "more".to_owned(),
+        text: "more".into(),
     };
     frame::encode(&turn, Pipe::Data).expect("encodes")
 }

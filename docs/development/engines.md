@@ -2,8 +2,9 @@
 
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
-Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Until 13b-1b,
-every run is answered by a script that sends nothing (runs.md, "The fixture engine").
+Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it on the
+signed-in account ("The Responses engine"). A dev build can play a script instead, which sends
+nothing (runs.md, "The fixture engine").
 
 ```mermaid
 flowchart LR
@@ -259,8 +260,8 @@ No error and no `Debug` output carries message text or names.
 
 ## The Responses engine
 
-`engines/responses.rs` holds the two halves that need no network. PR 11b's transport sends the
-body and feeds the stream, and engine selection arrives with it.
+`engines/responses.rs` builds the body and maps the stream; `engines/responses/engine.rs` runs a
+round on the account.
 
 **The body** is `ModelRequest` as JSON: `model`, `instructions`, `input`, `tools` (each a
 `function`), `reasoning.effort`, `include: ["reasoning.encrypted_content"]`, `store: false` and
@@ -292,6 +293,32 @@ its call ready.
 A round keeps at most 64 calls and items and 1 MiB of ids, arguments and items [guesses], charged
 before each is kept. A stream whose bytes run out has no ending of its own, so the round's pump
 reports it as `Truncated`.
+
+**A round** (`Responses`, one per `StartEngine`) goes in this order, so nothing is asked for that
+isn't needed:
+
+1. **The body** is built and checked. A refused body fails the round as `Stream(Request)` and asks
+   for no bearer.
+2. **The bearer.** The round asks the brain over the `AccessHandle` with its `SendKey`. The
+   coordinator names the connection the send may use (`Coordinator::sending`): a round's run's
+   own, only while that run is current, and the ready one for a job. The account answers only
+   when that connection is the ready one, refreshing first when it's due. Any other answer, or a
+   brain that's gone, fails the round as `Failed(Access)` with nothing sent. The shell hears the
+   account's own reason when it gave one (a refresh that couldn't connect keeps `AccountOffline`
+   with Retry), else why the run's connection can't send, else `SignInNeeded`. The bearer stays a
+   `Secret` and is dropped when the stream ends. A stream that ends in `AccountRefused` tells
+   the account which generation was refused, so the next access renews it (accounts.md).
+3. **The ask.** The transport asks the `SendGate` right before the body goes out (see
+   [The send lease](#the-send-lease)), which checks the round's build key and its sources. A
+   `Rebuild` drops the round with nothing more said, since the coordinator already dropped it.
+4. **The stream.** Each read's events go to the pump before the next read, through the bounded
+   events channel, so a slow coordinator slows the read and nothing queues without bound. A gone
+   pump, or a round its rules broke, stops the stream and closes its connection. The round's
+   end follows its last events.
+
+A dev build caps its requests with `KUMOCHI_LIVE_BUDGET` (`Budget::from_env`); a release build
+has no cap. One round per run: the tool loop that starts the next round, the store's round kinds
+and replay are 13b-2's.
 
 ## The Claude Code stream
 
