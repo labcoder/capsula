@@ -429,6 +429,7 @@ impl Threads {
                 self.failed = false;
             }
             DataToShell::PageFailed { request } => self.read_failed(request),
+            DataToShell::IssueCard(_) => {}
             DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. }

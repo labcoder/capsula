@@ -769,6 +769,9 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ThreadsChanged
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
+            | ControlToShell::GitHub(_)
+            | ControlToShell::ActionState { .. }
+            | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -921,6 +924,11 @@ fn watch(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
                 | ControlToShell::Connections(_),
+            )) => {}
+            Ok(Some(
+                ControlToShell::GitHub(_)
+                | ControlToShell::ActionState { .. }
+                | ControlToShell::IssueRefused { .. },
             )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {

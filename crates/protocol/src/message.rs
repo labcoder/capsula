@@ -13,6 +13,9 @@ mod account;
 mod connections;
 mod content;
 mod error;
+#[macro_use]
+mod github;
+mod issues;
 mod pages;
 mod scenes;
 #[macro_use]
@@ -29,6 +32,14 @@ pub use connections::{
 pub use content::Content;
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
+};
+pub use github::{
+    GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+};
+pub use issues::{
+    ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
+    IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult, MAX_ISSUE_BODY_BYTES,
+    MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -329,6 +340,10 @@ pub enum ControlToBrain {
         /// The thread.
         thread: ThreadId,
     },
+    /// The user's operation on Kumochi's GitHub connection.
+    GitHub(GitHubOp),
+    /// Consent or another explicit issue-card action.
+    Issue(IssueOp),
 }
 
 /// What a thread's delete came to.
@@ -444,6 +459,26 @@ pub enum ControlToShell {
     /// Both Claude connections: once per connection after `Settings` and `Account` and before
     /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
     Connections(ConnectionsView),
+    /// GitHub connection presentation, never credentials.
+    GitHub(GitHubView),
+    /// A versioned action transition, independent of data-pipe delivery.
+    ActionState {
+        /// The action.
+        draft: DraftId,
+        /// Its monotonic presentation version.
+        version: StateVersion,
+        /// The authoritative state.
+        state: ActionState,
+        /// The current approval, when offered.
+        approval: Option<ApprovalRev>,
+    },
+    /// A refused operation; it never changes the card's state.
+    IssueRefused {
+        /// The action whose operation was refused.
+        draft: DraftId,
+        /// A content-free refusal.
+        reason: IssueRefused,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -474,6 +509,22 @@ pub enum DataToBrain {
         request: u32,
         /// The list and its continuation.
         page: PageOf,
+    },
+    /// A pending edit, answered later by an authoritative card.
+    IssueEdit {
+        /// The action to edit.
+        draft: DraftId,
+        /// The proposed title.
+        title: IssueTitle,
+        /// The proposed canonical body.
+        body: IssueBody,
+        /// The selected repository, if any.
+        repo: Option<RepoName>,
+    },
+    /// Read back at most sixteen authoritative cards.
+    IssueCards {
+        /// The action ids to read.
+        drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
     },
 }
 
@@ -595,6 +646,8 @@ pub enum DataToShell {
         /// At most [`MAX_MODELS`], in the catalog's order.
         models: Vec<ModelInfo>,
     },
+    /// An authoritative card; its body belongs on the data pipe.
+    IssueCard(IssueCard),
 }
 
 #[cfg(test)]
@@ -608,6 +661,10 @@ mod hold_frame_tests;
 #[cfg(test)]
 #[path = "message/content_tests.rs"]
 mod content_tests;
+
+#[cfg(test)]
+#[path = "message/issue_tests.rs"]
+mod issue_tests;
 
 #[cfg(test)]
 mod tests {

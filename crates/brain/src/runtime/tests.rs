@@ -73,6 +73,18 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
 }
 
 #[test]
+fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
+    use kumochi_protocol::message::{DraftId, GitHubOp, IssueOp};
+
+    for message in [
+        ControlToBrain::GitHub(GitHubOp::Connect),
+        ControlToBrain::Issue(IssueOp::Discard { draft: DraftId(9) }),
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
 fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
     use kumochi_protocol::message::{SceneCuts, SceneFailure};
     let cut = kumochi_protocol::message::SceneCut {

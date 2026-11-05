@@ -24,7 +24,7 @@ use kumochi_protocol::message::{
     Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
 };
-use kumochi_protocol::tap::Direction;
+use kumochi_protocol::tap::{Direction, Tapped as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
@@ -1056,6 +1056,11 @@ async fn read_data(
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some(
+                message @ (DataToBrain::IssueEdit { .. } | DataToBrain::IssueCards { .. }),
+            )) => {
+                tracing::debug!(op = message.op(), "issue data ignored");
+            }
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
@@ -1185,7 +1190,9 @@ impl<'a, 't> Link<'a, 't> {
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::ScenesRemoved { .. } | DataToShell::Models { .. } => Owner::Marker,
+            DataToShell::ScenesRemoved { .. }
+            | DataToShell::Models { .. }
+            | DataToShell::IssueCard(_) => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }

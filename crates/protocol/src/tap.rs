@@ -61,6 +61,8 @@ impl Tapped for ControlToBrain {
             Self::ExclusionLapsed { .. } => "ExclusionLapsed",
             Self::Connection(_) => "Connection",
             Self::Warm { .. } => "Warm",
+            Self::GitHub(_) => "GitHub",
+            Self::Issue(_) => "Issue",
         }
     }
 
@@ -121,6 +123,9 @@ impl Tapped for ControlToShell {
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
+            Self::GitHub(_) => "GitHub",
+            Self::ActionState { .. } => "ActionState",
+            Self::IssueRefused { .. } => "IssueRefused",
         }
     }
 
@@ -163,6 +168,8 @@ impl Tapped for DataToBrain {
             Self::TextSubmit { .. } => "TextSubmit",
             Self::Credit { .. } => "Credit",
             Self::PageRequest { .. } => "PageRequest",
+            Self::IssueEdit { .. } => "IssueEdit",
+            Self::IssueCards { .. } => "IssueCards",
         }
     }
 
@@ -189,6 +196,7 @@ impl Tapped for DataToShell {
             Self::SceneCutApplied { .. } => "SceneCutApplied",
             Self::SceneEnd { .. } => "SceneEnd",
             Self::Models { .. } => "Models",
+            Self::IssueCard(_) => "IssueCard",
         }
     }
 
