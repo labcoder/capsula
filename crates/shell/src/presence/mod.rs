@@ -22,6 +22,7 @@ pub(crate) mod observer;
 mod overlay_input;
 mod paint;
 mod panels;
+mod perch;
 mod pulling;
 mod settings;
 mod settings_view;

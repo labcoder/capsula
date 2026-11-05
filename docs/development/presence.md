@@ -293,3 +293,24 @@ it the steps it lets through.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
+
+## Perch hosts
+
+The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the data and the geometry,
+and nothing calls them yet.
+
+- `platform::host` holds the plain data: `PhysicalRect`, `HostId`, `WatchGen`, `HostChange`,
+  the raw caption `Facts` and `Label`. A `Label` is another app's window title, so it's screen
+  text. It sits in an inline buffer of 64 UTF-16 units, cut at a unit boundary without half of a
+  surrogate pair, and its `Debug` prints only its length. Nothing logs it or sends it to the brain.
+- `presence::perch::caption` applies §10.4's caption rules. When the reported title bar and
+  buttons agree, the caption is the bar left of the leftmost exclusion. Otherwise it's the
+  standard band, scaled from host units by `monitor_dpi / layout_dpi` and rounded up, cut to the
+  frame and the work area. For a host without a caption, the band runs from the frame's top
+  (revision 12's guess). A usable reported button always stays an exclusion, and while the two
+  DPIs differ it's read both as physical pixels and as host units.
+- `presence::perch::place` sits the body above the title bar if the work area has room, and
+  otherwise just below the caption inside the frame, with the card beside the body. Sizes
+  convert at the host monitor's scale. A placement counts only if the body and the card stay
+  in the work area and 4 px clear of every exclusion along the whole straight settle from the
+  drop point.
