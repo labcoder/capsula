@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 unic-langid = "0.9"
+zeroize = "1"
 
 # Lints start from BeautifulRust's lints/lints.toml (MIT, github.com/morganlinton/BeautifulRust
 # at a9cdcfa94d13), then add Kumochi's rules: unwrap denied, unsafe only in platform modules.

@@ -35,8 +35,18 @@ use crate::coordinator::{Availability, Ready};
 use crate::engines::responses::{AccessAsk, Bearer};
 use crate::platform::credential::CredentialStore;
 
+use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
 use crate::coordinator::Input as CoreInput;
+
+#[derive(Debug)]
+pub(super) enum Work {
+    Account(Job),
+    Key {
+        generation: u64,
+        op: crate::connections::anthropic::KeyOp,
+    },
+}
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
 pub(crate) use crate::engines::responses::Access;
@@ -62,6 +72,7 @@ impl std::fmt::Debug for Net {
 /// What the account system hears: its machine's input, or the end of a catalog read.
 #[derive(Debug)]
 pub(crate) enum Event {
+    Connection(ConnectionEvent),
     Machine(Input),
     /// The read started under `epoch` ended: the models, or what to tell the user, if anything.
     Read {
@@ -122,22 +133,23 @@ impl Catalog {
 #[derive(Debug)]
 pub(crate) struct Accounts {
     state: AccountState,
-    jobs: Option<std_mpsc::Sender<Job>>,
+    pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
     released: Option<oneshot::Receiver<()>>,
     events_tx: mpsc::UnboundedSender<Input>,
     events: mpsc::UnboundedReceiver<Input>,
     /// The live attempt's listener; aborting it closes the loopback.
     listener: Option<JoinHandle<()>>,
-    net: Net,
+    pub(super) net: Net,
     /// Callers waiting for the bearer, by ticket.
     tickets: HashMap<u64, oneshot::Sender<Access>>,
     next_ticket: u64,
     catalog: Catalog,
-    reads_tx: mpsc::UnboundedSender<Event>,
+    pub(super) reads_tx: mpsc::UnboundedSender<Event>,
     reads: mpsc::UnboundedReceiver<Event>,
     /// Random per process, so each sign-in's connection is one no earlier sign-in used.
     salt: u64,
+    pub(super) connections: Connections,
 }
 
 impl Accounts {
@@ -154,8 +166,8 @@ impl Accounts {
         let (state, started) = AccountState::start();
         let (events_tx, events) = mpsc::unbounded_channel();
         let (loaded_tx, loaded) = std_mpsc::channel();
-        let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone())?;
         let (reads_tx, reads) = mpsc::unbounded_channel();
+        let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone(), reads_tx.clone())?;
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
             state,
@@ -171,13 +183,15 @@ impl Accounts {
             reads_tx,
             reads,
             salt,
+            connections: Connections::default(),
         };
         accounts.apply(started);
-        let done = loaded
+        let (done, key) = loaded
             .recv()
             .map_err(|_| std::io::Error::other("the credential thread stopped"))?;
         // No shell is connected yet: only the work it starts matters, not what it would say.
         accounts.handle(done);
+        accounts.start_key(key);
         Ok(accounts)
     }
 
@@ -228,6 +242,7 @@ impl Accounts {
     /// account becomes usable, and again on Retry or a connection while no read succeeded.
     pub(crate) fn handle(&mut self, event: impl Into<Event>) -> Vec<ControlToShell> {
         let input = match event.into() {
+            Event::Connection(event) => return self.connection_event(event),
             Event::Machine(input) => input,
             Event::Read { epoch, result } => return self.read_ended(epoch, result),
         };
@@ -301,7 +316,7 @@ impl Accounts {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.catalog.models.clone().unwrap_or_default(),
-                        #[cfg(debug_assertions)]
+                        #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
                     });
                 }
@@ -359,7 +374,7 @@ impl Accounts {
                     let sent = self
                         .jobs
                         .as_ref()
-                        .is_some_and(|jobs| jobs.send(job).is_ok());
+                        .is_some_and(|jobs| jobs.send(Work::Account(job)).is_ok());
                     if !sent {
                         tracing::error!("the credential thread has stopped");
                     }
@@ -456,6 +471,7 @@ impl Accounts {
             listener.abort();
         }
         self.catalog.cancel();
+        self.connections.cancel();
         let settled = tokio::time::timeout_at(refresh_by, async {
             while self.state.refresh_out() {
                 let input = self.next().await;
@@ -546,6 +562,9 @@ impl Brain {
             return Ok(());
         };
         frames.iter().try_for_each(|frame| link.control(frame))?;
+        if let Some(models) = self.account.connections.models_unsent() {
+            link.data(&models)?;
+        }
         match self.account.models_unsent() {
             Some(models) => link.data(&DataToShell::Models {
                 connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
@@ -560,19 +579,40 @@ impl Brain {
 /// load, to `loaded`.
 fn spawn<S: CredentialStore + 'static>(
     mut worker: Worker<S>,
-    loaded: std_mpsc::Sender<Input>,
+    loaded: std_mpsc::Sender<(Input, super::connections::KeyResult)>,
     events: mpsc::UnboundedSender<Input>,
-) -> std::io::Result<(std_mpsc::Sender<Job>, oneshot::Receiver<()>)> {
-    let (jobs, queued) = std_mpsc::channel::<Job>();
+    reads: mpsc::UnboundedSender<Event>,
+) -> std::io::Result<(std_mpsc::Sender<Work>, oneshot::Receiver<()>)> {
+    let (jobs, queued) = std_mpsc::channel::<Work>();
     let (released_tx, released) = oneshot::channel();
     thread::Builder::new()
         .name("credentials".to_owned())
         .spawn(move || {
             let mut loaded = Some(loaded);
             for job in queued {
+                let job = match job {
+                    Work::Account(job) => job,
+                    Work::Key { generation, op } => {
+                        if reads
+                            .send(Event::Connection(ConnectionEvent::Loaded {
+                                generation,
+                                result: worker.anthropic(op),
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
                 let done = Input::Vault(worker.run(job));
                 let sent = match loaded.take() {
-                    Some(loaded) => loaded.send(done).is_ok(),
+                    Some(loaded) => loaded
+                        .send((
+                            done,
+                            worker.anthropic(crate::connections::anthropic::KeyOp::Load),
+                        ))
+                        .is_ok(),
                     None => events.send(done).is_ok(),
                 };
                 if !sent {

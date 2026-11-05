@@ -770,6 +770,9 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::ThreadModelSet { .. }
+            | ControlToShell::GitHub(_)
+            | ControlToShell::ActionState { .. }
+            | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
             | ControlToShell::SpeechRevoked { .. },
         ) => Err(LinkError::Rejected),
@@ -924,6 +927,9 @@ fn watch(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
                 | ControlToShell::Connections(_)
+                | ControlToShell::GitHub(_)
+                | ControlToShell::ActionState { .. }
+                | ControlToShell::IssueRefused { .. }
                 | ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. },
             )) => {}

@@ -2,7 +2,8 @@
 //! runs under an exact bound, and nothing raw in `Debug`.
 
 use kumochi_protocol::message::{
-    AssistantName, Effort, EventId, ModelChoice, ModelSlug, RunId, ThreadId, UserName,
+    AssistantName, Effort, EventId, ModelChoice, ModelSlug, PageEventKind, RunId, ThreadId,
+    UserName,
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use super::compact::{self, Compaction, compaction};
 use super::*;
 use crate::engines::{CallId, Opaque};
 use crate::store::context::Snapshot;
-use crate::store::{EventKind, NewEvent, RunEnd, Store};
+use crate::store::{EventKind, NewEvent, RunEnd, Store, StoreError};
 use crate::test_support::Scratch;
 
 const TIME: &str = "Tuesday 4 November 2026, 09:30";
@@ -553,7 +554,7 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
     let item = |id: u64, tag: u64, byte: u8| Item {
         id: EventId(last.0 + id),
         run: current,
-        body: Body::Reasoning {
+        body: Body::Native {
             connection: ConnectionTag(tag),
             item: Opaque::new(vec![byte]).expect("small"),
         },
@@ -572,7 +573,7 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
         .expect("built");
     assert_eq!(
         built.request.input[1..],
-        [InputItem::Reasoning(Opaque::new(vec![1]).expect("small"))]
+        [InputItem::Native(Opaque::new(vec![1]).expect("small"))]
     );
 }
 
@@ -1221,4 +1222,249 @@ fn an_escaped_inline_rewrite_is_stored_and_the_next_build_fits() {
         .build(&run, (task, current), stored(&world), bound)
         .expect("the rewritten summary fits");
     assert!(request_bytes(&rebuilt.request) <= bound);
+}
+
+/// Run `at`'s round as the store thread writes it, on connection 7.
+fn round(world: &mut World, at: (ThreadId, RunId), text: &str, items: &[Value], calls: &[&str]) {
+    let items: Vec<Opaque> = items
+        .iter()
+        .map(|item| Opaque::new(serde_json::to_vec(item).expect("json")).expect("small"))
+        .collect();
+    let calls: Vec<CallId> = calls
+        .iter()
+        .map(|call| CallId::new(call).expect("short"))
+        .collect();
+    let results: Vec<_> = calls
+        .iter()
+        .map(|call| (call, crate::coordinator::UNKNOWN_TOOL))
+        .collect();
+    world
+        .store
+        .append_round(at, ConnectionTag(7), Some(text), &items, &results)
+        .expect("round");
+}
+
+fn said(role: &str, text: &str) -> Value {
+    json!({ "type": "message", "role": role, "content": text })
+}
+
+fn call_item(call: &str) -> Value {
+    json!({ "type": "function_call", "id": format!("fc_{call}"), "call_id": call, "name": "lookup", "arguments": "{}" })
+}
+
+fn result_item(call: &str) -> Value {
+    json!({ "type": "function_call_output", "call_id": call, "output": "{\"error\":\"unknown tool\"}" })
+}
+
+/// The main thread's run "ask": a first round that said "Looking." and made two calls, its
+/// stored native items and results, and the run left active.
+fn first_round(world: &mut World) -> (ThreadId, RunId) {
+    let main = world.main;
+    let (_, high) = world.store.high_water().expect("ids");
+    let at = (main, RunId(high.0 + 1));
+    world
+        .store
+        .begin_turn(main, None, at.1, "ask")
+        .expect("turn");
+    let reasoning = json!({ "type": "reasoning", "encrypted_content": "sealed" });
+    round(
+        world,
+        at,
+        "Looking.",
+        &[
+            reasoning,
+            said("assistant", "Looking."),
+            call_item("c1"),
+            call_item("c2"),
+        ],
+        &["c1", "c2"],
+    );
+    at
+}
+
+/// Round 1's native input, as the first run's replay sends it.
+fn first_round_input() -> Vec<Value> {
+    vec![
+        said("user", "ask"),
+        json!({ "type": "reasoning", "encrypted_content": "sealed" }),
+        said("assistant", "Looking."),
+        call_item("c1"),
+        call_item("c2"),
+        result_item("c1"),
+        result_item("c2"),
+    ]
+}
+
+/// The next run's whole request input on `connection`, as the Responses body sends it.
+fn next_input(world: &World, run: RunId, connection: u64) -> Vec<Value> {
+    let mut snapshot = snapshot(Origin::Kumo, None);
+    snapshot.connection = ConnectionTag(connection);
+    let built = world
+        .build(&snapshot, (world.main, run), Supplied::default(), BOUND)
+        .expect("built");
+    let body = crate::engines::responses::body(&built.request).expect("body");
+    body["input"].as_array().expect("a list").clone()
+}
+
+fn next_ask() -> Value {
+    said("user", &format!("next\n\nLocal time: {TIME}"))
+}
+
+fn partial() -> [NewEvent<'static>; 1] {
+    [NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some("Partial"),
+        body: None,
+    }]
+}
+
+#[test]
+fn a_two_round_run_replays_natively_through_its_final_message() {
+    let mut world = world("ctx-rounds-done");
+    let at = first_round(&mut world);
+    round(
+        &mut world,
+        at,
+        "Found it.",
+        &[said("assistant", "Found it.")],
+        &[],
+    );
+    world
+        .store
+        .end_run(at.0, at.1, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let mut expected = first_round_input();
+    expected.extend([said("assistant", "Found it."), next_ask()]);
+    assert_eq!(next_input(&world, next, 7), expected);
+
+    world.store = Store::open(&world.scratch.db()).expect("reopened");
+    assert_eq!(next_input(&world, next, 7), expected, "after a restart");
+    let (page, _) = world
+        .store
+        .pages()
+        .events_page(world.main, None, 50)
+        .expect("page");
+    assert_eq!(
+        page.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        [
+            PageEventKind::User,
+            PageEventKind::AssistantText,
+            PageEventKind::AssistantText,
+            PageEventKind::User
+        ],
+        "the panel never sees round items"
+    );
+}
+
+#[test]
+fn a_run_stopped_in_its_second_round_replays_round_one_then_the_text_after_it() {
+    let mut world = world("ctx-rounds-stop");
+    let at = first_round(&mut world);
+    let stopped = RunEnd::Interrupted(crate::store::Interruption::Stop);
+    world
+        .store
+        .end_run(at.0, at.1, &partial(), stopped)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let mut expected = first_round_input();
+    expected.extend([said("assistant", "Partial"), next_ask()]);
+    assert_eq!(next_input(&world, next, 7), expected);
+    assert_eq!(
+        next_input(&world, next, 8),
+        [
+            said("user", "ask"),
+            said("assistant", "Looking.Partial"),
+            next_ask()
+        ],
+        "another connection replays the run as its text only"
+    );
+}
+
+#[test]
+fn a_run_cut_by_a_crash_after_its_round_replays_what_was_stored() {
+    let mut world = world("ctx-rounds-crash");
+    let at = first_round(&mut world);
+    world.store.append(at.0, at.1, &partial()).expect("text");
+    world.store = Store::open(&world.scratch.db()).expect("reopened");
+    world.store.recover().expect("recovered");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let mut expected = first_round_input();
+    expected.extend([said("assistant", "Partial"), next_ask()]);
+    assert_eq!(next_input(&world, next, 7), expected);
+}
+
+#[test]
+fn a_bad_stored_round_record_fails_the_build() {
+    let long = format!(r#"{{"call":"c1","output":"{}"}}"#, "x".repeat(64 * 1024));
+    for (kind, body) in [
+        (EventKind::OutputItem, "not json"),
+        (EventKind::OutputItem, r#"{"connection":7,"item":[1]}"#),
+        (EventKind::OutputItem, r#"{"item":{"type":"message"}}"#),
+        (EventKind::ToolResult, r#"{"call":"","output":"x"}"#),
+        (EventKind::ToolResult, r#"{"call":"c1"}"#),
+        (EventKind::ToolResult, long.as_str()),
+    ] {
+        let mut world = world("ctx-rounds-bad");
+        let main = world.main;
+        let (_, high) = world.store.high_water().expect("ids");
+        let run = RunId(high.0 + 1);
+        world
+            .store
+            .begin_turn(main, None, run, "ask")
+            .expect("turn");
+        let event = NewEvent {
+            kind,
+            text: None,
+            body: Some(body),
+        };
+        world.store.append(main, run, &[event]).expect("appended");
+        let built = world.build(
+            &snapshot(Origin::Kumo, None),
+            (main, run),
+            Supplied::default(),
+            BOUND,
+        );
+        assert!(
+            matches!(built, Err(BuildError::Store(StoreError::RoundRecord))),
+            "{kind:?} {built:?}"
+        );
+    }
+}
+
+#[test]
+fn a_result_of_exactly_64_kib_is_read() {
+    let mut world = world("ctx-rounds-cap");
+    let main = world.main;
+    let (_, high) = world.store.high_water().expect("ids");
+    let run = RunId(high.0 + 1);
+    world
+        .store
+        .begin_turn(main, None, run, "ask")
+        .expect("turn");
+    let frame = r#"{"call":"c1","output":""}"#;
+    let body = format!(
+        r#"{{"call":"c1","output":"{}"}}"#,
+        "x".repeat(64 * 1024 - frame.len())
+    );
+    assert_eq!(body.len(), 64 * 1024);
+    let event = NewEvent {
+        kind: EventKind::ToolResult,
+        text: None,
+        body: Some(&body),
+    };
+    world.store.append(main, run, &[event]).expect("appended");
+    let built = world
+        .build(
+            &snapshot(Origin::Kumo, None),
+            (main, run),
+            Supplied::default(),
+            BOUND,
+        )
+        .expect("the cap fits");
+    assert_eq!(
+        built.request.input,
+        [message(Role::User, &format!("ask\n\nLocal time: {TIME}"))],
+        "a result with no native call isn't replayed"
+    );
 }

@@ -3,6 +3,7 @@
 pub mod camera;
 pub mod frame;
 pub mod mesh;
+pub mod pick;
 pub mod raster;
 pub mod size;
 

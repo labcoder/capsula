@@ -73,6 +73,35 @@ pub enum KeyRejection {
     RateLimited,
     /// Its account is out of credit.
     Credit,
+    /// A Claude subscription token isn't an API key.
+    SubscriptionToken,
+    /// An admin key can't be used for inference.
+    AdminKey,
+    /// The key needs a workspace header that this connection doesn't accept.
+    WorkspaceRequired,
+}
+
+/// Validate a pasted Anthropic API key, borrowing its trimmed text without copying it.
+///
+/// # Errors
+/// Returns a closed rejection for subscription/admin tokens or malformed key text.
+pub fn validate_anthropic_key(text: &str) -> Result<&str, KeyRejection> {
+    let key = text.trim();
+    if key.starts_with("sk-ant-oat") {
+        return Err(KeyRejection::SubscriptionToken);
+    }
+    if key.starts_with("sk-ant-admin") {
+        return Err(KeyRejection::AdminKey);
+    }
+    if !(16..=2048).contains(&key.len())
+        || !key.bytes().all(|byte| byte.is_ascii_graphic())
+        || !["sk-ant-api", "sk-ant-usr-", "sk-ant-svc-"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+    {
+        return Err(KeyRejection::Format);
+    }
+    Ok(key)
 }
 
 /// Where Claude Code stands.
@@ -201,6 +230,49 @@ impl fmt::Display for ClaudeVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_keys_trim_boundaries_and_accept_only_console_prefixes() {
+        for key in [
+            "sk-ant-api123456".to_owned(),
+            "sk-ant-usr-fake-personal-key".to_owned(),
+            "sk-ant-svc-fake-service-key".to_owned(),
+            format!("sk-ant-api{}", "x".repeat(2038)),
+        ] {
+            let padded = format!("\u{a0}\r\n{key}\t\u{2003}");
+            assert_eq!(validate_anthropic_key(&padded), Ok(key.as_str()));
+        }
+    }
+
+    #[test]
+    fn anthropic_keys_refuse_bad_sizes_bytes_and_prefixes() {
+        for text in [
+            String::new(),
+            " \t\r\n".to_owned(),
+            "sk-ant-api12345".to_owned(),
+            format!("sk-ant-api{}", "x".repeat(2039)),
+            "sk-test-fake-key-only".to_owned(),
+            "sk-ant-usrXfake-key-only".to_owned(),
+            "sk-ant-svcXfake-key-only".to_owned(),
+            "sk-ant-api-fake key".to_owned(),
+            "sk-ant-api-fake\tkey".to_owned(),
+            "sk-ant-api-fake\nkey".to_owned(),
+            "sk-ant-api-fake\u{a0}key".to_owned(),
+            "sk-ant-api-fake-é".to_owned(),
+            "sk-ant-api-fake\0key".to_owned(),
+            "sk-ant-api-fake\u{7f}key".to_owned(),
+        ] {
+            assert_eq!(validate_anthropic_key(&text), Err(KeyRejection::Format));
+        }
+        for (text, reason) in [
+            ("sk-ant-oat", KeyRejection::SubscriptionToken),
+            (" sk-ant-oat01-fake-token ", KeyRejection::SubscriptionToken),
+            ("sk-ant-admin", KeyRejection::AdminKey),
+            ("sk-ant-admin-fake-key", KeyRejection::AdminKey),
+        ] {
+            assert_eq!(validate_anthropic_key(text), Err(reason));
+        }
+    }
 
     #[test]
     fn versions_are_three_numbers_of_sixteen_bits() {

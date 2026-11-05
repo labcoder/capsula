@@ -216,10 +216,11 @@ async fn names_never_reach_the_tap_in_either_direction() {
     let lines: Vec<_> = dumped.lines().collect();
     assert!(lines[0].contains("brain -> shell  Settings ("), "{dumped}");
     assert!(lines[1].contains("brain -> shell  Account ("), "{dumped}");
-    assert!(lines[2].contains("brain -> shell  Scenes {"), "{dumped}");
-    assert!(lines[3].contains("shell -> brain  Settings ("), "{dumped}");
-    assert!(lines[4].contains("brain -> shell  Settings ("), "{dumped}");
-    assert!(lines[5].contains("shell -> brain  Pong"), "{dumped}");
+    assert!(lines[2].contains("brain -> shell  Connections(ConnectionsView { anthropic: Missing, claude_code: NotFound })"), "{dumped}");
+    assert!(lines[3].contains("brain -> shell  Scenes {"), "{dumped}");
+    assert!(lines[4].contains("shell -> brain  Settings ("), "{dumped}");
+    assert!(lines[5].contains("brain -> shell  Settings ("), "{dumped}");
+    assert!(lines[6].contains("shell -> brain  Pong"), "{dumped}");
 }
 
 fn saved_name(scratch: &Scratch) -> String {

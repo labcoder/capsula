@@ -12,7 +12,7 @@ use super::{
     REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, summary_item, tools,
 };
 use crate::store::StoreError;
-use crate::store::context::{Snapshot, Speaker};
+use crate::store::context::Snapshot;
 
 const INSTRUCTIONS: &str = include_str!("../../prompts/instructions.md");
 const KUMO_ROLE: &str = include_str!("../../prompts/kumo.md");
@@ -63,18 +63,7 @@ fn assemble(
         return Err(BuildError::Origin);
     }
     let after = supplied.summary.as_ref().map(|summary| summary.last);
-    let mut items: Vec<Item> = snapshot
-        .conversation(turn.thread, after, bound)?
-        .into_iter()
-        .map(|said| Item {
-            id: said.id,
-            run: said.run,
-            body: match said.speaker {
-                Speaker::User => Body::User(said.text),
-                Speaker::Assistant => Body::Assistant(said.text),
-            },
-        })
-        .collect();
+    let mut items: Vec<Item> = snapshot.conversation(turn.thread, after, bound)?;
     items.extend(
         supplied
             .items
@@ -155,7 +144,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
                 Body::Call { call, .. } if open.is_none() => open = Some(call),
                 Body::History { call, .. } if open == Some(call) => open = None,
                 Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
-                Body::User(_) | Body::Assistant(_) | Body::Reasoning { .. } => {}
+                Body::User(_) | Body::Assistant(_) | Body::Native { .. } | Body::Result { .. } => {}
             }
         }
         if open.is_some() {
@@ -180,6 +169,11 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 
 /// One run's input items. Its history results are re-read, adding each task they show text
 /// from to `sources`; `local_time` is added to the current run's turn.
+///
+/// A run with stored rounds from the connection this run uses replays them natively, each
+/// round's items then its results, and of its text only what came after its last round, which
+/// no stored item carries (D13-M1). A run from another connection replays as its text only, so
+/// no call travels without its result.
 pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
@@ -187,9 +181,17 @@ pub(super) fn render(
     local_time: Option<&str>,
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
+    let native = items.iter().any(
+        |item| matches!(&item.body, Body::Native { connection, .. } if *connection == run.connection),
+    );
+    let after_rounds = items
+        .iter()
+        .rposition(|item| matches!(item.body, Body::Native { .. } | Body::Result { .. }))
+        .filter(|_| native);
     let mut input: Vec<InputItem> = Vec::with_capacity(items.len());
-    for item in items {
+    for (at, item) in items.iter().enumerate() {
         match &item.body {
+            Body::Assistant(_) if after_rounds.is_some_and(|last| at < last) => {}
             Body::User(text) => input.push(InputItem::Message {
                 role: Role::User,
                 text: match local_time {
@@ -226,9 +228,17 @@ pub(super) fn render(
                     output: json!({ "quoted_history": quoted }).to_string(),
                 });
             }
-            Body::Reasoning { connection, item } => {
-                if *connection == run.connection {
-                    input.push(InputItem::Reasoning(item.clone()));
+            Body::Native { connection, item } => {
+                if native && *connection == run.connection {
+                    input.push(InputItem::Native(item.clone()));
+                }
+            }
+            Body::Result { call, output } => {
+                if native {
+                    input.push(InputItem::FunctionOutput {
+                        call: call.clone(),
+                        output: output.clone(),
+                    });
                 }
             }
         }
