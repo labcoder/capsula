@@ -9,7 +9,11 @@ use super::geometry::Position;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Launch {
-    pub(super) quit_delay: Option<Duration>,
+    #[cfg(debug_assertions)]
+    pub(crate) accounts_fixture: Option<super::accounts_fixture::State>,
+    #[cfg(debug_assertions)]
+    pub(crate) accounts_appearance: Option<super::accounts_fixture::Appearance>,
+    pub(crate) quit_delay: Option<Duration>,
     pub(super) escape_fixture: bool,
     /// `--gate-observer=<file>`: where the gate harness's records go.
     pub(super) observer: Option<PathBuf>,
@@ -26,7 +30,39 @@ impl Launch {
     pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, OpenError> {
         let mut launch = Self::default();
         for arg in args {
-            if arg == "--smoke" {
+            if arg == "--accounts-fixture" || arg.starts_with("--accounts-fixture=") {
+                #[cfg(debug_assertions)]
+                {
+                    if launch.accounts_fixture.is_some() {
+                        return Err(OpenError::AccountsFixture);
+                    }
+                    launch.accounts_fixture = Some(
+                        arg.strip_prefix("--accounts-fixture=")
+                            .and_then(super::accounts_fixture::State::parse)
+                            .ok_or(OpenError::AccountsFixture)?,
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                return Err(OpenError::AccountsFixture);
+            } else if arg == "--accounts-appearance" || arg.starts_with("--accounts-appearance=") {
+                #[cfg(debug_assertions)]
+                {
+                    use super::accounts_fixture::Appearance;
+                    if launch.accounts_appearance.is_some() {
+                        return Err(OpenError::AccountsFixture);
+                    }
+                    launch.accounts_appearance =
+                        Some(match arg.strip_prefix("--accounts-appearance=") {
+                            Some("light") => Appearance::Light,
+                            Some("dark") => Appearance::Dark,
+                            Some("large") => Appearance::Large,
+                            Some("constrained") => Appearance::Constrained,
+                            _ => return Err(OpenError::AccountsFixture),
+                        });
+                }
+                #[cfg(not(debug_assertions))]
+                return Err(OpenError::AccountsFixture);
+            } else if arg == "--smoke" {
                 launch.quit_delay = Some(Duration::from_secs(10));
             } else if arg == "--esc-fixture" {
                 launch.escape_fixture = true;
@@ -45,7 +81,15 @@ impl Launch {
                 launch.quit_delay = Some(Duration::from_millis(millis));
             }
         }
+        #[cfg(debug_assertions)]
+        if launch.accounts_appearance.is_some() && launch.accounts_fixture.is_none() {
+            return Err(OpenError::AccountsFixture);
+        }
         if launch.quit_delay.is_none() {
+            #[cfg(debug_assertions)]
+            if launch.accounts_fixture.is_some() {
+                return Err(OpenError::AccountsFixture);
+            }
             if launch.escape_fixture {
                 return Err(OpenError::EscFixtureDeadline);
             }
@@ -177,5 +221,144 @@ mod tests {
             ])),
             Err(OpenError::ReceiptFixture)
         ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn accounts_fixture_requires_one_fixed_state_and_a_bounded_deadline() {
+        use crate::presence::accounts_fixture::State;
+
+        for millis in [1, 120_000] {
+            let flags = launch(
+                [
+                    "--accounts-fixture=enabled".to_owned(),
+                    format!("--quit-after-ms={millis}"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+            assert_eq!(flags.accounts_fixture, Some(State::Enabled));
+            assert_eq!(flags.quit_delay, Some(Duration::from_millis(millis)));
+        }
+        for flags in [
+            vec!["--accounts-fixture=enabled"],
+            vec!["--accounts-fixture", "--smoke"],
+            vec!["--accounts-fixture=", "--smoke"],
+            vec!["--accounts-fixture=enabl", "--smoke"],
+            vec!["--accounts-fixture=Enabled", "--smoke"],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-fixture=offline",
+                "--smoke",
+            ],
+        ] {
+            assert!(matches!(
+                launch(args(&flags)),
+                Err(OpenError::AccountsFixture)
+            ));
+        }
+        for invalid in ["", "0", "120001", "-1", "later", "1ms"] {
+            assert!(matches!(
+                launch(
+                    [
+                        "--accounts-fixture=enabled".to_owned(),
+                        format!("--quit-after-ms={invalid}"),
+                    ]
+                    .into_iter()
+                ),
+                Err(OpenError::QuitDelay)
+            ));
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn accounts_fixture_is_refused_in_release() {
+        assert!(matches!(
+            launch(args(&["--accounts-fixture=enabled", "--smoke"])),
+            Err(OpenError::AccountsFixture)
+        ));
+        assert!(matches!(
+            launch(args(&["--accounts-appearance=constrained", "--smoke"])),
+            Err(OpenError::AccountsFixture)
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn accounts_appearance_is_fixed_unique_and_fixture_only() {
+        use crate::presence::accounts_fixture::Appearance;
+        for (name, expected) in [
+            ("light", Appearance::Light),
+            ("dark", Appearance::Dark),
+            ("large", Appearance::Large),
+            ("constrained", Appearance::Constrained),
+        ] {
+            let flags = launch(
+                [
+                    "--accounts-fixture=enabled".to_owned(),
+                    "--smoke".to_owned(),
+                    format!("--accounts-appearance={name}"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+            assert_eq!(flags.accounts_appearance, Some(expected));
+        }
+        for flags in [
+            vec!["--accounts-appearance=light", "--smoke"],
+            vec!["--accounts-appearance=constrained", "--smoke"],
+            vec![
+                "--accounts-fixture=backlog",
+                "--accounts-appearance=constrained",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=Constrained",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=constraine",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=constrained",
+                "--accounts-appearance=constrained",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-appearance",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-appearance=",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-appearance=dar",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-appearance=Dark",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=enabled",
+                "--accounts-appearance=dark",
+                "--accounts-appearance=light",
+                "--smoke",
+            ],
+        ] {
+            assert!(matches!(
+                launch(args(&flags)),
+                Err(OpenError::AccountsFixture)
+            ));
+        }
     }
 }

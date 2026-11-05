@@ -3,6 +3,7 @@
 
 pub mod constants;
 pub mod frame;
+pub mod geometry;
 pub mod message;
 mod secret;
 pub mod tap;

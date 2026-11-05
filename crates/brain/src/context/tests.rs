@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::bound::{item_bytes, request_bytes};
 use super::build::{Turn, build};
+use super::compact::{self, Compaction, compaction};
 use super::*;
 use crate::engines::{CallId, Opaque};
 use crate::store::context::Snapshot;
@@ -878,5 +879,186 @@ fn debug_and_errors_carry_no_content() {
     assert!(
         !shown.contains("private") && !shown.contains("Oscar"),
         "{shown}"
+    );
+}
+
+impl World {
+    /// `count` finished runs in `thread`, each an ask of `bytes` and a reply of `bytes`.
+    fn runs(&mut self, thread: ThreadId, count: usize, bytes: usize) {
+        for _ in 0..count {
+            self.run(Some(thread), &"a".repeat(bytes), Some(&"b".repeat(bytes)));
+        }
+    }
+
+    fn compact(&self, run: &RunSnapshot, thread: ThreadId, compact_at: u64) -> Option<Compaction> {
+        let reader = Connection::open(self.scratch.db()).expect("reader");
+        let snapshot = Snapshot::begin(&reader).expect("snapshot");
+        compaction(&snapshot, run, thread, compact_at).expect("read")
+    }
+}
+
+const WRITE_NOW: &str = "Write the new summary now.";
+
+#[test]
+fn compaction_waits_for_the_backlog_and_keeps_the_newest_eight_runs_raw() {
+    let mut world = world("compact-threshold");
+    let (task, _) = world.run(None, &"a".repeat(400), Some(&"b".repeat(400)));
+    world.runs(task, 8, 400);
+    let run = snapshot(Origin::Task(task), Some("Oscar"));
+    // Nine runs of 800 bytes: a backlog of 1,800 estimated tokens.
+    assert_eq!(world.compact(&run, task, 1801), None);
+    let found = world.compact(&run, task, 1800).expect("due");
+    let events = world.events(task);
+    assert_eq!(found.covers, (events[0], events[1]), "only the oldest run");
+    assert_eq!(found.built.sources, [task]);
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(Role::User, &"a".repeat(400)),
+            message(Role::Assistant, &"b".repeat(400)),
+            message(Role::Developer, WRITE_NOW),
+        ]
+    );
+    assert!(found.built.request.tools.is_empty());
+    assert!(found.built.request.instructions.contains("Kumo"));
+    assert!(found.built.request.instructions.contains("Oscar"));
+    assert!(!found.built.request.instructions.contains('{'));
+}
+
+#[test]
+fn many_small_runs_outside_the_window_reach_the_threshold() {
+    let mut world = world("compact-small");
+    let (task, _) = world.run(None, "aaaa", Some("bbbb"));
+    world.runs(task, 19, 4);
+    let run = snapshot(Origin::Task(task), None);
+    // Twenty runs of 8 bytes: 40 estimated tokens, though the newest eight hold only 16.
+    assert_eq!(world.compact(&run, task, 41), None);
+    let found = world.compact(&run, task, 40).expect("due");
+    let events = world.events(task);
+    assert_eq!(
+        found.covers,
+        (events[0], events[23]),
+        "the twelve oldest runs"
+    );
+}
+
+#[test]
+fn eight_runs_or_fewer_never_compact() {
+    let mut world = world("compact-none");
+    let (task, _) = world.run(None, &"a".repeat(10_000), None);
+    world.runs(task, 7, 10_000);
+    assert_eq!(
+        world.compact(&snapshot(Origin::Task(task), None), task, 1),
+        None
+    );
+}
+
+#[test]
+fn coverage_only_advances_over_whole_runs_that_fit() {
+    let mut world = world("compact-oversized");
+    let (task, _) = world.run(None, &"a".repeat(compact::SUMMARY_INPUT), None);
+    world.runs(task, 8, 4);
+    let run = snapshot(Origin::Task(task), None);
+    assert_eq!(
+        world.compact(&run, task, 1),
+        None,
+        "an oldest run over the input stalls with no request"
+    );
+
+    let mut world = self::world("compact-prefix");
+    let (task, _) = world.run(None, "aaaa", Some("bbbb"));
+    world.run(Some(task), &"a".repeat(compact::SUMMARY_INPUT), None);
+    world.runs(task, 8, 4);
+    let found = world.compact(&run, task, 1).expect("due");
+    let events = world.events(task);
+    assert_eq!(
+        found.covers,
+        (events[0], events[1]),
+        "only the run that fit"
+    );
+}
+
+#[test]
+fn a_summary_is_carried_forward_replaces_its_events_and_never_hides_them() {
+    let mut world = world("compact-summary");
+    let (task, _) = world.run(None, "first zqxsummarized ask", Some("first reply"));
+    world.runs(task, 8, 4);
+    let events = world.events(task);
+    let generation = crate::store::Generation(0);
+    assert!(
+        world
+            .store
+            .store_summary(task, generation, (events[0], events[1]), "earlier", None)
+            .expect("stored")
+    );
+    let run = snapshot(Origin::Task(task), None);
+    assert_eq!(world.compact(&run, task, 1), None, "eight uncovered runs");
+
+    let (_, current) = world.run(Some(task), "next", None);
+    let found = world.compact(&run, task, 1).expect("due");
+    assert_eq!(found.covers, (events[0], events[3]));
+    assert_eq!(
+        found.built.request.input[0],
+        message(
+            Role::Developer,
+            &format!(
+                "Summary so far, of events {}–{}:\nearlier",
+                events[0].0, events[1].0
+            )
+        )
+    );
+
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let read = Snapshot::begin(&reader).expect("snapshot");
+    let summary = read.summary(task).expect("read");
+    let excerpt = read
+        .excerpt(task, events[0], events[1], REREAD_CAP)
+        .expect("excerpt");
+    assert!(excerpt.text.contains("zqxsummarized"), "the events stay");
+    drop(read);
+    let built = world
+        .build(
+            &run,
+            (task, current),
+            Supplied {
+                summary,
+                items: Vec::new(),
+            },
+            BOUND,
+        )
+        .expect("built");
+    assert!(matches!(
+        &built.request.input[0],
+        InputItem::Message { role: Role::Developer, text } if text.ends_with("earlier")
+    ));
+    assert!(!built.request.input.iter().any(
+        |item| matches!(item, InputItem::Message { text, .. } if text.contains("zqxsummarized"))
+    ));
+
+    world.store.begin_delete(task).expect("begun");
+    assert_eq!(world.compact(&run, task, 1), None, "a task being deleted");
+    assert!(
+        !world
+            .store
+            .store_summary(task, generation, (events[0], events[3]), "late", None)
+            .expect("ran"),
+        "a delete during compaction stores nothing"
+    );
+}
+
+#[test]
+fn a_summary_is_trimmed_and_cut_on_a_character_boundary() {
+    assert_eq!(compact::clean_summary(""), None);
+    assert_eq!(compact::clean_summary(" \n\t "), None);
+    let exact = "s".repeat(compact::MAX_SUMMARY);
+    assert_eq!(
+        compact::clean_summary(&format!("  {exact}\n")),
+        Some(exact.clone())
+    );
+    assert_eq!(compact::clean_summary(&format!("{exact}t")), Some(exact));
+    let multibyte = format!("{}é", "s".repeat(compact::MAX_SUMMARY - 1));
+    assert_eq!(
+        compact::clean_summary(&multibyte),
+        Some("s".repeat(compact::MAX_SUMMARY - 1))
     );
 }

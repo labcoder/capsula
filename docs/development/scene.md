@@ -74,6 +74,13 @@ use three-component keys; existing tracks retain their existing key types.
 including rotations, targets, directions, outlines and paths, use the existing
 ±20,000 coordinate bound. Decode bounds apply in JSON and postcard, regardless of shape.
 
+`rot` uses degrees about x, then y, then z: `Rz·Ry·Rx` on column vectors,
+followed by uniform `scale`, then `pos`. An attached child's transform is applied
+before its parent's. This does not change the 2D `rotate` convention. Three-dimensional
+space is right-handed with y up. A lathe's `[radius,y]` profile runs from lower y
+towards higher y for outward winding; reversing the profile reverses the surface.
+Lathe ends are open, without caps; with back-face culling the inside is invisible.
+
 A decoded solid is not yet valid geometry. `Solid::geometry()` checks required
 fields first, then rejects unused shape fields (including `segments` on a box or an extrusion),
 then checks counts and radius relations:
@@ -92,9 +99,87 @@ then checks counts and radius relations:
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
 All lists decode at most 512 points; extrude counts above 128 are
-`OverBudget(PathPoints)`. Degeneracy checks belong to the future tessellator.
+`OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
+
+### 3D tessellation sizing
+
+`three::size::triangles` validates one decoded solid and returns its candidate
+triangle capacity without allocating. This count does not depend on world transforms.
+Triangle generation is a separate module; sizing alone does not establish world-space
+representability. Admission still refuses 3D until its later slice lands.
+
+Let n be `segments` (default 24), k the retained outline count, p the retained
+profile count and q the retained path count:
+
+| Shape | Candidate triangles | At n = 3 / n = 48 |
+|---|---|---|
+| box | 12 | 12 / 12 |
+| sphere | 20·4ᴸ | 20 / 1,280 |
+| cylinder | 4n − 4 | 8 / 188 |
+| cone, top zero | 2n − 2 | 4 / 94 |
+| cone, top positive | 4n − 4 | 8 / 188 |
+| torus | 2n² | 18 / 4,608 |
+| extrude | 4k − 4 | 508 at k = 128 |
+| lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
+| tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
+
+Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
+Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
+count at 49,148. Counts over the future per-view triangle budget remain legal here.
+Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
+
+The shared numeric policy is `three::REL = 1e-6` and
+`dist_eps(radius) = REL × max(radius, 0.001)`. The local radius is half the diagonal
+of the shape's AABB, not a distance from the origin. Tube bounds include the tube
+thickness; lathe bounds include the revolved radii. Calculations use f64; the shared
+source-area cutoff is `dist_eps²`. Transforms compose f64 affine matrices and check
+finiteness after narrowing points to f32. Sub-ulp distortion is accepted because the
+camera's near-plane precision floor bounds its screen size.
+Consecutive points strictly closer than `dist_eps` merge against the last retained
+point. Closing outline duplicates merge by the same rule. An origin offset in an
+outline or path does not alter the radius or tolerance.
+
+Sizing refuses a merged outline with fewer than three points, absolute twice-area
+below `dist_eps²`, self-intersections, nonadjacent touches or overlapping edges.
+A redundant collinear outline vertex is accepted. Profiles and paths need two
+retained points; a lathe needs a retained off-axis point. A tube turn with unit
+tangent dot product strictly below `−1 + REL` is refused. These failures are typed
+`MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
+original typed field and code. `ErrorCode::Degenerate` is appended for the later
+admission boundary, which alone will convert these errors into sanitized paths.
+
+### 3D tessellation
+
+`three::Transform` composes f64 affine transforms. Each canonical local vertex has
+one expression and one narrowing path to world-space f32. Periodic indices wrap
+before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
+endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
+extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
+frames, initially using the axis least aligned with the first tangent.
+
+Generation refuses non-finite world vertices, distinct local vertices that narrow
+to the same world point, and retained triangles whose narrowed points have zero
+area. It never rebases coordinates. Any source triangle with area below `dist_eps²`
+is refused too, except coincident-vertex candidates at lathe axis bands, which are
+dropped and counted. A successful result satisfies `written + dropped == triangles`.
+A thin solid can therefore be refused rather than rendered with missing caps.
+Representability does not guarantee analytic area accuracy: the world f32 lattice
+can change lengths substantially near large translations. Sub-ulp distortion is accepted
+because the camera's near-plane precision floor bounds its screen size.
+
+The caller owns the output and cancellation flag. `Full` means the candidate count
+does not fit beyond the existing prefix and appends nothing. `Cancelled` and
+`Degenerate` can leave appended triangles; callers save the original length and
+truncate back after failure. Cancellation is checked at entry, throughout vertex
+checks, during ear clipping, per emitted triangle and before success.
+
+Large scratch buffers belong to the caller's `MeshScratch`. `MeshScratch::new()` allocates
+collision keys (384 KiB), tube frames and tangents (36 KiB), and sphere vertices/faces
+(about 23 KiB) once. `build` borrows that scratch and never grows its private boxed buffers.
+Only small retained-index and ear-clipping arrays remain on the stack. No build allocates
+once the caller has constructed scratch and reserved its output.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
@@ -683,7 +768,8 @@ ordinary clear path, keeping its history, instead of cutting it.
 `layout::recover_all` recovers a visible batch for the shell: one result per source,
 in input order, and one new `GlobalBudget`. Each scene recovers alone. Scenes that
 recover are charged in input order and bound to that budget privately, so `stop`,
-`clear` and `admit` accept only it; there is no public adopt or bind call. A failed
+`clear` and `admit` accept only it. The shell's consuming `SceneBinding::bind` adopts
+that already-charged state without charging it twice or advancing the budget. A failed
 scene charges nothing, and neither does a recovered scene that would take the batch
 past a global cap with the scenes before it: it fails whole, with revision zero and
 `OverBudget`. Once `cancel` is set, the scenes still preparing fail with `Cancelled`.
@@ -779,7 +865,7 @@ must measure below 64 MiB before v1; if it does not, revisit bounded waiting wit
 release condition rather than raising the cap. These are requested Rust allocation bytes,
 not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers sit outside
 the presenter allowance, as does the dropper queue; returned consumption owners do not.
-v1 still needs bounded admission, admission at most 1 ms, clear/cut/eviction/timeout tails
+v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
 backlog grows. Queue attribution must be corrected before relying on its churn meter.
 
@@ -894,14 +980,40 @@ membership, ordinals, full log and retained counts, and every received frame byt
 its header. It returns credit per consumed chunk so recovery can exceed the data window;
 only pre-membership chunks and the waiting live suffix withhold bounded credit.
 
+One ordered admission lane holds a read-only `SceneRead` on a worker. It builds a protected
+`DetachedCandidate` without a global budget; only the non-cloneable `SceneBinding` can
+install it. Application checks the snapshot's owner, context, revision and mutation,
+all current global caps, and unique mutable ownership before changing either the scene
+or its charge. Rejected candidates leave both unchanged. There is no deep-copy fallback
+when a read is still alive. The brain keeps its ordinary admit/commit API.
+
+Later mutating scene frames remain FIFO behind admission, including removal and cut
+acknowledgements. The lane's frame and held frames share the 512 KiB data window, with
+credit withheld until consumption or current-session abandonment. Credit never crosses
+into a replacement connection. Admission, preparation and recovery share the same eight
+worker/answer leases, including cancelled workers and answers awaiting delivery.
+
+The lane's one 250 ms deadline begins when its frame reaches the head, including worker-slot
+waiting. Tick and completion reject at the same exact boundary. An admission timeout clears
+only the affected scene, including any recovered rest, and releases only its previously
+mirrored semantic usage. Its durable tombstone and ordinary ClearDrawing resend intent
+survive failed delivery and reconnect. Late answers, commits and cut acknowledgements
+cannot restore that scene or release its charge twice. A timely current validation or
+apply error still ends the connection; it is not converted into this timeout policy.
+
 ```mermaid
 flowchart LR
-    Pipe[Typed pipe frames] --> Assembly[Bounded log assembly]
+    Pipe[Typed pipe frames] -->|snapshots| Assembly[Bounded log assembly]
     Assembly --> Recovery[Scene-local batch recovery]
     Recovery --> Mirror[Canonical mirror and shared budget]
+    Pipe -->|live commits| Lane[Ordered admission lane]
+    Lane --> Candidate[Read-only worker admission]
+    Candidate --> Apply[Validate stamps, current caps and uniqueness]
+    Apply --> Mirror
     Mirror --> Worker[Serial immutable preparation jobs]
     Worker --> Publish[Validate job, cut, index and residency]
     Watchdog[Independent deadline timer] --> Mirror
+    Watchdog --> Lane
 ```
 
 GPUI's shared text system crosses to the background executor; each worker constructs its
@@ -929,8 +1041,16 @@ semantic retirement, and returns the protected charged owner plus scheduler effe
 scenes, consumed indices, out-of-order requests, missing ready results and insufficient
 residency leave state unchanged. Freeing a window position immediately gives its next
 successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`; outstanding-admission serialization and its Busy/wake contract belong to
-the following bounded-admission layer.
+and `StepShown`. While the scene's admission is in the lane, including its worker-slot wait,
+a valid consumption request returns Busy and records one pending request without changing
+semantic state, residency or window positions.
+Returning the read offers a wake/retry point before the next admission for that scene.
+Both fresh arrivals and already-held commits wait behind the pending request, even when
+the lane and held queue were empty at arrival.
+A Residency refusal instead fails without waiting for bytes; the activation caller must
+handle it explicitly, since a ready head has no watchdog or guaranteed owner-release wake.
+If that retry is refused for residency, its pending barrier remains until successful
+consumption or an explicit halt, so ignoring the refusal would also block the FIFO.
 
 Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
@@ -942,6 +1062,9 @@ scenes clear and late answers cannot restore them. Stop clears incomplete recove
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
 acknowledgement reaches the exact final committed revision. One new commit permits one new
 effective cut; stale acknowledgements for removed scenes do nothing.
+Stop also covers a scene whose begin is still held behind admission: the brain's
+unseen-scene job cuts unnamed, unactivated scenes from that run. Their acknowledgements
+stay FIFO behind the held commits, so the shell does not send a second cancelled cut.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.

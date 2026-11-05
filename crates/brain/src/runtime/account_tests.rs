@@ -10,7 +10,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
     AccountOp, AccountView, Action, ControlToBrain, ControlToShell, DataToShell, Effort, ErrorKey,
-    ModelChoice, ModelInfo, ModelSlug, PlanState, UserError,
+    ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -27,7 +27,10 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
+use crate::context::ConnectionTag;
+use crate::coordinator::{Availability, Ready, StoreOp};
 use crate::platform::{SessionLock, SessionLockError};
+use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
@@ -389,7 +392,7 @@ async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
         redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
     };
     let (events, mut results) = mpsc::unbounded_channel();
-    exchange_task(1, authorization, net, events).await;
+    exchange_task(1, 1, authorization, net, events).await;
     let Some(Input::Exchanged {
         attempt: 1,
         result: Ok(received),
@@ -459,6 +462,7 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
             expires_at: 1_800_000_000,
             pending_identity_validation: false,
             refresh_sent: false,
+            connection: 0,
         }),
     }));
     assert!(matches!(saved, SaveResult::Committed { .. }));
@@ -539,6 +543,9 @@ fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accoun
     seeded(scratch, store, http, 1_800_000_000)
 }
 
+/// The connection [`seeded`] saves.
+const SEEDED: u64 = 42;
+
 /// Saves an account whose bearer expires at `expires_at`, then starts the account system on it
 /// with `http` at 1,800,000,000.
 fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u64) -> Accounts {
@@ -568,6 +575,7 @@ fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at
                 expires_at,
                 pending_identity_validation: false,
                 refresh_sent: false,
+                connection: SEEDED,
             }),
         }));
     assert!(matches!(saved, SaveResult::Committed { .. }));
@@ -609,6 +617,17 @@ fn saved_refresh(scratch: &Scratch, store: &FakeStore) -> (String, bool) {
         .expect("an account");
     let tokens = account.expose().tokens.as_ref().expect("tokens");
     (tokens.refresh_token.to_string(), tokens.refresh_sent)
+}
+
+/// The saved set's connection.
+fn saved_connection(scratch: &Scratch, store: &FakeStore) -> u64 {
+    let lock = scratch.db().with_file_name("reader.lock");
+    let account = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &lock)
+        .expect("vault")
+        .load_account()
+        .expect("readable")
+        .expect("an account");
+    account.expose().tokens.as_ref().expect("tokens").connection
 }
 
 /// Panics on the refresh-token grant or, with `check`, answers it with a set to check and panics
@@ -734,6 +753,11 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
         saved_refresh(&scratch, &store),
         ("refresh-new".to_owned(), false)
     );
+    assert_eq!(
+        saved_connection(&scratch, &store),
+        SEEDED,
+        "a refreshed set keeps its sign-in's connection"
+    );
     drop(SessionLock::try_acquire(&lock).expect("released"));
 }
 
@@ -855,6 +879,38 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
         accounts.models(),
         None,
         "a read from before the sign-out is dropped"
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// D13-H1: a usable account is ready on its saved set's connection with its catalog, and an
+/// accepted sign-out is unavailable at once, before the sign-out finishes.
+#[tokio::test]
+async fn availability_is_the_saved_connection_until_a_sign_out_is_accepted() {
+    let scratch = Scratch::new("account-availability");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        accounts.availability(),
+        Availability::Ready(Ready {
+            connection: ConnectionTag(SEEDED),
+            models: accounts.models().expect("read").to_vec(),
+            trusted_draw: false,
+        })
+    );
+    let frames = accounts.handle(Input::Op(AccountOp::SignOut));
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            ControlToShell::Account(AccountView::SigningOut { .. })
+        )),
+        "the sign-out was accepted and hasn't finished"
+    );
+    let sign_in = UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn]);
+    assert_eq!(
+        accounts.availability(),
+        Availability::Unavailable(sign_in.expect("valid"))
     );
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -1045,4 +1101,55 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(scratch.config().view().default_model, Some(luna));
+}
+
+impl<S: AsyncRead + AsyncWrite> Shell<S> {
+    /// Submits `text` as a new task and reads its run to `Done` and its data's end.
+    async fn finish_task(&mut self, text: &str) {
+        self.submit(text).await;
+        let (run, _) = self.state().await;
+        assert_eq!(self.state().await, (run, Phase::Done));
+        loop {
+            match self.data().await {
+                DataToShell::RunEnd { run: ended } if ended == run => return,
+                DataToShell::Models { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+}
+
+/// A usable account at startup lets a task's `Done` start its title job, and a sign-out fences
+/// jobs before anything else that sign-out does: the next task's `Done` starts none.
+#[tokio::test]
+async fn a_title_job_starts_only_while_the_account_can_send() {
+    let scratch = Scratch::new("account-jobs");
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let mut seen = brain.observe();
+    let mut titles = move || {
+        std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadJob(_))))
+            .count()
+    };
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.finish_task("first").await;
+        assert_eq!(titles(), 1, "the account could send at startup");
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
+            .await;
+        while !matches!(
+            shell.frame().await,
+            ControlToShell::Account(AccountView::SignedOut { .. })
+        ) {}
+        shell.finish_task("second").await;
+        assert_eq!(titles(), 0, "signed out, so no job starts");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }

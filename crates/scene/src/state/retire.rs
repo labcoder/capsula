@@ -13,6 +13,7 @@ impl Candidate {
             + self.after_bytes
             + self.history_bytes
             + self.created.capacity() * size_of::<(WireId, Handle)>()
+            + heap::btree::<Handle, f32>(self.path_scales.len())
     }
 }
 

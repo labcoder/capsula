@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
 
 use super::budget::Budget;
-use super::conn::{Connect, ModelClient};
+use super::conn::{Connect, MAX_WIRE_BYTES, ModelClient, POOL_IDLE};
 use super::error::{Code, Failure, Param, ProviderError};
 use super::{ResponsesBody, stream, wire};
 use crate::connections::http_client::MAX_BODY_BYTES;
@@ -740,6 +740,66 @@ async fn two_completed_requests_reuse_one_connection_with_two_grants() {
     assert!(!harness.budget.reserve());
     // Each flush came before its lease settled.
     assert_eq!(harness.seen(), (vec![0, 1], vec![]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pooled_connection_is_reused_until_it_has_idled_its_limit() {
+    for (idle, reused) in [
+        (
+            POOL_IDLE
+                .checked_sub(Duration::from_millis(1))
+                .expect("the pool limit is over 1 ms"),
+            true,
+        ),
+        (POOL_IDLE, false),
+    ] {
+        let harness = Harness::budgeted(1 << 20, Some(2));
+        let body = body("hello");
+        // The first server end stays open and quiet, so only the connection's age decides.
+        let first = complete(&harness, &body, 1, None);
+        tokio::time::advance(idle).await;
+        if reused {
+            complete(&harness, &body, 2, Some(first));
+            assert_eq!(harness.accepts(), 0);
+        } else {
+            complete(&harness, &body, 2, None);
+            drop(first);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_response_may_put_exactly_the_wire_cap_on_the_wire_and_no_more() {
+    let head = |length: usize| {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\n\r\n"
+        )
+    };
+    for (extra, pooled) in [(0, true), (1, false)] {
+        let harness = Harness::new(MAX_WIRE_BYTES + 4096);
+        let body = body("hello");
+        let mut call = harness.call(&body, 1);
+        assert!(poll(&mut call).is_pending());
+        harness.grant(1);
+        assert!(poll(&mut call).is_pending());
+        let mut server = harness.accept();
+        received(&mut server);
+        let length = MAX_WIRE_BYTES - head(MAX_WIRE_BYTES).len() + extra;
+        let mut response = head(length).into_bytes();
+        response.extend_from_slice(TEXT);
+        // Bytes after response.completed are read only to finish the framing for reuse.
+        response.resize(response.len() + length - TEXT.len(), b'x');
+        assert_eq!(response.len(), MAX_WIRE_BYTES + extra);
+        reply(&mut server, &response);
+        let Poll::Ready((result, kinds)) = poll(&mut call) else {
+            panic!("the stream didn't end");
+        };
+        assert_eq!(
+            (result, kinds),
+            (Ok(()), TEXT_KINDS.map(str::to_owned).to_vec())
+        );
+        assert_eq!(harness.client.checkout().is_some(), pooled, "{extra} over");
+    }
 }
 
 #[tokio::test]

@@ -458,6 +458,8 @@ async fn next_control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
 
 fn turn_in(thread: ThreadId) -> Vec<u8> {
     let turn = kumochi_protocol::message::DataToBrain::TextSubmit {
+        turn: 1,
+        screen: kumochi_protocol::message::ScreenChoice::None,
         thread: Some(thread),
         text: "more".to_owned(),
     };
@@ -477,9 +479,12 @@ async fn submit_to<S: tokio::io::AsyncRead + tokio::io::AsyncWrite>(
 
 fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
     ControlToShell::RunState {
+        origin: (phase == Phase::Thinking)
+            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
         run: RunId(run),
         thread,
         phase,
+        error: None,
     }
 }
 
@@ -570,7 +575,10 @@ async fn cross_pipe(read: Read) {
         }
         assert_eq!(
             next_control(&mut shell).await,
-            ControlToShell::TurnRefused { thread: Some(T) }
+            ControlToShell::TurnRefused {
+                turn: 1,
+                thread: Some(T)
+            }
         );
         if let Some(release) = &release {
             release.send(()).expect("the delete waits at the gate");

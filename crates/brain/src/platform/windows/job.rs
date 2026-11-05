@@ -1,24 +1,30 @@
 //! Job Objects: the brain job that ends every helper when the brain dies, and nested run jobs
 //! that end one run's processes and nothing else.
+//! On macOS, use `posix_spawn` file actions for pipes and process-group kill for termination.
 
 use std::ffi::c_void;
+use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{FALSE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -62,7 +68,7 @@ impl Job {
         Ok(job)
     }
 
-    fn raw(&self) -> HANDLE {
+    pub(super) fn raw(&self) -> HANDLE {
         self.0.as_raw_handle()
     }
 
@@ -119,31 +125,71 @@ impl Job {
     /// # Errors
     /// Fails when the process can't be created.
     pub fn spawn(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<Helper> {
+        Self::spawn_inner(exe, arg, jobs, None)
+    }
+
+    /// Starts a helper with piped stdin and stdout; stderr is disconnected.
+    /// Only the two child pipe ends are inherited, and their parent copies close before return.
+    /// [`crate::platform::spawn_lock`] is held from marking them inheritable until they close.
+    ///
+    /// # Errors
+    /// Fails when pipes or the process can't be created or configured.
+    pub fn spawn_piped(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<(Helper, ChildPipes)> {
+        // Taken first so it drops last, after the child ends, on every error path too.
+        let spawning = crate::platform::spawn_lock();
+        let (child_stdin, stdin) = anonymous_pipe()?;
+        let (stdout, child_stdout) = anonymous_pipe()?;
+        let inherited = [child_stdin.as_raw_handle(), child_stdout.as_raw_handle()];
+        for handle in inherited {
+            // SAFETY: each handle is an open child pipe end owned until after process creation.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == FALSE
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        let helper = Self::spawn_inner(exe, arg, jobs, Some(inherited))?;
+        drop((child_stdin, child_stdout));
+        drop(spawning);
+        Ok((helper, ChildPipes { stdin, stdout }))
+    }
+
+    fn spawn_inner(
+        exe: &Path,
+        arg: &str,
+        jobs: &[&Self],
+        stdio: Option<[HANDLE; 2]>,
+    ) -> io::Result<Helper> {
         let mut application: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut command_line: Vec<u16> = format!("\"{}\" {arg}", exe.display())
             .encode_utf16()
             .chain(Some(0))
             .collect();
         let handles: Vec<HANDLE> = jobs.iter().map(|job| job.raw()).collect();
-        let attributes = AttributeList::with_jobs(&handles)?;
-        let startup = STARTUPINFOEXW {
+        let inherited = stdio.as_ref().map_or(&[][..], |handles| handles.as_slice());
+        let attributes = AttributeList::with_jobs(&handles, inherited)?;
+        let mut startup = STARTUPINFOEXW {
             StartupInfo: STARTUPINFOW {
                 cb: size_u32::<STARTUPINFOEXW>(),
                 ..Default::default()
             },
             lpAttributeList: attributes.0.as_ptr().cast_mut().cast(),
         };
+        if let Some([stdin, stdout]) = stdio {
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = stdin;
+            startup.StartupInfo.hStdOutput = stdout;
+        }
         let mut info = PROCESS_INFORMATION::default();
         // SAFETY: both strings are NUL-terminated and writable as CreateProcessW requires; the
-        // attribute list and the job handles it points to outlive the call; handles aren't
-        // inherited (bInheritHandles is FALSE).
+        // attribute list and its handles outlive the call; only the listed pipe ends inherit.
         let created = unsafe {
             CreateProcessW(
                 application.as_mut_ptr(),
                 command_line.as_mut_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
-                FALSE,
+                if stdio.is_some() { TRUE } else { FALSE },
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -165,6 +211,29 @@ impl Job {
     }
 }
 
+/// The parent's non-inheritable ends of a helper's stdin and stdout pipes.
+#[derive(Debug)]
+pub struct ChildPipes {
+    /// Writes to the child's stdin.
+    pub stdin: File,
+    /// Reads the child's stdout.
+    pub stdout: File,
+}
+
+fn anonymous_pipe() -> io::Result<(File, File)> {
+    let mut read = std::ptr::null_mut();
+    let mut write = std::ptr::null_mut();
+    // SAFETY: both output pointers are valid; null attributes make both ends non-inheritable.
+    if unsafe { CreatePipe(&raw mut read, &raw mut write, std::ptr::null(), 0) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreatePipe returned a fresh read handle, owned only here.
+    let read = unsafe { File::from_raw_handle(read) };
+    // SAFETY: CreatePipe returned a fresh write handle, owned only here.
+    let write = unsafe { File::from_raw_handle(write) };
+    Ok((read, write))
+}
+
 /// A helper process the brain started.
 #[derive(Debug)]
 pub struct Helper {
@@ -173,9 +242,29 @@ pub struct Helper {
 }
 
 impl Helper {
+    pub(super) const fn new(process: OwnedHandle, pid: u32) -> Self {
+        Self { process, pid }
+    }
+
     /// The helper's process id.
     pub const fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// Requests termination; an already exited process counts as success.
+    ///
+    /// # Errors
+    /// Fails when termination fails and the process isn't confirmed exited.
+    pub fn terminate(&self) -> io::Result<()> {
+        // SAFETY: the process handle is open for the borrow and has termination access.
+        if unsafe { TerminateProcess(self.process.as_raw_handle(), TERMINATED) } != FALSE {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match self.exits_within(Duration::ZERO) {
+            Ok(true) => Ok(()),
+            _ => Err(error),
+        }
     }
 
     /// Whether the process exits within `timeout`.
@@ -193,20 +282,21 @@ impl Helper {
     }
 }
 
-/// A process-creation attribute list holding `PROC_THREAD_ATTRIBUTE_JOB_LIST`. The buffer is
+/// A process-creation attribute list holding job and optional inherited-handle lists. The buffer is
 /// `u64`s so it's aligned for the pointers the OS writes into it.
-struct AttributeList(Vec<u64>);
+pub(super) struct AttributeList(pub(super) Vec<u64>);
 
 impl AttributeList {
-    fn with_jobs(jobs: &[HANDLE]) -> io::Result<Self> {
+    pub(super) fn with_jobs(jobs: &[HANDLE], inherited: &[HANDLE]) -> io::Result<Self> {
         let mut size = 0;
+        let count = 1 + u32::from(!inherited.is_empty());
         // SAFETY: the sizing call takes a null list and only writes `size`; it reports
         // ERROR_INSUFFICIENT_BUFFER, which is expected.
-        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &raw mut size) };
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), count, 0, &raw mut size) };
         let mut buffer = vec![0_u64; size.div_ceil(size_of::<u64>())];
         // SAFETY: the buffer is at least `size` bytes, as the sizing call asked.
         let initialized = unsafe {
-            InitializeProcThreadAttributeList(buffer.as_mut_ptr().cast(), 1, 0, &raw mut size)
+            InitializeProcThreadAttributeList(buffer.as_mut_ptr().cast(), count, 0, &raw mut size)
         };
         if initialized == FALSE {
             return Err(io::Error::last_os_error());
@@ -214,7 +304,7 @@ impl AttributeList {
         // Only an initialized list gets the destructor.
         let mut list = Self(buffer);
         // SAFETY: `jobs` holds open job handles and outlives every use of the list, which only
-        // lives inside `Job::spawn`.
+        // lives inside one spawn call.
         let updated = unsafe {
             UpdateProcThreadAttribute(
                 list.ptr(),
@@ -229,6 +319,24 @@ impl AttributeList {
         };
         if updated == FALSE {
             return Err(io::Error::last_os_error());
+        }
+        if !inherited.is_empty() {
+            // SAFETY: the listed pipe handles and their slice outlive the list and spawn call.
+            let updated = unsafe {
+                UpdateProcThreadAttribute(
+                    list.ptr(),
+                    0,
+                    usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+                        .expect("attribute ids fit in usize"),
+                    inherited.as_ptr().cast::<c_void>(),
+                    size_of_val(inherited),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            if updated == FALSE {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(list)
     }
@@ -245,6 +353,6 @@ impl Drop for AttributeList {
     }
 }
 
-fn size_u32<T>() -> u32 {
+pub(super) fn size_u32<T>() -> u32 {
     u32::try_from(size_of::<T>()).expect("Win32 structs are far smaller than 4 GiB")
 }

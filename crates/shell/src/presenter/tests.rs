@@ -17,7 +17,7 @@ use kumochi_scene::{
     theme::Theme,
 };
 
-use super::{Broken, Completion, Effect, PrepareJob, Presenter, RecoveryJob};
+use super::{AdmitJob, Broken, Completion, Effect, PrepareJob, Presenter, RecoveryJob};
 
 const GENERATION: u64 = 1;
 const RUN: RunId = RunId(5);
@@ -35,6 +35,9 @@ mod dead_dropper;
 
 #[path = "window_tests.rs"]
 mod consumption;
+
+#[path = "admit_tests.rs"]
+mod admission;
 
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
@@ -145,12 +148,21 @@ fn measure_v1_mirror_admission_at_caps() {
                     now,
                 )
                 .expect("legal mirrored update");
-            let elapsed = start.elapsed().as_nanos();
-            assert_eq!(mirror.scenes[&LIVE].state.object_count(), objects);
-            assert_eq!(mirror.scenes[&LIVE].state.revision(), index + 1);
+            let admission = only_admission(effects);
+            let receipt = start.elapsed().as_nanos();
+            let done = admission.run();
+            let start = Instant::now();
+            let effects = mirror.completed(done, now).expect("legal mirrored update");
             drop(effects);
+            let apply = start.elapsed().as_nanos();
+            let elapsed = receipt + apply;
+            assert_eq!(mirror.scenes[&LIVE].state.view().object_count(), objects);
+            assert_eq!(mirror.scenes[&LIVE].state.view().revision(), index + 1);
             if iteration >= 5 {
                 samples.push(elapsed);
+                println!(
+                    "v1_mirror_admission_parts receipt_ns={receipt} apply_ns={apply} sum_ns={elapsed}; reducer and effect selection, executor dispatch and pipe drain unmeasured"
+                );
             }
         }
         samples.sort_unstable();
@@ -230,12 +242,61 @@ fn live() -> (Presenter, Instant) {
     (presenter, now)
 }
 
-fn data(
+/// A frame as it arrives, admissions left to the caller.
+fn arrive(
     presenter: &mut Presenter,
     frame: DataToShell,
     now: Instant,
 ) -> Result<Vec<Effect>, Broken> {
     presenter.data(GENERATION, Deferred::new(frame, 0), FRAME, now)
+}
+
+/// A frame whose admissions run and answer at once, as a commit applied before the lane.
+fn data(
+    presenter: &mut Presenter,
+    frame: DataToShell,
+    now: Instant,
+) -> Result<Vec<Effect>, Broken> {
+    let effects = arrive(presenter, frame, now)?;
+    settle(presenter, effects, now)
+}
+
+/// Runs each admission among `effects` and answers it at `now`, until none is sent.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a second admission lane is a test failure, not a stream error"
+)]
+fn settle(
+    presenter: &mut Presenter,
+    mut effects: Vec<Effect>,
+    now: Instant,
+) -> Result<Vec<Effect>, Broken> {
+    let mut settled = Vec::new();
+    loop {
+        let mut admission = None;
+        for effect in effects {
+            match effect {
+                Effect::Admit(job) => {
+                    assert!(admission.is_none(), "one admission lane");
+                    admission = Some(job);
+                }
+                effect => settled.push(effect),
+            }
+        }
+        let Some(job) = admission else {
+            return Ok(settled);
+        };
+        effects = presenter.completed(job.run(), now)?;
+    }
+}
+
+fn commit_frame(scene: SceneId, index: u32, step: Step) -> DataToShell {
+    DataToShell::SceneStepCommit {
+        run: RUN,
+        scene,
+        index,
+        step,
+    }
 }
 
 fn begin(presenter: &mut Presenter, scene: SceneId, now: Instant) -> Vec<Effect> {
@@ -332,6 +393,22 @@ fn only_job(effects: Vec<Effect>) -> PrepareJob {
     let mut jobs = jobs(effects);
     assert_eq!(jobs.len(), 1);
     jobs.remove(0)
+}
+
+fn admissions(effects: Vec<Effect>) -> Vec<AdmitJob> {
+    effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Admit(job) => Some(job),
+            _ => None,
+        })
+        .collect()
+}
+
+fn only_admission(effects: Vec<Effect>) -> AdmitJob {
+    let mut admissions = admissions(effects);
+    assert_eq!(admissions.len(), 1);
+    admissions.remove(0)
 }
 
 fn zero_cut() -> StopCut {
@@ -694,6 +771,7 @@ fn live_frames_wait_for_recovery_and_then_apply_in_arrival_order() {
     let effects = presenter
         .completed(job.run(&mut Shaper), ms(now, 20))
         .expect("the batch");
+    let effects = settle(&mut presenter, effects, ms(now, 20)).expect("the held step");
     assert_eq!(credit(&effects), 2 * FRAME);
     assert_eq!(only_job(effects).scene(), LIVE);
     let effects = presenter.stop(RUN, ms(now, 30)).expect("a stop");
@@ -781,35 +859,48 @@ fn exhausted() -> (Presenter, Instant, Vec<PrepareJob>) {
 }
 
 #[test]
-fn a_step_that_finds_every_worker_slot_held_fails_at_its_deadline() {
+fn an_admission_that_finds_every_worker_slot_held_clears_its_scene_at_its_deadline() {
     let (mut presenter, now, _zombies) = exhausted();
     begin(&mut presenter, LIVE, now);
     let effects = commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step");
-    assert!(jobs(effects).is_empty());
+    assert!(effects.is_empty(), "no slot and no credit yet");
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
+    assert!(presenter.tick(ms(now, 249)).expect("a tick").is_empty());
     let effects = presenter.tick(ms(now, 250)).expect("a tick");
-    assert_eq!(
-        controls(&effects),
-        [&failed(LIVE, 0, SceneFailure::Timeout)]
-    );
+    assert_eq!(credit(&effects), FRAME);
+    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert!(!presenter.holds_scenes());
     assert_eq!(presenter.deadline(), None);
+    let late = commit(&mut presenter, LIVE, 0, rect("b"), now).expect("a cleared scene");
+    assert_eq!(credit(&late), FRAME);
+    assert!(controls(&late).is_empty());
 }
 
 #[test]
-fn a_freed_worker_slot_starts_the_waiting_step() {
+fn a_freed_worker_slot_starts_the_waiting_admission_on_the_same_clock() {
     let (mut presenter, now, mut zombies) = exhausted();
     begin(&mut presenter, LIVE, now);
     commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step");
     let zombie = zombies.pop().expect("a held slot");
     let effects = presenter
-        .completed(zombie.run(&mut Shaper), ms(now, 100))
+        .completed(zombie.run(&mut Shaper), ms(now, 249))
         .expect("a stale answer");
-    assert_eq!(only_job(effects).scene(), LIVE);
+    let admission = only_admission(effects);
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
+    let effects = presenter
+        .completed(admission.run(), ms(now, 249))
+        .expect("an admission");
+    assert_eq!(credit(&effects), FRAME);
+    assert_eq!(only_job(effects).scene(), LIVE);
+    assert_eq!(
+        presenter.deadline(),
+        Some(ms(now, 250)),
+        "the step was eligible from its commit"
+    );
 }
 
 #[test]
-fn a_slot_freed_after_the_waiting_step_s_deadline_fails_it_instead_of_starting_it() {
+fn a_slot_freed_at_or_after_the_waiting_admission_s_deadline_clears_its_scene() {
     for at in [250, 251] {
         let (mut presenter, now, mut zombies) = exhausted();
         begin(&mut presenter, LIVE, now);
@@ -818,14 +909,64 @@ fn a_slot_freed_after_the_waiting_step_s_deadline_fails_it_instead_of_starting_i
         let effects = presenter
             .completed(zombie.run(&mut Shaper), ms(now, at))
             .expect("a stale answer");
+        assert_eq!(credit(&effects), FRAME, "a slot freed at {at} ms");
         assert_eq!(
             controls(&effects),
-            [&failed(LIVE, 0, SceneFailure::Timeout)],
+            [&clear_drawing(vec![LIVE])],
             "a slot freed at {at} ms"
         );
-        assert!(jobs(effects).is_empty(), "a slot freed at {at} ms");
+        assert!(admissions(effects).is_empty(), "a slot freed at {at} ms");
         assert_eq!(presenter.deadline(), None, "a slot freed at {at} ms");
     }
+}
+
+/// Seven zombie slots, and LIVE's admitted step queued for the eighth: an earlier scene's
+/// admission took it first, and that scene's preparation, returned here, holds it now.
+fn queued() -> (Presenter, Instant, Vec<PrepareJob>, PrepareJob) {
+    let (mut presenter, now, mut zombies) = exhausted();
+    let earlier = SceneId(19);
+    begin(&mut presenter, earlier, now);
+    begin(&mut presenter, LIVE, now);
+    let zombie = zombies.pop().expect("a held slot");
+    let freed = presenter
+        .completed(zombie.run(&mut Shaper), now)
+        .expect("a stale answer");
+    assert!(freed.is_empty());
+    let frame = commit_frame(LIVE, 0, rect("queued"));
+    let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
+    let frame = commit_frame(earlier, 0, rect("e"));
+    assert!(
+        arrive(&mut presenter, frame, now)
+            .expect("a held step")
+            .is_empty()
+    );
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("LIVE's admission");
+    let admission = only_admission(effects);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("the earlier admission");
+    let holder = only_job(effects);
+    assert_eq!(holder.scene(), earlier);
+    assert_eq!(presenter.scenes[&LIVE].queue.len(), 1);
+    assert_eq!(presenter.workers(), 8);
+    (presenter, now, zombies, holder)
+}
+
+#[test]
+fn a_step_that_finds_every_worker_slot_held_fails_at_its_deadline() {
+    let (mut presenter, now, _zombies, _holder) = queued();
+    assert_eq!(presenter.deadline(), Some(ms(now, 250)));
+    let effects = presenter.tick(ms(now, 250)).expect("a tick");
+    assert_eq!(
+        controls(&effects),
+        [
+            &failed(SceneId(19), 0, SceneFailure::Timeout),
+            &failed(LIVE, 0, SceneFailure::Timeout)
+        ]
+    );
+    assert_eq!(presenter.deadline(), None);
 }
 
 #[test]
@@ -974,7 +1115,10 @@ fn a_job_discarded_with_a_broken_batch_frees_its_worker_slot() {
     begin(&mut presenter, LIVE, now);
     commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a held step");
     commit(&mut presenter, LIVE, 5, rect("b"), now).expect("a held step");
-    let broken = presenter.completed(job.run(&mut Shaper), ms(now, 20)).err();
+    let effects = presenter
+        .completed(job.run(&mut Shaper), ms(now, 20))
+        .expect("the batch and the first held step's admission");
+    let broken = settle(&mut presenter, effects, ms(now, 20)).err();
     assert_eq!(broken, Some(Broken::Index));
     assert_eq!(presenter.workers(), 0);
 }
@@ -1106,7 +1250,15 @@ fn jobs_answers_and_the_presenter_print_no_drawing_content() {
     };
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);
-    let effects = commit(&mut presenter, LIVE, 0, private.clone(), now).expect("a step");
+    let frame = commit_frame(LIVE, 0, private.clone());
+    let effects = arrive(&mut presenter, frame, now).expect("a step");
+    let printed = format!("{effects:?}");
+    assert!(printed.contains("Admit"), "{printed}");
+    assert!(!leaks(&printed), "{printed}");
+    let done = only_admission(effects).run();
+    let printed = format!("{done:?}");
+    assert!(!leaks(&printed), "{printed}");
+    let effects = presenter.completed(done, now).expect("an admission");
     let printed = format!("{effects:?}");
     assert!(printed.contains("Prepare"), "{printed}");
     assert!(!leaks(&printed), "{printed}");
@@ -1297,7 +1449,8 @@ fn a_failed_weak_entity_update_retires_its_captured_completion(cx: &mut gpui_kit
         panic!("a preparation completion");
     };
     assert_eq!(result.as_ref().expect("prepared step").index, 0);
-    let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.recovery_log()[0] else {
+    let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.view().recovery_log()[0]
+    else {
         panic!("the committed source");
     };
     let source = Arc::clone(step);
@@ -1451,8 +1604,8 @@ fn recovery_transfers_a_full_rest_charge_not_just_the_last_ready_delta() {
     recovered
         .completed(job.run(&mut Shaper), ms(now, 20))
         .expect("recovery answer");
-    assert_eq!(recovered.scenes[&LIVE].state.revision(), 2);
-    assert_eq!(recovered.scenes[&LIVE].state.object_count(), 1);
+    assert_eq!(recovered.scenes[&LIVE].state.view().revision(), 2);
+    assert_eq!(recovered.scenes[&LIVE].state.view().object_count(), 1);
     assert!(recovered.scenes[&LIVE].ready.is_empty());
     assert!(
         recovered.residency() > delta,
@@ -1472,11 +1625,9 @@ fn recovery_transfers_a_full_rest_charge_not_just_the_last_ready_delta() {
 #[test]
 fn queued_tickets_survive_halt_expiry_and_input_errors_until_retirement() {
     for case in 0..3 {
-        let (mut presenter, now, mut zombies) = exhausted();
-        begin(&mut presenter, LIVE, now);
-        let effects = commit(&mut presenter, LIVE, 0, rect("queued"), now).expect("queued step");
-        assert!(jobs(effects).is_empty());
-        let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.recovery_log()[0] else {
+        let (mut presenter, now, mut zombies, _holder) = queued();
+        let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.view().recovery_log()[0]
+        else {
             panic!("the queued step is recorded");
         };
         let probe = Arc::clone(step);
@@ -1502,10 +1653,16 @@ fn queued_tickets_survive_halt_expiry_and_input_errors_until_retirement() {
                 .expect("the old completion frees a slot")
         };
         let expected = match case {
-            0 => stop_scenes(vec![SceneCut {
-                scene: LIVE,
-                cut: zero_cut(),
-            }]),
+            0 => stop_scenes(vec![
+                SceneCut {
+                    scene: SceneId(19),
+                    cut: zero_cut(),
+                },
+                SceneCut {
+                    scene: LIVE,
+                    cut: zero_cut(),
+                },
+            ]),
             1 => failed(LIVE, 0, SceneFailure::Timeout),
             _ => failed(LIVE, 0, SceneFailure::Layout),
         };

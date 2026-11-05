@@ -24,6 +24,7 @@ mod presenter;
 mod runs;
 mod settings;
 mod strings;
+mod theme;
 mod threads;
 
 use std::process::ExitCode;
@@ -32,6 +33,17 @@ use kumochi_protocol::constants;
 use strings::Strings;
 
 fn main() -> ExitCode {
+    let Ok(flags) = presence::Launch::parse(std::env::args().skip(1)) else {
+        return ExitCode::FAILURE;
+    };
+    #[cfg(debug_assertions)]
+    if let Some(state) = flags.accounts_fixture {
+        let delay = flags
+            .quit_delay
+            .expect("fixture parsing requires a deadline");
+        presence::run_accounts_fixture(state, flags.accounts_appearance, delay);
+        return ExitCode::SUCCESS;
+    }
     if logging::init(constants::SHELL_LOG).is_err() {
         return ExitCode::FAILURE;
     }
@@ -67,13 +79,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let flags = match presence::Launch::parse(std::env::args().skip(1)) {
-        Ok(flags) => flags,
-        Err(error) => {
-            tracing::error!(%error, "can't start with these flags");
-            return ExitCode::FAILURE;
-        }
-    };
     let observer = match presence::Observer::prepare(flags.observer()) {
         Ok(observer) => observer,
         Err(error) => {
@@ -92,6 +97,7 @@ fn main() -> ExitCode {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            crate::theme::init(cx);
             cx.set_global(Strings::english());
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
             let started =

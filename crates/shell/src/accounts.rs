@@ -46,7 +46,9 @@ impl Accounts {
             | ErrorKey::UsageLimit
             | ErrorKey::AccountRefused
             | ErrorKey::RequestRefused
-            | ErrorKey::ResponseUnreadable => {}
+            | ErrorKey::ResponseUnreadable
+            | ErrorKey::SignInNeeded
+            | ErrorKey::ModelUnavailable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount
@@ -68,6 +70,14 @@ impl Accounts {
 
     pub(crate) fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
+            return false;
+        }
+        if op == AccountOp::SignIn
+            && self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.key() == ErrorKey::RevocationBacklog)
+        {
             return false;
         }
         match (&self.view, op) {

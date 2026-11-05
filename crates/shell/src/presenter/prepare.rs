@@ -7,12 +7,15 @@
 
 use std::{
     fmt,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use kumochi_protocol::message::SceneId;
+use kumochi_protocol::message::{DataToShell, SceneId};
 use kumochi_scene::{
-    GlobalBudget,
+    DetachedCandidate, GlobalBudget, SceneRead, StepError,
     deferred::Deferred,
     display::TextMeasure,
     layout::{self, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry},
@@ -40,6 +43,16 @@ pub(crate) struct RecoveryJob {
     slot: Arc<()>,
 }
 
+/// One commit's admission against a read-only snapshot of its scene, installed through the
+/// scene's binding when it comes back.
+pub(crate) struct AdmitJob {
+    id: u64,
+    read: SceneRead,
+    frame: Deferred<DataToShell>,
+    cancel: Arc<AtomicBool>,
+    slot: Arc<()>,
+}
+
 /// A job's answer, sent back to [`super::Presenter::completed`] whether or not it is still wanted.
 /// Its payload drops on the dropper thread wherever the answer is discarded.
 pub(crate) enum Completion {
@@ -50,6 +63,13 @@ pub(crate) enum Completion {
         result: Deferred<Result<PreparedStep, PrepareError>>,
         /// The full charge of the result's layout alone, for when it becomes rest.
         full_after: usize,
+        slot: Arc<()>,
+    },
+    /// An admission with the snapshot it read, which the install gives back; none if cancelled.
+    Admitted {
+        id: u64,
+        read: SceneRead,
+        result: Option<Result<DetachedCandidate, StepError>>,
         slot: Arc<()>,
     },
     /// A recovery batch, one result per scene, with the budget the recovered scenes are bound to.
@@ -110,6 +130,45 @@ impl PrepareJob {
     #[cfg(test)]
     pub(super) fn scene(&self) -> SceneId {
         self.scene
+    }
+}
+
+impl AdmitJob {
+    pub(super) fn new(
+        id: u64,
+        read: SceneRead,
+        frame: Deferred<DataToShell>,
+        cancel: Arc<AtomicBool>,
+        slot: Arc<()>,
+    ) -> Self {
+        Self {
+            id,
+            read,
+            frame,
+            cancel,
+            slot,
+        }
+    }
+
+    /// Admits on the calling worker thread, against the snapshot alone.
+    pub(crate) fn run(self) -> Completion {
+        let result = match &*self.frame {
+            DataToShell::SceneStepCommit { step, .. } if !self.cancel.load(Ordering::Relaxed) => {
+                Some(self.read.admit_detached(step))
+            }
+            _ => None,
+        };
+        Completion::Admitted {
+            id: self.id,
+            read: self.read,
+            result,
+            slot: self.slot,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -181,6 +240,14 @@ impl fmt::Debug for PrepareJob {
     }
 }
 
+impl fmt::Debug for AdmitJob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmitJob")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for RecoveryJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RecoveryJob")
@@ -201,6 +268,11 @@ impl fmt::Debug for Completion {
                 .field("scene", scene)
                 .field("ok", &result.is_ok())
                 .finish(),
+            Self::Admitted { id, result, .. } => f
+                .debug_struct("Admitted")
+                .field("id", id)
+                .field("ok", &result.as_ref().map(Result::is_ok))
+                .finish_non_exhaustive(),
             Self::Recovered { id, scenes, .. } => f
                 .debug_struct("Recovered")
                 .field("id", id)

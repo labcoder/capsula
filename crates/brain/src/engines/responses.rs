@@ -231,7 +231,7 @@ impl Round {
         self.events.push(TurnEvent::ToolCallStarted {
             call: call.clone(),
             name: match name {
-                "draw" => ToolName::Draw,
+                super::DRAW => ToolName::Draw,
                 _ => ToolName::Unknown,
             },
         });

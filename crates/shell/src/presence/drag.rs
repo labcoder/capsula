@@ -16,6 +16,8 @@ pub(crate) enum End {
     Released(Point<Pixels>),
     /// Esc.
     Cancelled,
+    /// Another pointer mode took over; this ending has no user effects.
+    Preempted,
     /// Capture went elsewhere, another button came up, a release was missed, or the window
     /// holding capture closed.
     Lost,
@@ -36,6 +38,12 @@ pub(crate) enum Event {
     },
     /// `Escape::CancelPull`.
     Escape,
+    /// The overlay input authority takes the pointer for selection.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "B3b preempts Kumo before selection capture")
+    )]
+    Preempt,
     /// The native bridge's `CaptureLost`: stamped `seq` in the UI thread's input sequence when
     /// it was emitted, with the button whose release caused it, or `None` for a loss from outside.
     CaptureLost {
@@ -115,6 +123,7 @@ impl DragOwner {
                 return Outcome::Ignored;
             }
             Event::Escape => End::Cancelled,
+            Event::Preempt => End::Preempted,
             Event::Move { pressed: None, .. }
             | Event::Up { .. }
             | Event::CaptureLost { .. }

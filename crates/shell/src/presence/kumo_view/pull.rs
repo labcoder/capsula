@@ -29,6 +29,10 @@ pub(in crate::presence) enum PullChanged {
     Ended(Generation, End),
 }
 
+pub(in crate::presence) struct LeaseReturned(pub(crate) crate::presenter::overlay_input::DragLease);
+
+impl EventEmitter<LeaseReturned> for KumoView {}
+
 impl EventEmitter<PullChanged> for KumoView {}
 
 impl KumoView {
@@ -73,7 +77,18 @@ impl KumoView {
         };
         let home = space.point(origin, centre);
         let grab = Grab::new(space, site.line, site.slot, home, motion(cx));
+        let Some(owner) = &self.owner else { return };
+        let Ok(Some(lease)) = owner.update(cx, |owner, _| owner.presenter.input.lease_drag())
+        else {
+            return;
+        };
+        self.lease = Some(lease);
         self.grab(event.button, seq, origin, event.position, grab, cx);
+        if !self.pull_live()
+            && let Some(lease) = self.lease.take()
+        {
+            cx.emit(LeaseReturned(lease));
+        }
     }
 
     /// Starts a pull at `at` in the peek whose client area starts at `origin`, unless one exists.
@@ -114,14 +129,14 @@ impl KumoView {
                 self.pulling.handle(Event::SourceClosed, self.origin)
             }
         };
-        Self::follow(outcome, cx);
+        self.follow(outcome, cx);
         self.pull_event(event, cx);
     }
 
     /// One event for the drag.
     pub(in crate::presence) fn pull_event(&mut self, event: Event, cx: &mut Context<'_, Self>) {
         let outcome = self.pulling.handle(event, self.origin);
-        Self::follow(outcome, cx);
+        self.follow(outcome, cx);
     }
 
     /// A presence window lost capture. The drag decides whether the loss ends it; one its own
@@ -142,11 +157,14 @@ impl KumoView {
     /// The release that took capture has been forwarded: a drag still waiting for it is lost.
     fn reconcile(&mut self, cx: &mut Context<'_, Self>) {
         let outcome = self.pulling.reconcile();
-        Self::follow(outcome, cx);
+        self.follow(outcome, cx);
     }
 
-    fn follow(outcome: Outcome, cx: &mut Context<'_, Self>) {
+    fn follow(&mut self, outcome: Outcome, cx: &mut Context<'_, Self>) {
         if let Outcome::Ended(generation, end) = outcome {
+            if let Some(lease) = self.lease.take() {
+                cx.emit(LeaseReturned(lease));
+            }
             cx.emit(PullChanged::Ended(generation, end));
         }
     }
