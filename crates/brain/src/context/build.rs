@@ -183,7 +183,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 
 /// One run's input items. Its history results are re-read, adding each task they show text
 /// from to `sources`; `local_time` is added to the current run's turn.
-fn render(
+pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
     items: &[Item],

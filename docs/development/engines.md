@@ -129,17 +129,19 @@ that.
 ## Background jobs
 
 A job is one model request outside any run, in a one-job slot the coordinator owns
-(`coordinator/job.rs`; the pure parts are in `jobs.rs`). PR 16 adds the title job, and PR 17
-adds compaction.
+(`coordinator/job.rs`; the pure parts are in `jobs.rs` and `context/compact.rs`). A task's run
+starts a title job, and when that ends on its own, a compaction job for the same thread (see
+[Compaction](#compaction)); Kumo's run starts compaction only.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Reading: a task's run ends Done while an account is signed in
-    Reading --> Sending: the read finds first words and no delete reached the task
-    Sending --> Writing: the round completes with a title
-    Writing --> Idle: TitleSet for this job
-    Reading --> Idle: a new run, a delete, sign-out, no first words, failure
+    Idle --> Reading: a run ends Done while an account is signed in
+    Reading --> Sending: the read finds work and no delete reached what it read
+    Sending --> Writing: the round completes with a title or summary
+    Writing --> Idle: TitleSet or SummaryStored for this job
+    Idle --> Reading: a title job ended on its own, so compaction follows
+    Reading --> Idle: a new run, a delete, sign-out, nothing to do, failure
     Sending --> Idle: a new run, a delete, sign-out, a lease deadline, failure
 ```
 
@@ -150,7 +152,7 @@ stateDiagram-v2
   the next `Done`. A job never retries on its own.
 - **Key.** `JobKey { thread, serial }`, the serial from the build attempts' counter, so no key
   repeats. An input for any other key is stale.
-- **Read.** `StoreOp::ReadTitle` runs on the page reader after every op sent before it, in one read
+- **Read.** `StoreOp::ReadJob` runs on the page reader after every op sent before it, in one read
   transaction: the task's first user message, its deletion generation and its model choice. Like a
   build, the job keeps the threads a delete pending at its start, or accepted since, reached, so a
   delete of the task voids it at the read, at the grant and when the answer arrives.
@@ -176,7 +178,42 @@ stateDiagram-v2
   anything else that account input does. Sign-out cancels the job, so nothing is written and no
   request starts until an account signs in again. A grant and a write each need the job's own
   account generation, and an older generation's `SignedOut` changes nothing.
-- **Logs** carry the job's key and whether it titled, never the title, the ask or the prompt.
+- **Logs** carry the job's key and kind and whether it produced anything, never the title,
+  summary, ask or prompt.
+
+## Compaction
+
+Compaction keeps a long thread's requests bounded without losing its history (`context/compact.rs`,
+`store/summaries.rs`). A summary covers a thread's events `[first_event, last_event]`, and a build
+uses the thread's newest summary in place of every event through `last_event`. The events stay, so
+`read_history` and search still reach every one, and a summary is never the only copy.
+
+- **After a run.** When a title job ends on its own (and at once for Kumo's runs, which have no
+  title job), a compaction job for the same thread takes the slot, under every fence above. Its
+  read sums the byte length of the text and bodies of every ended run no summary covers, ÷ 4 as
+  estimated tokens [guess: the catalog has no context sizes yet]. Under `COMPACT_AT` = 24k [guess]
+  it stops with no request. Debug builds take `KUMOCHI_COMPACT_AT` to lower it for the live check.
+  Measuring the whole uncovered backlog, not the newest eight runs, means runs that leave the raw
+  window are summarized even while the newest stay small.
+- **What it summarizes.** The uncovered runs older than the newest eight [guess] are eligible; with
+  none, there's no request. The request carries `prompts/summary.md` with the run's names, the
+  previous summary, and the longest prefix of whole eligible runs that fits `SUMMARY_INPUT` = 96 KiB
+  [guess], rendered by the builder's own reference rendering in the job's read transaction, so a
+  deleted task's range renders as the removed marker. The cut is always at a run boundary, so a
+  call never leaves its result. If the oldest eligible run alone doesn't fit, the job stops with no
+  request and coverage doesn't move (`shortcut:` one such run stalls compaction behind it until a
+  continuation scheme exists). The new summary replaces the previous one, so it covers from the
+  previous summary's first event through the last whole run it carried.
+- **Answer.** At most 16 KiB of text, taken only when the round completes, trimmed and cut to
+  `MAX_SUMMARY` = 8 KiB [guess] on a character boundary. Empty output fails the job.
+- **Write.** `StoreSummary { owner: SendKey::Job(key), generation, covers, … }` inserts only while
+  the thread is live in the generation the read found, so a delete during compaction stores
+  nothing. `SummaryStored { owner, applied }` ends the job only for the slot's own key.
+- **Deletes.** A task's own summaries go with its other rows. A Kumo summary that drew on a deleted
+  task keeps that text, as Kumo's replies do (OSC-161), so no summary records its sources; a
+  delete accepted while Kumo's compaction is reading or sending voids it like any job.
+
+Inline compaction, for a run whose own build doesn't fit, comes in a later PR.
 
 ## The bound
 

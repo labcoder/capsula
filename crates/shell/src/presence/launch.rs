@@ -56,6 +56,7 @@ impl Launch {
                             Some("light") => Appearance::Light,
                             Some("dark") => Appearance::Dark,
                             Some("large") => Appearance::Large,
+                            Some("constrained") => Appearance::Constrained,
                             _ => return Err(OpenError::AccountsFixture),
                         });
                 }
@@ -277,6 +278,10 @@ mod tests {
             launch(args(&["--accounts-fixture=enabled", "--smoke"])),
             Err(OpenError::AccountsFixture)
         ));
+        assert!(matches!(
+            launch(args(&["--accounts-appearance=constrained", "--smoke"])),
+            Err(OpenError::AccountsFixture)
+        ));
     }
 
     #[cfg(debug_assertions)]
@@ -287,6 +292,7 @@ mod tests {
             ("light", Appearance::Light),
             ("dark", Appearance::Dark),
             ("large", Appearance::Large),
+            ("constrained", Appearance::Constrained),
         ] {
             let flags = launch(
                 [
@@ -301,6 +307,27 @@ mod tests {
         }
         for flags in [
             vec!["--accounts-appearance=light", "--smoke"],
+            vec!["--accounts-appearance=constrained", "--smoke"],
+            vec![
+                "--accounts-fixture=backlog",
+                "--accounts-appearance=constrained",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=Constrained",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=constraine",
+                "--smoke",
+            ],
+            vec![
+                "--accounts-fixture=confirmation",
+                "--accounts-appearance=constrained",
+                "--accounts-appearance=constrained",
+                "--smoke",
+            ],
             vec![
                 "--accounts-fixture=enabled",
                 "--accounts-appearance",

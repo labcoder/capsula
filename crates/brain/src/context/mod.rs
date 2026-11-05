@@ -8,6 +8,7 @@
 
 pub(crate) mod bound;
 pub(crate) mod build;
+pub(crate) mod compact;
 #[cfg(test)]
 mod tests;
 

@@ -1135,7 +1135,7 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
     let mut seen = brain.observe();
     let mut titles = move || {
         std::iter::from_fn(|| seen.try_recv().ok())
-            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadTitle(_))))
+            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadJob(_))))
             .count()
     };
     let ((control, data), mut shell) = duplex();
