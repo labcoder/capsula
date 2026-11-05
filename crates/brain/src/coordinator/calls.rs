@@ -12,10 +12,6 @@ impl Coordinator {
     /// hand calls here; a call whose run isn't the current, started one, or whose thread is being
     /// deleted, runs nothing. Nor does a call from a build that rendered a thread a delete has
     /// reached since: its response is dropped and the round is built again, as for a voided send.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "13b-2's tool loop and C4b-2's listener call it")
-    )]
     pub(crate) fn tool_call(
         &mut self,
         caller: Caller,
@@ -66,20 +62,34 @@ impl Coordinator {
     }
 
     /// A call's write committed. Its callers are answered only while their run is current and,
-    /// for MCP, its launch is still the authorized one.
-    pub(super) fn call_committed(&mut self, key: &LedgerKey) -> Result<(), Stale> {
+    /// for MCP, its launch is still the authorized one; a model call answers its round's call,
+    /// and the round is stored once every call has its answer.
+    pub(super) fn call_committed(
+        &mut self,
+        key: &LedgerKey,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
         let run = self.current(key.run)?;
         let answers = run.ledger.committed(key);
         let authorized = |caller: &Caller| match caller {
             Caller::Model { .. } => true,
             Caller::Mcp { launch, .. } => run.mcp == Some(*launch),
         };
-        let answers: Vec<_> = answers
-            .into_iter()
-            .filter(|(caller, _)| authorized(caller))
-            .collect();
-        run.answered.extend(answers);
-        Ok(())
+        // A model call answers its round's call once, so the round stores one result per call;
+        // any other answer waits in `answered`, which no round reads.
+        for (caller, output) in answers.into_iter().filter(|(caller, _)| authorized(caller)) {
+            let taken = match &caller {
+                Caller::Model { call, .. } => run.tools.answer(call, output.clone()),
+                Caller::Mcp { .. } => false,
+            };
+            if !taken {
+                run.answered.push((caller, output));
+            }
+        }
+        if !run.tools.dispatched() {
+            return Ok(());
+        }
+        self.store_round(key.run, effects)
     }
 
     /// A call's write failed: its key stays refused and the run fails.
