@@ -21,7 +21,7 @@ env:
 
 jobs:
   check:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'cloud-ci')
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'cloud-ci') && (github.event.action != 'labeled' || github.event.label.name == 'cloud-ci'))
     name: fmt, deny, clippy, test
     runs-on: windows-latest
     timeout-minutes: 40
