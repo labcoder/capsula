@@ -178,7 +178,11 @@ sequenceDiagram
   empty the lane is stuck: it refuses everything and never lets the lock go.
 - **Bounds.** The queue holds 4 jobs and refuses more without waiting. stdout is capped at 4 KiB for
   Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
-  One 10-second deadline [guess] covers the exit and both pipes.
+  A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
+  read is retried.
+- **Time.** A call gets 10 seconds [guess] to exit, then it's ended. Ending it is bounded but
+  separate: up to 5 seconds for its job to be confirmed empty, then about a second for each pipe
+  to end. The lock stays held throughout, so a call can take up to about 17 seconds.
 - **The fence.** Each job carries the generation it was queued under, and a job from an older
   generation does nothing. Finds asked for while one runs coalesce into one more.
 - **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the

@@ -3,9 +3,10 @@
 //! held grandchild's appends a line to `starts.log` in its working folder: its arguments, a tab,
 //! then its whole environment.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Read, Write as _};
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +18,7 @@ use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
 
 use super::{
     DEADLINE, Done, Failure, Host, LANE_QUEUE, Lane, Outcome, Program, STATUS_CAP, STDERR_CAP,
-    VERSION_CAP, Work,
+    VERSION_CAP, Work, drain, output,
 };
 use crate::engines::claude_code::auth::StatusFailure;
 use crate::engines::claude_code::install::FindError;
@@ -325,13 +326,80 @@ async fn the_child_sees_only_kumochis_folders_and_the_system_environment() {
         Some(base.owned().join("config"))
     );
     assert_eq!(value(planted), None, "nothing is inherited");
+    // Kumochi's own folders are the only paths under the real profile a child may see.
     for (name, value) in &env {
-        assert_ne!(
-            Path::new(value),
-            real_profile,
-            "{name} names the real profile"
-        );
+        for path in value.split(';').map(Path::new) {
+            assert!(
+                !path.starts_with(&real_profile) || path.starts_with(&base.0),
+                "{name} names a folder in the real profile"
+            );
+        }
     }
+}
+
+/// A pipe that gives each step in turn, then its end.
+struct Script(VecDeque<io::Result<Vec<u8>>>);
+
+impl Script {
+    fn new(steps: impl IntoIterator<Item = io::Result<Vec<u8>>>) -> Self {
+        Self(steps.into_iter().collect())
+    }
+}
+
+impl Read for Script {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.0.pop_front() {
+            None => Ok(0),
+            Some(Err(error)) => Err(error),
+            Some(Ok(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+    }
+}
+
+const ANSWER: &[u8] = b"2.1.306 (Claude Code)\n";
+
+fn drained(pipe: Script) -> Option<super::Drained> {
+    drain(pipe, VERSION_CAP)
+        .recv_timeout(Duration::from_secs(5))
+        .ok()
+}
+
+fn whole() -> Script {
+    Script::new([Ok(ANSWER.to_vec())])
+}
+
+fn broken() -> Script {
+    Script::new([Ok(ANSWER.to_vec()), Err(io::ErrorKind::Other.into())])
+}
+
+#[test]
+fn a_pipe_that_fails_after_a_whole_answer_fails_the_call() {
+    assert_eq!(
+        output(drained(broken()), drained(Script::new([]))),
+        Err(Failure::Pipe),
+        "stdout"
+    );
+    assert_eq!(
+        output(drained(whole()), drained(broken())),
+        Err(Failure::Pipe),
+        "stderr"
+    );
+}
+
+#[test]
+fn an_interrupted_read_is_retried_to_the_end() {
+    let interrupted = Script::new([
+        Ok(ANSWER[..4].to_vec()),
+        Err(io::ErrorKind::Interrupted.into()),
+        Ok(ANSWER[4..].to_vec()),
+    ]);
+    assert_eq!(
+        output(drained(interrupted), drained(Script::new([]))),
+        Ok(ANSWER.to_vec())
+    );
 }
 
 #[tokio::test]

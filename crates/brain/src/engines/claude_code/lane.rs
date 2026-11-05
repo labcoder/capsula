@@ -4,7 +4,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, PipeReader, Read as _};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
@@ -27,7 +27,8 @@ pub(crate) const VERSION_CAP: usize = 4 * 1024;
 pub(crate) const STATUS_CAP: usize = 64 * 1024;
 /// stderr is read and dropped, up to this.
 pub(crate) const STDERR_CAP: usize = 64 * 1024;
-/// One call's whole budget, from its start to its exit and both pipes' end [guess].
+/// How long a call may run before it's ended [guess]. Ending it then takes up to the job's own
+/// bound to confirm empty, and up to [`PIPE_GRACE`] for each pipe.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
 /// How often a running call looks at its deadline and at closing.
 const POLL: Duration = Duration::from_millis(20);
@@ -36,6 +37,7 @@ const PIPE_GRACE: Duration = Duration::from_secs(1);
 
 /// What the lane starts. `prefix` comes before the entry point's own arguments; only the tests'
 /// fake has one.
+#[derive(Clone)]
 pub(crate) struct Program {
     pub(crate) exe: PathBuf,
     pub(crate) prefix: Vec<OsString>,
@@ -91,6 +93,8 @@ pub(crate) enum Failure {
     Deadline,
     /// It printed more than its cap.
     TooLong,
+    /// A pipe failed before its end.
+    Pipe,
     /// `--version` failed or printed no version.
     Version,
     Status(StatusFailure),
@@ -241,14 +245,14 @@ impl Worker {
                 Ok(Outcome::Version(version))
             }
             Work::Status => {
-                let Some((program, version)) = self.found.take() else {
-                    return Err(Failure::Find(FindError::NotFound));
-                };
+                let (program, version) = self
+                    .found
+                    .clone()
+                    .ok_or(Failure::Find(FindError::NotFound))?;
                 let reviewed = policy::reviewed(version).map_err(Failure::Unsupported)?;
                 let folders = self.preflight(Some(reviewed.policy))?;
-                let called = self.call(&program, &folders.paths, &EntryPoint::Status, STATUS_CAP);
-                self.found = Some((program, version));
-                let (exit, stdout) = called?;
+                let (exit, stdout) =
+                    self.call(&program, &folders.paths, &EntryPoint::Status, STATUS_CAP)?;
                 let signed_in = auth::parse_status(&stdout, exit, &folders.paths.config)
                     .map_err(Failure::Status)?;
                 Ok(Outcome::Status { version, signed_in })
@@ -286,8 +290,8 @@ impl Worker {
         owned_folders(&self.host.base).map_err(|_| Failure::Folders)
     }
 
-    /// Runs one call to its end: its exit, its job emptied and both pipes closed, all by one
-    /// deadline. The exit code and stdout, or why not.
+    /// Runs one call to its end: its exit within [`DEADLINE`], then its job emptied and both pipes
+    /// ended, each within its own bound. The exit code and stdout, or why not.
     fn call(
         &mut self,
         program: &Program,
@@ -334,13 +338,8 @@ impl Worker {
             .max(PIPE_GRACE);
         let stdout = stdout.and_then(|pipe| pipe.recv_timeout(remaining).ok());
         let stderr = stderr.and_then(|pipe| pipe.recv_timeout(PIPE_GRACE).ok());
-        let (Some(exit), Some(stdout), Some(stderr)) = (exit, stdout, stderr) else {
-            return Err(Failure::Deadline);
-        };
-        if stdout.over || stderr.over {
-            return Err(Failure::TooLong);
-        }
-        Ok((exit, stdout.bytes))
+        let exit = exit.ok_or(Failure::Deadline)?;
+        Ok((exit, output(stdout, stderr)?))
     }
 }
 
@@ -371,25 +370,47 @@ fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
     Ok(Folders { paths, _held: held })
 }
 
-/// A pipe read to its end: the first `cap` bytes, and whether there were more.
+/// A pipe read to its end: the first `cap` bytes, whether there were more, and whether a read
+/// failed before the end.
 struct Drained {
     bytes: Vec<u8>,
     over: bool,
+    broken: bool,
+}
+
+/// stdout's bytes, when both pipes reached their end, unbroken and within their caps.
+fn output(stdout: Option<Drained>, stderr: Option<Drained>) -> Result<Vec<u8>, Failure> {
+    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+        return Err(Failure::Deadline);
+    };
+    if stdout.broken || stderr.broken {
+        return Err(Failure::Pipe);
+    }
+    if stdout.over || stderr.over {
+        return Err(Failure::TooLong);
+    }
+    Ok(stdout.bytes)
 }
 
 /// Reads `pipe` to its end on a thread, keeping at most `cap` bytes; the receiver gets them once
 /// it has ended.
-fn drain(mut pipe: PipeReader, cap: usize) -> std_mpsc::Receiver<Drained> {
+fn drain(mut pipe: impl Read + Send + 'static, cap: usize) -> std_mpsc::Receiver<Drained> {
     let (done, drained) = std_mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("claude-code-pipe".to_owned())
         .spawn(move || {
             let mut bytes = Vec::new();
             let mut over = false;
+            let mut broken = false;
             let mut chunk = [0; 4096];
             loop {
                 match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => {
+                        broken = true;
+                        break;
+                    }
                     Ok(read) => {
                         let room = (cap + 1).saturating_sub(bytes.len()).min(read);
                         bytes.extend_from_slice(&chunk[..room]);
@@ -398,7 +419,12 @@ fn drain(mut pipe: PipeReader, cap: usize) -> std_mpsc::Receiver<Drained> {
                 }
             }
             bytes.truncate(cap);
-            done.send(Drained { bytes, over }).ok();
+            done.send(Drained {
+                bytes,
+                over,
+                broken,
+            })
+            .ok();
         });
     // With no reader thread the receiver gets nothing, which ends the call as `Deadline`.
     drop(spawned);

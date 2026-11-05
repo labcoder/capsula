@@ -283,3 +283,32 @@ fn the_default_model_persists_and_a_bad_one_reads_as_unset() {
         assert_eq!(reload(), expected, "{text}");
     }
 }
+
+#[test]
+fn claude_code_is_on_unless_the_file_could_have_turned_it_off() {
+    let cases: [(&str, Option<&str>, bool); 7] = [
+        ("no-file", None, true),
+        ("no-section", Some("onboarded = true\n"), true),
+        ("no-key", Some("[claude_code]\n"), true),
+        ("on", Some("[claude_code]\nenabled = true\n"), true),
+        ("off", Some("[claude_code]\nenabled = false\n"), false),
+        ("mistyped", Some("[claude_code]\nenabled = \"no\"\n"), false),
+        ("not-a-section", Some("claude_code = false\n"), false),
+    ];
+    for (name, text, enabled) in cases {
+        let scratch = Scratch::new(&format!("config-claude-{name}"));
+        let dir = dir(&scratch);
+        if let Some(text) = text {
+            std::fs::write(dir.join(CONFIG_FILE), text).expect("seeded");
+        }
+        let config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.claude_code_enabled(), enabled, "{name}");
+    }
+    let scratch = Scratch::new("config-claude-unreadable");
+    let dir = dir(&scratch);
+    std::fs::write(dir.join(CONFIG_FILE), "[claude_code\n").expect("seeded");
+    assert!(
+        !Config::load(Some(dir), ThreadId(1)).claude_code_enabled(),
+        "a file that can't be parsed may have turned it off"
+    );
+}

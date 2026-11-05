@@ -167,9 +167,11 @@ fn failed(failure: Failure) -> Option<ClaudeCodeView> {
         Failure::Policy(policy) => ClaudeCodeView::PolicyFailed(policy),
         Failure::Deadline => ClaudeCodeView::AuditFailed(AuditFailed::Deadline),
         Failure::Version => ClaudeCodeView::AuditFailed(AuditFailed::Version),
-        Failure::Folders | Failure::Spawn | Failure::TooLong | Failure::Status(_) => {
-            ClaudeCodeView::AuditFailed(AuditFailed::Malformed)
-        }
+        Failure::Folders
+        | Failure::Spawn
+        | Failure::TooLong
+        | Failure::Pipe
+        | Failure::Status(_) => ClaudeCodeView::AuditFailed(AuditFailed::Malformed),
     })
 }
 
