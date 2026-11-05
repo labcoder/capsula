@@ -169,9 +169,13 @@ pub const FOCUS_INPUT_MARKER: usize = 0x4350_5346;
 /// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
 pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
 
-/// Kumochi's own Claude Code configuration folder (`CLAUDE_CONFIG_DIR`), in the [`DATA_DIR`]
-/// folder under `%LOCALAPPDATA%`. Claude Code keeps its sign-in there; Kumochi never opens it.
+/// Kumochi's own Claude Code folder, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`: its
+/// `config` folder is `CLAUDE_CONFIG_DIR`, where Claude Code keeps its sign-in and Kumochi never
+/// looks, beside the profile, application data, temporary and working folders it's given.
 pub const CLAUDE_CODE_DIR: &str = "claude-code";
+/// The lock a brain holds, beside [`CLAUDE_CODE_DIR`], for as long as any `claude` it started
+/// may still be running, so no other brain starts one against the same folder.
+pub const CLAUDE_CODE_LOCK: &str = "claude-code.lock";
 /// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
 /// `%LOCALAPPDATA%`.
 pub const ENGINE_DIR: &str = "engine";

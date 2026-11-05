@@ -12,7 +12,7 @@
     not(test),
     expect(dead_code, reason = "the claude engine (slice 8's C5b) drives it")
 )]
-mod claude_code;
+pub(crate) mod claude_code;
 #[cfg(debug_assertions)]
 pub(crate) mod fixture;
 pub(crate) mod responses;

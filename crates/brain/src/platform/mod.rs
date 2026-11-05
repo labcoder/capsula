@@ -42,6 +42,10 @@ pub use windows::{
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(windows)]
+pub(crate) use windows::{Untrusted, hold_chain, owner_only_dir};
+#[cfg(all(test, windows))]
+pub(crate) use windows::{fake_claude::FAKE_CLAUDE, local_app_data};
+#[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
