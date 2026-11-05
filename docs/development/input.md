@@ -416,6 +416,10 @@ input-free repaints and a guarded wait produce a completed CSV that must have ze
 eligible dock swapchain before the main trace starts.
 
 Every main-trace swapchain has the same first-present seed rule, including the status panel.
+The v1 CSV parser accepts a finite negative `msUntilRenderStart`: GPU work can start before
+the Present call. Other timing columns, including `msUntilRenderComplete` and `msUntilDisplayed`,
+remain nonnegative. The render-start offset does not change present/display endpoints or gate
+budgets; those still use raw QPC and the validated display delay.
 Joins consider that derived seed alongside raw rows, using the same uniqueness, drop and reuse
 checks. Reports retain each sample's CSV/seed provenance and the seed derivation; raw CSV rows
 stay unchanged. A seed is eligible only when the first emitted row is displayed, its
