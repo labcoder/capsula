@@ -259,9 +259,9 @@ pub struct AccountState {
     refused: Option<u64>,
     /// The wall time the latest timed input carried, for the expiry of a set saved since.
     now: Option<u64>,
-    /// The generation a session the provider ended left: the registration and email stay, shown
-    /// as `SignInAgain` until the account moves again.
-    ended: Option<u64>,
+    /// The generation a session ended in, and why: the registration and email stay, shown as
+    /// `SignInAgain` until the account moves again.
+    ended: Option<(u64, ErrorKey)>,
     jobs: VecDeque<Queued>,
     flight: Option<Flight>,
     shown: Option<AccountView>,
@@ -799,7 +799,7 @@ impl AccountState {
             .is_some_and(|tokens| tokens.refresh_sent)
         {
             tracing::warn!("a refresh's answer was never saved; the session needs a new sign-in");
-            self.ended = Some(self.generation);
+            self.ended = Some((self.generation, ErrorKey::RenewalUnconfirmed));
         }
         self.loaded = Loaded {
             notice: marker.notice,

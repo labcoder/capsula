@@ -192,16 +192,9 @@ impl Coordinator {
             .as_ref()
             .filter(|run| run.finishing && !run.outstanding() && !self.drawing.pending_for(run.id))
             .map(|run| run.id);
-        if let Some(run) = done
-            && let Ok(done) = self.take(run)
-        {
-            self.end(
-                done,
-                crate::store::RunEnd::Done,
-                None,
-                super::Notify::Shell,
-                effects,
-            );
+        if let Some(run) = done {
+            self.round_end(run, effects)
+                .expect("the finishing run is current");
         }
         let runs: Vec<_> = self.ending.iter().map(|run| run.id).collect();
         for run in runs {

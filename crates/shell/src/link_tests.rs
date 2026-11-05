@@ -641,6 +641,74 @@ fn pings_are_answered_and_run_states_passed_on() {
 }
 
 #[test]
+fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
+    use kumochi_protocol::message::{
+        ActionState, ContentHash, DraftId, GitHubView, IssueBody, IssueCard, IssueRefused,
+        IssueTitle, StateVersion,
+    };
+
+    let link = attended("staged-issues");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for message in [
+        ControlToShell::GitHub(GitHubView::Requesting),
+        ControlToShell::ActionState {
+            draft: DraftId(9),
+            version: StateVersion(1),
+            state: ActionState::Draft,
+            approval: None,
+        },
+        ControlToShell::IssueRefused {
+            draft: DraftId(9),
+            reason: IssueRefused::NotAllowedNow,
+        },
+        ControlToShell::Ping,
+    ] {
+        frame::write(&mut &link.control, &message, Pipe::Control).expect("written");
+    }
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong)
+    );
+    let card = DataToShell::IssueCard(IssueCard {
+        draft: DraftId(9),
+        thread: ThreadId(3),
+        repo: None,
+        account: None,
+        title: IssueTitle::new("Fix layout").expect("title"),
+        body: IssueBody::new("Private details").expect("body"),
+        hash: ContentHash([0; 32]),
+        approval: None,
+        version: StateVersion(1),
+        state: ActionState::Draft,
+    });
+    let size = frame::encode(&card, Pipe::Data).expect("frame").len();
+    frame::write(&mut &*link.data, &card, Pipe::Data).expect("written");
+    let LinkEvent::Data {
+        generation,
+        message,
+        bytes,
+    } = next(&events)
+    else {
+        panic!("only the card reaches the UI")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(message, card);
+    assert_eq!(usize::try_from(bytes).expect("small"), size);
+    let mut runs = Runs::default();
+    let credit = runs.apply_data(message, bytes);
+    assert_eq!(credit, bytes);
+    assert_eq!(runs.shown(), None);
+    session.grant(credit);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::Credit { bytes })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn the_ui_s_messages_go_out_on_their_pipes_and_credit_adds_up() {
     let link = attended("outbox");
     let events = patient(link.events);
