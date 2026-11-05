@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::constants::CREDENTIAL_SERVICE;
+use kumochi_protocol::constants::{ACCOUNT_CHUNKED_RECORDS, CREDENTIAL_SERVICE, account_target};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -51,8 +51,8 @@ enum Chunked {
 impl Chunked {
     const fn name(self) -> &'static str {
         match self {
-            Self::Account => "chatgpt",
-            Self::Revoke => "revoke",
+            Self::Account => ACCOUNT_CHUNKED_RECORDS[0],
+            Self::Revoke => ACCOUNT_CHUNKED_RECORDS[1],
         }
     }
 
@@ -385,7 +385,7 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     fn target(&self, entry: &str) -> String {
-        format!("{}/{entry}", self.service)
+        account_target(&self.service, entry)
     }
 
     fn manifest(&self, record: Chunked) -> Result<Option<Manifest>, VaultError> {

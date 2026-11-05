@@ -95,7 +95,8 @@ revision; changing a name never retargets input. See [settings](settings.md).
 ## Page state
 
 `shell/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
-and nonblocking requests; `presence/thread_view.rs` composes the two virtualized lists:
+and nonblocking requests; `presence/thread_view.rs` composes the task list with the retained
+`presence/messages.rs` conversation component:
 
 - gpui-kit's `ListState<ThreadsDelegate>` supplies thread selection, search, and load-more;
 - GPUI's variable-height `list()` supplies the messages, displayed oldest first. Older pages
@@ -103,6 +104,18 @@ and nonblocking requests; `presence/thread_view.rs` composes the two virtualized
   the focused message region; its scrollbar and Older messages command are also available.
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
+
+`Messages` owns the message region's focus, scrollbar, page-navigation keys and measurement
+invalidation. Its Older messages callback retains the model it belongs to, so it never pages
+another surface's selected task. Moving the component out of Tasks does not change its layout
+or rendering.
+
+Presence keeps two independent `Threads` models: Tasks owns browsed history, while the focused
+chat history follows `Runs::thread()`. The latter is prepared while typing is visible; the
+typing panel's visible answer remains unchanged until the chat surface is introduced. Both
+models receive connection, settings, run, rename, title-change and deletion updates. Browsing
+does not select the chat's task. Every chat show selects the focused task before refreshing,
+including reopening with unchanged focus after a hide cleared its selection.
 
 The list highlight follows changes to `Threads.open`, including Back to Kumo and hide/reopen.
 Unrelated model notifications preserve a row highlighted with the arrow keys, so Enter still
@@ -138,7 +151,12 @@ sequenceDiagram
   UI->>Core: Credit for the frame taken
 ```
 
-There is at most one unanswered request for the threads list and one for events. Changing the
+Each model has at most one unanswered request for the task list and one for events. Together
+they can occupy all four of the brain's page slots; another page consumer must share this cap,
+not add a fifth request. Tasks allocates even request ids (starting at 2), and chat allocates odd
+ids (starting at 1). Each sequence advances by two, including wrapping, and is retained across
+hide and reconnect. Presence routes each reply by parity to exactly one model and returns that
+frame's data credit once, whether the model applies it or drops it. Changing the
 query or open thread invalidates its pending reply but does not free its slot: the replacement
 waits until that reply is taken. Request ids are checked when replies are applied. Closing the
 thread drops its eventual page too, and dropped page frames still earn credit. Page frames
@@ -190,8 +208,8 @@ bytes since SQLite's character functions stop at a NUL, and the rows past the bu
 in one pass by their own encoded sizes. Defensive truncation also makes a single impossible, oversized stored title fit;
 normal titles are already limited by the coordinator.
 
-Two shell page requests occupy at most 64 KiB of frame bytes, plus bounded queue metadata,
-leaving roughly 448 KiB of the 512 KiB data queue for runs. The brain permits four unanswered
+Four shell page requests occupy at most 128 KiB of frame bytes, plus bounded queue metadata,
+leaving roughly 384 KiB of the 512 KiB data queue for runs. The brain permits four unanswered
 page requests [guess], counting a reply until its write finishes; a fifth breaks the connection.
 Pages share credit, the queue cap, and the stall watchdog with run data. At the cap, engine
 events and new turns wait. RunEnd keeps its existing ordered, one-event-past-the-cap allowance.
