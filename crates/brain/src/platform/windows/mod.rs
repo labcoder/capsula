@@ -1,26 +1,24 @@
 //! Win32 implementations of the brain's platform functions.
 
 mod credential;
+mod fault;
 mod folders;
 mod fs;
 mod job;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "PR 4b's speech worker calls it")
-)]
 mod library;
 mod pipe;
 mod policy;
 mod process;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "PR 4b's speech worker stages its natives")
-)]
 mod protected;
 mod root_store;
 mod spawn;
 
 pub(crate) use credential::WindowsCredentialStore;
+#[cfg(debug_assertions)]
+pub(crate) use fault::call_throwing_export;
+pub use fault::quiet_failures;
+#[cfg(debug_assertions)]
+pub use fault::raise_access_violation;
 pub use folders::{config_dir, data_dir, session_lock_path};
 pub use fs::{free_space, links_unsupported, replace_file};
 pub use job::{ChildPipes, Helper, Job};

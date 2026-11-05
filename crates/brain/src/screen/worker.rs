@@ -1,8 +1,10 @@
 use std::io::{self, Write as _};
 
-use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::frame;
 
-use super::wire::{Request, RequestBody, pong};
+use super::supervisor::Screen;
+use super::wire::{ReplyBody, RequestBody};
+use crate::supervise::{Kind as _, read_request, write_message};
 
 /// Serves stdin/stdout after the caller initializes content-free logging.
 ///
@@ -31,10 +33,10 @@ pub fn serve() -> Result<(), frame::FrameError> {
             "panic" => Some(super::wire::WorkerFault::Panic),
             _ => None,
         });
-    while let Some(request) = frame::read::<Request>(&mut input, Pipe::Data)? {
+    while let Some((id, body)) = read_request::<RequestBody>(&mut input, Screen::MAX_REQUEST)? {
         #[cfg(debug_assertions)]
         {
-            if let RequestBody::Fault(requested) = request.body {
+            if let RequestBody::Fault(requested) = body {
                 fault = Some(requested);
             }
             if let Some(fault) = fault.take() {
@@ -54,9 +56,8 @@ pub fn serve() -> Result<(), frame::FrameError> {
             }
         }
         #[cfg(not(debug_assertions))]
-        let RequestBody::Ping = request.body;
-        frame::write(&mut output, &pong(request.id)?, Pipe::Data)?;
-        output.flush()?;
+        let RequestBody::Ping = body;
+        write_message(&mut output, id, &ReplyBody::Pong, Screen::MAX_REPLY)?;
     }
     Ok(())
 }
