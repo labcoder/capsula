@@ -29,7 +29,7 @@ mod test_support;
     not(test),
     expect(
         dead_code,
-        reason = "PR 7 wires spoken replies; PR 8 wires voice installation"
+        reason = "PR 5 wires speech input; PR 7 wires spoken replies; PR 8 wires voice installation"
     )
 )]
 mod voice;

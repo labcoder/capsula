@@ -145,6 +145,38 @@ makes lives on the thread that loaded it.
 - **Errors** are `NativeError` values, which carry no native text and no paths. sherpa-onnx itself
   prints one line to stderr when it resamples (see [voice-natives.md](voice-natives.md)).
 
+### The owner
+
+`voice::stt::SttHandle` owns speech input. Its one thread, `voice-stt`, asks the speech worker
+(below) to load, decode and unload through the brain's runtime, so the coordinator never waits on
+that work. sherpa-onnx never loads in the brain.
+
+```mermaid
+flowchart LR
+  C["coordinator (PR 5)"] -->|"load / unload / try_decode, never blocking"| H["SttHandle: state behind a mutex"]
+  H --> T["voice-stt thread"]
+  T --> S["speech::SpeechHandle"]
+  S --> W["kumochid --speech: platform::sherpa"]
+```
+
+- **Control:** load, unload and shutdown set fields in one shared state; none of them queues, so
+  none can be refused or held up. At most one decode waits behind the running one, and another is
+  `SttBusy`. While no model is ready (unloaded, loading, or after a failed load) a decode is
+  answered `NotLoaded` at once, and so is one that arrives after unload while a decode still runs.
+  Unload answers a waiting decode `Stale`; a decode in progress finishes and is answered, then the
+  model is unloaded. A decode whose caller has gone is skipped. `Decode` and `SttResult` print no
+  samples and no transcript text.
+- **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
+  `load`. A new models folder reloads, and a decode left waiting is served by the new model.
+- **A lost worker:** the running decode is answered `Failed(WorkerLost)`, a waiting one
+  `NotLoaded`, and speech input stays unloaded unless a `load` or `reload` was asked for after the
+  lost load started; a failure's cleanup never undoes a newer ask. `load` of the models already
+  served coalesces, so the coordinator answers `SpeechHandle::lost` with `reload`, which always
+  reaches the worker. Retrying a model that keeps failing is the coordinator's bounded policy;
+  nothing here retries on its own.
+- **Shutdown:** dropping the handle lets the request in flight finish, unloads and ends the
+  thread; nothing waits for it.
+
 ### The FFI owner
 
 `platform::sherpa` is the only code that calls sherpa-onnx. Its ten C functions sit in a private
@@ -286,10 +318,14 @@ replying. A fresh worker must then load the real natives and Parakeet and decode
 ### Checks on Rez
 
 These are ignored in CI and read the real DLLs (`SHERPA_NATIVES`, by default beside the test
-binary's profile folder), and the header (`SHERPA_INCLUDE`):
+binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODELS`) and the clips
+(`STT_CLIPS`):
 
 - `measure_sherpa_layout` compiles a probe against `c-api.h` and compares every layout value.
 - `measure_native_imports` checks `NATIVE_CLOSURE` against `dumpbin /dependents` of both DLLs,
   minus API sets and `KnownDLLs`.
 - `measure_planted_neighbor` stages the pins, plants an `MSVCP140.dll` beside them and checks the
   system one loads instead.
+- `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
+  the owner and the release `kumochid --speech` at 16, 44.1 and 48 kHz, with WER against S5's
+  reference transcripts.

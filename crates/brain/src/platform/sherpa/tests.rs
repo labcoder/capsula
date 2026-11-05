@@ -35,7 +35,9 @@ use super::{
     Fns, MAX_TRANSCRIPT_BYTES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa, check_closure,
     only_expected_added, sample_count, stage, verify,
 };
+use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
+use crate::voice::stt::{Decode, SttHandle, SttResult};
 
 /// What the fake C functions do and saw, per test thread.
 #[derive(Default)]
@@ -1089,4 +1091,194 @@ fn measure_planted_neighbor() {
         Some(system.to_string_lossy().to_lowercase())
     );
     drop(sherpa);
+}
+
+/// Waits until every one-second sample of whole-machine CPU use stays under 30% for 10 seconds
+/// running, read with `typeperf`, and returns the highest sample of that window. With no build
+/// running, Rez idles at about 20%: the Capy app and Defender.
+fn wait_for_idle_cpu() -> f64 {
+    let started = std::time::Instant::now();
+    loop {
+        let samples = run(std::process::Command::new("typeperf").args([
+            r"\Processor(_Total)\% Processor Time",
+            "-sc",
+            "10",
+            "-si",
+            "1",
+        ]));
+        let busy: Vec<f64> = samples
+            .lines()
+            .filter_map(|line| line.rsplit(',').next())
+            .filter_map(|value| value.trim().trim_matches('"').parse().ok())
+            .collect();
+        let peak = busy.iter().copied().fold(0.0, f64::max);
+        if busy.len() >= 10 && peak < 30.0 {
+            return peak;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(600),
+            "the machine stayed busy for 10 minutes"
+        );
+    }
+}
+
+/// Mono 16-bit PCM and its rate from a WAV file.
+fn read_wav(path: &Path) -> (u32, Vec<i16>) {
+    let bytes = std::fs::read(path).expect("clip readable");
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let (mut at, mut rate, mut samples) = (12, None, None);
+    while at + 8 <= bytes.len() {
+        let size = usize::try_from(u32_at(at + 4)).expect("32-bit size");
+        let body = at + 8;
+        match &bytes[at..at + 4] {
+            b"fmt " => {
+                assert_eq!(
+                    (u16_at(body + 2), u16_at(body + 14)),
+                    (1, 16),
+                    "mono 16-bit"
+                );
+                rate = Some(u32_at(body + 4));
+            }
+            b"data" => {
+                samples = Some(
+                    bytes[body..body + size]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&pair| i16::from_le_bytes(pair))
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+        at = body + size + size % 2;
+    }
+    (rate.expect("a fmt chunk"), samples.expect("a data chunk"))
+}
+
+/// Word error rate, ignoring case and punctuation.
+fn wer(reference: &str, hypothesis: &str) -> f64 {
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|word| {
+                word.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '\'')
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    };
+    let (reference, hypothesis) = (words(reference), words(hypothesis));
+    let mut row: Vec<usize> = (0..=hypothesis.len()).collect();
+    for (i, word) in reference.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, other) in hypothesis.iter().enumerate() {
+            let substitution = previous + usize::from(word != other);
+            previous = row[j + 1];
+            row[j + 1] = substitution.min(row[j] + 1).min(previous + 1);
+        }
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::as_conversions,
+        reason = "word counts"
+    )]
+    let rate = row[hypothesis.len()] as f64 / reference.len().max(1) as f64;
+    rate
+}
+
+fn ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+/// Release to text through the owner and the speech worker, beside the in-process run 2's
+/// 253/631/1,894 ms and S5's 169/391/1,355 ms. Build the release `kumochid` first
+/// (`cargo test --release --no-run` does).
+#[test]
+#[ignore = "Rez only: real models, under measuring.lock"]
+fn measure_parakeet() {
+    check_layout_against_the_header();
+    let natives = natives_dir();
+    let models = env_dir("VOICE_MODELS");
+    let clips = env_dir("STT_CLIPS");
+    let worker = std::env::current_exe()
+        .expect("own path")
+        .ancestors()
+        .nth(2)
+        .expect("target/<profile>/deps")
+        .join("kumochid.exe");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let tasks = runtime.handle().clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let driver = std::thread::spawn(move || runtime.block_on(stopped).ok());
+    let job = std::sync::Arc::new(crate::platform::Job::new().expect("job"));
+    let handle = {
+        let _context = tasks.enter();
+        let speech = SpeechSupervisor::start(worker, job).expect("speech worker");
+        SttHandle::spawn(tasks.clone(), speech, natives).expect("owner")
+    };
+    handle.load(models);
+    let ask = |rate: u32, samples: Vec<i16>| {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        handle
+            .try_decode(Decode {
+                rate,
+                samples,
+                reply,
+            })
+            .expect("nothing else waits");
+        answer.blocking_recv().expect("answered")
+    };
+    let ready = std::time::Instant::now();
+    while ask(16_000, vec![0; 1_600]) == SttResult::NotLoaded {
+        assert!(
+            ready.elapsed() < std::time::Duration::from_secs(60),
+            "loads within a minute"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    println!("owner ready after {:.0} ms", ms(ready.elapsed()));
+
+    for clip in ["clip-3s", "clip-10s", "clip-30s"] {
+        let peak = wait_for_idle_cpu();
+        println!("{clip}: whole-machine CPU under {peak:.1}% for the 10 s before it");
+        let reference = std::fs::read_to_string(clips.join(format!("{clip}.ref.txt")))
+            .expect("reference transcript");
+        let mut sixteen = None;
+        for suffix in ["", "-44100", "-48000"] {
+            let (rate, samples) = read_wav(&clips.join(format!("{clip}{suffix}.wav")));
+            let mut times = Vec::new();
+            let mut text = String::new();
+            for run in 0..11 {
+                let start = std::time::Instant::now();
+                let SttResult::Text(got) = ask(rate, samples.clone()) else {
+                    panic!("{clip}{suffix} failed");
+                };
+                if run > 0 {
+                    times.push(ms(start.elapsed()));
+                }
+                text = got;
+            }
+            times.sort_by(f64::total_cmp);
+            let drift = sixteen.as_deref().map_or(0.0, |base| wer(base, &text));
+            println!(
+                "{clip} @ {rate} Hz: median {:.0} ms, p95 {:.0} ms; WER {:.3}; drift from 16 kHz {:.3}",
+                times[times.len() / 2],
+                times[times.len() - 1],
+                wer(&reference, &text),
+                drift
+            );
+            sixteen.get_or_insert(text);
+        }
+    }
+    drop(handle);
+    drop(stop);
+    driver.join().expect("the runtime ends");
 }
