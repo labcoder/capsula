@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io;
 use std::time::Instant;
 
 use kumochi_protocol::frame;
@@ -28,8 +28,8 @@ pub fn serve() -> Result<(), frame::FrameError> {
     )
 )]
 fn serve_on(
-    input: &mut impl Read,
-    output: &mut impl Write,
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
     open: Open,
 ) -> Result<(), frame::FrameError> {
     let mut screen = Screen::default();
