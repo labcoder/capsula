@@ -498,7 +498,11 @@ fn a_delete_while_a_calls_write_is_pending_drops_the_round_and_the_call_never_ru
     play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
     assert_eq!(
         core.handle(completed()),
-        Ok(vec![answered(1, None, vec![(id(1), probed("zqxfromtaskb"))])]),
+        Ok(vec![answered(
+            1,
+            None,
+            vec![(id(1), probed("zqxfromtaskb"))]
+        )]),
         "the ledger's answer with no second write, and no text or item of the voided round"
     );
 }
@@ -529,7 +533,10 @@ fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_or
     let mut joined = Vec::new();
     assert_eq!(
         core.tool_call(
-            Caller::Model { run: R, call: id(1) },
+            Caller::Model {
+                run: R,
+                call: id(1)
+            },
             ToolName::Probe,
             br#"{"word":"one"}"#,
             &mut joined,
