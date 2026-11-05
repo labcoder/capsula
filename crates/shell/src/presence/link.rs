@@ -42,7 +42,7 @@ impl Presence {
                             Update::Unsolicited
                         },
                         cx,
-                    );
+                    )?;
                 }
                 LinkEvent::RunState {
                     run,
@@ -234,17 +234,23 @@ impl Presence {
         view: SettingsView,
         update: Update,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> Result<(), OpenError> {
         let current = self.session.as_ref().map(crate::link::Session::generation);
+        let (link, session) = (&self.link, &self.session);
         let applied = self.settings.update(cx, |state, cx| {
             let applied = state.receive(current, generation, view.clone(), update);
             if applied {
+                state.flush_offline_position(|op| {
+                    session.as_ref().is_some_and(|session| {
+                        link.send_control(session, ControlToBrain::Settings(op))
+                    })
+                });
                 cx.notify();
             }
             applied
         });
         if !applied {
-            return;
+            return Ok(());
         }
         self.runs.settings(view.main_thread);
         self.clear_refusal(cx);
@@ -253,6 +259,7 @@ impl Presence {
             state.set_settings(view);
             cx.notify();
         });
+        self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
     }
 
     /// Shows the brain's error in both panels and on the connected dock.

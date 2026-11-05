@@ -36,8 +36,8 @@ pub use scenes::{
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
 pub use settings::{
-    AssistantName, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp, SettingsView,
-    UserName,
+    AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
+    SettingsView, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,

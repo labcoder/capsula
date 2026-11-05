@@ -15,8 +15,10 @@ The line itself has no label. Its status, Offline, **Check settings** and **Sett
 saved** show in the peek.
 
 Use the tray menu to choose one of nine positions: top, middle or bottom, aligned left,
-center or right. This choice currently lasts until the shell restarts. A later release moves
-it into Settings → General and saves it. Moving the dock closes any open Settings panel,
+center or right. Kumochi saves this choice and restores it when you restart. A choice made
+while disconnected moves the dock immediately and is sent when the background process reconnects.
+If saving is refused, the dock returns to its saved position and shows **Check settings**.
+Moving the dock from the tray closes any open Settings panel,
 saving an active edit as if you had left the field.
 
 If the taskbar or display work area changes, choose the position again to realign the dock.

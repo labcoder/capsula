@@ -155,6 +155,12 @@ pub(super) struct Line {
 }
 
 impl Line {
+    pub(super) fn position_index(&self) -> Option<usize> {
+        self.requested
+            .or(self.accepted)
+            .map(|placement| placement.index)
+    }
+
     /// What the mask owns now: the pixels that take the pointer.
     pub(super) fn contains(&self, point: [i32; 2]) -> bool {
         self.accepted
