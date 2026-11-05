@@ -1089,6 +1089,9 @@ The ignored native eight-window residency fixture replaces each consumed rest wi
 resting view and includes the reserved frames. It retains the previous consumption owner
 until the next handoff, with four scenes and eight prepared positions each. This exercises
 the storage allowance on native shaping, not production activation, paint latency or RSS.
+On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged peaks of
+54,823,602 bytes for the Unicode fixture and 52,430,246 for ASCII, below 67,108,864.
+These are allowance checks, not before/after performance comparisons or heap bounds.
 
 Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
 semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown
