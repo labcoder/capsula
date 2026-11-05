@@ -412,16 +412,18 @@ sequenceDiagram
 
 | Provider answer | Recovery | Shown |
 | --- | --- | --- |
-| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused` | sign in again | `SessionEnded`, Sign in |
+| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused`, other codes with any other 4xx | sign in again | `SessionEnded`, Sign in |
 | `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable`, other codes with 429 or 5xx | retry later | `AccountOffline`, Retry |
 | `subscription_sharing_user_not_eligible` | unavailable | `PlanUnavailable` |
-| `invalid_client`, `chatpass_v2_*`, other codes | fix the request | `AccountMisconfigured` |
+| `invalid_client`, `chatpass_v2_*` | fix the request | `AccountMisconfigured` |
 | connection never opened | nothing sent | `AccountOffline`, Retry |
-| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
-| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
+| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
+| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
 
 Every row but the first keeps the credentials; the two unknown rows keep them only for sign-out
-to revoke. A typed refusal or a connection that never opened issued nothing, so it clears the
+to revoke. An unlisted code that isn't a busy or failing server still offers Sign in rather than
+a dead end. `RenewalUnconfirmed` ends the session like `SessionEnded`, but says the renewal
+may have gone through unconfirmed rather than that ChatGPT ended it. A typed refusal or a connection that never opened issued nothing, so it clears the
 pending flag without setting `outcome_unknown`, and clears the sent mark.
 
 **Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use

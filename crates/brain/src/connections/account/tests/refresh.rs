@@ -267,9 +267,14 @@ fn a_refused_save_holds_the_rotated_set_until_the_next_use_saves_it() {
     assert_eq!(h.marker(), None);
 }
 
+/// OSC-223 gap 9: an unlisted refusal ends the session too, so the user always gets Sign in.
 #[test]
 fn a_session_the_provider_ended_keeps_only_the_registration() {
-    for code in [OAuthCode::InvalidGrant, OAuthCode::SessionEnded] {
+    for code in [
+        OAuthCode::InvalidGrant,
+        OAuthCode::SessionEnded,
+        OAuthCode::Other,
+    ] {
         let mut h = Harness::seeded("refresh-ended", account_at(NOW, None));
         h.access(1, NOW);
         h.refreshed(Err(ExchangeError::OAuth { status: 400, code }));
@@ -321,11 +326,6 @@ fn other_refusals_keep_the_credentials() {
             OAuthCode::Other,
             failed(ErrorKey::AccountOffline, &[Action::Retry]),
         ),
-        (
-            400,
-            OAuthCode::Other,
-            failed(ErrorKey::AccountMisconfigured, &[]),
-        ),
     ] {
         let mut h = Harness::seeded("refresh-refused", account_at(NOW, None));
         h.access(1, NOW);
@@ -340,8 +340,9 @@ fn other_refusals_keep_the_credentials() {
     }
 }
 
-/// A timeout after the request went out may have consumed the token: the session ends, and the
-/// token stays for sign-out to revoke but is never sent again, after a restart too.
+/// A timeout after the request went out may have consumed the token: the session ends, saying
+/// the renewal wasn't confirmed (OSC-223 gap 8), and the token stays for sign-out to revoke but
+/// is never sent again, after a restart too.
 #[test]
 fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     let mut h = Harness::seeded("refresh-ambiguous", account_at(NOW, None));
@@ -349,7 +350,7 @@ fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     h.refreshed(Err(ExchangeError::Http(HttpError::Timeout)));
     assert_eq!(
         h.answers,
-        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
+        [(1, failed(ErrorKey::RenewalUnconfirmed, &[Action::SignIn]))]
     );
     assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));

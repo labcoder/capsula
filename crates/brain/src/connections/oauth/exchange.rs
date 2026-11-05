@@ -61,15 +61,17 @@ impl OAuthCode {
         }
     }
 
-    /// What this code asks for on a refresh or a plan request; an unlisted code goes by status.
+    /// What this code asks for on a refresh or a plan request. An unlisted code goes by status:
+    /// a busy or failing server asks for a retry, and any other refusal for a new sign-in, so the
+    /// user always has a way out.
     #[must_use]
     pub fn recovery(self, status: u16) -> Recovery {
         match self {
-            Self::InvalidGrant | Self::SessionEnded => Recovery::SignInAgain,
+            Self::Other if status == 429 || status >= 500 => Recovery::RetryLater,
+            Self::InvalidGrant | Self::SessionEnded | Self::Other => Recovery::SignInAgain,
             Self::NotEligible => Recovery::Unavailable,
             Self::PlanBusy => Recovery::RetryLater,
-            Self::Other if status == 429 || status >= 500 => Recovery::RetryLater,
-            Self::InvalidClient | Self::GrantRefused | Self::Other => Recovery::FixRequest,
+            Self::InvalidClient | Self::GrantRefused => Recovery::FixRequest,
         }
     }
 }

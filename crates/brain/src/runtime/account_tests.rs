@@ -684,8 +684,9 @@ fn failed(key: ErrorKey, action: Action) -> Result<String, Denied> {
 }
 
 /// #98 M2, CAPS-151 M2: a refresh task that panics after its token was marked as sent still ends
-/// its flight. The token may have gone out, so the session ends and it stays marked; a later
-/// caller is answered at once instead of joining a dead flight.
+/// its flight. The token may have gone out, so the session ends, saying the renewal wasn't
+/// confirmed (OSC-223 gap 8), and it stays marked; a later caller is answered at once instead of
+/// joining a dead flight.
 #[tokio::test]
 async fn a_refresh_task_that_panics_still_answers_its_callers() {
     let scratch = Scratch::new("account-refresh-panic");
@@ -695,7 +696,7 @@ async fn a_refresh_task_that_panics_still_answers_its_callers() {
     let (wait, _) = accounts.access();
     assert_eq!(
         answered(&mut accounts, wait).await,
-        failed(ErrorKey::SessionEnded, Action::SignIn)
+        failed(ErrorKey::RenewalUnconfirmed, Action::SignIn)
     );
     let (later, _) = accounts.access();
     assert_eq!(answered(&mut accounts, later).await, Err(Denied::Unusable));
