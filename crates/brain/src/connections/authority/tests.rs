@@ -48,6 +48,17 @@ impl Setup {
         Connection::open(self.path()).expect("raw connection")
     }
 
+    /// How many generations are Removed and not yet Swept.
+    fn removed(&self) -> i64 {
+        self.raw()
+            .query_row(
+                "SELECT count(*) FROM generations WHERE state = 'removed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count")
+    }
+
     fn save(&self, authority: &mut Authority, kind: Kind, secret: &SecretBytes) -> ActiveRef {
         let revision = authority.current(kind).expect("head").revision;
         let plan = authority
@@ -235,7 +246,7 @@ fn begin_and_activate_compare_and_swap_the_head() {
         authority.current(Kind::Host).expect("other head").revision,
         0
     );
-    let retired = authority.retired(None, 16).expect("retired");
+    let retired = authority.retired(16).expect("retired");
     assert!(
         retired
             .iter()
@@ -279,7 +290,7 @@ fn a_candidate_from_before_a_restart_never_activates() {
         Some(old)
     );
     assert_eq!(
-        authority.retired(None, 16).expect("retired").len(),
+        authority.retired(16).expect("retired").len(),
         1,
         "the candidate is owed a sweep"
     );
@@ -294,7 +305,7 @@ fn a_removal_stays_final_when_the_store_serves_the_deleted_value_again() {
     authority
         .remove(&[Kind::AnthropicKey], None)
         .expect("remove");
-    let retired = authority.retired(None, 16).expect("retired");
+    let retired = authority.retired(16).expect("retired");
     assert_eq!(
         io::sweep(&setup.store, SERVICE, &retired[0]),
         Observed::Absent
@@ -465,15 +476,15 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     let active = setup.save(&mut authority, Kind::Host, &secret(1, 45));
     let before = setup.store.snapshot();
     authority.remove(&[Kind::Host], None).expect("remove");
-    let retired = authority.retired(None, 16).expect("retired")[0];
+    let retired = authority.retired(16).expect("retired")[0];
     assert_eq!(io::sweep(&setup.store, SERVICE, &retired), Observed::Absent);
     authority
         .observed(&retired, Observed::Absent)
         .expect("observed");
-    assert_eq!(
-        authority.retired(None, 16).expect("still owed").len(),
-        1,
-        "same open isn't enough"
+    assert_eq!(setup.removed(), 1, "same open isn't enough");
+    assert!(
+        authority.retired(16).expect("retired").is_empty(),
+        "this open has swept it"
     );
     drop(authority);
     let mut authority = setup.open();
@@ -492,7 +503,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
         .observed(&retired, Observed::Absent)
         .expect("observed");
     assert_eq!(
-        authority.retired(None, 16).expect("retired").len(),
+        setup.removed(),
         1,
         "the resurrection reset the clock to this open"
     );
@@ -502,10 +513,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     authority
         .observed(&retired, Observed::Absent)
         .expect("observed");
-    assert!(
-        authority.retired(None, 16).expect("retired").is_empty(),
-        "now Swept"
-    );
+    assert_eq!(setup.removed(), 0, "now Swept");
     assert!(matches!(
         authority.observed(&retired, Observed::Absent),
         Err(AuthorityError::Conflict)
@@ -519,8 +527,8 @@ fn one_sweep_pass_is_bounded_however_many_generations_retired() {
     for round in 0..20 {
         setup.save(&mut authority, Kind::Account, &secret(round, 10));
     }
-    assert_eq!(authority.retired(None, 100).expect("all").len(), 19);
-    assert_eq!(authority.retired(None, 16).expect("one pass").len(), 16);
+    assert_eq!(authority.retired(100).expect("all").len(), 19);
+    assert_eq!(authority.retired(16).expect("one pass").len(), 16);
 }
 
 #[test]
@@ -531,15 +539,19 @@ fn a_bounded_sweep_reaches_every_retired_generation() {
     for round in 0..33 {
         active = Some(setup.save(&mut authority, Kind::Account, &secret(round, 10)));
     }
-    let first = authority.retired(None, 16).expect("first pass");
+    let first = authority.retired(16).expect("first pass");
     for retired in &first {
         assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
         authority
             .observed(retired, Observed::Absent)
             .expect("observed");
     }
-    let second = authority.retired(first.last(), 16).expect("second pass");
+    let second = authority.retired(16).expect("second pass");
     assert_eq!((first.len(), second.len()), (16, 16));
+    assert!(
+        second.iter().all(|retired| !first.contains(retired)),
+        "the second pass moves past the first"
+    );
     for retired in &second {
         assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
         authority
@@ -552,16 +564,15 @@ fn a_bounded_sweep_reaches_every_retired_generation() {
         "every retired generation's names were visited"
     );
     assert!(
-        authority
-            .retired(second.last(), 16)
-            .expect("end")
-            .is_empty(),
-        "the round ends"
+        authority.retired(16).expect("end").is_empty(),
+        "this open has visited them all"
     );
+    drop(authority);
+    let authority = setup.open();
     assert_eq!(
-        authority.retired(None, 16).expect("next round"),
+        authority.retired(16).expect("next open"),
         first,
-        "a new round revisits what is still owed"
+        "the next open revisits what is still owed"
     );
 }
 
@@ -669,10 +680,7 @@ fn debug_output_names_no_generation_or_value() {
     assert!(!shown.contains(&hex), "no generation in Debug");
     let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4)).expect("write");
     let active = authority.activate(verified, None).expect("activate");
-    let shown = format!(
-        "{active:?} {:?}",
-        authority.retired(None, 16).expect("retired")
-    );
+    let shown = format!("{active:?} {:?}", authority.retired(16).expect("retired"));
     assert!(
         !shown.contains(&hex) && !shown.contains("SSSS"),
         "no secret or generation"

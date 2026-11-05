@@ -326,7 +326,7 @@ impl AccountState {
 
     pub(super) fn rotated(&mut self, why: Rotation, result: SaveResult, effects: &mut Vec<Effect>) {
         match (why, result) {
-            (Rotation::Marked(generation), SaveResult::Committed { .. }) => {
+            (Rotation::Marked(generation), SaveResult::Committed) => {
                 self.send(generation, effects);
             }
             (Rotation::Marked(_), SaveResult::NotCommitted(failure)) => {
@@ -340,7 +340,7 @@ impl AccountState {
                     effects,
                 );
             }
-            (Rotation::Rotated(generation), SaveResult::Committed { .. }) => {
+            (Rotation::Rotated(generation), SaveResult::Committed) => {
                 let Lane::Owning {
                     save: Save::Rotated { account, .. },
                     ..
@@ -371,7 +371,7 @@ impl AccountState {
                 tracing::warn!(%failure, "a rotated set is held for another save");
                 self.hold(effects);
             }
-            (Rotation::Verified(generation), SaveResult::Committed { .. }) => {
+            (Rotation::Verified(generation), SaveResult::Committed) => {
                 self.validating = None;
                 if generation != self.generation || self.leaving.is_some() {
                     return;
@@ -399,7 +399,7 @@ impl AccountState {
             (Rotation::Unmarked(_), SaveResult::NotCommitted(failure)) => {
                 tracing::warn!(%failure, "a refresh token stays marked as sent on disk; the next start ends the session");
             }
-            (Rotation::Ended(_) | Rotation::Unmarked(_), SaveResult::Committed { .. }) => {}
+            (Rotation::Ended(_) | Rotation::Unmarked(_), SaveResult::Committed) => {}
         }
     }
 

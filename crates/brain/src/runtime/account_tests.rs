@@ -155,7 +155,7 @@ async fn the_account_system_never_prints_a_secret() {
     let saved = Vault::with_service(store.clone(), "test-accounts-debug", &seed)
         .expect("seed vault")
         .save_account(&registration);
-    assert!(matches!(saved, SaveResult::Committed { .. }));
+    assert!(matches!(saved, SaveResult::Committed));
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let worker = Worker::new(
         Box::new(move || Vault::with_service(store.clone(), "test-accounts-debug", &lock)),
@@ -475,7 +475,7 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
             connection: 0,
         }),
     }));
-    assert!(matches!(saved, SaveResult::Committed { .. }));
+    assert!(matches!(saved, SaveResult::Committed));
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let opening = store.clone();
     let worker = Worker::new(
@@ -605,7 +605,7 @@ fn seeded_at(
                 connection: SEEDED,
             }),
         }));
-    assert!(matches!(saved, SaveResult::Committed { .. }));
+    assert!(matches!(saved, SaveResult::Committed));
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let opening = store.clone();
     let worker = Worker::new(

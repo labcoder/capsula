@@ -39,6 +39,17 @@ fn accounts(scratch: &Scratch, http: SharedHttp) -> Accounts {
 
 struct Held(Arc<Notify>);
 
+impl Http for Held {
+    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
+        self.0.notified().await;
+        Ok(Response {
+            status: 200,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
+        })
+    }
+}
+
 struct EmptyCatalog;
 
 impl Http for EmptyCatalog {
@@ -51,12 +62,32 @@ impl Http for EmptyCatalog {
     }
 }
 
+fn save_key(store: &FakeStore, lock: &std::path::Path) {
+    Vault::with_service(store.clone(), "key-test", lock)
+        .expect("seed vault")
+        .save_anthropic_key(b"sk-ant-api-fake-saved-value")
+        .expect("saved key");
+}
+
+async fn settle(accounts: &mut Accounts) {
+    timeout(Duration::from_secs(5), async {
+        while accounts.connections.loading || accounts.connections.read.is_some() {
+            let event = accounts.next().await;
+            accounts.handle(event);
+        }
+    })
+    .await
+    .expect("the key settles");
+}
+
+/// shortcut: a staged paste isn't adopted until C7 stages it through the authority.
 #[tokio::test]
-async fn duplicate_staged_ops_keep_the_saved_key_ready() {
-    let scratch = Scratch::new("key-double-submit");
+async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
+    let scratch = Scratch::new("key-staged-refused");
     let store = FakeStore::default();
-    let owned = store.clone();
     let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let owned = store.clone();
     let worker = Worker::new(
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
@@ -69,41 +100,40 @@ async fn duplicate_staged_ops_keep_the_saved_key_ready() {
         },
     )
     .expect("worker");
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    let paste = Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec()));
     store
-        .set(
-            "anthropic-key-staged.key-test",
-            &Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec())),
-        )
+        .set("anthropic-key-staged.key-test", &paste)
         .expect("fake paste");
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
-    timeout(Duration::from_secs(5), async {
-        while accounts.connections.loading || accounts.connections.read.is_some() {
-            let event = accounts.next().await;
-            accounts.handle(event);
-        }
-    })
-    .await
-    .expect("both submissions settle");
-    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
-    assert_eq!(
-        store
-            .get("anthropic-key.key-test")
-            .expect("active")
-            .expect("saved")
-            .expose()
-            .as_slice(),
-        b"sk-ant-api-fake-staged-value"
-    );
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
     assert_eq!(
         store.get("anthropic-key-staged.key-test").expect("staged"),
-        None
+        Some(paste),
+        "the paste is left for C7's cleanup"
+    );
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    assert_eq!(
+        accounts
+            .connections
+            .key
+            .as_ref()
+            .map(|key| key.expose().as_str()),
+        Some("sk-ant-api-fake-saved-value")
     );
     accounts
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
 }
 
+/// Blocks the first read of a current key's chunk until the test lets it go, as a native
+/// Credential Manager call that hangs would.
 struct HeldStore {
     armed: Arc<std::sync::atomic::AtomicBool>,
     store: FakeStore,
@@ -113,7 +143,7 @@ struct HeldStore {
 
 impl CredentialStore for HeldStore {
     fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
-        if target == "anthropic-key-staged.key-test"
+        if target.starts_with("key-test/gen/anthropic/")
             && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
             && let Some(resume) = self.resume.lock().expect("gate").take()
         {
@@ -133,21 +163,15 @@ impl CredentialStore for HeldStore {
         self.store.delete(target)
     }
 }
-impl Http for Held {
-    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
-        self.0.notified().await;
-        Ok(Response {
-            status: 200,
-            request_id: None,
-            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
-        })
-    }
-}
 
+/// CAPS-179: a removal sent while a native read is blocked wins. It runs after the read on the
+/// same worker, and the late read's key is dropped by its stale generation.
 #[tokio::test]
-async fn remove_behind_a_held_adoption_runs_on_the_same_worker() {
+async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     let scratch = Scratch::new("key-worker-order");
     let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
     let (entered_tx, entered) = std::sync::mpsc::channel();
     let (resume, resume_rx) = std::sync::mpsc::channel();
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -157,29 +181,25 @@ async fn remove_behind_a_held_adoption_runs_on_the_same_worker() {
         entered: entered_tx,
         resume: std::sync::Mutex::new(Some(resume_rx)),
     });
-    let lock = scratch.db().with_file_name("key-test.lock");
+    let worker_lock = lock.clone();
     let worker = Worker::new(
-        Box::new(move || Vault::with_service(held.take().expect("one open"), "key-test", &lock)),
+        Box::new(move || {
+            Vault::with_service(held.take().expect("one open"), "key-test", &worker_lock)
+        }),
         Arc::new(FixedClock(0)),
     );
     let mut accounts = Accounts::spawn(worker, test_support::net()).expect("worker");
-    store
-        .set(
-            "anthropic-key-staged.key-test",
-            &Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec())),
-        )
-        .expect("fake paste");
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     tokio::task::spawn_blocking(move || {
         entered
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("adoption is held");
+            .expect("the read is held");
     })
     .await
     .expect("gate joined");
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
-    resume.send(()).expect("release adoption");
+    resume.send(()).expect("release the read");
     timeout(Duration::from_secs(5), async {
         while accounts.connections.view.anthropic != KeyView::Missing {
             let event = accounts.next().await;
@@ -187,21 +207,28 @@ async fn remove_behind_a_held_adoption_runs_on_the_same_worker() {
         }
     })
     .await
-    .expect("remove completes after adoption");
-    assert_eq!(
-        store.get("anthropic-key.key-test").expect("fake read"),
-        None
-    );
-    assert_eq!(
-        store
-            .get("anthropic-key-staged.key-test")
-            .expect("fake read"),
-        None
-    );
+    .expect("the removal completes after the read");
     assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
+    assert_eq!(accounts.connections.read.as_ref().map(|_| ()), None);
     accounts
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
+    let mut vault = Vault::with_service(store.clone(), "key-test", &lock).expect("reopen");
+    assert_eq!(
+        vault
+            .anthropic(crate::connections::anthropic::KeyOp::Load)
+            .expect("read")
+            .map(|_| ()),
+        None,
+        "the key stays removed"
+    );
+    assert!(
+        store
+            .names()
+            .iter()
+            .all(|name| !name.starts_with("key-test/gen/anthropic/")),
+        "and its names are swept"
+    );
 }
 
 #[tokio::test]

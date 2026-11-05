@@ -241,8 +241,6 @@ pub(crate) struct Retired {
     kind: Kind,
     generation: Generation,
     layout: Layout,
-    /// Its place in the backlog, so the next pass starts after it.
-    row: i64,
 }
 
 /// The open authority, held by the credential worker under its session lock.
@@ -453,39 +451,33 @@ impl Authority {
         write_marker(&self.conn, marker)
     }
 
-    /// The oldest Removed generations after `after`, at most `limit`, so a sweep pass is bounded
-    /// however many were ever made and still reaches the newest. An empty list ends a round; the
-    /// next round starts from `None` and revisits what remained. A cursor is for this open only.
+    /// The oldest Removed generations this open hasn't swept yet, at most `limit`, so a pass is
+    /// bounded however many were ever made and the next pass reaches the ones after. One that
+    /// fails or comes back waits for the next open, which revisits every generation still owed.
     ///
     /// # Errors
     /// Fails on a SQLite failure or an invalid row.
-    pub(crate) fn retired(
-        &self,
-        after: Option<&Retired>,
-        limit: usize,
-    ) -> Result<Vec<Retired>, AuthorityError> {
+    pub(crate) fn retired(&self, limit: usize) -> Result<Vec<Retired>, AuthorityError> {
         let limit = i64::try_from(limit).map_err(|_| AuthorityError::Bounds)?;
         let mut statement = self.conn.prepare(
-            "SELECT generation, kind, chunks, bytes, rowid FROM generations
-             WHERE state = 'removed' AND rowid > ?1 ORDER BY rowid LIMIT ?2",
+            "SELECT generation, kind, chunks, bytes FROM generations
+             WHERE state = 'removed' AND (deleted_in IS NULL OR deleted_in < ?1)
+             ORDER BY rowid LIMIT ?2",
         )?;
-        let rows =
-            statement.query_map(params![after.map_or(0, |after| after.row), limit], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })?;
+        let rows = statement.query_map(params![self.lifetime, limit], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
         rows.map(|row| {
-            let (generation, kind, chunks, bytes, row) = row?;
+            let (generation, kind, chunks, bytes) = row?;
             Ok(Retired {
                 kind: Kind::parse(&kind)?,
                 generation: Generation::from_sql(&generation)?,
                 layout: Layout::from_sql(chunks, bytes)?,
-                row,
             })
         })
         .collect()

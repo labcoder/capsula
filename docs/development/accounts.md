@@ -9,15 +9,16 @@ The key never crosses the pipe or enters a file, log, command line or environmen
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
 
-Windows stores the staging and active records as `anthropic-key-staged.{service}` and
-`anthropic-key.{service}`, where the service is the product's debug or release credential
-service. These are keyring's exact target spelling, not the ChatGPT vault's slash targets.
-The brain's existing credential worker adopts a validated staged key, attempts staging
-deletion on every outcome, and resolves leftover staging at startup. An explicit adoption
-retries an absent staging read four times, 25 ms apart; if it stays absent, it loads the saved
-key instead of reporting a malformed paste, so duplicate submissions keep their saved state.
-Remove attempts both deletions and reports failure until both are verified absent. All work
-shares the vault's session lock; a cancelled waiter never interrupts an in-flight operation.
+The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
+reads its current generation, and Remove commits the removal first, then sweeps the names, so a
+removed key is never read again even while Credential Manager still serves it. The shell still
+stages a paste at keyring's `anthropic-key-staged.{service}` target, but the brain doesn't adopt
+it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed) and the staged entry is
+left for C7, which stages a paste through the authority. Neither that name nor the old
+`anthropic-key.{service}` record is read. All work runs on the credential worker under the
+vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
+read is blocked runs after it, and the stale Check's result is dropped by its generation. A
+cancelled waiter never interrupts an in-flight call.
 
 The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
 `Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
@@ -31,11 +32,6 @@ by generation and clears the old catalog. Catalog checks do not authorize infere
 automatic fallback to another connection. Fixtures are synthetic API-reference examples;
 no live provider call is part of the tests.
 
-The ignored `dev_keyring_staging_round_trip` test runs the shell's actual staging helper
-against the native vault on Rez with a dummy value. It requires the Dev identity and unused
-Dev key names, refuses to overwrite an existing key, and removes both records on success or
-panic unwinding. A terminated test can leave only its dummy Dev credential behind.
-
 ## Stored namespaces and credential names
 
 `protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
@@ -43,11 +39,12 @@ caller's build profile. The app's existing constants select `ACTIVE` (Dev for de
 release otherwise). Release tooling must select `RELEASE` explicitly, even when xtask
 itself is built in debug. Stored spellings are unchanged; there is no migration.
 
-The raw account vault uses `account_target(service, entry)` and the bounded
-`account_targets(service)` inventory: host, sign-out marker, chatgpt/revoke manifests,
-and each record's two slots of 64 chunks, plus the active and staged Anthropic targets in
-their dot form. These are 262 exact targets, not a service-prefix match. A new credential
-producer must extend this inventory with its actual stored names.
+The vault writes only write-once generation names, `<service>/gen/<kind>/<generation>/<index>`
+(see [Credential authority](#credential-authority)). `account_target(service, entry)` and the
+bounded `account_targets(service)` inventory name what earlier builds wrote: host, sign-out
+marker, chatgpt/revoke manifests, and each record's two slots of 64 chunks, plus the active and
+staged Anthropic targets in their dot form. These are 262 exact targets, not a service-prefix
+match. Nothing reads or writes them now; their exact-name cleanup is the next change.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
 `capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
@@ -329,8 +326,8 @@ the incoming set keeps the slot it was admitted on should its own save be refuse
 when the token can't fit an entry, it writes `outcome_unknown` first. An equal entry already
 listed needs nothing, so a Retry never lists it twice. The job reports a list it saved even when
 the account save is then refused; the machine takes its count and starts a revocation pass for it
-before anything else runs. Once the account manifest commits, the sign-in is committed, whatever
-the marker writes after it do.
+before anything else runs. Once the account's generation is current, the sign-in is committed,
+whatever the marker writes after it do.
 
 Listing comes before replacing, so if the account save fails after the old account's token was
 listed, that token can be revoked before the new set is installed: the old session's next refresh
@@ -362,10 +359,10 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
 rewrites the list without the ones an empty 200 confirmed. Passes run at startup, when an entry
 is added and on `Retry`, never on a timer, one at a time: a request during a pass becomes one more
 pass after it. None runs while the lock is Busy or a sign-out is pending. When the list empties,
-the empty list is saved, its names are deleted and checked, and `sweep` clears. A pass that a
-sign-out overtook only saves the shorter list: the sign-out's Delete removes the names. The manifest is
-deleted before its chunks, so a crash or refusal at any step leaves either the readable empty
-list or chunks with no manifest, and the next start or Retry finishes the job.
+the empty list is saved, then removed, and `sweep` clears. A pass that a sign-out overtook only
+saves the shorter list: the sign-out's Delete removes it. Each save and removal is one authority
+commit, so a crash or refusal at any step leaves the list as it was or as it became, and the next
+start or Retry finishes the job.
 
 `oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
 passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
@@ -519,13 +516,13 @@ or Retry enters at the first step of the persisted phase:
    only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With
    `outcome_unknown` persisted, an absent list isn't checked against the account, so a damaged
    account still reaches Delete. If it's refused, the phase stays `Revoking` and nothing is deleted.
-5. **Delete**, driven by the marker alone, whether or not a manifest survives. Keep rewrites a
-   readable account to its registration and deletes every other name of the record by name. An
-   account with no manifest, or with damaged data, is erased, as Erase does; a refused read erases
-   nothing: the step is `Refused` and Retry reruns it. Then `revoke` is erased. An erase deletes the manifest first, then all 128 chunk names, then checks all 129 gone,
-   so an interruption leaves chunks with no manifest that the next start or Retry still deletes.
-6. **Finish.** Only once its own by-name check of both records passes, the marker becomes
-   notice-only or is deleted. Use stays fenced until the vault is read again, so the next sign-in
+5. **Delete**, driven by the marker alone. Keep rewrites a readable account to its registration, a
+   fresh generation. An account with no record, or with damaged data, is removed, as Erase does;
+   a refused read removes nothing: the step is `Refused` and Retry reruns it. Then `revoke` is
+   removed. Each removal is one authority commit; the removed names are swept after it, and a
+   name the store keeps waits for the next start's sweep.
+6. **Finish.** Only once the authority holds neither record current (Keep: only a registration),
+   the marker becomes notice-only or empty. Use stays fenced until the vault is read again, so the next sign-in
    reuses the kept registration; then the view becomes `SignedOut { revocation_unconfirmed: notice }`.
 
 ```mermaid
@@ -770,10 +767,10 @@ stateDiagram-v2
 - **Remove.** `remove` retires every Active and Pending generation of the given kinds and bumps
   their heads, with the marker in the same transaction. It reads nothing from the store first,
   so an unsettled store can't block sign-out.
-- **Sweep.** `retired(after, limit)` lists at most `limit` Removed generations, oldest first,
-  after the last one the previous pass returned, so each pass is bounded and later passes reach
-  the newest. An empty list ends a round. The next round starts over from `None` and revisits
-  whatever is still Removed, failures included. `io::sweep` deletes each name and reads it once, and `observed` records the result. A
+- **Sweep.** `retired(limit)` lists at most `limit` Removed generations, oldest first, that this
+  open hasn't deleted yet, so each pass is bounded and the next pass reaches the ones after,
+  however its row order falls. A failed or returning name waits for the next open, which lists
+  every generation still owed. `io::sweep` deletes each name and reads it once, and `observed` records the result. A
   generation becomes Swept, and loses its layout, only after a clean sweep in a later open than
   its last delete. That way, a delete that comes back is caught by the next open's sweep.
 
@@ -784,6 +781,7 @@ activated, and its names are swept like any other. `activate` and `remove` each 
 everything in one transaction or nothing. The test fake store can be write-once, and it can roll
 back or resurrect names, so those cases run offline.
 
-Nothing calls the authority yet. The vault above still reads and writes the legacy names.
-Moving the vault onto it, together with the startup sweep and its bound, is the next change.
-Removing the legacy names follows after that.
+The vault reads and writes every record through the authority. It runs one sweep pass of 16
+generations (`SWEEP`) when it opens and after each commit or removal, so a sign-out's names
+leave Credential Manager without waiting for the next start. Removing the legacy names is the
+next change.
