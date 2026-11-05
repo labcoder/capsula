@@ -123,6 +123,9 @@ sequenceDiagram
   once while it waits.
 - **Text goes out in pieces of at most 64 KiB**, split on character boundaries, so every frame
   fits the data pipe.
+- **A voice run** will show `Listening` while the key is held and `Transcribing` while speech
+  becomes text; both phases are reserved until hold admission lands. Its `Transcript`, `SegmentQueued` and `SpeechPcm` frames belong to the run, so
+  the shell fences them like `AssistantText`.
 - **Streamed text is stored with each step and with the outcome**, in the same transaction.
   shortcut: text after the last step is lost if the brain dies mid-run; store it on a timer once
   real engines stream long answers (slice 3).

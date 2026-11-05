@@ -527,11 +527,12 @@ async fn a_brain_that_stops_reading_cannot_hold_a_request_past_the_deadline() {
     drop(brain);
 }
 
-/// A stdout nobody reads: every write waits until the test ends.
-struct Withheld(std_mpsc::Receiver<()>);
+/// A stdout nobody reads: every write says it started, then waits until the test ends.
+struct Withheld(std_mpsc::Receiver<()>, std_mpsc::Sender<()>);
 
 impl Write for Withheld {
     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        self.1.send(()).unwrap_or_default();
         self.0.recv().unwrap_or_default();
         Err(std::io::ErrorKind::BrokenPipe.into())
     }
@@ -541,12 +542,17 @@ impl Write for Withheld {
     }
 }
 
+/// What [`withheld`] does with the brain's end.
+#[derive(Clone, Copy)]
+enum BrainEnd {
+    Kept,
+    /// Dropped once a line is stuck in stdout.
+    LostOnceStuck,
+}
+
 /// Runs the whole bridge on its own thread against a brain that said `Hello`, with a stdout
-/// nobody reads and twenty pings on stdin; `lose_after` drops the brain's end that long after.
-fn withheld(
-    remaining_ms: u64,
-    lose_after: Option<Duration>,
-) -> (Result<(), BridgeError>, Duration) {
+/// nobody reads and twenty pings on stdin.
+fn withheld(remaining_ms: u64, end: BrainEnd) -> (Result<(), BridgeError>, Duration) {
     let (mut brain, client) = tokio::io::duplex(64 * 1024);
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -556,18 +562,21 @@ fn withheld(
 "#
     .repeat(20);
     let (keep, withheld) = std_mpsc::channel();
+    let (writing, stuck) = std_mpsc::channel();
     let (done, ended) = std_mpsc::channel();
     let started = Instant::now();
     std::thread::spawn(move || {
         done.send(run(
             move || Ok::<DuplexStream, BridgeError>(client),
             Cursor::new(pings),
-            Withheld(withheld),
+            Withheld(withheld, writing),
         ))
         .unwrap_or_default();
     });
-    if let Some(after) = lose_after {
-        std::thread::sleep(after);
+    if let BrainEnd::LostOnceStuck = end {
+        stuck
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a line reaches stdout");
         drop(brain);
     }
     let result = ended
@@ -579,11 +588,11 @@ fn withheld(
 
 #[test]
 fn a_stdout_nobody_reads_holds_neither_memory_nor_the_ending() {
-    let (result, took) = withheld(300, None);
+    let (result, took) = withheld(300, BrainEnd::Kept);
     assert!(matches!(result, Err(BridgeError::Deadline)), "{result:?}");
     assert!(took < Duration::from_secs(3), "{took:?}");
 
-    let (result, took) = withheld(60_000, Some(Duration::from_millis(100)));
+    let (result, took) = withheld(60_000, BrainEnd::LostOnceStuck);
     assert!(
         matches!(result, Err(BridgeError::Stdout)),
         "a lost pipe, with lines unwritten: {result:?}"
