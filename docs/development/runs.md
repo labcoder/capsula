@@ -25,6 +25,16 @@ Each submit captures the target in `TextSubmit` and queues the current revision 
 even for New task. Disconnect clears the main id and pending submissions, so a previous
 connection's id cannot be reused before the new view arrives.
 
+The shell also retains the submitted text until its named run ends. A named Failed state
+with SessionEnded, AccountRefused, SignInNeeded, ClaudeCodeSignedOut, AnthropicKeyRejected or
+RenewalUnconfirmed returns that text once, only while its captured selection revision and
+thread still match the current input target. The typing view restores it only into an empty
+input; even whitespace is a newer draft. No frame resends a turn automatically. General
+account errors and TurnRefused cannot restore text because neither identifies a failed run.
+Esc, a new submit attempt, a target change, disconnect, a new brain incarnation, confirmed
+deletion, success or interruption discard the recovery content. Duplicate terminal states
+cannot offer it again. Recovery carriers redact their text in Debug output.
+
 While `Target::New` has a submission pending at the current revision, another submit is
 refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
 stays, so after the first `RunState` adopts the task, retrying continues that task. Pending

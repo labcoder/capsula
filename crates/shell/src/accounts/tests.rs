@@ -493,3 +493,63 @@ fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
     receive(&mut accounts, AccountView::SigningIn);
     assert_eq!(accounts.error, None);
 }
+
+#[test]
+fn provider_sign_in_actions_survive_an_unchanged_signed_in_snapshot() {
+    for key in [ErrorKey::AccountRefused, ErrorKey::SignInNeeded] {
+        let mut accounts = Accounts::default();
+        let view = signed_in(PlanState::Enabled, None);
+        receive(&mut accounts, view.clone());
+        let failure = error(key, vec![Action::SignIn]);
+        accounts.error(&failure);
+        receive(&mut accounts, view);
+        assert_eq!(accounts.error, Some(failure));
+        assert_eq!(
+            allowed(&accounts),
+            vec![AccountOp::SignIn, AccountOp::SignOut]
+        );
+        let mut sent = Vec::new();
+        press(&mut accounts, AccountOp::SignIn, &mut sent);
+        assert_eq!(sent, vec![AccountOp::SignIn]);
+        assert_eq!(accounts.error, None);
+        accounts.error(&error(key, vec![Action::SignIn]));
+        assert!(!accounts.send(AccountOp::SignIn, |_| panic!("still waiting")));
+        accounts.disconnected();
+        assert_eq!(allowed(&accounts), Vec::<AccountOp>::new());
+    }
+}
+
+#[test]
+fn sign_in_actions_never_bypass_waiting_or_revocation_backlog() {
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, signed_in(PlanState::Enabled, None));
+    accounts.error(&error(ErrorKey::RevocationBacklog, vec![Action::SignIn]));
+    assert!(!accounts.send(AccountOp::SignIn, |_| panic!("revocation backlog")));
+    assert_eq!(accounts.waiting, None);
+    accounts.error(&error(ErrorKey::AccountRefused, vec![Action::Retry]));
+    assert_eq!(
+        accounts.error.as_ref().map(UserError::key),
+        Some(ErrorKey::RevocationBacklog)
+    );
+    accounts.error(&error(ErrorKey::SignInNeeded, vec![Action::SignIn]));
+    assert_eq!(
+        accounts.error.as_ref().map(UserError::key),
+        Some(ErrorKey::RevocationBacklog)
+    );
+    assert!(!accounts.allows(AccountOp::SignIn));
+    for view in [
+        AccountView::Busy,
+        AccountView::SigningOut {
+            cleanup: Cleanup::Running,
+            revocation_unconfirmed: false,
+        },
+    ] {
+        let mut accounts = Accounts::default();
+        receive(&mut accounts, view);
+        accounts.error(&error(ErrorKey::SignInNeeded, vec![Action::SignIn]));
+        assert!(!accounts.send(AccountOp::SignIn, |_| panic!(
+            "account is busy or signing out"
+        )));
+        assert_eq!(accounts.waiting, None);
+    }
+}

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -99,6 +99,26 @@ CREATE TABLE summaries (
     created_ms INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX summaries_thread ON summaries (thread, id);
+";
+
+/// The tool-call ledger (docs/development/tools.md): one row per committed call, written in the
+/// transaction that applies the call's write. Results are tagged JSON, and a history result holds
+/// references only, so no task's text is copied here; nothing is indexed. `route` is `model`, or
+/// `mcp:` and the launch id in 32 hex digits. A thread's rows are deleted with it.
+const V5: &str = "
+CREATE TABLE tool_calls (
+    run INTEGER NOT NULL,
+    thread INTEGER NOT NULL,
+    route TEXT NOT NULL CHECK (route = 'model' OR (route GLOB 'mcp:*' AND length(route) = 36)),
+    call TEXT NOT NULL CHECK (length(call) BETWEEN 1 AND 64),
+    tool TEXT NOT NULL,
+    hash BLOB NOT NULL CHECK (length(hash) = 32),
+    result TEXT NOT NULL CHECK (length(CAST(result AS BLOB)) <= 65536),
+    created_ms INTEGER NOT NULL,
+    PRIMARY KEY (run, route, call),
+    FOREIGN KEY (run, thread) REFERENCES runs (id, thread)
+) STRICT;
+CREATE INDEX tool_calls_thread ON tool_calls (thread);
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.
