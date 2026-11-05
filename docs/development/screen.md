@@ -116,3 +116,28 @@ binary=$(ls -t target/debug/deps/screen-*.exe | head -n 1)
 
 Remove the lock afterward. The strict fixture asserts 1,500–1,600 ms and prints the measured time;
 record Rez's scale with that result.
+
+## Portable element data and walk
+
+The control-view data and walk are implemented independently of the worker operation; A3a2
+connects them to capture authority and a bounded reader thread, and A3b supplies Windows UIA.
+Nothing in production calls the walk yet, and no new worker operation is served by this layer.
+
+One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
+bytes of element JSON. The byte cap usually binds first. A cut records Elements, Depth, Bytes,
+Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
+carry physical desktop and window-relative rectangles from the same cached properties. Names
+never appear in Debug or errors. Password names are discarded, their rectangles are published
+immediately, and password subtrees are never descended into.
+
+A source validates the root window and pid; the portable layer rejects roots off the captured
+display and excludes Kumochi's process-image names case-insensitively. Each capture owns a fresh
+mask sink with its capture id, generation and completeness. Publishing a rectangle and finishing
+the walk both advance generation. A full walk is Complete, a cut is Partial, and unavailability
+is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
+needs masking: image consumers must withhold or flag those frames, not call them fully masked.
+
+Offline fake-source fixtures cover exact limits, Unicode names, provider/budget cuts, relative
+geometry, excluded roots and password/descendant sentinels. No real window or platform timing
+is exercised by these tests. Cancellation, worker authority and late/hung-thread handling belong
+to A3a2/A6 rather than this portable walk.
