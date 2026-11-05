@@ -33,5 +33,39 @@ pub use windows::{
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
+#[cfg(windows)]
+pub use windows::{managed_presence, system_env};
+
+/// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
+/// `Absent`; access denied and every other unresolved result are `Indeterminate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Proven missing.
+    Absent,
+    /// It exists.
+    Present,
+    /// Couldn't be ruled out; counts as present.
+    Indeterminate,
+}
+
+/// Claude Code's endpoint-managed policy sources (macOS counterpart: /Library/Application
+/// Support/ClaudeCode, unverified).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManagedPresence {
+    /// `managed-settings.json`, `managed-settings.d` and `managed-mcp.json`.
+    pub files: [Presence; 3],
+    /// The machine's `Settings` policy value.
+    pub machine: Presence,
+    /// The user's `Settings` policy value.
+    pub user: Presence,
+}
+
+impl ManagedPresence {
+    /// Every source.
+    pub fn all(&self) -> [Presence; 5] {
+        let [settings, folder, mcp] = self.files;
+        [settings, folder, mcp, self.machine, self.user]
+    }
+}
 #[cfg(all(test, windows))]
 pub(crate) use windows::{PipeClient, test_pair};
