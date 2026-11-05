@@ -123,7 +123,7 @@ pub enum StoreOp {
         /// The model that wrote it; `None` when the engine took none.
         model: Option<String>,
     },
-    /// Store a live thread's model and effort. Nothing answers it.
+    /// Store a live thread's model and effort; `ModelSet` answers the result.
     SetModel {
         /// The thread.
         thread: ThreadId,
