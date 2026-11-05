@@ -10,6 +10,7 @@ use crate::connections::records::{Origin, Revocable, Tokens};
 use crate::platform::credential::CredentialStoreError;
 use crate::test_support::Scratch;
 
+mod anthropic;
 mod bounds;
 mod marker;
 

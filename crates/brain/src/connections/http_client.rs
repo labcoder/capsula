@@ -14,6 +14,8 @@ use rustls::pki_types::CertificateDer;
 use url::Url;
 use zeroize::Zeroizing;
 
+use super::anthropic::key::AnthropicKey;
+
 /// The issuer from the public `OpenAI` discovery document.
 pub(crate) const ISSUER: &str = "https://auth.openai.com";
 /// Local policy: authentication, discovery, JWKS and error bodies share a 1 MiB byte cap.
@@ -93,6 +95,8 @@ pub enum Endpoint {
     Revocation(IssuerUrl),
     /// The account's model list, the only destination given the bearer.
     Models(Secret<Zeroizing<String>>),
+    /// The fixed Anthropic Models destination, the only destination given the API key.
+    AnthropicModels(Secret<AnthropicKey>),
 }
 
 impl Endpoint {
@@ -102,6 +106,7 @@ impl Endpoint {
             Self::Discovery => "https://auth.openai.com/.well-known/openid-configuration",
             Self::Jwks(url) | Self::Revocation(url) => url.0.expose(),
             Self::Models(_) => "https://api.openai.com/v1/models",
+            Self::AnthropicModels(_) => "https://api.anthropic.com/v1/models?limit=65",
         }
     }
 }
@@ -276,6 +281,7 @@ impl Client {
             }
             match &request.endpoint {
                 Endpoint::Models(bearer) => self.0.get(url).bearer_auth(bearer.expose().as_str()),
+                Endpoint::AnthropicModels(key) => anthropic_request(&self.0, url, key)?,
                 _ => self.0.get(url).timeout(Duration::from_secs(10)),
             }
         };
@@ -285,6 +291,22 @@ impl Client {
             .map_err(|error| transport_error(&error))?;
         read_response(response).await
     }
+}
+
+fn anthropic_request(
+    client: &reqwest::Client,
+    url: &str,
+    key: &Secret<AnthropicKey>,
+) -> Result<reqwest::RequestBuilder, HttpError> {
+    let bearer = Zeroizing::new(format!("Bearer {}", key.expose().as_str()));
+    let mut header =
+        reqwest::header::HeaderValue::from_str(&bearer).map_err(|_| HttpError::Request)?;
+    header.set_sensitive(true);
+    Ok(client
+        .get(url)
+        .header(reqwest::header::AUTHORIZATION, header)
+        .header("anthropic-version", "2023-06-01")
+        .timeout(Duration::from_secs(15)))
 }
 
 fn body_buffer(length: Option<u64>) -> Zeroizing<Vec<u8>> {

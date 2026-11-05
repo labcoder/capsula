@@ -89,6 +89,45 @@ impl<S: CredentialStore> fmt::Debug for Vault<S> {
 }
 
 impl<S: CredentialStore> Vault<S> {
+    pub(crate) fn anthropic(
+        &mut self,
+        op: super::anthropic::KeyOp,
+    ) -> Result<Option<Secret<super::anthropic::key::AnthropicKey>>, super::anthropic::KeyError>
+    {
+        use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
+        use kumochi_protocol::constants::{ANTHROPIC_KEY_ACCOUNT, ANTHROPIC_STAGING_ACCOUNT};
+        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{}", self.service);
+        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{}", self.service);
+        if matches!(op, KeyOp::Remove) {
+            let first = self.store.delete(&active);
+            let second = self.store.delete(&staged);
+            first.and(second).map_err(VaultError::from)?;
+            return Ok(None);
+        }
+        let read = self.store.get(&staged);
+        let adopting = matches!(op, KeyOp::Adopt) || !matches!(read, Ok(None));
+        if adopting {
+            let result = (|| {
+                let bytes = read.map_err(VaultError::from)?.ok_or(KeyError::Rejected(
+                    kumochi_protocol::message::KeyRejection::Format,
+                ))?;
+                let key = AnthropicKey::parse(bytes).map_err(KeyError::Rejected)?;
+                let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
+                self.store.set(&active, &bytes).map_err(VaultError::from)?;
+                Ok(Some(key))
+            })();
+            let cleanup = self.store.delete(&staged).map_err(VaultError::from);
+            cleanup?;
+            return result;
+        }
+        self.store
+            .get(&active)
+            .map_err(VaultError::from)?
+            .map(AnthropicKey::parse)
+            .transpose()
+            .map_err(KeyError::Rejected)
+    }
+
     /// Takes account-session ownership without reading any credential yet.
     ///
     /// # Errors

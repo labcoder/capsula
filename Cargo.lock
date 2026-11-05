@@ -3804,6 +3804,7 @@ dependencies = [
  "tracing-subscriber",
  "unic-langid",
  "windows 0.62.2",
+ "zeroize",
 ]
 
 [[package]]

@@ -43,11 +43,16 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
     /// The next control frame, whatever it is.
     async fn frame(&mut self) -> ControlToShell {
-        timeout(PATIENCE, self.next_control())
-            .await
-            .expect("in time")
-            .expect("readable")
-            .expect("open")
+        loop {
+            let frame = timeout(PATIENCE, self.next_control())
+                .await
+                .expect("in time")
+                .expect("readable")
+                .expect("open");
+            if !matches!(frame, ControlToShell::Connections(_)) {
+                return frame;
+            }
+        }
     }
 
     /// The next control frame, which must be an account view.
@@ -353,7 +358,8 @@ impl Http for SlowCheck {
             Endpoint::Discovery
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
-            | Endpoint::Models(_) => {
+            | Endpoint::Models(_)
+            | Endpoint::AnthropicModels(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
             }
@@ -429,7 +435,8 @@ impl Http for Rotating {
             Endpoint::Discovery
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
-            | Endpoint::Models(_) => (503, Vec::new()),
+            | Endpoint::Models(_)
+            | Endpoint::AnthropicModels(_) => (503, Vec::new()),
         };
         std::future::ready(Ok(Response {
             status,
