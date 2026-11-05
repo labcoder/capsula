@@ -1,5 +1,24 @@
 # Accounts
 
+## Stored namespaces and credential names
+
+`protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
+caller's build profile. The app's existing constants select `ACTIVE` (Dev for debug,
+release otherwise). Release tooling must select `RELEASE` explicitly, even when xtask
+itself is built in debug. Stored spellings are unchanged; there is no migration.
+
+The raw account vault uses `account_target(service, entry)` and the bounded
+`account_targets(service)` inventory: host, sign-out marker, chatgpt/revoke manifests,
+and each record's two slots of 64 chunks. These are 260 exact targets, not a service-prefix
+match. A new credential producer must extend this inventory with its actual stored names.
+
+Instance capabilities use keyring instead: `instance_entry(session)` is the account
+`capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
+On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
+`capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
+target is not an account and must not be fed directly to the account parser. Existing
+callers retain keyring's default mapping; they do not switch to custom targets.
+
 ## Sign-in callback
 
 `connections::oauth::SignIn::bind` binds `127.0.0.1` on port 0 before the browser
