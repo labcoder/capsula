@@ -28,7 +28,7 @@ pub use account::{
 };
 pub use connections::{
     AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp, ConnectionsView,
-    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError,
+    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{

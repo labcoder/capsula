@@ -273,7 +273,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     async fn unaccounted(&mut self) -> std::io::Result<Option<ControlToShell>> {
         loop {
             match self.next_control().await {
-                Ok(Some(ControlToShell::Account(_))) => {}
+                Ok(Some(ControlToShell::Account(_) | ControlToShell::Connections(_))) => {}
                 other => return other.map_err(std::io::Error::other),
             }
         }
@@ -306,7 +306,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                     self.control_out.write_all(&pong).await.expect("sent");
                 }
                 Some(ControlToShell::Settings { view, .. }) => self.views.push(view),
-                Some(ControlToShell::Account(_)) => {}
+                Some(ControlToShell::Account(_) | ControlToShell::Connections(_)) => {}
                 other => return other,
             }
         }
@@ -338,7 +338,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 }
                 ControlToShell::Scenes { scenes } => self.scenes = Some(scenes),
                 ControlToShell::Settings { view, .. } => self.views.push(view),
-                ControlToShell::Account(_) => {}
+                ControlToShell::Account(_) | ControlToShell::Connections(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }

@@ -122,6 +122,11 @@ impl Brain {
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
             return;
         }
+        if let ControlToBrain::Connection(op) = message {
+            let applied = self.connection_op(op, None);
+            debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+            return;
+        }
         if let ControlToBrain::Settings(op) = message {
             // Still written; the shell that sent it is gone, so nothing answers it.
             self.settings_ops.push_back(settings::Queued {
@@ -161,6 +166,11 @@ impl Brain {
         }
         if let ControlToBrain::AccountOp(op) = message {
             self.account_input(AccountInput::Op(op), Some(link))
+                .map_err(|Full| Ended::Lost)?;
+            return Ok(None);
+        }
+        if let ControlToBrain::Connection(op) = message {
+            self.connection_op(op, Some(link))
                 .map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }

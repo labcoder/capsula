@@ -6,6 +6,7 @@
 //! writer is blocked on a shell that stopped reading.
 
 pub(crate) mod account;
+mod connections;
 mod controls;
 mod data;
 mod recovery;
@@ -791,6 +792,11 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
+        link.control(&self.account.connections.connected())
+            .map_err(|Full| Ended::Lost)?;
+        if let Some(models) = self.account.connections.models_unsent() {
+            link.data(&models).map_err(|Full| Ended::Lost)?;
+        }
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
