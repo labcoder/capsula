@@ -212,6 +212,23 @@ fn an_acknowledgement_after_stop_changes_nothing() {
 }
 
 #[test]
+fn an_old_runs_acknowledgement_never_answers_the_same_id_in_the_next_run() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    assert_eq!(call(&mut core, model(R, "c1")), (Dispatch::Committing, true));
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("stop");
+    let next = RunId(R.0 + 1);
+    running(&mut core, next, Some(T));
+    assert_eq!(call(&mut core, model(next, "c1")), (Dispatch::Committing, true));
+    assert_eq!(core.handle(ack(&model(R, "c1"))), Err(Stale));
+    assert_eq!(answered(&core), []);
+}
+
+#[test]
 fn a_failed_write_fails_the_run_with_a_store_failure() {
     let mut core = fresh();
     running(&mut core, R, None);
