@@ -61,6 +61,8 @@ pub(crate) struct PreInputAudit {
     tools: BTreeSet<String>,
     initialize: bool,
     mcp: bool,
+    /// `SignedOut` or a failure, once given.
+    refused: Option<Result<Progress, AuditFailed>>,
 }
 
 impl PreInputAudit {
@@ -71,28 +73,41 @@ impl PreInputAudit {
             tools,
             initialize: false,
             mcp: false,
+            refused: None,
         }
     }
 
-    /// Judges one control response.
+    /// Judges one control response. A refusal is final: every later response gets it again.
     ///
     /// # Errors
     /// The first check that failed. An error subtype, an unknown or repeated request id, or a
     /// body of the wrong shape is `Malformed`.
     pub(crate) fn control(&mut self, response: &ControlResponse) -> Result<Progress, AuditFailed> {
+        if let Some(refusal) = self.refused {
+            return refusal;
+        }
+        let verdict = self.judge(response);
+        if !matches!(verdict, Ok(Progress::Waiting | Progress::Ready)) {
+            self.refused = Some(verdict);
+        }
+        verdict
+    }
+
+    /// Marks a response done only once it passed.
+    fn judge(&mut self, response: &ControlResponse) -> Result<Progress, AuditFailed> {
         if response.subtype != "success" {
             return Err(AuditFailed::Malformed);
         }
         match response.request_id.as_str() {
             INITIALIZE_ID if !self.initialize => {
-                self.initialize = true;
                 if !self.initialize_passes(&response.response)? {
                     return Ok(Progress::SignedOut);
                 }
+                self.initialize = true;
             }
             MCP_STATUS_ID if !self.mcp => {
-                self.mcp = true;
                 self.mcp_passes(&response.response)?;
+                self.mcp = true;
             }
             _ => return Err(AuditFailed::Malformed),
         }

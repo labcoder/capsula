@@ -581,3 +581,90 @@ fn the_gate_starts_pending_and_failure_is_final() {
     assert!(!early.may_call(), "a pass that lost the race to a failure");
     assert_eq!(format!("{early:?}"), "AuditGate(\"Failed\")");
 }
+
+#[test]
+fn a_refusal_stands_against_every_later_response() {
+    let real = &REVIEWED_CLAUDE_CODE[0];
+    let refusals: [(
+        &str,
+        &'static Reviewed,
+        ControlResponse,
+        Result<Progress, AuditFailed>,
+    ); 5] = [
+        (
+            "signed out",
+            real,
+            control(0, |_| {}),
+            Ok(Progress::SignedOut),
+        ),
+        (
+            "no reviewed sign-in",
+            real,
+            control(0, signed_in),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "another version",
+            &SIGNED_IN_ROW,
+            control(0, |line| {
+                signed_in(line);
+                line["response"]["response"]["claude_code_version"] = json!("2.1.307");
+            }),
+            Err(AuditFailed::Version),
+        ),
+        (
+            "an error response",
+            &SIGNED_IN_ROW,
+            control(0, |line| line["response"]["subtype"] = json!("error")),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a failed server",
+            &SIGNED_IN_ROW,
+            control(1, |line| {
+                line["response"]["response"]["mcpServers"][0]["status"] = json!("failed");
+            }),
+            Err(AuditFailed::McpServer),
+        ),
+    ];
+    for (case, row, refusing, refusal) in refusals {
+        let mut audit = PreInputAudit::new(row, tools());
+        assert_eq!(audit.control(&refusing), refusal, "{case}");
+        for valid in [
+            control(1, |_| {}),
+            control(0, signed_in),
+            control(1, |_| {}),
+        ] {
+            assert_eq!(
+                audit.control(&valid),
+                refusal,
+                "{case}: a valid response afterwards"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_callers_tool_set_is_what_both_audits_expect() {
+    let wider: BTreeSet<String> = ["mcp__kumochi__ping", "mcp__kumochi__see"]
+        .map(String::from)
+        .into();
+    for expected in [
+        wider,
+        BTreeSet::new(),
+        ["mcp__kumochi__see".to_owned()].into(),
+    ] {
+        let mut before = PreInputAudit::new(&SIGNED_IN_ROW, expected.clone());
+        assert_eq!(
+            before.control(&control(1, |_| {})),
+            Err(AuditFailed::Tools),
+            "{expected:?}"
+        );
+        let mut after = PostSeedAudit::new(&SIGNED_IN_ROW, expected.clone());
+        assert_eq!(
+            after.init(init(|_| {})),
+            Err(AuditFailed::Tools),
+            "{expected:?}"
+        );
+    }
+}
