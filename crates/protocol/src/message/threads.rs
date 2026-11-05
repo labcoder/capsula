@@ -135,7 +135,7 @@ pub struct ModelChoice {
     pub connection: ConnectionKind,
 }
 
-/// A change to one thread, shell to brain; nothing answers it.
+/// A change to one thread, shell to brain; model writes receive a committed result.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreadOp {
     /// Retitle a task; the user's title wins over any other. A rename of the main thread is

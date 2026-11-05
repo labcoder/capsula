@@ -421,9 +421,12 @@ fn a_model_choice_round_trips_through_a_page_and_a_restart() {
     let thread = task(&mut store, "task");
     let hidden = task(&mut store, "hidden");
     let picked = choice("gpt-6.1-sol", Effort::XHigh);
-    store.set_model(thread, &picked).expect("model");
+    assert!(store.set_model(thread, &picked).expect("model"));
+    assert!(store.set_model(thread, &picked).expect("same model"));
     store.begin_delete(hidden).expect("hidden");
-    store.set_model(hidden, &picked).expect("nothing to change");
+    for refused in [hidden, ThreadId(999), ThreadId(u64::MAX)] {
+        assert!(!store.set_model(refused, &picked).expect("no match"));
+    }
     let hidden_model: Option<String> = store
         .conn
         .query_row(
