@@ -365,26 +365,40 @@ fn masks_are_capture_bound_and_completeness_reaches_both_encodings() {
     .unwrap();
     let wrong = MaskSet::new(CaptureId(1));
     assert_eq!(sanitize(&mut raw, &wrong).unwrap_err(), Refusal::Stale);
-    let sink: MaskSink = std::sync::Arc::new(std::sync::Mutex::new(MaskSet::new(CaptureId(2))));
-    let mut masks = sink.lock().unwrap();
-    for (generation, completeness) in [
-        (1, Completeness::Unknown(Unavailable::Busy)),
-        (2, Completeness::Partial),
-        (3, Completeness::Complete),
+    for completeness in [
+        Completeness::Unknown(Unavailable::Busy),
+        Completeness::Partial,
+        Completeness::Complete,
     ] {
+        let sink: MaskSink =
+            std::sync::Arc::new(std::sync::Mutex::new(MaskSet::new(CaptureId(2))));
+        let mut masks = sink.lock().unwrap();
         masks.finish(completeness);
         let clean = sanitize(&mut raw, &masks).unwrap();
         assert_eq!(clean.completeness(), completeness);
-        assert_eq!(clean.generation(), generation);
+        assert_eq!(clean.generation(), 1);
         for encoded in [
             overview(&clean).unwrap(),
             crop(&clean, rect([0, 0], [64, 64])).unwrap(),
         ] {
             assert_eq!(encoded.capture, CaptureId(2));
-            assert_eq!(encoded.generation, generation);
+            assert_eq!(encoded.generation, 1);
             assert_eq!(encoded.completeness, completeness);
         }
     }
+}
+
+#[test]
+fn the_first_finish_wins_so_a_late_complete_cannot_hide_unknown_masks() {
+    let mut masks = MaskSet::new(CaptureId(3));
+    masks.finish(Completeness::Unknown(Unavailable::Busy));
+    masks.finish(Completeness::Complete);
+    assert_eq!(masks.completeness(), Completeness::Unknown(Unavailable::Busy));
+    assert_eq!(masks.generation(), 1);
+    let mut cut = MaskSet::new(CaptureId(3));
+    cut.finish(Completeness::Partial);
+    cut.finish(Completeness::Complete);
+    assert_eq!(cut.completeness(), Completeness::Partial);
 }
 
 #[test]

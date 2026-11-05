@@ -62,8 +62,12 @@ impl MaskSet {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Records how the walk ended and bumps the generation.
+    /// Records how the walk ended and bumps the generation. The first finish wins, so a late
+    /// result can't overwrite `Unknown` or `Partial`.
     pub(crate) fn finish(&mut self, completeness: Completeness) {
+        if self.completeness != Completeness::Pending {
+            return;
+        }
         self.completeness = completeness;
         self.generation = self.generation.wrapping_add(1);
     }

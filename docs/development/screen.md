@@ -113,7 +113,8 @@ generation; sanitizing again applies all masks idempotently before another encod
 Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
 frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
 `Partial`, or `Unknown` with an availability reason); an empty set never implies a completed
-walk. Both publishing a mask and finishing the walk bump the generation. Encoded images also
+walk. Both publishing a mask and finishing the walk bump the generation. The first finish wins:
+a late `Complete` can't overwrite `Unknown` or `Partial`. Encoded images also
 carry their capture id and generation: A6 must never stage a superseded generation.
 
 The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
