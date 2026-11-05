@@ -17,6 +17,7 @@ mod kumo_view;
 mod launch;
 mod line;
 mod link;
+mod messages;
 pub(crate) mod observer;
 mod overlay_input;
 mod paint;
@@ -96,6 +97,7 @@ struct Presence {
     settings_panel: Option<SettingsPanel>,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
+    chat: Entity<Threads>,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
@@ -856,6 +858,7 @@ pub(crate) fn open(
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
+    let chat = cx.new(|_| Threads::chat());
     let settings = cx.new(|_| Settings::default());
     // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
     let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
@@ -882,6 +885,7 @@ pub(crate) fn open(
             settings_panel: None,
             settings,
             threads,
+            chat,
             events,
             link,
             session: None,
