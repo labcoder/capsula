@@ -142,7 +142,10 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
         );
         let debug = format!("{result:?}");
         assert!(!debug.contains(MODEL), "{debug}");
-        assert!(!debug.contains(&format!("{:?}", MODEL.as_bytes())), "{debug}");
+        assert!(
+            !debug.contains(&format!("{:?}", MODEL.as_bytes())),
+            "{debug}"
+        );
         let record = record(Direction::ToShell, &result);
         assert_eq!(record.payload, None);
         let file = recording(&[record]);
