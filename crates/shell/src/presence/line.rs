@@ -3,10 +3,12 @@
 //! finds it without the line growing. A placement becomes current only once Windows accepts its
 //! mask, so the line never shows where the mask isn't.
 
+use std::sync::Arc;
+
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, canvas,
-    div, px,
+    App, Context, IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _,
+    StyledImage as _, WeakEntity, Window, canvas, div, img, px,
 };
 
 use super::diagnostics::{self, PendingPaint};
@@ -14,6 +16,7 @@ use super::geometry::Layout;
 use super::kumo_view::PullSite;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
+use super::pull_picture::PullPicture;
 use super::{OpenError, Presence, platform};
 use crate::platform::{PresenceError, PresenceNative, ROW_SPANS, RowSpans};
 
@@ -114,7 +117,11 @@ pub(super) trait Surfaces {
 /// What Windows holds now, as far as the surfaces' last successful calls say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Held {
+    /// The line's band, when the mask Windows holds is exactly it.
     mask: Option<LineFrame>,
+    /// Where the mask Windows holds takes clicks, whoever gave it: the line's band or a
+    /// pull's area. Failing closed empties it.
+    proxy: Option<[i32; 4]>,
     /// None while the overlay is hidden.
     overlay: Option<[i32; 4]>,
     /// The tray entry, None while the proxy is hidden.
@@ -152,9 +159,52 @@ pub(super) struct Line {
     held: Held,
     /// Failed attempts at `requested` in a row.
     failed: u8,
+    /// A pull is under way, from its accepted grab until it hands the dock back: it uses this
+    /// line's coordinates and may hold the overlay and the mask, so the line takes no attempt.
+    pulled: bool,
 }
 
 impl Line {
+    pub(super) fn position_index(&self) -> Option<usize> {
+        self.requested
+            .or(self.accepted)
+            .map(|placement| placement.index)
+    }
+
+    /// The line Windows last accepted.
+    pub(super) fn accepted_frame(&self) -> Option<LineFrame> {
+        self.accepted.map(|placement| placement.frame)
+    }
+
+    /// A grab was accepted: from now until the pull hands the dock back, it's drawn in this
+    /// line's coordinates, so the line takes no attempt.
+    pub(super) fn pull_started(&mut self) {
+        self.pulled = true;
+    }
+
+    /// A pull moved the overlay: the next attempt moves it back to the line's.
+    pub(super) fn pull_overlay(&mut self) {
+        self.held.overlay = None;
+        self.pulled = true;
+    }
+
+    /// Windows accepted a pull's mask over `area`: the next attempt gives the line its band
+    /// back, and failing closed empties the pull's area.
+    pub(super) fn pull_mask(&mut self, area: [i32; 4]) {
+        self.held.mask = None;
+        self.held.proxy = Some(area);
+        self.pulled = true;
+    }
+
+    /// The pull is done with the mask and the overlay, and the dock draws no picture of it:
+    /// ask for the line again, the pending placement if there is one, with a fresh run of
+    /// attempts.
+    pub(super) fn reclaim(&mut self) {
+        self.pulled = false;
+        self.requested = self.requested.or(self.accepted);
+        self.failed = 0;
+    }
+
     /// What the mask owns now: the pixels that take the pointer.
     pub(super) fn contains(&self, point: [i32; 2]) -> bool {
         self.accepted
@@ -172,7 +222,10 @@ impl Line {
     /// fails with the surfaces apart, the dock is hidden rather than left showing a line it
     /// doesn't own or owning a band it doesn't show.
     pub(super) fn attempt<S: Surfaces>(&mut self, surfaces: &mut S) -> Attempt<S::Error> {
-        let Some(target) = self.requested.filter(|_| self.failed < MAX_FAILED_UPLOADS) else {
+        let Some(target) = self
+            .requested
+            .filter(|_| !self.pulled && self.failed < MAX_FAILED_UPLOADS)
+        else {
             return Attempt::Idle;
         };
         if let Err(error) = self.converge(target, surfaces) {
@@ -203,6 +256,7 @@ impl Line {
         if self.held.mask != Some(target.frame) {
             surfaces.upload(&target.frame)?;
             self.held.mask = Some(target.frame);
+            self.held.proxy = Some(target.frame.hit);
         }
         let overlay = target.layout.overlay;
         if self.held.overlay != Some(overlay) {
@@ -213,7 +267,10 @@ impl Line {
                     && self.held.mask != Some(accepted.frame)
                 {
                     match surfaces.upload(&accepted.frame) {
-                        Ok(()) => self.held.mask = Some(accepted.frame),
+                        Ok(()) => {
+                            self.held.mask = Some(accepted.frame);
+                            self.held.proxy = Some(accepted.frame.hit);
+                        }
                         Err(restore) => tracing::warn!(%restore, "can't put the hit mask back"),
                     }
                 }
@@ -237,8 +294,8 @@ impl Line {
         }
         if let Err(error) = surfaces.hide_proxy() {
             tracing::warn!(%error, "can't hide the dock's proxy; emptying its mask");
-            if let Some(mask) = self.held.mask {
-                surfaces.clear_mask(mask.hit)?;
+            if let Some(proxy) = self.held.proxy {
+                surfaces.clear_mask(proxy)?;
             }
         }
         *self = Self::default();
@@ -251,10 +308,12 @@ impl Line {
             == self.accepted.map_or(
                 Held {
                     mask: self.held.mask,
+                    proxy: self.held.proxy,
                     ..Held::default()
                 },
                 |accepted| Held {
                     mask: Some(accepted.frame),
+                    proxy: Some(accepted.frame.hit),
                     overlay: Some(accepted.layout.overlay),
                     shown: Some(accepted.index),
                 },
@@ -277,15 +336,15 @@ pub(super) fn on_next_frame<T: 'static>(
 }
 
 /// The real surfaces: the proxy's mask and visibility, and the dock's overlay window.
-struct Desktop<'a> {
-    native: &'a mut PresenceNative,
-    window: &'a mut Window,
-    cx: &'a mut App,
+struct Desktop<'native, 'ui> {
+    native: &'native mut PresenceNative,
+    window: &'ui mut Window,
+    cx: &'ui mut App,
     /// The observer's state after the last accepted upload, which the dock names when it draws.
     drawn: Drawn,
 }
 
-impl Surfaces for Desktop<'_> {
+impl Surfaces for Desktop<'_, '_> {
     type Error = PresenceError;
 
     fn upload(&mut self, frame: &LineFrame) -> Result<(), PresenceError> {
@@ -355,7 +414,12 @@ impl Presence {
 
     /// One attempt at the requested placement. Returns whether it became current, with its
     /// layout and line published.
-    fn try_line(&mut self, owner: WeakEntity<Self>, window: &mut Window, cx: &mut App) -> bool {
+    pub(super) fn try_line(
+        &mut self,
+        owner: WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
         let mut surfaces = Desktop {
             native: &mut self.native,
             window,
@@ -371,6 +435,9 @@ impl Presence {
             Attempt::Idle => false,
             Attempt::Placed(placement) => {
                 self.layout = placement.layout;
+                if let Err(error) = self.reanchor_panels(cx) {
+                    tracing::warn!(%error, "can't re-anchor open panels after the dock moved");
+                }
                 let origin = [placement.layout.overlay[0], placement.layout.overlay[1]];
                 self.dock.update(cx, |dock, cx| {
                     dock.paint = Some(placement.frame.paint);
@@ -383,6 +450,7 @@ impl Presence {
                     slot: placement.layout.dock,
                 };
                 self.kumo.update(cx, |kumo, _| kumo.set_site(Some(site)));
+                self.line_reclaimed(cx);
                 true
             }
             Attempt::Failed {
@@ -401,6 +469,7 @@ impl Presence {
                         cx.notify();
                     });
                     self.kumo.update(cx, |kumo, _| kumo.set_site(None));
+                    self.line_reclaimed(cx);
                 }
                 if retry {
                     on_next_frame(window, owner, Self::retry_line);
@@ -432,6 +501,32 @@ pub(super) struct Dock {
     pub(super) drawn: Drawn,
     /// While Listening, the line takes the accent colour.
     pub(super) listening: bool,
+    /// The pulled picture whose mask Windows accepted, drawn over the line.
+    pub(super) pull: Option<PullPicture>,
+    /// Images no picture draws any more, and those retired a frame earlier, which leave
+    /// GPUI's atlas at this render.
+    pub(super) retired: Vec<Arc<RenderImage>>,
+    pub(super) aged: Vec<Arc<RenderImage>>,
+    /// `pull` changed, to an accepted picture or to none as a pull lets go, and hasn't been
+    /// rendered since.
+    pub(super) undrawn: bool,
+}
+
+impl Dock {
+    pub(super) fn new() -> Self {
+        Self {
+            pending_paint: PendingPaint::default(),
+            paint: None,
+            origin: [0; 2],
+            drawn: Drawn::default(),
+            listening: false,
+            pull: None,
+            // Clearing a pull's picture retires all it draws: drip, stub and body.
+            retired: Vec::with_capacity(3),
+            aged: Vec::with_capacity(3),
+            undrawn: false,
+        }
+    }
 }
 
 impl Render for Dock {
@@ -448,6 +543,13 @@ impl Render for Dock {
             .absolute()
             .size_full()
         });
+        for image in self.aged.drain(..) {
+            if let Err(error) = window.drop_image(image) {
+                tracing::debug!(%error, "can't drop a pulled frame");
+            }
+        }
+        std::mem::swap(&mut self.aged, &mut self.retired);
+        self.undrawn = false;
         let scale = window.scale_factor();
         let fill = if self.listening {
             cx.theme().primary
@@ -467,11 +569,25 @@ impl Render for Dock {
                 .border_1()
                 .border_color(cx.theme().border)
         });
+        let pulled = self
+            .pull
+            .iter()
+            .flat_map(|picture| picture.images.iter().flatten());
+        let pulled = pulled.map(|(quad, image)| {
+            img(Arc::clone(image))
+                .absolute()
+                .left(logical(quad.x - origin_x, scale))
+                .top(logical(quad.y - origin_y, scale))
+                .w(logical(quad.width, scale))
+                .h(logical(quad.height, scale))
+                .object_fit(ObjectFit::Fill)
+        });
         div()
             .size_full()
             .relative()
             .child(Stamp(Surface::Dock, self.drawn))
             .children(line)
+            .children(pulled)
             // After the frame's stamp, so the paint qpc it logs falls inside that frame.
             .children(marker)
     }
@@ -504,6 +620,7 @@ mod tests {
     use super::{Attempt, Line, LineFrame, Placement, Surfaces, on_next_frame, slot};
     use crate::platform::ROW_SPANS;
     use crate::presence::geometry::Layout;
+    use crate::presence::pull_dock::{Holding, PullDock, Rest};
 
     /// The first and last owned pixel on each side, and the pass-through pixel beyond each.
     fn assert_edges(frame: &LineFrame, [left, top, right, bottom]: [i32; 4]) {
@@ -592,6 +709,8 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         mask: Option<LineFrame>,
+        /// A pull's mask over this area, which the line's surfaces didn't give.
+        pulled: Option<[i32; 4]>,
         overlay: Option<[i32; 4]>,
         shown: Option<usize>,
         refuse_uploads: Vec<bool>,
@@ -614,6 +733,7 @@ mod tests {
                 return Err("upload refused");
             }
             self.mask = Some(*frame);
+            self.pulled = None;
             Ok(())
         }
 
@@ -653,6 +773,10 @@ mod tests {
             if self.refuse_clears {
                 return Err("clear refused");
             }
+            if self.pulled == Some(hit) {
+                self.pulled = None;
+                return Ok(());
+            }
             if self.mask.map(|mask| mask.hit) != Some(hit) {
                 return Err("cleared a band it doesn't hold");
             }
@@ -676,7 +800,7 @@ mod tests {
 
         /// A shown proxy with a band: it takes clicks.
         fn takes_clicks(&self) -> bool {
-            self.shown.is_some() && self.mask.is_some()
+            self.shown.is_some() && (self.mask.is_some() || self.pulled.is_some())
         }
     }
 
@@ -690,6 +814,94 @@ mod tests {
 
     fn failed([retry, closed]: [bool; 2]) -> impl Fn(&Attempt<&'static str>) -> bool {
         move |attempt| matches!(attempt, Attempt::Failed { retry: r, closed: c, .. } if *r == retry && *c == closed)
+    }
+
+    #[test]
+    fn a_position_chosen_after_a_grab_before_any_pull_frame_waits_and_never_fails_closed() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        line.pull_started();
+        line.request(b);
+        // Each attempt would move the band, have its overlay move refused, and fail to put the
+        // band back: the third would leave the surfaces apart and close the dock.
+        fake.refuse_uploads = vec![false, true, false, true, false, true];
+        fake.refuse_moves = vec![true; 3];
+        for _ in 0..3 {
+            assert_eq!(
+                line.attempt(&mut fake),
+                Attempt::Idle,
+                "the pull uses A's line"
+            );
+        }
+        assert!(
+            fake.holds(a),
+            "nothing on screen changed and the dock stays shown"
+        );
+        assert_eq!(
+            (fake.refuse_uploads.len(), fake.refuse_moves.len()),
+            (6, 3),
+            "no surface was touched"
+        );
+        (fake.refuse_uploads, fake.refuse_moves) = (Vec::new(), Vec::new());
+        line.reclaim();
+        assert_eq!(
+            line.attempt(&mut fake),
+            Attempt::Placed(b),
+            "placed at the hand-back"
+        );
+        assert!(fake.holds(b));
+    }
+
+    #[test]
+    fn a_pull_keeps_its_mask_until_the_dock_draws_no_body_then_a_refused_shrink_keeps_a_band() {
+        let (a, b) = (placement(0, 0), placement(400, 2));
+        let (mut line, mut fake) = at_a();
+        let area = [-228, -228, 514, 477];
+        line.pull_overlay();
+        (fake.mask, fake.pulled) = (None, Some(area));
+        line.pull_mask(area);
+        line.request(b);
+        assert_eq!(
+            line.attempt(&mut fake),
+            Attempt::Idle,
+            "the dock draws the body"
+        );
+        assert_eq!(
+            (fake.mask, fake.pulled),
+            (None, Some(area)),
+            "the body's pixels stay owned"
+        );
+        let mut dock = PullDock::new(477);
+        assert_eq!(dock.rest(Holding::Picture), Rest::Release);
+        assert_eq!(dock.rest(Holding::Clearing), Rest::Wait);
+        assert_eq!(dock.rest(Holding::Nothing), Rest::Reclaim);
+        line.reclaim();
+        fake.refuse_moves = vec![true];
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert_eq!(
+            fake.mask,
+            Some(a.frame),
+            "the band under the line the dock still draws"
+        );
+        assert_eq!(line.attempt(&mut fake), Attempt::Placed(b));
+        assert!(fake.holds(b));
+    }
+
+    #[test]
+    fn a_pull_mask_a_failed_reclaim_leaves_is_emptied_when_the_proxy_wont_hide() {
+        let (mut line, mut fake) = at_a();
+        let area = [-228, -228, 514, 477];
+        (fake.mask, fake.pulled) = (None, Some(area));
+        line.pull_overlay();
+        line.pull_mask(area);
+        fake.refuse_uploads = vec![true; 3];
+        fake.refuse_proxy_hides = true;
+        line.reclaim();
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([true, false])(&line.attempt(&mut fake)));
+        assert!(failed([false, true])(&line.attempt(&mut fake)));
+        assert_eq!(fake.pulled, None, "the pull's area was emptied");
+        assert!(!fake.takes_clicks(), "nothing on screen takes clicks");
     }
 
     #[test]

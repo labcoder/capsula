@@ -143,6 +143,8 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         main_thread: ThreadId(9),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     frame::write(
         &mut &link.control,
@@ -641,6 +643,39 @@ fn pings_are_answered_and_run_states_passed_on() {
 }
 
 #[test]
+fn model_write_results_are_accepted_without_ending_the_link() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    let link = attended("model-result");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    for applied in [false, true] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::ThreadModelSet {
+                thread: ThreadId(3),
+                choice: ModelChoice {
+                    model: ModelSlug::new("private-model").expect("valid"),
+                    effort: Effort::High,
+                    connection: ConnectionKind::ChatGpt,
+                },
+                applied,
+            },
+            Pipe::Control,
+        )
+        .expect("model result");
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+            .expect("ping after result");
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+            Some(ControlToBrain::Pong)
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     use kumochi_protocol::message::{
         ActionState, ContentHash, DraftId, GitHubView, IssueBody, IssueCard, IssueRefused,
@@ -799,6 +834,8 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         main_thread: ThreadId(9),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     for message in [
         ControlToShell::Welcome {

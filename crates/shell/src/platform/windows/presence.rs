@@ -795,7 +795,6 @@ impl Drop for Menu {
 }
 
 /// Shows the tray menu at `[x, y]` and returns what the user picked, if anything.
-// shortcut: the tray owns dock positioning until slice 10 adds Settings → General.
 fn pick_from_tray_menu(
     hwnd: HWND,
     state: &ProxyState,

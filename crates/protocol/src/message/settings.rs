@@ -99,6 +99,46 @@ name! {
     UserName, MAX_NAME_CHARS
 }
 
+/// The dock's alignment within the screen's work area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockPosition {
+    /// Top edge, left aligned.
+    TopLeft,
+    /// Top edge, centered.
+    #[default]
+    TopCenter,
+    /// Top edge, right aligned.
+    TopRight,
+    /// Middle, left aligned.
+    MiddleLeft,
+    /// Center of the work area.
+    Center,
+    /// Middle, right aligned.
+    MiddleRight,
+    /// Bottom edge, left aligned.
+    BottomLeft,
+    /// Bottom edge, centered.
+    BottomCenter,
+    /// Bottom edge, right aligned.
+    BottomRight,
+}
+
+impl DockPosition {
+    /// All positions in the tray menu's row-major order.
+    pub const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::TopCenter,
+        Self::TopRight,
+        Self::MiddleLeft,
+        Self::Center,
+        Self::MiddleRight,
+        Self::BottomLeft,
+        Self::BottomCenter,
+        Self::BottomRight,
+    ];
+}
+
 /// A settings change, shell to brain. Each one is answered by exactly one
 /// [`super::ControlToShell::Settings`] with `answer` set, in order, while its connection lasts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +154,10 @@ pub enum SettingsOp {
     /// Set the model a thread with no choice runs on. Only the brain sends it today, from the
     /// catalog (design §6).
     SetDefaultModel(ModelChoice),
+    /// Move the dock within the work area.
+    SetDockPosition(DockPosition),
+    /// Also show the app in the taskbar.
+    SetTaskbar(bool),
 }
 
 /// The settings as the brain holds them: once per connection before `Scenes`, and after
@@ -132,6 +176,10 @@ pub struct SettingsView {
     pub max_frame_rate: MaxFrameRate,
     /// The model a thread with no choice runs on; unset until a catalog has been read.
     pub default_model: Option<ModelChoice>,
+    /// The dock's saved work-area alignment.
+    pub dock_position: DockPosition,
+    /// Whether the app also appears in the taskbar.
+    pub show_in_taskbar: bool,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -188,7 +236,62 @@ impl From<MaxFrameRate> for Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssistantName, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, UserName};
+    use super::{
+        AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
+        SettingsView, ThreadId, UserName,
+    };
+
+    #[test]
+    fn dock_and_taskbar_operations_and_views_round_trip() {
+        let positions = [
+            DockPosition::TopLeft,
+            DockPosition::TopCenter,
+            DockPosition::TopRight,
+            DockPosition::MiddleLeft,
+            DockPosition::Center,
+            DockPosition::MiddleRight,
+            DockPosition::BottomLeft,
+            DockPosition::BottomCenter,
+            DockPosition::BottomRight,
+        ];
+        assert_eq!(DockPosition::ALL, positions);
+        assert_eq!(DockPosition::default(), DockPosition::TopCenter);
+        for position in positions {
+            for shown in [true, false] {
+                for op in [
+                    SettingsOp::SetDockPosition(position),
+                    SettingsOp::SetTaskbar(shown),
+                ] {
+                    let bytes = postcard::to_allocvec(&op).expect("encodes");
+                    assert_eq!(
+                        postcard::from_bytes::<SettingsOp>(&bytes).expect("decodes"),
+                        op
+                    );
+                }
+                let view = SettingsView {
+                    assistant_name: AssistantName::new("Sentinelname").expect("valid"),
+                    user_name: Some(UserName::new("Sentineluser").expect("valid")),
+                    onboarded: true,
+                    main_thread: ThreadId(1),
+                    max_frame_rate: MaxFrameRate::AUTOMATIC,
+                    default_model: None,
+                    dock_position: position,
+                    show_in_taskbar: shown,
+                };
+                let bytes = postcard::to_allocvec(&view).expect("encodes");
+                assert_eq!(
+                    postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
+                    view
+                );
+                let outer = super::super::ControlToShell::Settings { view, answer: true };
+                let debug = format!("{outer:?}");
+                for marker in ["Sentinelname", "Sentineluser"] {
+                    assert!(!debug.contains(marker));
+                    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+                }
+            }
+        }
+    }
 
     #[test]
     fn only_the_listed_caps_decode() {

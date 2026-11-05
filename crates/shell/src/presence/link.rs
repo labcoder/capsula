@@ -251,9 +251,15 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
+        let (link, session) = (&self.link, &self.session);
         let applied = self.settings.update(cx, |state, cx| {
             let applied = state.receive(current, generation, view.clone(), update);
             if applied {
+                state.flush_offline_position(|op| {
+                    session.as_ref().is_some_and(|session| {
+                        link.send_control(session, ControlToBrain::Settings(op))
+                    })
+                });
                 cx.notify();
             }
             applied
@@ -272,6 +278,11 @@ impl Presence {
             state.set_settings(view);
             cx.notify();
         });
+        if let Err(error) =
+            self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
+        {
+            tracing::warn!(%error, "can't restore the saved dock position");
+        }
     }
 
     /// Shows the brain's error in both panels and on the connected dock.
