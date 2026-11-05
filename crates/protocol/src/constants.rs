@@ -218,16 +218,16 @@ mod identity_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
-        for one in logs {
-            for other in logs {
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG];
+        for (index, one) in logs.iter().enumerate() {
+            for other in &logs[index + 1..] {
                 assert!(
-                    one == other || !one.starts_with(other),
-                    "{one} starts with {other}"
+                    !one.starts_with(other) && !other.starts_with(one),
+                    "{one} and {other} overlap"
                 );
             }
         }

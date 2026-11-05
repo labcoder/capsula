@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use kumochi_protocol::frame;
 
-use super::capture::{Capturer, Failure, Screen};
+use super::capture::{Capturer, Failure, Open, Screen};
 use super::supervisor::Screen as ScreenKind;
 use super::wire::{ReplyBody, RequestBody};
 use crate::supervise::{Kind as _, read_request, write_message};
@@ -15,6 +15,11 @@ use crate::supervise::{Kind as _, read_request, write_message};
 ///
 /// # Panics
 /// Debug builds panic when the explicit panic fixture is selected.
+pub fn serve() -> Result<(), frame::FrameError> {
+    serve_on(&mut io::stdin().lock(), &mut io::stdout().lock(), open)
+}
+
+/// Answers requests until `input` ends, a capture must retire the worker, or framing breaks.
 #[cfg_attr(
     debug_assertions,
     expect(
@@ -22,9 +27,11 @@ use crate::supervise::{Kind as _, read_request, write_message};
         reason = "explicit dev-only panic-hook fixture"
     )
 )]
-pub fn serve() -> Result<(), frame::FrameError> {
-    let mut input = io::stdin().lock();
-    let mut output = io::stdout().lock();
+fn serve_on(
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
+    open: Open,
+) -> Result<(), frame::FrameError> {
     let mut screen = Screen::default();
     #[cfg(debug_assertions)]
     let mut fault = std::env::var(kumochi_protocol::constants::SCREEN_FAULT_ENV)
@@ -41,12 +48,10 @@ pub fn serve() -> Result<(), frame::FrameError> {
     if fault == Some(super::wire::WorkerFault::Exit) {
         return Ok(());
     }
-    while let Some((id, body)) = read_request::<RequestBody>(&mut input, ScreenKind::MAX_REQUEST)? {
+    while let Some((id, body)) = read_request::<RequestBody>(input, ScreenKind::MAX_REQUEST)? {
         let received = Instant::now();
         #[cfg(debug_assertions)]
         {
-            use std::io::Write as _;
-
             if let RequestBody::Fault(requested) = body {
                 fault = Some(requested);
             }
@@ -85,7 +90,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
             #[cfg(debug_assertions)]
             RequestBody::Fault(_) => continue,
         };
-        write_message(&mut output, id, &reply, ScreenKind::MAX_REPLY)?;
+        write_message(output, id, &reply, ScreenKind::MAX_REPLY)?;
         if retire {
             return Ok(());
         }
@@ -93,11 +98,21 @@ pub fn serve() -> Result<(), frame::FrameError> {
     Ok(())
 }
 
-/// No platform captures yet, so every capture is a numeric fault.
-// shortcut: A2b opens Windows Graphics Capture here; macOS will open ScreenCaptureKit.
+#[cfg(windows)]
+fn open() -> Result<Box<dyn Capturer>, i32> {
+    crate::platform::screen_capturer()
+}
+
+/// No platform but Windows captures yet, so every capture is a numeric fault.
+// shortcut: macOS will open ScreenCaptureKit here.
+#[cfg(not(windows))]
 fn open() -> Result<Box<dyn Capturer>, i32> {
     Err(NO_CAPTURER)
 }
 
 /// `E_NOTIMPL`, as the Windows adapter reports an unsupported capture.
+#[cfg(not(windows))]
 const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
+
+#[cfg(test)]
+mod tests;

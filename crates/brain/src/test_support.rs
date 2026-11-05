@@ -82,19 +82,32 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
 
 /// A brain on a fresh store in `scratch`, playing `script`, on `accounts`.
 pub(crate) fn brain_with(scratch: &Scratch, script: &str, accounts: Accounts) -> Brain {
+    let fixture = Fixture::parse(script).expect("script");
+    brain_on(
+        scratch,
+        crate::runtime::Selected::Fixture(Box::new(fixture)),
+        accounts,
+    )
+}
+
+/// A brain on a fresh store in `scratch`, answering with `engine`, on `accounts`.
+pub(crate) fn brain_on(
+    scratch: &Scratch,
+    engine: crate::runtime::Selected,
+    accounts: Accounts,
+) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
-    let fixture = Fixture::parse(script).expect("script");
     let config = Config::load(Some(scratch.0.clone()), main_thread);
     Brain::new(
         store,
         main_thread,
         high_water,
         scenes,
-        crate::runtime::Selected::Fixture(Box::new(fixture)),
+        engine,
         config,
         accounts,
     )

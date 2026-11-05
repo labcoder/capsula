@@ -141,6 +141,7 @@ error-plan-not-enabled = Plan use wasn't turned on. Enable it to use your ChatGP
 error-account-misconfigured = ChatGPT didn't accept this app's sign-in. Trying again won't help.
 error-sign-out-not-durable = Couldn't record the sign-out in the system's credential store. The account stays unused, but if the app restarts before Retry works, it will be signed in again.
 error-session-ended = Your ChatGPT session ended. Sign in again to keep using your plan.
+error-renewal-unconfirmed = ChatGPT didn't confirm your sign-in renewal. Sign in again to keep going.
 error-plan-unavailable = This ChatGPT account can't use its plan in this app.
 error-usage-limit = You've reached a ChatGPT usage limit for this app. Check your usage in ChatGPT settings.
 error-account-refused = ChatGPT didn't accept this account for that request. Signing in again may help.

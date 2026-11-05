@@ -34,6 +34,8 @@ pub(crate) use windows::call_throwing_export;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
 #[cfg(windows)]
+pub(crate) use windows::screen_capturer;
+#[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, config_dir, create_owner_only,
     data_dir, free_space, launch_detached, links_unsupported, quiet_failures, replace_file,

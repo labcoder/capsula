@@ -325,7 +325,10 @@ impl Accounts {
             AccountView::SignedIn {
                 recovery: Some(AccountRecovery::SignInAgain),
                 ..
-            } => error(ErrorKey::SessionEnded, Action::SignIn),
+            } => error(
+                self.state.ended_by().unwrap_or(ErrorKey::SessionEnded),
+                Action::SignIn,
+            ),
             AccountView::SignedIn {
                 plan: PlanState::Declined,
                 ..
