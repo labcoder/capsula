@@ -44,6 +44,13 @@ pub(super) enum BuildError {
 ///
 /// # Errors
 /// [`BuildError`] when the primitive is text, exceeds its charge, or fails to tessellate.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by the next overlay/frame integration layer"
+    )
+)]
 pub(super) fn paths(
     prim: &Prim,
     transform: Affine,

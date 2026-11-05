@@ -700,6 +700,11 @@ latency. The final locked native preparation fixture measures real admission, pr
 with host font shaping, and installation separately and together, with unique text and
 content-free count/timing output. It excludes queue delay and compositor presentation.
 
+The shell's `presence::paint_paths` builds bounded prim-space geometry, then transforms its
+finished triangles. It is an inert production seam until the overlay/frame integration layer:
+no drawing window or production paint callback calls it yet. Its numeric and fidelity tests
+exercise the same builder; the integration layer removes the temporary unused-entry expectation.
+
 ### Motion and the host clock
 
 `motion::SceneView` owns the activated layout and live property owners. Construct an
