@@ -768,7 +768,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::Account(_)
             | ControlToShell::ThreadsChanged
             | ControlToShell::CaptureDone { .. }
-            | ControlToShell::CaptureFailed { .. },
+            | ControlToShell::CaptureFailed { .. }
+            | ControlToShell::Connections(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -914,9 +915,13 @@ fn watch(
                     return;
                 }
             }
-            // shortcut: B3a releases the exclusion lease on these; nothing holds one yet.
-            Ok(Some(ControlToShell::CaptureDone { .. } | ControlToShell::CaptureFailed { .. })) => {
-            }
+            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
+            // brain sends no connections view until C2; the Connect screen reads it.
+            Ok(Some(
+                ControlToShell::CaptureDone { .. }
+                | ControlToShell::CaptureFailed { .. }
+                | ControlToShell::Connections(_),
+            )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");

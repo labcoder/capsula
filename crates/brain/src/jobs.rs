@@ -121,6 +121,7 @@ mod tests {
             choice: Some(ModelChoice {
                 model: ModelSlug::new("gpt-test").expect("valid"),
                 effort: Effort::High,
+                connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
             }),
             connection: ConnectionTag(0),
         };

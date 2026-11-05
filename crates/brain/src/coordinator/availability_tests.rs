@@ -95,6 +95,7 @@ fn built(choice: Option<&str>, tools: Vec<ToolSchema>) -> Input {
             choice: choice.map(|slug| ModelChoice {
                 model: ModelSlug::new(slug).expect("valid"),
                 effort: Effort::Low,
+                connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
             }),
             connection: ConnectionTag(7),
         }),
