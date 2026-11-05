@@ -73,10 +73,14 @@ no operation that reads or exports them.
   smaller frame shrinks the logical length, so an old tail is never part of the image, while the
   CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
   about COM or GPU allocations, which happen per capture.
-- **Platforms.** No platform captures yet, so `Capture` answers `Fault` with `E_NOTIMPL`'s
-  code. A2b adds Windows Graphics Capture behind the `Capturer` seam; macOS will use
-  `SCScreenshotManager` with Kumochi excluded from the content filter. A platform that can't
-  show its capture stopped makes the worker answer `Fault` and exit.
+- **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
+  thread. Per ticket: the monitor must have exactly the requested physical bounds
+  (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
+  with the cursor off and, where Windows allows it, no border. Frames and readback poll at 1 ms
+  until expiry. Session, pool and frame are closed on every path; if a close fails the worker
+  answers `Fault` and exits, so no capture can keep running. Foreign failures are HRESULT codes.
+- **macOS.** `SCScreenshotManager` with Kumochi excluded from the content filter, not built yet;
+  other platforms answer `Fault` with `E_NOTIMPL`'s code.
 - The supervisor's `capture` accepts only a `Captured` for its own capture id and display, maps
   `Refused` through, and treats any other reply as `WorkerLost`.
 

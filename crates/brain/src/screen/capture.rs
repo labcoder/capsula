@@ -15,7 +15,10 @@ pub(crate) enum Failure {
     /// A numeric platform code.
     Fault(i32),
     /// The capture may still be running, so the worker must exit after answering.
-    #[cfg_attr(not(test), expect(dead_code, reason = "A2b's Windows adapter retires"))]
+    #[cfg_attr(
+        not(any(test, windows)),
+        expect(dead_code, reason = "only the Windows adapter retires")
+    )]
     Retire(i32),
 }
 

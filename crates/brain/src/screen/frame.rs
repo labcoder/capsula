@@ -22,8 +22,8 @@ impl RawFrame {
     /// # Errors
     /// `Invalid` for an empty side, a side over [`MAX_SIDE`] or an overflowing length.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "A2b's Windows adapter fills it")
+        not(any(test, windows)),
+        expect(dead_code, reason = "only the Windows adapter fills it")
     )]
     pub(crate) fn begin(&mut self, width: u32, height: u32) -> Result<&mut [u8], Refusal> {
         self.valid = None;
