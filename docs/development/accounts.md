@@ -428,7 +428,9 @@ rows keep the set exactly as it was, marked as sent, so it's never sent again an
 sign-in's Commit or the sign-out to revoke; an unlisted code isn't evidence that nothing was
 issued. `RenewalUnconfirmed` ends the session like `SessionEnded`, but says the renewal may have
 gone through unconfirmed rather than that ChatGPT ended it. The account keeps that reason with
-the generation it ended, so a run's failure and the next task's refusal say the same; after a
+the generation it ended, so a run's failure and the next task's refusal say the same, and it
+sends the shell that error once before the view, since the view alone only says to sign in
+again and a catalog read that asked may be cancelled; after a
 restart, a set still marked as sent reads as `RenewalUnconfirmed`. A listed refusal or a
 connection that never opened issued nothing, so it clears the pending flag without setting
 `outcome_unknown`, and clears the sent mark.

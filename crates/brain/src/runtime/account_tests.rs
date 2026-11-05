@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
-    AccountOp, AccountView, Action, ControlToBrain, ControlToShell, DataToShell, Effort, ErrorKey,
-    ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ControlToBrain, ControlToShell, DataToShell,
+    Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -1439,5 +1439,66 @@ async fn a_run_waiting_on_an_unconfirmed_renewal_fails_saying_so() {
         let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
         assert_eq!(ended, Ended::Lost, "{name}");
         brain.close().await;
+    }
+}
+
+/// P169-M1 re-review: a renewal a catalog read started, with no run to fail, still tells the shell
+/// why the session ended, though the read it was for is cancelled.
+#[tokio::test]
+async fn a_catalog_renewal_that_goes_unconfirmed_tells_the_shell_why() {
+    let unlisted: TokenAnswer = || {
+        Ok(Response {
+            status: 408,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(
+                br#"{"error":"temporarily_unavailable"}"#.to_vec(),
+            )),
+        })
+    };
+    let timed_out: TokenAnswer = || Err(HttpError::Timeout);
+    let expected = UserError::new(
+        ErrorKey::RenewalUnconfirmed,
+        Vec::new(),
+        vec![Action::SignIn],
+    )
+    .expect("within limits");
+    for (name, token) in [("timeout", timed_out), ("unlisted", unlisted)] {
+        let scratch = Scratch::new(&format!("account-catalog-renewal-{name}"));
+        let store = FakeStore::default();
+        let mut accounts = seeded(
+            &scratch,
+            &store,
+            SharedHttp::new(Renewing(token)),
+            1_800_000_000,
+        );
+        let frames = timeout(PATIENCE, async {
+            let mut frames = Vec::new();
+            loop {
+                let event = accounts.next().await;
+                frames.extend(accounts.handle(event));
+                if frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        ControlToShell::Account(AccountView::SignedIn {
+                            recovery: Some(AccountRecovery::SignInAgain),
+                            ..
+                        })
+                    )
+                }) {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("the session ends in time");
+        let errors: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ControlToShell::Error(error) => Some(error.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, std::slice::from_ref(&expected), "{name}");
+        accounts.close(Instant::now(), Instant::now()).await;
     }
 }

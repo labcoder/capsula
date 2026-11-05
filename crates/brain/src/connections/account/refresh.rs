@@ -520,6 +520,10 @@ impl AccountState {
     /// account moves. Tokens left in place stay for sign-out to revoke.
     fn session_lost(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
         self.fail(error_of(key, Action::SignIn), effects);
+        // The view only says to sign in again, and a catalog read that asked may be cancelled.
+        if key == ErrorKey::RenewalUnconfirmed {
+            effects.push(Effect::Error(error_of(key, Action::SignIn)));
+        }
         self.moved(effects);
         self.ended = Some((self.generation, key));
     }
