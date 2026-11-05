@@ -10,7 +10,8 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 - Licenses, advisories, duplicates: `cargo deny check`
 - Dev tasks: `cargo xtask help`
 - CI (`.github/workflows/ci.yml`, Windows) runs fmt, clippy and tests; all must pass.
-  Deny runs when dependency files or its CI configuration change, plus weekly advisories on main.
+  Deny runs for dependency/CI configuration changes and every scheduled or manual run.
+  Cloud runs: `cloud-ci` PRs into main, `batch/**` pushes, manual dispatch, daily main checks.
 
 ## Layout
 ```

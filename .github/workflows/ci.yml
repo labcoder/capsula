@@ -2,10 +2,13 @@ name: CI
 
 on:
   pull_request:
-  push:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: ['batch/**']
+  workflow_dispatch:
   schedule:
-    - cron: '17 8 * * 1'
+    - cron: '17 8 * * *'
 
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' }}
@@ -20,7 +23,7 @@ env:
 
 jobs:
   check:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'cloud-ci') && (github.event.action != 'labeled' || github.event.label.name == 'cloud-ci'))
     name: fmt, deny, clippy, test
     runs-on: windows-latest
     timeout-minutes: 40
@@ -31,10 +34,11 @@ jobs:
       - name: Detect dependency changes
         id: dependencies
         env:
+          EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if ($env:BASE -match '^0+$') {
+          if ($env:EVENT -in @('schedule', 'workflow_dispatch') -or $env:BASE -match '^0+$') {
             'changed=True' >> $env:GITHUB_OUTPUT
             exit 0
           }
@@ -58,17 +62,3 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test -p gpui-pre-windows --locked --lib frame_demand
-
-  advisories:
-    if: github.event_name == 'schedule'
-    name: weekly advisories
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install the pinned toolchain
-        run: rustup toolchain install
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.20.2
-      - run: cargo deny --locked check advisories
