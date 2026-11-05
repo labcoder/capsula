@@ -326,8 +326,15 @@ pub struct Usage {
 }
 
 /// A provider's id for one tool call: ASCII and at most [`CallId::MAX`] bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CallId(String);
+
+/// The id is the provider's text, so only its length prints.
+impl fmt::Debug for CallId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CallId(len={})", self.0.len())
+    }
+}
 
 impl CallId {
     /// The longest id taken; a longer one is refused, never truncated.
@@ -903,7 +910,7 @@ mod tests {
             "RunRequest { key: Build(BuildKey { run: RunId(7), round: 1, attempt: 1 }), \
              run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
              choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
-             ToolCallReady { call: CallId(\"call-1\"), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
+             ToolCallReady { call: CallId(len=6), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
         );
         assert_eq!(
             format!(
@@ -913,7 +920,7 @@ mod tests {
                     name: ToolName::Draw
                 }
             ),
-            "ToolCallStarted { call: CallId(\"call-1\"), name: Draw }"
+            "ToolCallStarted { call: CallId(len=6), name: Draw }"
         );
     }
 }

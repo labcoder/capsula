@@ -35,6 +35,8 @@ mod drawings;
 mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
+#[path = "loop_tests.rs"]
+mod loops;
 #[path = "page_tests.rs"]
 mod pages;
 #[path = "scene_tests.rs"]
