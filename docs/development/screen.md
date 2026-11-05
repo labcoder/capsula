@@ -78,8 +78,8 @@ no operation that reads or exports them.
   (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
   with the cursor off. Border suppression is best-effort: Windows can accept it and still draw its
   yellow border on screen. Frames and the map poll at 1 ms, and a result that is ready at or
-  after expiry is released and refused, so no copy starts late. Frame, session and pool close
-  once the GPU copy into a staging texture is issued, so the CPU copy runs after capture has
+  after expiry is released and refused, and nothing late is published. Frame, session and pool
+  close once the GPU copy into a staging texture is issued, so the CPU copy runs after capture has
   stopped. All three close on every path; if a close fails the worker
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next

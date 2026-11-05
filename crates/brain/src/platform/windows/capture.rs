@@ -245,7 +245,7 @@ impl Wgc {
 }
 
 /// Polls `attempt` until it's ready. A result that's ready at or after `until` goes to `late`
-/// to be released and is refused, so no work starts after the deadline.
+/// to be released and is refused.
 fn poll<T>(
     until: Instant,
     mut attempt: impl FnMut() -> Result<Option<T>, Failure>,
