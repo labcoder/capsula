@@ -75,6 +75,7 @@ impl Accounts {
             | ErrorKey::AccountMisconfigured
             | ErrorKey::SignOutNotDurable
             | ErrorKey::SessionEnded
+            | ErrorKey::RenewalUnconfirmed
             | ErrorKey::PlanUnavailable => {
                 self.error = Some(error.clone());
                 self.unexplained = true;

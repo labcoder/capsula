@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
-    AccountOp, AccountView, Action, ControlToBrain, ControlToShell, DataToShell, Effort, ErrorKey,
-    ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ControlToBrain, ControlToShell, DataToShell,
+    Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -22,6 +22,8 @@ use super::{Ended, PATIENCE, Shell, duplex};
 use crate::connections::account::{Denied, Input, Listened, Worker};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
+use crate::connections::model::budget::Budget;
+use crate::connections::model::conn::{Connect, ModelClient};
 use crate::connections::oauth::id_token::IdentityError;
 use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launcher};
 use crate::connections::records::{Account, Tokens};
@@ -29,7 +31,7 @@ use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
-use crate::engines::responses::Bearer;
+use crate::engines::responses::{AccessHandle, Bearer, Responses};
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
@@ -43,11 +45,16 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
     /// The next control frame, whatever it is.
     async fn frame(&mut self) -> ControlToShell {
-        timeout(PATIENCE, self.next_control())
-            .await
-            .expect("in time")
-            .expect("readable")
-            .expect("open")
+        loop {
+            let frame = timeout(PATIENCE, self.next_control())
+                .await
+                .expect("in time")
+                .expect("readable")
+                .expect("open");
+            if !matches!(frame, ControlToShell::Connections(_)) {
+                return frame;
+            }
+        }
     }
 
     /// The next control frame, which must be an account view.
@@ -353,7 +360,8 @@ impl Http for SlowCheck {
             Endpoint::Discovery
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
-            | Endpoint::Models(_) => {
+            | Endpoint::Models(_)
+            | Endpoint::AnthropicModels(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
             }
@@ -429,7 +437,8 @@ impl Http for Rotating {
             Endpoint::Discovery
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
-            | Endpoint::Models(_) => (503, Vec::new()),
+            | Endpoint::Models(_)
+            | Endpoint::AnthropicModels(_) => (503, Vec::new()),
         };
         std::future::ready(Ok(Response {
             status,
@@ -560,6 +569,23 @@ fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u6
 
 /// [`seeded`], building each client with `http`.
 fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at: u64) -> Accounts {
+    seeded_at(
+        scratch,
+        store,
+        http,
+        expires_at,
+        Arc::new(FixedClock(1_800_000_000)),
+    )
+}
+
+/// [`seeded_on`], with the account system's wall clock `clock`.
+fn seeded_at(
+    scratch: &Scratch,
+    store: &FakeStore,
+    http: HttpFactory,
+    expires_at: u64,
+    clock: Arc<dyn Clock>,
+) -> Accounts {
     let seed = scratch.db().with_file_name("seed.lock");
     let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
         .expect("vault")
@@ -584,10 +610,11 @@ fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at
     let opening = store.clone();
     let worker = Worker::new(
         Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
-        Arc::new(FixedClock(1_800_000_000)),
+        Arc::clone(&clock),
     );
     let net = Net {
         http,
+        clock,
         ..test_support::net()
     };
     Accounts::spawn(worker, net).expect("accounts")
@@ -684,8 +711,9 @@ fn failed(key: ErrorKey, action: Action) -> Result<String, Denied> {
 }
 
 /// #98 M2, CAPS-151 M2: a refresh task that panics after its token was marked as sent still ends
-/// its flight. The token may have gone out, so the session ends and it stays marked; a later
-/// caller is answered at once instead of joining a dead flight.
+/// its flight. The token may have gone out, so the session ends, saying the renewal wasn't
+/// confirmed (OSC-223 gap 8), and it stays marked; a later caller is answered at once instead of
+/// joining a dead flight.
 #[tokio::test]
 async fn a_refresh_task_that_panics_still_answers_its_callers() {
     let scratch = Scratch::new("account-refresh-panic");
@@ -695,7 +723,7 @@ async fn a_refresh_task_that_panics_still_answers_its_callers() {
     let (wait, _) = accounts.access();
     assert_eq!(
         answered(&mut accounts, wait).await,
-        failed(ErrorKey::SessionEnded, Action::SignIn)
+        failed(ErrorKey::RenewalUnconfirmed, Action::SignIn)
     );
     let (later, _) = accounts.access();
     assert_eq!(answered(&mut accounts, later).await, Err(Denied::Unusable));
@@ -1282,4 +1310,202 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
+}
+
+/// Lists the catalog and answers the refresh-token grant with what `token` gives, inside the
+/// refresh's own task, so a panic there is that task's.
+struct Renewing(TokenAnswer);
+
+/// How the token endpoint answers a refresh.
+type TokenAnswer = fn() -> Result<Response, HttpError>;
+
+impl Http for Renewing {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let token = self.0;
+        let models = matches!(request.endpoint, Endpoint::Models(_));
+        async move {
+            if !models {
+                return token();
+            }
+            let (status, body) = listing();
+            Ok(Response {
+                status,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(body.into_bytes())),
+            })
+        }
+    }
+}
+
+/// No model server: a round that gets its bearer never gets further.
+struct Unreachable;
+
+impl Connect for Unreachable {
+    type Io = tokio::io::DuplexStream;
+
+    fn connect(&self) -> impl std::future::Future<Output = std::io::Result<Self::Io>> + Send {
+        std::future::ready(Err(std::io::Error::other("no model server in tests")))
+    }
+}
+
+/// The error of the next `Failed` run state the shell hears, answering pings on the way.
+async fn failed_with<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) -> Option<UserError> {
+    loop {
+        match shell.frame().await {
+            ControlToShell::RunState {
+                phase: Phase::Failed,
+                error,
+                ..
+            } => return error,
+            ControlToShell::Ping => shell.send(&ControlToBrain::Pong).await,
+            _ => {}
+        }
+    }
+}
+
+/// P169-M1 (OSC-223 gap 8): a named run waiting on a renewal whose outcome is unknown fails
+/// saying so, on the frames the shell reads, and so does the next task's admission. The account's
+/// end reaches the run before its engine's own answer, so the reason has to travel with the
+/// account. An explicit `invalid_grant` still says the session ended.
+#[tokio::test]
+async fn a_run_waiting_on_an_unconfirmed_renewal_fails_saying_so() {
+    let refusal = || {
+        Ok(Response {
+            status: 400,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(br#"{"error":"invalid_grant"}"#.to_vec())),
+        })
+    };
+    let cases: [(&str, TokenAnswer, ErrorKey); 3] = [
+        (
+            "timeout",
+            || Err(HttpError::Timeout),
+            ErrorKey::RenewalUnconfirmed,
+        ),
+        (
+            "panic",
+            || panic!("the transport panicked"),
+            ErrorKey::RenewalUnconfirmed,
+        ),
+        ("invalid-grant", refusal, ErrorKey::SessionEnded),
+    ];
+    for (name, token, key) in cases {
+        let scratch = Scratch::new(&format!("account-run-renewal-{name}"));
+        let store = FakeStore::default();
+        let now = Arc::new(AtomicU64::new(1_800_000_000));
+        let http = SharedHttp::new(Renewing(token));
+        let accounts = seeded_at(
+            &scratch,
+            &store,
+            Arc::new(move || Ok(http.clone())),
+            1_800_003_600,
+            Arc::new(Ticking(Arc::clone(&now))),
+        );
+        let (access, asks) = AccessHandle::new();
+        let engine = Responses::new(ModelClient::new(Unreachable), Budget::limited(None), access);
+        let selected = crate::runtime::Selected::Account {
+            engine: Box::new(engine),
+            asks,
+        };
+        let mut brain = test_support::brain_on(&scratch, selected, accounts);
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let expected =
+            UserError::new(key, Vec::new(), vec![Action::SignIn]).expect("within limits");
+        let client = async {
+            assert!(matches!(
+                timeout(PATIENCE, shell.data()).await.expect("in time"),
+                DataToShell::Models { .. }
+            ));
+            loop {
+                if let ControlToShell::Settings { view, .. } = shell.frame().await
+                    && view.default_model.is_some()
+                {
+                    break;
+                }
+            }
+            // The bearer is now due, so the run's round renews it, and waits.
+            now.store(1_800_003_600, Ordering::SeqCst);
+            shell.submit("first").await;
+            assert_eq!(
+                failed_with(&mut shell).await,
+                Some(expected.clone()),
+                "{name}: the run"
+            );
+            shell.submit("second").await;
+            assert_eq!(
+                failed_with(&mut shell).await,
+                Some(expected.clone()),
+                "{name}: the next task"
+            );
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost, "{name}");
+        brain.close().await;
+    }
+}
+
+/// P169-M1 re-review: a renewal a catalog read started, with no run to fail, still tells the shell
+/// why the session ended, though the read it was for is cancelled.
+#[tokio::test]
+async fn a_catalog_renewal_that_goes_unconfirmed_tells_the_shell_why() {
+    let unlisted: TokenAnswer = || {
+        Ok(Response {
+            status: 408,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(
+                br#"{"error":"temporarily_unavailable"}"#.to_vec(),
+            )),
+        })
+    };
+    let timed_out: TokenAnswer = || Err(HttpError::Timeout);
+    let expected = UserError::new(
+        ErrorKey::RenewalUnconfirmed,
+        Vec::new(),
+        vec![Action::SignIn],
+    )
+    .expect("within limits");
+    for (name, token) in [("timeout", timed_out), ("unlisted", unlisted)] {
+        let scratch = Scratch::new(&format!("account-catalog-renewal-{name}"));
+        let store = FakeStore::default();
+        let mut accounts = seeded(
+            &scratch,
+            &store,
+            SharedHttp::new(Renewing(token)),
+            1_800_000_000,
+        );
+        let frames = timeout(PATIENCE, async {
+            let mut frames = Vec::new();
+            loop {
+                let event = accounts.next().await;
+                frames.extend(accounts.handle(event));
+                if frames.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        ControlToShell::Account(AccountView::SignedIn {
+                            recovery: Some(AccountRecovery::SignInAgain),
+                            ..
+                        })
+                    )
+                }) {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("the session ends in time");
+        let errors: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ControlToShell::Error(error) => Some(error.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, std::slice::from_ref(&expected), "{name}");
+        accounts.close(Instant::now(), Instant::now()).await;
+    }
 }

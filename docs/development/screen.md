@@ -42,7 +42,7 @@ after the last handle has closed doesn't respawn, so shutdown can't start a work
 
 Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic`.
 The environment switch applies on the next request of every respawn; neither path exists in a
-release worker. No capture, UI Automation or OCR is implemented here yet.
+release worker. No UI Automation or OCR is implemented here yet.
 
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
@@ -73,10 +73,19 @@ no operation that reads or exports them.
   smaller frame shrinks the logical length, so an old tail is never part of the image, while the
   CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
   about COM or GPU allocations, which happen per capture.
-- **Platforms.** No platform captures yet, so `Capture` answers `Fault` with `E_NOTIMPL`'s
-  code. A2b adds Windows Graphics Capture behind the `Capturer` seam; macOS will use
-  `SCScreenshotManager` with Kumochi excluded from the content filter. A platform that can't
-  show its capture stopped makes the worker answer `Fault` and exit.
+- **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
+  thread. Per ticket: the monitor must have exactly the requested physical bounds
+  (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
+  with the cursor off. Border suppression is best-effort: Windows can accept it and still draw its
+  yellow border on screen. Frames and the map poll at 1 ms, and a result that is ready at or
+  after expiry is released and refused, and nothing late is published. Frame, session and pool
+  close once the GPU copy into a staging texture is issued, so the CPU copy runs after capture has
+  stopped. All three close on every path; if a close fails the worker
+  answers `Fault` and exits, so no capture can keep running. A lost device
+  (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
+  ticket gets a fresh device. Foreign failures are HRESULT codes.
+- **macOS.** `SCScreenshotManager` with Kumochi excluded from the content filter, not built yet;
+  other platforms answer `Fault` with `E_NOTIMPL`'s code.
 - The supervisor's `capture` accepts only a `Captured` for its own capture id and display, maps
   `Refused` through, and treats any other reply as `WorkerLost`.
 

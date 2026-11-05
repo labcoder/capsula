@@ -6,6 +6,7 @@
 //! writer is blocked on a shell that stopped reading.
 
 pub(crate) mod account;
+mod connections;
 mod controls;
 mod data;
 mod recovery;
@@ -22,9 +23,10 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
+    Transcript,
 };
-use kumochi_protocol::tap::Direction;
+use kumochi_protocol::tap::{Direction, Tapped as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
@@ -33,7 +35,7 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
@@ -126,7 +128,7 @@ pub(crate) enum Quit {
 #[derive(Debug)]
 pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     Fixture(Box<dyn Engine>),
     /// The account's engine answers, so runs need a usable account. Its rounds ask for the
     /// bearer on `asks`.
@@ -144,7 +146,7 @@ pub(crate) struct Brain {
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     fixture: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
@@ -238,12 +240,12 @@ impl Brain {
         config: Config,
         account: Accounts,
     ) -> std::io::Result<Self> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
             Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),
             Selected::Account { engine, asks } => (engine, asks, false),
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let Selected::Account {
             engine,
             asks: access,
@@ -271,7 +273,7 @@ impl Brain {
             coordinator,
             store: Some(store),
             engine,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             fixture,
             inputs_tx,
             inputs,
@@ -315,13 +317,13 @@ impl Brain {
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
     /// nothing.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let now = if self.fixture {
             Availability::Ready(Ready::fixture())
         } else {
             self.account.availability()
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
         let effects = self
             .coordinator
@@ -790,6 +792,11 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
+        link.control(&self.account.connections.connected())
+            .map_err(|Full| Ended::Lost)?;
+        if let Some(models) = self.account.connections.models_unsent() {
+            link.data(&models).map_err(|Full| Ended::Lost)?;
+        }
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
@@ -1056,6 +1063,16 @@ async fn read_data(
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some(DataToBrain::MicPcm(chunk))) if chunk.check().is_err() => {
+                return Ended::Broken("a microphone chunk out of bounds");
+            }
+            // shortcut: slice 7's PR 5 buffers a hold's audio.
+            Ok(Some(DataToBrain::MicPcm(_))) => {}
+            Ok(Some(
+                message @ (DataToBrain::IssueEdit { .. } | DataToBrain::IssueCards { .. }),
+            )) => {
+                tracing::debug!(op = message.op(), "issue data ignored");
+            }
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
@@ -1181,11 +1198,16 @@ impl<'a, 't> Link<'a, 't> {
         let owner = match message {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
-            | DataToShell::RunEnd { run } => Owner::Run(*run),
+            | DataToShell::RunEnd { run }
+            | DataToShell::SegmentQueued { run, .. }
+            | DataToShell::Transcript(Transcript { run, .. })
+            | DataToShell::SpeechPcm(SpeechPcm { run, .. }) => Owner::Run(*run),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,
-            DataToShell::ScenesRemoved { .. } | DataToShell::Models { .. } => Owner::Marker,
+            DataToShell::ScenesRemoved { .. }
+            | DataToShell::Models { .. }
+            | DataToShell::IssueCard(_) => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }

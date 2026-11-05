@@ -1,21 +1,11 @@
-//! JSON-RPC ids as the client sent them, and the call key the brain sees instead.
+//! JSON-RPC ids as the client sent them, the call key the brain sees instead, and the launch
+//! a bridge serves.
 
 use std::fmt::{self, Write as _};
 
 use serde_json::Value;
 
 use super::wire::CallKey;
-
-/// One Claude Code launch, drawn when the launch starts; its hex names the launch's pipe.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct LaunchId(pub(crate) u128);
-
-/// Only that it is one: a launch id names a pipe.
-impl fmt::Debug for LaunchId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LaunchId")
-    }
-}
 
 /// The longest string id, in bytes: `m:s:` and two hex digits a byte fit `CallId`'s 64 bytes.
 pub(crate) const MAX_STRING_ID: usize = 29;
@@ -56,6 +46,40 @@ impl JsonRpcId {
             Self::String(text) => Value::String(text.clone()).to_string(),
         }
     }
+}
+
+/// One Claude Code launch, drawn at random by C5a. Its 32 hex digits name the launch's pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LaunchId(pub(crate) u128);
+
+impl LaunchId {
+    /// The 32 lowercase hex digits the bridge's argv and the pipe's name carry.
+    pub(crate) fn hex(self) -> String {
+        format!("{:032x}", self.0)
+    }
+}
+
+/// Whether `key` is one [`JsonRpcId::key`] can produce: `m:n:<i64>` in canonical decimal, or
+/// `m:s:` and the UTF-8 of at most [`MAX_STRING_ID`] bytes in lowercase hex.
+pub(crate) fn is_call_key(key: &CallKey) -> bool {
+    if let Some(number) = key.0.strip_prefix("m:n:") {
+        return number.parse::<i64>().is_ok_and(|n| n.to_string() == number);
+    }
+    key.0.strip_prefix("m:s:").is_some_and(|hex| {
+        if hex.len() % 2 != 0
+            || hex.len() > 2 * MAX_STRING_ID
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return false;
+        }
+        let bytes: Option<Vec<u8>> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).ok())
+            .collect();
+        bytes.is_some_and(|bytes| std::str::from_utf8(&bytes).is_ok())
+    })
 }
 
 /// The kind and length only: an id is the client's text.

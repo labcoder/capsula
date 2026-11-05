@@ -527,6 +527,10 @@ impl Frame {
         self.world.clear();
         self.generation = None;
     }
+    /// Requested bytes of the reserved item and world storage; items share their geometry.
+    pub fn resident_bytes(&self) -> usize {
+        self.items.capacity() * size_of::<FrameItem>() + self.world.capacity() * size_of::<World>()
+    }
 }
 
 /// The activated picture of one scene: layout at rest plus the motion it still owes.
@@ -576,6 +580,20 @@ impl SceneView {
     /// The activated layout, which a cut freezes.
     pub fn layout(&self) -> &LayoutState {
         &self.layout
+    }
+    /// Requested bytes this view owns beyond geometry its layout shares: the layout's own
+    /// index copy, nodes, paint order, tracks with their keys, and the generation.
+    pub fn resident_bytes(&self) -> usize {
+        self.layout.index_bytes()
+            + self.nodes.capacity() * size_of::<Node>()
+            + self.paint.capacity() * size_of::<usize>()
+            + self.tracks.capacity() * size_of::<Live>()
+            + self
+                .tracks
+                .iter()
+                .map(|live| size_of_val(&*live.keys))
+                .sum::<usize>()
+            + crate::layout::heap::ARC_HEADER
     }
 
     /// Activates a prepared step at `now`, scheduling its objects and tracks against the

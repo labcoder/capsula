@@ -13,22 +13,34 @@ mod account;
 mod connections;
 mod content;
 mod error;
+#[macro_use]
+mod github;
+mod issues;
 mod pages;
 mod scenes;
 #[macro_use]
 mod settings;
 mod threads;
+mod voice;
 pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
     MAX_EMAIL_BYTES, PlanState,
 };
 pub use connections::{
     AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp, ConnectionsView,
-    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError,
+    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
+};
+pub use github::{
+    GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+};
+pub use issues::{
+    ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
+    IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult, MAX_ISSUE_BODY_BYTES,
+    MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -43,6 +55,12 @@ pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
     MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError, ThreadKind, ThreadOp,
     ThreadTitle,
+};
+pub use voice::{
+    Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
+    MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
+    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, SegmentId,
+    SpeechPcm, StepRef, Transcript, VoiceBound, check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -194,10 +212,19 @@ pub const MAX_PENDING_TURNS: usize = 64;
 
 /// One drawing step. shortcut: a labelled placeholder so runs, recovery and Esc can be built
 /// and tested; slice 4 replaces it with the `scene` v1 step.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// What the step shows, at most [`MAX_STEP_LABEL`] bytes.
     pub label: String,
+}
+
+/// The label is model text, so only its length prints.
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step")
+            .field("label_len", &self.label.len())
+            .finish()
+    }
 }
 
 /// Where a run is, as the shell shows it.
@@ -215,6 +242,8 @@ pub enum Phase {
     Failed,
     /// A recognized hold is waiting for input.
     Listening,
+    /// A released hold's audio is being transcribed.
+    Transcribing,
 }
 
 /// Shell to brain, on the control pipe.
@@ -298,11 +327,18 @@ pub enum ControlToBrain {
         thread: Option<ThreadId>,
         /// The exclusion lease protecting capture.
         lease: LeaseGeneration,
+        /// When the hold was recognized, in QPC ticks.
+        t_qpc: u64,
     },
     /// The hold key was released.
     KeyUp {
         /// The released gesture.
         gesture: GestureId,
+        /// When it was released, in QPC ticks.
+        t_qpc: u64,
+        /// How many [`MicPcm`] chunks the hold sent, at most [`MAX_HOLD_CHUNKS`]; fewer
+        /// arriving fails the hold.
+        chunks: u32,
     },
     /// The shell cancelled the hold.
     GestureCancel {
@@ -329,6 +365,52 @@ pub enum ControlToBrain {
         /// The thread.
         thread: ThreadId,
     },
+    /// The hold key went down; only reloads speech input, and starts nothing.
+    KeyDown {
+        /// The gesture the shell will recognize, if the hold lasts.
+        gesture: GestureId,
+        /// When the key went down, in QPC ticks.
+        t_qpc: u64,
+    },
+    /// How much of a segment has played, at most every [`PROGRESS_INTERVAL_MS`].
+    SpeechProgress {
+        /// The run.
+        run: RunId,
+        /// The playing segment.
+        segment: SegmentId,
+        /// Samples of it played.
+        sample: u32,
+        /// When that sample played, in QPC ticks.
+        t_qpc: u64,
+    },
+    /// The shell's output for `run` is quiet after a Stop or [`ControlToShell::SpeechRevoked`]:
+    /// it dropped all of the run's queued audio and presentation. Sent once for each.
+    SpeechStopped {
+        /// The run.
+        run: RunId,
+        /// Where playback stopped; none when none of the run's audio played.
+        cursor: Option<Cursor>,
+    },
+    /// A segment's last sample played.
+    SegmentPlayed {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// Its total samples.
+        samples: u32,
+    },
+    /// The output device's rate, and its generation, which changes with each device.
+    AudioOutput {
+        /// The rate in Hz, [`MIN_RATE`] to [`MAX_RATE`].
+        rate: u32,
+        /// The device's generation.
+        generation: OutputGeneration,
+    },
+    /// The user's operation on Kumochi's GitHub connection.
+    GitHub(GitHubOp),
+    /// Consent or another explicit issue-card action.
+    Issue(IssueOp),
 }
 
 /// What a thread's delete came to.
@@ -444,6 +526,32 @@ pub enum ControlToShell {
     /// Both Claude connections: once per connection after `Settings` and `Account` and before
     /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
     Connections(ConnectionsView),
+    /// Drop all of `run`'s outstanding speech and its queued presentation; the shell answers
+    /// with one [`ControlToBrain::SpeechStopped`] once its output is quiet.
+    SpeechRevoked {
+        /// The run.
+        run: RunId,
+    },
+    /// GitHub connection presentation, never credentials.
+    GitHub(GitHubView),
+    /// A versioned action transition, independent of data-pipe delivery.
+    ActionState {
+        /// The action.
+        draft: DraftId,
+        /// Its monotonic presentation version.
+        version: StateVersion,
+        /// The authoritative state.
+        state: ActionState,
+        /// The current approval, when offered.
+        approval: Option<ApprovalRev>,
+    },
+    /// A refused operation; it never changes the card's state.
+    IssueRefused {
+        /// The action whose operation was refused.
+        draft: DraftId,
+        /// A content-free refusal.
+        reason: IssueRefused,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -474,6 +582,24 @@ pub enum DataToBrain {
         request: u32,
         /// The list and its continuation.
         page: PageOf,
+    },
+    /// 20 ms of a recognized hold's microphone audio.
+    MicPcm(MicPcm),
+    /// A pending edit, answered later by an authoritative card.
+    IssueEdit {
+        /// The action to edit.
+        draft: DraftId,
+        /// The proposed title.
+        title: IssueTitle,
+        /// The proposed canonical body.
+        body: IssueBody,
+        /// The selected repository, if any.
+        repo: Option<RepoName>,
+    },
+    /// Read back at most sixteen authoritative cards.
+    IssueCards {
+        /// The action ids to read.
+        drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
     },
 }
 
@@ -595,6 +721,22 @@ pub enum DataToShell {
         /// At most [`MAX_MODELS`], in the catalog's order.
         models: Vec<ModelInfo>,
     },
+    /// What a hold said.
+    Transcript(Transcript),
+    /// A segment will be spoken: after the text before it, or with `step` when it's a step's
+    /// `say`. The text stays in the brain.
+    SegmentQueued {
+        /// The run.
+        run: RunId,
+        /// The segment, counted from 0 within the run, at most [`MAX_SEGMENTS_PER_RUN`].
+        segment: SegmentId,
+        /// The step it narrates.
+        step: Option<StepRef>,
+    },
+    /// Audio of a queued segment.
+    SpeechPcm(SpeechPcm),
+    /// An authoritative card; its body belongs on the data pipe.
+    IssueCard(IssueCard),
 }
 
 #[cfg(test)]
@@ -608,6 +750,10 @@ mod hold_frame_tests;
 #[cfg(test)]
 #[path = "message/content_tests.rs"]
 mod content_tests;
+
+#[cfg(test)]
+#[path = "message/issue_tests.rs"]
+mod issue_tests;
 
 #[cfg(test)]
 mod tests {

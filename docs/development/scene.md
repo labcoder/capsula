@@ -203,8 +203,9 @@ flowchart LR
   edge function under 2^45.
 - **Depth.** The plane gives 1/z over texel coordinates, evaluated in f64 and narrowed to f32; it
   must be finite and positive at every vertex. Keys clear the 3 lowest mantissa bits and compare
-  strictly, so depths within about 1e-6 relative tie and the earlier input wins, coplanar faces
-  included.
+  strictly, so depths in one 8-ulp bin (about 1e-6 wide) tie and the earlier input wins. That is
+  a bin, not a tolerance: depths one ulp apart across a bin boundary don't tie, so coplanar
+  stability rests on PR 4 building shared planes identically.
 - **Translucency.** Polygons under opacity 1 are sorted farthest first by their centroid's camera
   depth (ties by input order) with an in-place sort, depth-tested against opaque samples and
   blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
@@ -224,6 +225,98 @@ flowchart LR
 
 Nothing allocates once the caller holds the scratch, band and target. Targets are 1 to 4,096
 texels per axis; anything else, or a band narrower than the target, is `RasterError::Size`.
+
+### 3D camera and frames
+
+`three::camera` owns validated numeric camera and light state. The camera defaults to yaw 30°,
+pitch 20°, vertical fov 40°, distance three bounding radii and the centre of the **world-space 3D
+bounds**, not the layout rectangle. Authored distance is retained, including inside geometry.
+Orbit applies −0.4° per horizontal logical pixel and +0.4° per vertical pixel, clamps pitch to
+±85° and distance to 1.2–6 radii. These feel values are provisional. Camera inputs must be finite,
+distance positive and fov 10–120°. Eye and angle-derived basis stay in f64, so a tiny camera
+distance at a translated target never relies on subtracting a rounded f32 eye.
+
+`three::frame::frame` takes borrowed indexed `Solid`s, each with shared local vertices, source
+`Face`s, a theme-resolved colour/opacity and a composed sampled f64 `Transform`. Preparation must
+preserve original vertex indices and one stable three-vertex plane anchor per source face across
+its tessellations; triangle soup alone cannot satisfy those contracts. A face's triangles tessellate
+one source plane before f32 vertex rounding. The caller composes attachments before the call;
+the frame transforms vertices at the sampled pose rather than rebuilding geometry. This input is
+the seam for later preparation, not a live shell host or a new admission path.
+
+```mermaid
+flowchart LR
+  P["indexed source faces + composed pose"] --> C["f64 camera transform<br/>face plane + backface cull"]
+  C --> N["near, left, right, top, bottom clips"]
+  N --> S["project + snap once to 1/256 texel"]
+  S --> R["flat shade + Fragment → FrameScratch"]
+```
+
+The near distance is `max(0.05·distance, 1e-4·radius, 8·ulp(largest world coordinate)·focal_px)`.
+Focal length uses the exact internal raster height; the floor itself is a world-space distance. It
+keeps one f32 world-coordinate ulp below 1/8 texel at the nearest drawn depth. It also prevents
+approaching translated content arbitrarily closely: at coordinate 20,000 and height 1,440 with
+40° fov, it is about 30.9 world units. Nothing closer is drawn or writes an id.
+
+Clipping uses camera-space halfspaces, including the homogeneous equivalents of the four
+projected guard edges. That is perspective-equivalent to projecting then clipping, but keeps
+all intersections in f64 camera coordinates. Planes always apply near, left, right, top, bottom.
+An edge's endpoint order is the original solid vertex index, then lexicographic coordinates for
+equal indices; generated endpoints inherit the lower index. Intersections clamp the f64 parameter
+to [0,1], and on-plane endpoints are included once without an extra intersection. Consecutive and
+closing exact duplicates are removed before projection; raster push removes snapped duplicates
+and collinearity. Eight inline vertices suffice: three plus at most one per plane. No clip or
+output write grows a buffer.
+
+The reciprocal-depth plane is derived **once per source face**, in f64, then narrowed once and
+shared by every triangle. This makes a source face's depth independent of its triangulation,
+including across the raster's 8-ulp key boundaries. It is not a general tolerance between
+unrelated nearly coplanar faces. Flat shading uses
+`ambient + (1 − ambient)·max(0, normal·−light_dir)`, default direction (−1,−2,−1), ambient 0.35.
+The translucent key is the clipped polygon vertices' mean camera z, not a per-solid key.
+
+The frame refuses more than 160 solids or 24,000 triangles, invalid indices, non-finite geometry,
+invalid opacity or sizes outside 1–4,096 per axis. Numeric failures include unrepresentable depth
+planes; raster push checks positive finite depth at the snapped vertices. Cancellation polls at
+each face and every 1,024 vertex/index/triangle visits. Any error clears the whole output; the
+host must retain its previous displayed frame. Frame construction allocates nothing with reserved
+`FrameScratch`. Shell integration and publication remain staged.
+
+### 3D picking
+
+`three::pick::DisplayedFrame` owns the completed raster's ids and `FrameState`: geometry revision,
+camera, composed sampled pose per solid, frozen `Mapping` and solid-index-to-`Handle` map. Parts
+carry existing host handles, not user labels; handles retain their original commit identities.
+Construction checks the exact width × height id length, at most 160 matching poses/parts and
+every one-based solid id. That scan visits every id, so the raster worker builds the frame, not
+the UI thread. Background is 0. There are no mutable accessors; retirement consumes
+the frame with `into_parts` to return the id allocation for reuse.
+
+`Mapping` snapshots the logical destination origin/extent, effective DPI (physical pixels per
+logical pixel) and exact integer raster dimensions, each 1–4,096. Rectangle ends must be finite
+and greater than their origins; extents and DPI must be finite and positive. `pick(&frame, at)`
+takes a pointer in that same logical coordinate space. It rejects non-finite pointers and points
+outside the half-open rectangle, then uses `(at - origin) / extent × texels` **per axis**.
+DPI is not applied twice. Integer rounding can make the two ratios different, including in
+scaled and half-resolution motion frames. A labelled id returns `Part(handle)`, an unlabelled id
+returns `Blocked` and background returns `Miss`. A pick performs no allocation or ray traversal.
+
+Ids already encode raster coverage and opacity: an opaque unlabelled solid blocks, material
+below authored opacity 0.5 passes, and 0.5 blocks. Near-clipped geometry has no id. Rest chooses
+the most frequent of four sample ids, background included, with ties won by the lowest first
+sample index. Translucent ids follow the last qualifying polygon in the approximate painted
+centroid order, **not necessarily the nearest geometric surface** (OSC-218). A pick within one
+**internal texel** of an edge, mapped separately through both frozen axis ratios and including
+bilinear filtering, can differ from an exact ray. This is not a one-display-pixel tolerance.
+The scaled pointer/oracle fixtures reuse the frame's independent f64 ray oracle and omit only
+that edge neighbourhood and the declared 1e-6 relative depth ambiguity.
+
+The host must publish the same image and `DisplayedFrame` together at accepted paint, not on
+worker completion. Until then picks read the old pair, even if the desired camera, pose, DPI,
+rectangle or geometry revision changed. A skipped, failed, stale or superseded paint cannot
+advance picking. Unique ownership keeps the displayed ids unavailable for worker writes; the
+other buffer can belong to the running job or ready candidate, never both. Host job admission,
+image lifetime and the actual paint transaction belong to PR 6/10, not this scene primitive.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
@@ -489,7 +582,7 @@ Prepared residency remains the preparation layer's separate limit.
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
 24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
-the depth-buffered raster (3D raster below), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
+the depth-buffered raster (3D raster above), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
 and no 3D geometry is built yet.
 
 ## Preparation
@@ -1075,9 +1168,23 @@ At most eight jobs or undelivered answers retain worker slots; dropping an unspa
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
 waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
-ownership but cannot release a result still held by its caller. Cancelled workers keep
-their slots until their answer is applied or dropped. Cancellation never claims to kill
-a thread.
+ownership but cannot release a result still held by its caller. Each mirrored scene also
+reserves a resting view and a frame inside this allowance: the view's cloned layout index,
+node/paint/track storage and generation, plus both frame buffers. Fixed four-slot cache
+metadata is conservatively charged in full to each scene, rather than adding an unmetered
+index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
+Replacement clears a frame only while its old view still owns the geometry; release and
+disconnect defer the frame with its rest and view. This storage layer adds no painting or
+activation. Cancelled workers keep their slots until their answer is applied or dropped.
+Cancellation never claims to kill a thread.
+
+The ignored native eight-window residency fixture replaces each consumed rest with a fresh
+resting view and includes the reserved frames. It retains the previous consumption owner
+until the next handoff, with four scenes and eight prepared positions each. This exercises
+the storage allowance on native shaping, not production activation, paint latency or RSS.
+On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged peaks of
+54,823,602 bytes for the Unicode fixture and 52,430,246 for ASCII, below 67,108,864.
+These are allowance checks, not before/after performance comparisons or heap bounds.
 
 Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
 semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown

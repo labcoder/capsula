@@ -365,8 +365,10 @@ or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or C
 
 | Direction | Control message | Fields |
 | --- | --- | --- |
-| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease` |
-| Shell to brain | `KeyUp`, `GestureCancel` | `gesture` |
+| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease`, `t_qpc` |
+| Shell to brain | `KeyDown` | `gesture`, `t_qpc`; it only warms speech input, never starts a run |
+| Shell to brain | `KeyUp` | `gesture`, `t_qpc`, `chunks`: the `MicPcm` chunks the hold sent |
+| Shell to brain | `GestureCancel` | `gesture` |
 | Shell to brain | `FocusHint` | `gesture`, `hint`: `Region(PhysicalRect)` or `Window(WindowRef)` |
 | Shell to brain | `ExclusionLapsed` | `lease` |
 | Brain to shell | `CaptureDone` | `capture_for`: `Gesture(GestureId)` or `Turn(u32)` |
@@ -376,7 +378,8 @@ These controls are staged: the brain ignores hold controls and logs only their o
 names until B2a supplies admission and capture tickets; the shell ignores capture results
 until it owns exclusion leases. The tap records only these controls' operation and payload
 length, never coordinates or native window references, even when dumping a forged payload.
-The largest hold control is 42 payload bytes, below the 64 KiB control cap.
+The largest hold control is 52 payload bytes, below the 64 KiB control cap. `t_qpc` is the
+shell's performance-counter reading when the key moved, for latency checks only.
 
 Each `TextSubmit` now carries `turn: u32`, counted from one per connection, and
 `screen: ScreenChoice`. The shell advances the count only after a successful enqueue and
@@ -385,8 +388,90 @@ preserves FIFO admission and copies that submit's `turn` into `TurnRefused` or t
 run's first `RunState.origin: Some(RunOrigin::Typed { turn })`. Later states have `origin: None`.
 `RunOrigin::Hold { gesture }` and `Phase::Listening` are reserved for hold admission. The shell
 still settles pending turns in FIFO order; B2a replaces that with keyed correlation.
-Slice 7 will append `t_qpc` to `HoldRecognized` and `KeyUp`, append `chunks` to `KeyUp`, and
-add `KeyDown`, `MicPcm` and `Transcribing` without renaming these types or allocating another run.
+Slice 7 appended `t_qpc`, `chunks`, `KeyDown`, `MicPcm` and `Transcribing` without renaming these
+types or allocating another run.
+
+## Voice wire contract
+
+Voice is appended at the end of each enum, so earlier tags keep their bytes. The bounds live
+once, in `crates/protocol/src/message/voice.rs`, and every one is a guess until slice 7's
+gate measures it. Audio and transcripts print only their lengths in `Debug`, and the tap
+records only their operation and length.
+
+| Direction | Pipe | Message | Fields |
+| --- | --- | --- | --- |
+| Shell to brain | data | `MicPcm` | `gesture`, `seq`, `rate`, `last`, `samples` (i16) |
+| Brain to shell | data | `Transcript` | `run`, `text` |
+| Brain to shell | data | `SegmentQueued` | `run`, `segment`, optional `step` (`StepRef { scene, index }`) |
+| Brain to shell | data | `SpeechPcm` | `run`, `segment`, `output_generation`, `seq`, `samples`, `last` |
+| Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
+| Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
+| Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
+| Shell to brain | control | `AudioOutput` | `rate`, `generation` |
+| Brain to shell | control | `SpeechRevoked` | `run` |
+
+- **Microphone.** A `MicPcm` holds exactly `rate / 50` samples (20 ms) unless `last` is set,
+  when it holds 1 to `rate / 50`. `seq` counts from 0 below `MAX_HOLD_CHUNKS` (3,000, 60 s), and
+  the hold's `KeyUp` says how many chunks it sent. Rates are 8,000 to 192,000 Hz.
+- **Speech.** A `SpeechPcm` holds 1 to `rate / 10` samples (100 ms) at the rate of the output
+  generation it names; PCM for an older generation is dropped. Every queued segment ends with
+  exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
+  of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
+  audio or was cut still ends.
+- **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
+  output for the run is quiet; `cursor` is `None` when nothing of it played.
+- **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
+  broken. Until slice 7's later PRs consume them, the brain ignores in-bound microphone audio
+  and the speech controls, and the shell credits and drops the speech frames.
+
+## GitHub and issue wire contract
+
+These variants are appended, so existing postcard tags and handshake bytes stay unchanged.
+Mixed binaries still fail the build-id check. Protocol values carry no credentials: the brain
+owns account binding, content hashes, approval revisions and monotonic state versions; the
+shell will own presentation and pending edits.
+
+| Pipe and direction | Message | Fields |
+| --- | --- | --- |
+| Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
+| Control, shell to brain | `Issue(IssueOp)` | Consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
+| Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
+| Control, brain to shell | `ActionState` | `draft`, `version`, `state`, optional `approval` |
+| Control, brain to shell | `IssueRefused` | `draft`, content-free `reason`; no state change |
+| Data, shell to brain | `IssueEdit` | `draft`, checked `title`, normalized `body`, optional `repo` |
+| Data, shell to brain | `IssueCards` | At most 16 draft ids; empty is valid |
+| Data, brain to shell | `IssueCard` | `draft`, `thread`, optional `repo` and `account`, `title`, `body`, `hash`, optional `approval`, `version`, `state` |
+
+Titles preserve 1–256 Unicode scalar values, refuse blank or multiline text and controls, and
+are never silently trimmed. Bodies allow empty text, LF and tab, up to 32 KiB of UTF-8 after
+CRLF normalization; wire decoding refuses CR. Issue URLs allow only canonical
+`https://github.com/{owner}/{repo}/issues/{number}` URLs with a positive number. Checked
+repository and login values compare byte for byte. A card fits the 256 KiB data cap and the
+bounded repository view fits the 64 KiB control cap.
+
+P1 stages these messages without senders or action handlers. The brain logs only the operation
+kind and drops GitHub/issue requests, including edits and card reads; no reply is owed until
+later slices implement them. The shell explicitly ignores the new controls and cards, returning
+data credit for each dropped card without waiting for a run state. A history event can carry
+`PageEventKind::Issue { draft }`; its existing text supplies the localized one-line
+`Issue draft: {title}` placeholder, not a card or a consent surface. The tap records the new
+controls only as operation and payload length, never content; data frames are not tapped.
+
+P8 adds the card reducer and its version-merge tests. Its contract is:
+
+- State changes only for a strictly newer version.
+- Card content is accepted only when `card.version >= held_version`, so an equal-version card
+  can fill content after its control state arrived first.
+- An older card cannot fill missing content. If no content is held, request the current card
+  again with `IssueCards`.
+
+For example, Draft A v3, edited Draft B v4, Sending v5 and Filed v6 followed by delayed card A
+v3 must never show Filed with A's content. Request the current card and accept B at v6 without
+regressing the state. Approval revisions bind consent separately from presentation versions;
+Sending is presentation-only, with durable send phases left to the brain.
+
+Screenshot fields wait for slice 6's real `AssetId`. Client id and app slug wait for P3's app
+registration; P1 invents neither.
 
 ## Scene v1 wire contract
 

@@ -1,0 +1,498 @@
+//! The tool loop: each round's calls get results, its native items are stored in output order,
+//! the next round is built from the store, and the run's call and round budgets are charged
+//! before anything over them is kept or sent (D13-M2).
+
+use kumochi_protocol::message::Phase;
+
+use super::{
+    R, T, ack, committed, draw_call, end_run, ends_failed, engine, request, run_end, started,
+    state, text,
+};
+use crate::context::{Built, ConnectionTag};
+use crate::coordinator::{
+    BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_CALLS, MAX_ROUNDS, RoundItems, Stale,
+    StoreOp,
+};
+use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
+use crate::store::{Failure, Interruption, RunEnd};
+
+fn id(n: u32) -> CallId {
+    CallId::new(&format!("tool-{n}")).expect("short ASCII")
+}
+
+fn item(bytes: &str) -> Opaque {
+    Opaque::new(bytes.as_bytes().to_vec()).expect("small")
+}
+
+fn called(n: u32) -> [TurnEvent; 3] {
+    [
+        TurnEvent::ToolCallStarted {
+            call: id(n),
+            name: ToolName::Unknown,
+        },
+        TurnEvent::ToolArgsDelta {
+            call: id(n),
+            delta: "{}".to_owned(),
+        },
+        TurnEvent::ToolCallReady {
+            call: id(n),
+            args: "{}".to_owned(),
+        },
+    ]
+}
+
+fn completed() -> Input {
+    engine(R, TurnEvent::Finished(Finish::Completed))
+}
+
+fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<CallId>) -> Effect {
+    Effect::Store(StoreOp::RoundItems(RoundItems {
+        thread: T,
+        run: R,
+        round,
+        connection: ConnectionTag(0),
+        text: text.map(Into::into),
+        items,
+        calls,
+    }))
+}
+
+/// Plays each event of the current round, none of which may say anything.
+fn play(core: &mut Coordinator, events: impl IntoIterator<Item = TurnEvent>) {
+    for event in events {
+        assert_eq!(core.handle(engine(R, event)), Ok(Vec::new()));
+    }
+}
+
+/// Acks round `round`'s write, which must build round `round + 1`, and admits that build.
+fn next(core: &mut Coordinator, round: u32) -> Vec<Effect> {
+    let effects = core
+        .handle(Input::RoundStored { run: R, round })
+        .expect("current");
+    let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+        panic!("one build, not {effects:?}");
+    };
+    assert_eq!(build.key.round, round + 1);
+    core.handle(Input::ContextBuilt(ContextBuilt {
+        key: build.key,
+        snapshot: None,
+        result: Ok(Built {
+            request: request(),
+            sources: vec![T],
+        }),
+    }))
+    .expect("current")
+}
+
+fn starts_round(effects: &[Effect], round: u32) -> bool {
+    matches!(
+        effects,
+        [Effect::StartEngine { request }]
+            if matches!(request.key, crate::coordinator::SendKey::Build(BuildKey { round: r, .. }) if r == round)
+    )
+}
+
+#[test]
+fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built() {
+    let mut core = started();
+    assert_eq!(
+        core.handle(engine(R, TurnEvent::TextDelta("a".to_owned()))),
+        Ok(vec![state(R, T, Phase::Answering), text("a")])
+    );
+    play(&mut core, called(1));
+    play(&mut core, called(2));
+    play(
+        &mut core,
+        [
+            TurnEvent::OutputItem {
+                index: 2,
+                item: item("call two"),
+            },
+            TurnEvent::OutputItem {
+                index: 0,
+                item: item("message"),
+            },
+            TurnEvent::OutputItem {
+                index: 1,
+                item: item("call one"),
+            },
+        ],
+    );
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![round_items(
+            1,
+            Some("a"),
+            vec![item("message"), item("call one"), item("call two")],
+            vec![id(1), id(2)],
+        )]),
+        "items in output order, results in call order"
+    );
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 2 }),
+        Err(Stale),
+        "only round 1 is being written"
+    );
+    assert!(starts_round(&next(&mut core, 1), 2));
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![end_run(None, None, RunEnd::Done)]),
+        "a round with no calls and no items ends the run"
+    );
+}
+
+#[test]
+fn a_last_round_with_items_is_stored_before_done() {
+    let mut core = started();
+    core.handle(engine(R, TurnEvent::TextDelta("bye".to_owned())))
+        .expect("current");
+    play(
+        &mut core,
+        [TurnEvent::OutputItem {
+            index: 0,
+            item: item("message"),
+        }],
+    );
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![round_items(
+            1,
+            Some("bye"),
+            vec![item("message")],
+            Vec::new()
+        )])
+    );
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Err(Stale),
+        "the engine finished within its budget"
+    );
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 1 }),
+        Ok(vec![end_run(None, None, RunEnd::Done)])
+    );
+    assert_eq!(
+        core.handle(Input::RunStored { run: R }),
+        Ok(vec![state(R, T, Phase::Done), run_end(R)])
+    );
+}
+
+#[test]
+fn the_ninth_round_is_refused_before_its_build() {
+    let mut core = started();
+    let mut sends = 1;
+    for round in 1..MAX_ROUNDS {
+        play(&mut core, called(round));
+        assert_eq!(
+            core.handle(completed()),
+            Ok(vec![round_items(round, None, Vec::new(), vec![id(round)])])
+        );
+        assert!(starts_round(&next(&mut core, round), round + 1));
+        sends += 1;
+    }
+    assert_eq!(sends, 8);
+    play(&mut core, called(MAX_ROUNDS));
+    assert_eq!(
+        core.handle(completed()),
+        Ok(ends_failed(Failure::Budget)),
+        "no ninth build, so no ninth ask or send"
+    );
+}
+
+#[test]
+fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
+    let mut core = started();
+    for n in 1..=MAX_CALLS {
+        assert_eq!(
+            core.handle(engine(
+                R,
+                TurnEvent::ToolCallStarted {
+                    call: id(n),
+                    name: ToolName::Unknown,
+                }
+            )),
+            Ok(Vec::new()),
+            "call {n}"
+        );
+    }
+    assert_eq!(
+        core.handle(engine(
+            R,
+            TurnEvent::ToolCallStarted {
+                call: id(17),
+                name: ToolName::Unknown,
+            }
+        )),
+        Ok(ends_failed(Failure::Budget))
+    );
+
+    let mut core = started();
+    for n in 1..=MAX_CALLS {
+        play(&mut core, called(n));
+    }
+    core.handle(completed()).expect("current");
+    next(&mut core, 1);
+    assert_eq!(
+        core.handle(engine(
+            R,
+            TurnEvent::ToolCallStarted {
+                call: id(1),
+                name: ToolName::Unknown,
+            }
+        )),
+        Ok(ends_failed(Failure::Budget)),
+        "the count is the run's, not the round's"
+    );
+}
+
+#[test]
+fn a_call_must_be_new_and_its_arguments_follow_it() {
+    let mut core = started();
+    play(&mut core, called(1));
+    assert_eq!(
+        core.handle(engine(
+            R,
+            TurnEvent::ToolCallStarted {
+                call: id(1),
+                name: ToolName::Unknown,
+            }
+        )),
+        Ok(ends_failed(Failure::Engine)),
+        "the same call twice"
+    );
+
+    let mut core = started();
+    play(&mut core, called(1));
+    assert_eq!(
+        core.handle(engine(
+            R,
+            TurnEvent::ToolArgsDelta {
+                call: id(1),
+                delta: "more".to_owned(),
+            }
+        )),
+        Ok(ends_failed(Failure::Engine)),
+        "a ready call takes no more arguments"
+    );
+
+    let mut core = started();
+    play(&mut core, [called(1)[0].clone()]);
+    assert_eq!(
+        core.handle(completed()),
+        Ok(ends_failed(Failure::Engine)),
+        "a round can't complete with a call that never got ready"
+    );
+}
+
+#[test]
+fn a_late_round_ack_only_lets_the_ended_run_be_written() {
+    let mut core = started();
+    play(&mut core, called(1));
+    core.handle(completed()).expect("current");
+    assert_eq!(
+        core.handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        }),
+        Ok(vec![
+            Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
+            state(R, T, Phase::Interrupted),
+            run_end(R),
+        ]),
+        "the outcome waits for the round's write"
+    );
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 1 }),
+        Ok(vec![end_run(
+            None,
+            Some(Vec::new()),
+            RunEnd::Interrupted(Interruption::Stop)
+        )]),
+        "no next round"
+    );
+
+    let mut core = started();
+    play(&mut core, called(1));
+    core.handle(completed()).expect("current");
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Ok(vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Failed),
+            run_end(R),
+        ]),
+        "a round's write counts against the run's deadline"
+    );
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 1 }),
+        Ok(vec![end_run(None, None, RunEnd::Failed(Failure::Budget))])
+    );
+
+    let mut core = started();
+    play(
+        &mut core,
+        [TurnEvent::OutputItem {
+            index: 0,
+            item: item("message"),
+        }],
+    );
+    core.handle(completed()).expect("current");
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("current");
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 1 }),
+        Ok(vec![end_run(
+            None,
+            Some(Vec::new()),
+            RunEnd::Interrupted(Interruption::Stop)
+        )]),
+        "a stopped run's last round is answered, not refused"
+    );
+}
+
+#[test]
+fn a_failed_round_write_fails_the_run_with_no_next_round() {
+    let mut core = started();
+    play(&mut core, called(1));
+    core.handle(completed()).expect("current");
+    assert_eq!(
+        core.handle(Input::StoreFailed { run: R }),
+        Ok(ends_failed(Failure::Store))
+    );
+    assert_eq!(
+        core.handle(Input::RoundStored { run: R, round: 1 }),
+        Err(Stale),
+        "the failed write stays failed"
+    );
+}
+
+#[test]
+fn steps_are_stored_before_their_rounds_items() {
+    let mut core = started();
+    core.handle(engine(R, draw_call())).expect("current");
+    core.handle(engine(
+        R,
+        TurnEvent::ToolArgsDelta {
+            call: super::call(),
+            delta: "a\n".to_owned(),
+        },
+    ))
+    .expect("current");
+    play(
+        &mut core,
+        called(1).into_iter().chain([TurnEvent::OutputItem {
+            index: 0,
+            item: item("call"),
+        }]),
+    );
+    assert_eq!(
+        core.handle(completed()),
+        Ok(Vec::new()),
+        "a's write is pending"
+    );
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Ok(vec![
+            Effect::CancelEngine { run: R },
+            state(R, T, Phase::Failed),
+            run_end(R),
+        ]),
+        "a round with calls left still counts against the deadline"
+    );
+
+    let mut core = started();
+    core.handle(engine(R, draw_call())).expect("current");
+    core.handle(engine(
+        R,
+        TurnEvent::ToolArgsDelta {
+            call: super::call(),
+            delta: "a\n".to_owned(),
+        },
+    ))
+    .expect("current");
+    play(&mut core, called(1));
+    core.handle(completed()).expect("current");
+    assert_eq!(
+        core.handle(ack(0, "a")),
+        Ok(vec![
+            committed(0, "a"),
+            round_items(1, None, Vec::new(), vec![id(1)])
+        ])
+    );
+    assert!(starts_round(&next(&mut core, 1), 2));
+}
+
+#[test]
+fn a_rounds_items_fill_the_request_bound_and_no_more() {
+    let mut core = started();
+    let full = || TurnEvent::OutputItem {
+        index: 0,
+        item: Opaque::new(vec![b'x'; Opaque::MAX]).expect("the cap fits"),
+    };
+    assert_eq!(crate::context::BOUND, 2 * Opaque::MAX);
+    play(&mut core, [full(), full()]);
+    assert_eq!(
+        core.handle(engine(
+            R,
+            TurnEvent::OutputItem {
+                index: 2,
+                item: item("x"),
+            }
+        )),
+        Ok(ends_failed(Failure::Budget)),
+        "one byte over"
+    );
+}
+
+#[test]
+fn round_writes_show_lengths_never_content() {
+    const MARKER: &str = "zqxplantedmarker";
+    let call = CallId::new(&format!("call-{MARKER}")).expect("short ASCII");
+    let op = Effect::Store(StoreOp::RoundItems(RoundItems {
+        thread: T,
+        run: R,
+        round: 1,
+        connection: ConnectionTag(0),
+        text: Some(format!("said {MARKER}").into()),
+        items: vec![item(&format!("{{\"text\":\"{MARKER}\"}}"))],
+        calls: vec![call.clone()],
+    }));
+    let result = crate::context::Body::Result {
+        call: call.clone(),
+        output: MARKER.to_owned(),
+    };
+    let request = [
+        crate::context::InputItem::FunctionCall {
+            call: call.clone(),
+            name: MARKER.to_owned(),
+            arguments: MARKER.to_owned(),
+        },
+        crate::context::InputItem::FunctionOutput {
+            call: call.clone(),
+            output: MARKER.to_owned(),
+        },
+    ];
+    let events = [
+        TurnEvent::ToolCallStarted {
+            call: call.clone(),
+            name: ToolName::Unknown,
+        },
+        TurnEvent::ToolArgsDelta {
+            call: call.clone(),
+            delta: MARKER.to_owned(),
+        },
+        TurnEvent::ToolCallReady {
+            call,
+            args: MARKER.to_owned(),
+        },
+    ];
+    let printed = format!("{op:?} {result:?} {request:?} {events:?}");
+    assert!(!printed.contains(MARKER), "{printed}");
+    let bytes = format!("{:?}", MARKER.as_bytes());
+    let listed = bytes.trim_start_matches('[').trim_end_matches(']');
+    assert!(!printed.contains(listed), "{printed}");
+}

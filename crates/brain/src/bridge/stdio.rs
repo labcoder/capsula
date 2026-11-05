@@ -119,22 +119,25 @@ pub(crate) enum RpcError {
     Parse,
     InvalidRequest,
     MethodNotFound,
+    /// Only the brain's listener answers it.
+    InvalidParams,
     Internal,
 }
 
 impl RpcError {
-    const fn json(self) -> &'static str {
+    pub(super) const fn json(self) -> &'static str {
         match self {
             Self::Parse => r#"{"code":-32700,"message":"Parse error"}"#,
             Self::InvalidRequest => r#"{"code":-32600,"message":"Invalid Request"}"#,
             Self::MethodNotFound => r#"{"code":-32601,"message":"Method not found"}"#,
+            Self::InvalidParams => r#"{"code":-32602,"message":"Invalid params"}"#,
             Self::Internal => r#"{"code":-32603,"message":"Internal error"}"#,
         }
     }
 }
 
-/// Classifies one stdin line. A batch, a non-object, a bad `jsonrpc` or a bad id is
-/// `InvalidRequest`.
+/// Classifies one stdin line. A batch, a non-object, a bad `jsonrpc`, a bad id, or a request's
+/// `params` that are present but neither an object nor an array is `InvalidRequest`.
 pub(crate) fn classify(line: &[u8]) -> Incoming {
     if line.iter().all(u8::is_ascii_whitespace) {
         return Incoming::Blank;
@@ -169,6 +172,12 @@ pub(crate) fn classify(line: &[u8]) -> Incoming {
             initialized: method == "notifications/initialized",
         };
     };
+    if fields
+        .get("params")
+        .is_some_and(|params| !params.is_object() && !params.is_array())
+    {
+        return invalid(Some(id));
+    }
     let method = match method {
         "initialize" => Method::Initialize,
         "tools/list" => Method::ToolsList,

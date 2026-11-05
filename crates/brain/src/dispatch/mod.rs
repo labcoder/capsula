@@ -98,7 +98,7 @@ impl Route {
     pub(crate) fn column(self) -> String {
         match self {
             Self::Model => "model".to_owned(),
-            Self::Mcp(launch) => format!("mcp:{:032x}", launch.0),
+            Self::Mcp(launch) => format!("mcp:{}", launch.hex()),
         }
     }
 }

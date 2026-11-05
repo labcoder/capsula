@@ -61,6 +61,8 @@ pub enum StoreOp {
         /// The step.
         step: Step,
     },
+    /// A round's text, native items and results.
+    RoundItems(super::RoundItems),
     /// The text streamed since the last write, the revealed set, then the run's outcome.
     EndRun {
         /// The thread.
@@ -154,6 +156,7 @@ impl StoreOp {
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
             Self::CommitCall(call) => Some(call.key.run),
+            Self::RoundItems(round) => Some(round.run),
             Self::Drawing { .. }
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
@@ -204,6 +207,7 @@ impl StoreOp {
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
+            Self::RoundItems(round) => Input::StoreFailed { run: round.run },
             Self::ClearScenes { scenes } => Input::ScenesCleared {
                 scenes: scenes.clone(),
                 ok: false,

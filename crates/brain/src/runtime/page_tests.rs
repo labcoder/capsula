@@ -12,6 +12,7 @@ fn preamble(frame: &[u8]) -> bool {
         ControlToShell::Scenes { .. }
             | ControlToShell::Settings { .. }
             | ControlToShell::Account(_)
+            | ControlToShell::Connections(_)
     )
 }
 
@@ -119,6 +120,49 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
 }
 
 #[tokio::test]
+async fn staged_issue_data_is_dropped_without_blocking_credit() {
+    use kumochi_protocol::message::{DraftId, IssueBody, IssueTitle};
+
+    let queue = exhausted_queue();
+    let ready = Notify::new();
+    let (turns_tx, mut turns) = mpsc::channel(1);
+    let (pages_tx, mut pages) = mpsc::channel(1);
+    let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
+    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0);
+    let writer = async {
+        for message in [
+            DataToBrain::IssueEdit {
+                draft: DraftId(9),
+                title: IssueTitle::new("Fix layout").expect("title"),
+                body: IssueBody::new("Private details").expect("body"),
+                repo: None,
+            },
+            DataToBrain::IssueCards {
+                drafts: kumochi_scene::text::Bounded::new(vec![DraftId(9)]).expect("one id"),
+            },
+            DataToBrain::Credit { bytes: 17 },
+        ] {
+            let bytes = frame::encode(&message, Pipe::Data).expect("frame");
+            shell.write_all(&bytes).await.expect("sent");
+        }
+        shell.shutdown().await.expect("EOF");
+    };
+    let ended = timeout(PATIENCE, async { tokio::join!(reader, writer).0 })
+        .await
+        .expect("reader finishes");
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(turns.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(pages.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Marker, vec![7; 17]);
+    assert_eq!(
+        queue.borrow_mut().pop(std::time::Instant::now()),
+        Some(vec![7; 17])
+    );
+}
+
+#[tokio::test]
 async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish() {
     let scratch = Scratch::new("page-flood");
     let mut brain = test_support::brain(&scratch, "");
@@ -217,7 +261,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         );
         queue_turn(&turns_tx, 1, "go").await;
         let mut bytes = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..5 {
             bytes = timeout(PATIENCE, control.recv())
                 .await
                 .expect("state")
@@ -461,7 +505,11 @@ async fn read_pages_and_text(
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. }) => {
+            | DataToShell::Models { .. }
+            | DataToShell::IssueCard(_)
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_)) => {
                 panic!("unexpected {other:?}")
             }
         }

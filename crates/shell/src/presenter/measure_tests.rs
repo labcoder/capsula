@@ -417,6 +417,10 @@ fn measure_native_eight_window_residency() {
     use kumochi_scene::limits::MAX_RESIDENT_BYTES;
     use std::{sync::mpsc, time::Duration};
 
+    let _timeout = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(420));
+        std::process::exit(124);
+    });
     assert!(!kumochi_scene::deferred::running());
     let app = gpui_kit::application();
     for content in [
@@ -477,6 +481,12 @@ fn measure_native_eight_window_residency() {
                             .consume_ready(id, expected, now)
                             .expect("the next native head fits with the prior owner held");
                         assert_eq!(done.step.step().index, expected);
+                        let scene = presenter.scenes.get_mut(&id).expect("the consumed scene");
+                        scene.view = kumochi_scene::SceneView::new(
+                            &scene.rest,
+                            scene.state.view().activated(),
+                        );
+                        scene.view_bytes = scene.view.resident_bytes();
                         peak = peak.max(presenter.residency());
                         drop(previous.replace(done.step));
                         let effects = done.effects.expect("a current scene");
@@ -522,7 +532,7 @@ fn measure_native_eight_window_residency() {
             .recv_timeout(Duration::from_secs(180))
             .expect("native window worker");
         println!(
-            "native_eight_window ascii_cells={ascii} scenes=4 objects=1500 cells=4000 marks=20000 lifetime_prefixes=256 ready_per_scene=8 consumed=256 drawing_bytes_per_scene={drawing_bytes} peak_charge_bytes={peak} allowance_bytes={MAX_RESIDENT_BYTES}; one returned owner per scene, previous retained until next handoff, synthetic scheduler clock, no paint or RSS measurement"
+            "native_eight_window ascii_cells={ascii} scenes=4 objects=1500 cells=4000 marks=20000 lifetime_prefixes=256 ready_per_scene=8 consumed=256 drawing_bytes_per_scene={drawing_bytes} peak_charge_bytes={peak} allowance_bytes={MAX_RESIDENT_BYTES}; fixture replaces resting views after consumption, reserved frames included, one returned owner per scene, previous retained until next handoff, synthetic scheduler clock, no production activation, paint or RSS measurement"
         );
     }
 }

@@ -769,7 +769,11 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ThreadsChanged
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
-            | ControlToShell::Connections(_),
+            | ControlToShell::GitHub(_)
+            | ControlToShell::ActionState { .. }
+            | ControlToShell::IssueRefused { .. }
+            | ControlToShell::Connections(_)
+            | ControlToShell::SpeechRevoked { .. },
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -916,11 +920,16 @@ fn watch(
                 }
             }
             // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
-            // brain sends no connections view until C2; the Connect screen reads it.
+            // brain sends no connections view until C2; the Connect screen reads it. Slice 7's
+            // PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::Connections(_),
+                | ControlToShell::Connections(_)
+                | ControlToShell::GitHub(_)
+                | ControlToShell::ActionState { .. }
+                | ControlToShell::IssueRefused { .. }
+                | ControlToShell::SpeechRevoked { .. },
             )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {

@@ -7,6 +7,11 @@
 //! reads and writes on one file object; stdin and stdout stay on their own std threads.
 
 mod id;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "C5a creates the listener for each launch")
+)]
+mod listener;
 mod stdio;
 #[cfg(test)]
 mod tests;
@@ -21,7 +26,7 @@ use kumochi_protocol::constants::{BRIDGE_LOG, BRIDGE_PIPE, OBJECT_PREFIX};
 use kumochi_protocol::frame::{self, Pipe};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 pub(crate) use self::id::LaunchId;
@@ -86,9 +91,14 @@ pub fn serve(launch: &str) -> Result<(), BridgeError> {
         return Err(BridgeError::Launch);
     }
     let session = crate::platform::session_id().map_err(BridgeError::Connect)?;
-    let name = format!(r"\\.\pipe\{OBJECT_PREFIX}-{session}-{BRIDGE_PIPE}-{launch}");
+    let name = pipe_name(session, launch);
     let own = std::env::current_exe().map_err(BridgeError::Connect)?;
     run(|| connect(&name, &own), io::stdin(), io::stdout())
+}
+
+/// The launch's pipe, for one Windows session and the launch's 32 hex digits.
+fn pipe_name(session: u32, launch: &str) -> String {
+    format!(r"\\.\pipe\{OBJECT_PREFIX}-{session}-{BRIDGE_PIPE}-{launch}")
 }
 
 /// Runs the relay between `stdin`, `stdout` and the pipe `open` gives. Nothing here waits on
@@ -117,16 +127,17 @@ where
         })
         .map_err(BridgeError::Start)?;
     let (lines, input) = mpsc::channel(16);
+    let (ended, stdin_end) = watch::channel(false);
     let reader = std::thread::Builder::new()
         .name("bridge-stdin".to_owned())
-        .spawn(move || read_stdin(stdin, &lines));
+        .spawn(move || read_stdin(stdin, &lines, &ended));
     if let Err(error) = reader {
         // The writer has nothing queued, so it ends as soon as its sender is gone.
         drop(out);
         writer.join().unwrap_or_default();
         return Err(BridgeError::Start(error));
     }
-    let relayed = runtime.block_on(async move { relay(open()?, input, out).await });
+    let relayed = runtime.block_on(async move { relay(open()?, input, stdin_end, out).await });
     drop(runtime);
     let flushed = done.recv_timeout(FLUSH_WAIT).unwrap_or(false);
     relayed?;
@@ -160,7 +171,10 @@ pub(crate) enum Input {
     End,
 }
 
-fn read_stdin(mut stdin: impl Read, lines: &mpsc::Sender<Input>) {
+/// Reads stdin into `lines`. `ended` is set the moment a read sees the end, before the last
+/// sends, which can block on a full queue: the relay learns of the end even then. A reader
+/// blocked on a full queue before its end never sees it; the deadline ends that case.
+fn read_stdin(mut stdin: impl Read, lines: &mpsc::Sender<Input>, ended: &watch::Sender<bool>) {
     let mut reader = LineReader::default();
     let mut chunk = vec![0; 64 * 1024];
     let mut ready = Vec::new();
@@ -169,6 +183,7 @@ fn read_stdin(mut stdin: impl Read, lines: &mpsc::Sender<Input>) {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
+        // A full line queue blocks here, before the next read can see the end.
         reader.push(&chunk[..read], &mut ready);
         for line in ready.drain(..) {
             if lines.blocking_send(Input::Line(line)).is_err() {
@@ -176,6 +191,7 @@ fn read_stdin(mut stdin: impl Read, lines: &mpsc::Sender<Input>) {
             }
         }
     }
+    ended.send_replace(true);
     if let Some(line) = reader.finish()
         && lines.blocking_send(Input::Line(line)).is_err()
     {
@@ -200,16 +216,30 @@ enum Stop {
     Stdout,
 }
 
-/// Waits for `work` unless the deadline passes or the pipe ends first.
-async fn within<T>(
-    work: impl Future<Output = T>,
+/// What ends every wait: the deadline, the pipe's end and stdin's.
+struct Ends {
     deadline: Instant,
-    lost: &mut oneshot::Receiver<()>,
-) -> Result<T, Stop> {
+    /// Resolves when the pipe's reader stops.
+    lost: oneshot::Receiver<()>,
+    /// Set once stdin's reader has seen its end.
+    stdin: watch::Receiver<bool>,
+}
+
+/// Waits for `work` unless an end comes first. A known end wins over work that's also ready.
+async fn within<T>(work: impl Future<Output = T>, ends: &mut Ends) -> Result<T, Stop> {
     tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(ends.deadline) => Err(Stop::Deadline),
+        () = stdin_ended(&mut ends.stdin) => Err(Stop::Ended),
+        _ = &mut ends.lost => Err(Stop::Ended),
         done = work => Ok(done),
-        () = tokio::time::sleep_until(deadline) => Err(Stop::Deadline),
-        _ = lost => Err(Stop::Ended),
+    }
+}
+
+/// Resolves once stdin's reader has seen its end; never if it stopped without one.
+async fn stdin_ended(stdin: &mut watch::Receiver<bool>) {
+    if stdin.wait_for(|ended| *ended).await.is_err() {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -217,9 +247,7 @@ async fn within<T>(
 struct Relay<W> {
     pipe: W,
     out: mpsc::Sender<Vec<u8>>,
-    deadline: Instant,
-    /// Resolves when the pipe's reader stops.
-    lost: oneshot::Receiver<()>,
+    ends: Ends,
     in_flight: Option<(JsonRpcId, CallKey, Reassembly)>,
 }
 
@@ -227,13 +255,13 @@ impl<W: AsyncWrite + Unpin> Relay<W> {
     /// Writes one frame; a write the deadline or the pipe's end cut short ends the connection.
     async fn send(&mut self, message: &ToBrain) -> Result<(), Stop> {
         let frame = frame::encode(message, Pipe::Data).map_err(|_| Stop::Ended)?;
-        within(self.pipe.write_all(&frame), self.deadline, &mut self.lost)
+        within(self.pipe.write_all(&frame), &mut self.ends)
             .await?
             .map_err(|_| Stop::Ended)
     }
 
     async fn emit(&mut self, line: Vec<u8>) -> Result<(), Stop> {
-        within(self.out.send(line), self.deadline, &mut self.lost)
+        within(self.out.send(line), &mut self.ends)
             .await?
             .map_err(|_| Stop::Stdout)
     }
@@ -310,17 +338,23 @@ impl<W: AsyncWrite + Unpin> Relay<W> {
 }
 
 /// Relays stdin lines to the brain over `pipe` and its answers to `out`, one request at a time,
-/// once the brain's `Hello` has come. Every wait, pipe writes included, ends at the deadline.
+/// once the brain's `Hello` has come. Every wait, pipe writes included, ends at the deadline,
+/// and at stdin's end once its reader has seen it (`stdin_end`).
 pub(crate) async fn relay<P>(
     pipe: P,
     mut input: mpsc::Receiver<Input>,
+    mut stdin_end: watch::Receiver<bool>,
     out: mpsc::Sender<Vec<u8>>,
 ) -> Result<(), BridgeError>
 where
     P: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, writer) = tokio::io::split(pipe);
-    let hello = tokio::time::timeout(HELLO_WAIT, crate::ipc::read(&mut reader, Pipe::Data)).await;
+    let hello = tokio::select! {
+        biased;
+        () = stdin_ended(&mut stdin_end) => return Ok(()),
+        hello = tokio::time::timeout(HELLO_WAIT, crate::ipc::read(&mut reader, Pipe::Data)) => hello,
+    };
     let Ok(Ok(Some(ToBridge::Hello { remaining_ms }))) = hello else {
         return Err(BridgeError::NoHello);
     };
@@ -337,8 +371,11 @@ where
     let mut relay = Relay {
         pipe: writer,
         out,
-        deadline: Instant::now() + Duration::from_millis(remaining_ms),
-        lost,
+        ends: Ends {
+            deadline: Instant::now() + Duration::from_millis(remaining_ms),
+            lost,
+            stdin: stdin_end,
+        },
         in_flight: None,
     };
     let stop = loop {
@@ -351,7 +388,7 @@ where
                 None => Err(Stop::Ended),
                 Some(message) => relay.brain(message).await,
             },
-            () = tokio::time::sleep_until(relay.deadline) => Err(Stop::Deadline),
+            () = tokio::time::sleep_until(relay.ends.deadline) => Err(Stop::Deadline),
         };
         if let Err(stop) = step {
             break stop;
