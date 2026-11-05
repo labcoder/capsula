@@ -3,15 +3,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kumochi_protocol::geometry::DisplayRef;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
-use super::wire::{MAX_REPLY_BYTES, ReplyBody, RequestBody, ScreenError};
+use super::wire::{
+    Exclusion, FrameMeta, MAX_REPLY_BYTES, Refusal, ReplyBody, RequestBody, ScreenError, TicketWire,
+};
 use crate::platform::Job;
 use crate::supervise::{self, Handle, Kind, WorkerLost};
 
 /// Absolute request budget, including queueing (guess).
 pub const REQUEST_DEADLINE: Duration = Duration::from_millis(1500);
+
+/// Why a capture produced no frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CaptureError {
+    /// The worker refused the ticket or the display.
+    #[error("capture refused: {0:?}")]
+    Refused(Refusal),
+    /// The worker failed or was lost.
+    #[error(transparent)]
+    Screen(#[from] ScreenError),
+}
 
 /// The screen worker's kind for the shared supervisor.
 pub(crate) struct Screen;
@@ -19,7 +33,7 @@ pub(crate) struct Screen;
 impl Kind for Screen {
     const ARG: &'static str = crate::SCREEN_WORKER;
     const NAME: &'static str = "screen";
-    /// Requests are a tag and a fixture at most.
+    /// Requests are a tag, a fixture or a capture's ticket and display at most.
     const MAX_REQUEST: usize = 64 * 1024;
     const MAX_REPLY: usize = MAX_REPLY_BYTES;
     type Request = RequestBody;
@@ -55,6 +69,33 @@ impl ScreenHandle {
         }
     }
 
+    /// Takes one frame under `ticket`; the pixels stay in the worker. The worker's validity runs
+    /// from its receipt, so the caller (B2a) still discards a reply past the ticket's own deadline.
+    ///
+    /// # Errors
+    /// The worker's refusal, a platform fault, or `WorkerLost` for any reply that isn't this
+    /// capture's.
+    pub async fn capture(
+        &self,
+        ticket: TicketWire,
+        display: DisplayRef,
+        exclude: Exclusion,
+    ) -> Result<FrameMeta, CaptureError> {
+        let capture = ticket.capture();
+        let body = RequestBody::Capture {
+            ticket,
+            display,
+            exclude,
+        };
+        match self.request(body).await? {
+            ReplyBody::Captured(meta) if meta.capture == capture && meta.display == display.0 => {
+                Ok(meta)
+            }
+            ReplyBody::Refused(refusal) => Err(CaptureError::Refused(refusal)),
+            _ => Err(ScreenError::WorkerLost.into()),
+        }
+    }
+
     /// Subscribes before issuing work, so a lost watch generation cannot be missed.
     pub fn lost(&self) -> broadcast::Receiver<WorkerLost> {
         self.inner.lost()
@@ -86,3 +127,6 @@ impl ScreenSupervisor {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -247,3 +247,56 @@ async fn third_fourth_fifth_loss_and_window_boundary() {
     tokio::time::advance(Duration::from_nanos(1)).await;
     assert_eq!(backoff(&mut history, Instant::now()), Duration::ZERO);
 }
+
+#[test]
+fn a_17_chunk_message_reassembles_at_4_mib() {
+    let most = Pipe::Data.max_payload() - 6;
+    let sizes = [vec![most; 16], vec![Test::MAX_REPLY - 16 * most]].concat();
+    assert_eq!(sizes.len(), 17);
+    let mut assembly = Assembly::new(Test::MAX_REPLY);
+    for (index, size) in sizes.iter().enumerate() {
+        let last = index == 16;
+        let sent = Frame {
+            id: 1,
+            chunk: u32::try_from(index).expect("17 chunks"),
+            last,
+            body: vec![42; *size],
+        };
+        let encoded = frame::encode(&sent, Pipe::Data).expect("within the frame cap");
+        let read = frame::read::<Frame>(&mut encoded.as_slice(), Pipe::Data)
+            .expect("read")
+            .expect("frame");
+        let done = assembly.push(read).expect("within the message cap");
+        assert_eq!(
+            done.map(|bytes| bytes.len()),
+            last.then_some(Test::MAX_REPLY)
+        );
+    }
+}
+
+#[test]
+fn each_malformed_frame_is_its_own_frame_error() {
+    let over = (256 * 1024 + 1_u32).to_le_bytes().to_vec();
+    let whole = Frame {
+        id: 1,
+        chunk: 0,
+        last: true,
+        body: vec![1; 64],
+    };
+    let at_cap = frame::encode(&whole, Pipe::Data).expect("frame");
+    let truncated = at_cap[..at_cap.len() - 1].to_vec();
+    let mistyped = frame::encode(&(1_u64, 0_u32), Pipe::Data).expect("not a frame");
+    let read = |bytes: Vec<u8>| frame::read::<Frame>(&mut bytes.as_slice(), Pipe::Data);
+    assert!(matches!(
+        read(over),
+        Err(frame::FrameError::TooLarge {
+            len: 262_145,
+            max: 262_144
+        })
+    ));
+    assert!(matches!(read(truncated), Err(frame::FrameError::Truncated)));
+    assert!(matches!(
+        read(mistyped),
+        Err(frame::FrameError::Malformed(_))
+    ));
+}
