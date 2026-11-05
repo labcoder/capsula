@@ -1,0 +1,94 @@
+use std::f64::consts::TAU;
+
+use super::Resampler;
+
+fn tone(hz: f64, rate: u32, samples: usize) -> Vec<f32> {
+    (0..samples)
+        .map(|n| {
+            let n = f64::from(u32::try_from(n).expect("short"));
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_truncation,
+                reason = "a test tone"
+            )]
+            let sample = (0.5 * (TAU * hz * n / f64::from(rate)).sin()) as f32;
+            sample
+        })
+        .collect()
+}
+
+fn all(from: u32, to: u32, input: &[f32], pieces: &[usize]) -> Vec<f32> {
+    let mut resampler = Resampler::new(from, to);
+    let mut out = Vec::new();
+    let mut rest = input;
+    for &piece in pieces.iter().cycle() {
+        if rest.is_empty() {
+            break;
+        }
+        let (now, later) = rest.split_at(piece.min(rest.len()));
+        resampler.push(now, &mut out);
+        rest = later;
+    }
+    resampler.finish(&mut out);
+    out
+}
+
+#[test]
+fn the_same_rate_passes_through() {
+    let input = tone(1_000.0, 24_000, 100);
+    assert_eq!(all(24_000, 24_000, &input, &[7]), input);
+    assert_eq!(all(24_000, 24_000, &[], &[7]), Vec::<f32>::new());
+}
+
+#[test]
+fn every_output_inside_the_input_comes_out_once() {
+    let input = vec![0.25; 2_400];
+    for (to, want) in [
+        (48_000, 4_800),
+        (44_100, 4_410),
+        (8_000, 800),
+        (192_000, 19_200),
+    ] {
+        assert_eq!(all(24_000, to, &input, &[480]).len(), want, "{to}");
+    }
+    assert_eq!(all(24_000, 44_100, &[0.5], &[1]).len(), 2);
+    assert_eq!(all(24_000, 44_100, &[], &[1]).len(), 0);
+}
+
+#[test]
+fn how_the_input_is_cut_changes_nothing() {
+    let input = tone(440.0, 24_000, 5_000);
+    for to in [48_000, 44_100, 16_000] {
+        let whole = all(24_000, to, &input, &[5_000]);
+        assert_eq!(all(24_000, to, &input, &[1, 7, 333, 2]), whole, "{to}");
+    }
+}
+
+#[test]
+fn a_tone_keeps_its_shape() {
+    for to in [48_000, 44_100, 16_000] {
+        let out = all(24_000, to, &tone(1_000.0, 24_000, 4_800), &[960]);
+        let want = tone(1_000.0, to, out.len());
+        // The ends meet the silence around the input.
+        let edge = usize::try_from(to / 1_000).expect("small");
+        for (n, (got, want)) in out.iter().zip(&want).enumerate().skip(edge) {
+            if n + edge >= out.len() {
+                break;
+            }
+            assert!(
+                (got - want).abs() < 2e-3,
+                "{to} Hz, sample {n}: {got} vs {want}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tone_above_the_output_nyquist_is_removed() {
+    let out = all(24_000, 8_000, &tone(6_000.0, 24_000, 4_800), &[960]);
+    let middle = &out[100..out.len() - 100];
+    let peak = middle
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(peak < 5e-3, "{peak}");
+}
