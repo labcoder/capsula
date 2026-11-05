@@ -170,7 +170,10 @@ sequenceDiagram
   vault's, and takes it on its first call only while the account worker reports the vault lock
   held. Before Version every managed-policy source must be absent; before Status the reviewed
   row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
-  held from the volume root. A refusal starts nothing and makes no folder. When another brain
+  held from the volume root. Then the whole `claude-code` folder is walked without following
+  anything: no one but the user and SYSTEM may read any folder or file in it, or, through an
+  inheritable entry, what's made in its folders. A folder or file that fails is refused, never
+  re-secured, so Claude Code's own sign-in file stays readable by the user and SYSTEM only. A refusal starts nothing and makes no folder. When another brain
   holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
 - **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
   as `configDirectory`, byte for byte; anything else fails closed.
@@ -230,12 +233,14 @@ stateDiagram-v2
   with the folder in place and the marker down. A second Disconnect while one is pending is
   ignored; one the lane can't queue marks nothing and may be asked again.
 - **While the marker stands,** every call that would start `claude` first tries the deletion, and
-  if it can't finish, starts nothing and answers `CleanupPending`. So a brain that stopped part
+  if it can't finish, starts nothing and answers `CleanupPending`. A marker is taken only through
+  the same checks Disconnect uses, with the chain held, and removed through that handle; anything
+  else at its name asks for no deletion and starts nothing either. So a brain that stopped part
   way finishes the deletion before its first discovery. A Find while it's pending retries the
   deletion alone. With the off switch, only that deletion runs.
 - **The deletion** holds the chain from the volume root, then opens each entry in Kumochi's folder
-  without following it and deletes it through that handle. Each folder must pass the chain's checks
-  and stays open while its entries are listed through its handle, so its name can't be rebound
+  without following it, checks it through that handle like a held folder or file, and deletes it
+  through that handle. Each folder stays open while its entries are listed through its handle, so its name can't be rebound
   mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
   target alone and the marker down.
   The marker's name and the folder are constants, never a path from input.

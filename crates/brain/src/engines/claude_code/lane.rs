@@ -5,7 +5,7 @@
 //! C5a adds questions to this lane.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -347,17 +347,17 @@ impl Worker {
     /// Deletes Kumochi's folder and then the marker, when a Disconnect left one; until both are
     /// gone, nothing else starts.
     fn settle(&mut self) -> Result<(), Failure> {
-        let marker = self.host.base.join(CLAUDE_CODE_DELETING);
-        match fs::symlink_metadata(&marker) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(Failure::Cleanup),
-            Ok(_) => {}
-        }
+        let _held = platform::hold_chain(&self.host.base).map_err(|_| Failure::Folders)?;
+        // Something at the marker's name that isn't a valid marker asks for no deletion.
+        let Some(marker) = platform::marker(&self.host.base.join(CLAUDE_CODE_DELETING))
+            .map_err(|_| Failure::Cleanup)?
+        else {
+            return Ok(());
+        };
         self.hold()?;
-        let _held = platform::hold_chain(&self.host.base).map_err(|_| Failure::Cleanup)?;
         platform::remove_tree(&self.host.base.join(CLAUDE_CODE_DIR))
             .map_err(|_| Failure::Cleanup)?;
-        fs::remove_file(&marker).map_err(|_| Failure::Cleanup)
+        platform::unmark(marker).map_err(|_| Failure::Cleanup)
     }
 
     /// The lane open and not stuck, and this brain's lock, taken on first use only while this
@@ -501,6 +501,8 @@ fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
     ] {
         held.push(platform::owner_only_dir(dir)?);
     }
+    // shortcut: the whole folder is walked before every start; cache it if starts get slow.
+    platform::private_tree(&root)?;
     Ok(Folders { paths, _held: held })
 }
 

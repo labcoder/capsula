@@ -28,7 +28,8 @@ use crate::engines::claude_code::install::FindError;
 use crate::platform::Stdio;
 use crate::platform::sherpa::tests::{icacls, set_junction};
 use crate::platform::{
-    FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, local_app_data, pause_after_check,
+    FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, dacl_sddl, local_app_data,
+    pause_after_check, set_dacl, this_user,
 };
 
 /// The version every fake reports.
@@ -822,6 +823,129 @@ async fn a_nested_folder_others_can_change_stops_the_deletion_before_its_listed(
     assert_eq!(base.calls(), Vec::<String>::new());
 }
 
+/// Kumochi's folder and its `config` folder made before the lane runs, the folder readable by this
+/// user and SYSTEM only and `config` with this user's full control plus `extra` ACEs; then a
+/// Version's result.
+async fn version_with_config(base: &Base, extra: &str) -> Result<Outcome, Failure> {
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folders");
+    set_dacl(&base.owned(), |user| {
+        format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)")
+    });
+    set_dacl(&config, |user| format!("D:P(A;OICI;FA;;;{user}){extra}"));
+    let (host, _switches) = host(base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    let version = call(&mut lane, Work::Version).await;
+    assert!(lane.close(soon()).await);
+    version
+}
+
+#[tokio::test]
+async fn a_reused_config_folder_everyone_may_read_is_refused() {
+    let base = Base::new("config-readable");
+    assert_eq!(
+        version_with_config(&base, "(A;OICI;0x1200a9;;;WD)").await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_reused_config_folder_whose_new_files_another_account_may_read_is_refused() {
+    let base = Base::new("config-inherits-readers");
+    assert_eq!(
+        version_with_config(&base, "(A;OICIIO;GR;;;S-1-5-21-1-2-3-1002)").await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_retained_file_another_account_may_read_is_refused() {
+    let base = Base::new("config-file-readable");
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folders");
+    let kept = config.join("kept.json");
+    fs::write(&kept, b"{}").expect("a file left in it");
+    set_dacl(&kept, |user| format!("D:P(A;;FA;;;{user})(A;;FR;;;WD)"));
+    assert_eq!(
+        version_with_config(&base, "(A;OICI;FA;;;SY)").await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(fs::read(&kept).expect("left alone"), b"{}");
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_sign_in_the_fake_writes_gets_only_this_users_access() {
+    let base = Base::new("sign-in-private");
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert_eq!(call(&mut lane, Work::Login).await, Ok(Outcome::LoginEnded));
+    assert!(lane.close(soon()).await);
+    let token = base.owned().join("config").join("signed-in");
+    assert_eq!(dacl_sddl(&token), format!("D:(A;ID;FA;;;{})", this_user()));
+}
+
+#[tokio::test]
+async fn a_plain_file_others_can_change_stops_the_deletion() {
+    let base = Base::new("marked-file-writable");
+    let left = marked(&base);
+    icacls(&left, &["/grant", "*S-1-1-0:(M)"]);
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Cleanup));
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(&left).expect("refused, not deleted"), b"{}");
+    assert!(base.marker().exists(), "the deletion waits");
+    assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+/// Asserts a fresh lane's Version and Cleanup both refuse the deletion an invalid marker at
+/// `base` would ask for, leaving `left` in Kumochi's folder and starting nothing.
+async fn assert_no_recovery(base: &Base, left: &Path) {
+    let starts = base.starts();
+    let (host, _switches) = host(base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    for work in [Work::Version, Work::Cleanup] {
+        assert_eq!(
+            call(&mut lane, work).await,
+            Err(Failure::Cleanup),
+            "{work:?}"
+        );
+    }
+    assert!(lane.close(soon()).await);
+    assert!(left.exists(), "nothing deleted");
+    assert_eq!(base.starts(), starts, "nothing started");
+}
+
+#[tokio::test]
+async fn an_invalid_marker_found_at_startup_deletes_nothing() {
+    let base = Base::new("marker-invalid-at-start");
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folders");
+    let left = config.join("left.json");
+    fs::write(&left, b"{}").expect("a file in it");
+    let kept = kept(&base);
+    fs::hard_link(&kept, base.marker()).expect("a hard link at the marker");
+    assert_no_recovery(&base, &left).await;
+    assert_eq!(fs::read(&kept).expect("still there"), KEPT);
+}
+
+#[tokio::test]
+async fn a_reused_config_folder_only_this_user_and_system_may_read_is_used() {
+    let base = Base::new("config-private");
+    assert_eq!(
+        version_with_config(&base, "(A;OICI;FA;;;SY)").await,
+        Ok(Outcome::Version(V))
+    );
+    assert_eq!(base.calls(), ["--version"]);
+}
+
 /// Signs in on the fake, runs `plant`, then asserts a Disconnect refuses: no sign-out, nothing
 /// deleted and `kept` still holding [`KEPT`].
 async fn assert_disconnect_refused(base: &Base, kept: &Path, plant: impl FnOnce()) {
@@ -838,12 +962,11 @@ async fn assert_disconnect_refused(base: &Base, kept: &Path, plant: impl FnOnce(
         Err(Failure::Cleanup)
     );
     assert!(lane.close(soon()).await);
-    assert_eq!(fs::read(kept).expect("still there"), KEPT);
     assert_eq!(base.calls(), ["--version", "auth login"], "no sign-out");
-    assert!(
-        base.owned().join("config").join("signed-in").exists(),
-        "nothing deleted"
-    );
+    let token = base.owned().join("config").join("signed-in");
+    assert!(token.exists(), "nothing deleted");
+    assert_no_recovery(base, &token).await;
+    assert_eq!(fs::read(kept).expect("still there"), KEPT);
 }
 
 #[tokio::test]
@@ -963,6 +1086,7 @@ async fn a_marker_that_cant_be_written_signs_nothing_out_and_deletes_nothing() {
     assert!(lane.close(soon()).await);
     assert_eq!(base.calls(), ["--version"]);
     assert!(base.owned().join("config").exists());
+    assert_no_recovery(&base, &base.owned().join("config")).await;
 }
 
 #[tokio::test]
