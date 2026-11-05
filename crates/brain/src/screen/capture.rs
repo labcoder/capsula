@@ -14,7 +14,8 @@ pub(crate) enum Failure {
     Refused(Refusal),
     /// A numeric platform code.
     Fault(i32),
-    /// The capture may still be running, so the worker must exit after answering.
+    /// The capture may still be running or the device is lost, so the worker must exit after
+    /// answering.
     #[cfg_attr(
         not(any(test, windows)),
         expect(dead_code, reason = "only the Windows adapter retires")

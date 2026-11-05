@@ -19,7 +19,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_WAS_STILL_DRAWING, IDXGIDevice};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
+    DXGI_ERROR_WAS_STILL_DRAWING, IDXGIDevice,
+};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
 };
@@ -53,8 +56,20 @@ struct Wgc {
     winrt: IDirect3DDevice,
 }
 
+/// A lost device retires the worker, so the next ticket gets a fresh device chain.
 fn fault(error: &windows::core::Error) -> Failure {
-    Failure::Fault(error.code().0)
+    let code = error.code();
+    if [
+        DXGI_ERROR_DEVICE_REMOVED,
+        DXGI_ERROR_DEVICE_RESET,
+        DXGI_ERROR_DEVICE_HUNG,
+    ]
+    .contains(&code)
+    {
+        Failure::Retire(code.0)
+    } else {
+        Failure::Fault(code.0)
+    }
 }
 
 impl Wgc {
@@ -96,14 +111,15 @@ impl Wgc {
         })
     }
 
+    /// Starts the session and stages the first frame that's ready before `until`.
     fn acquire(
         &self,
         pool: &Direct3D11CaptureFramePool,
         session: &GraphicsCaptureSession,
         size: SizeInt32,
+        extent: [u32; 2],
         until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Instant, Failure> {
+    ) -> Result<(Instant, ID3D11Texture2D), Failure> {
         // shortcut: without borderless access Windows keeps its yellow border; it's drawn on
         // screen, never in the frame, so the capture goes on.
         if let Err(error) = session.SetIsBorderRequired(false) {
@@ -116,35 +132,31 @@ impl Wgc {
             return Err(Refusal::Expired.into());
         }
         session.StartCapture().map_err(|e| fault(&e))?;
-        let captured = loop {
-            match pool.TryGetNextFrame() {
-                Ok(captured) => break captured,
-                Err(error) if error.code().is_ok() => {}
-                Err(error) => return Err(fault(&error)),
-            }
-            if Instant::now() >= until {
-                return Err(Refusal::Expired.into());
-            }
-            std::thread::sleep(POLL);
-        };
+        let captured = poll(
+            until,
+            || match pool.TryGetNextFrame() {
+                Ok(captured) => Ok(Some(captured)),
+                Err(error) if error.code().is_ok() => Ok(None),
+                Err(error) => Err(fault(&error)),
+            },
+            |late| late.Close().map_err(|e| Failure::Retire(e.code().0)),
+        )?;
         let arrived = Instant::now();
-        let copied = self.read_back(&captured, size, until, frame);
+        let staged = self.stage(&captured, size, extent);
         captured.Close().map_err(|e| Failure::Retire(e.code().0))?;
-        copied.map(|()| arrived)
+        staged.map(|staging| (arrived, staging))
     }
 
-    fn read_back(
+    /// Issues the GPU copy of the frame's requested rectangle into a CPU-readable texture.
+    fn stage(
         &self,
         captured: &Direct3D11CaptureFrame,
         size: SizeInt32,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<(), Failure> {
+        [width, height]: [u32; 2],
+    ) -> Result<ID3D11Texture2D, Failure> {
         if captured.ContentSize().map_err(|e| fault(&e))? != size {
             return Err(Refusal::DisplayChanged.into());
         }
-        let width = u32::try_from(size.Width).map_err(|_| Refusal::DisplayChanged)?;
-        let height = u32::try_from(size.Height).map_err(|_| Refusal::DisplayChanged)?;
         let access: IDirect3DDxgiInterfaceAccess = captured
             .Surface()
             .and_then(|surface| surface.cast())
@@ -197,30 +209,60 @@ impl Wgc {
         }
         // SAFETY: submits the copy on this owner's context.
         unsafe { self.context.Flush() };
+        Ok(staging)
+    }
+
+    /// Maps the staged copy and packs it into `frame`, once the capture has stopped.
+    fn read_out(
+        &self,
+        staging: &ID3D11Texture2D,
+        [width, height]: [u32; 2],
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<(), Failure> {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let flags = u32::try_from(D3D11_MAP_FLAG_DO_NOT_WAIT.0).map_err(|_| Failure::Fault(0))?;
-        loop {
-            // SAFETY: subresource zero exists and isn't mapped; `mapped` is writable.
-            match unsafe {
-                self.context
-                    .Map(&staging, 0, D3D11_MAP_READ, flags, Some(&raw mut mapped))
-            } {
-                Ok(()) => break,
-                Err(error) if error.code() == DXGI_ERROR_WAS_STILL_DRAWING => {}
-                Err(error) => return Err(fault(&error)),
+        let _mapping = poll(
+            until,
+            || {
+                // SAFETY: subresource zero exists and isn't mapped; `mapped` is writable.
+                match unsafe {
+                    self.context
+                        .Map(staging, 0, D3D11_MAP_READ, flags, Some(&raw mut mapped))
+                } {
+                    Ok(()) => Ok(Some(Mapping {
+                        context: &self.context,
+                        texture: staging,
+                    })),
+                    Err(error) if error.code() == DXGI_ERROR_WAS_STILL_DRAWING => Ok(None),
+                    Err(error) => Err(fault(&error)),
+                }
+            },
+            |_late| Ok(()),
+        )?;
+        copy_rows(&mapped, width, height, frame)
+    }
+}
+
+/// Polls `attempt` until it's ready. A result that's ready at or after `until` goes to `late`
+/// to be released and is refused, so no work starts after the deadline.
+fn poll<T>(
+    until: Instant,
+    mut attempt: impl FnMut() -> Result<Option<T>, Failure>,
+    late: impl FnOnce(T) -> Result<(), Failure>,
+) -> Result<T, Failure> {
+    loop {
+        let ready = attempt()?;
+        if Instant::now() >= until {
+            if let Some(value) = ready {
+                late(value)?;
             }
-            if Instant::now() >= until {
-                return Err(Refusal::Expired.into());
-            }
-            std::thread::sleep(POLL);
+            return Err(Refusal::Expired.into());
         }
-        let mapping = Mapping {
-            context: &self.context,
-            texture: &staging,
-        };
-        let copied = copy_rows(&mapped, width, height, frame);
-        drop(mapping);
-        copied
+        if let Some(value) = ready {
+            return Ok(value);
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -313,16 +355,18 @@ impl Capturer for Wgc {
             size,
         )
         .map_err(|e| fault(&e))?;
-        let acquired = pool
+        let staged = pool
             .CreateCaptureSession(&item)
             .map_err(|e| fault(&e))
             .and_then(|session| {
-                let acquired = self.acquire(&pool, &session, size, until, frame);
+                let staged = self.acquire(&pool, &session, size, display.0.size, until);
                 session.Close().map_err(|e| Failure::Retire(e.code().0))?;
-                acquired
+                staged
             });
         pool.Close().map_err(|e| Failure::Retire(e.code().0))?;
-        acquired.map(|arrived| Acquired { arrived, dpi })
+        let (arrived, staging) = staged?;
+        self.read_out(&staging, display.0.size, until, frame)?;
+        Ok(Acquired { arrived, dpi })
     }
 }
 
@@ -332,12 +376,109 @@ mod tests {
 
     use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
     use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
     };
 
-    use super::Wgc;
-    use crate::screen::{Capturer, Exclusion, RawFrame};
+    use super::{Wgc, copy_rows, fault, poll};
+    use crate::screen::{CaptureId, Capturer, Exclusion, Failure, FrameMeta, RawFrame, Refusal};
+
+    #[test]
+    fn a_result_ready_at_the_deadline_is_released_and_refused() {
+        let mut released = Vec::new();
+        let late = poll(
+            Instant::now(),
+            || Ok(Some(7)),
+            |value| {
+                released.push(value);
+                Ok(())
+            },
+        );
+        assert_eq!(late, Err(Failure::Refused(Refusal::Expired)));
+        assert_eq!(released, [7]);
+        let failed_release = poll(Instant::now(), || Ok(Some(7)), |_| Err(Failure::Retire(-7)));
+        assert_eq!(failed_release, Err(Failure::Retire(-7)));
+    }
+
+    #[test]
+    fn poll_returns_the_first_ready_result_and_ends_at_the_deadline() {
+        let far = Instant::now() + Duration::from_secs(60);
+        let mut tries = 0;
+        let ready = poll(
+            far,
+            || {
+                tries += 1;
+                Ok((tries == 3).then_some(tries))
+            },
+            |_| panic!("released a result ready before the deadline"),
+        );
+        assert_eq!(ready, Ok(3));
+        let never = poll(
+            Instant::now() + Duration::from_millis(5),
+            || Ok(None::<u8>),
+            |_| Ok(()),
+        );
+        assert_eq!(never, Err(Failure::Refused(Refusal::Expired)));
+        let fault = poll(far, || Err::<Option<u8>, _>(Failure::Fault(-5)), |_| Ok(()));
+        assert_eq!(fault, Err(Failure::Fault(-5)));
+    }
+
+    #[test]
+    fn device_loss_retires_and_other_faults_do_not() {
+        let removed = 0x887A_0005_u32.cast_signed();
+        let hung = 0x887A_0006_u32.cast_signed();
+        let reset = 0x887A_0007_u32.cast_signed();
+        let still_drawing = 0x887A_000A_u32.cast_signed();
+        let e_fail = 0x8000_4005_u32.cast_signed();
+        for (code, expected) in [
+            (removed, Failure::Retire(removed)),
+            (hung, Failure::Retire(hung)),
+            (reset, Failure::Retire(reset)),
+            (still_drawing, Failure::Fault(still_drawing)),
+            (e_fail, Failure::Fault(e_fail)),
+        ] {
+            let error = windows::core::Error::from(windows::core::HRESULT(code));
+            assert_eq!(fault(&error), expected, "{code:#x}");
+        }
+    }
+
+    #[test]
+    fn copy_rows_packs_rows_without_padding_and_rejects_bad_mappings() {
+        // Three rows of two pixels, each padded from 8 to 12 bytes.
+        let mut texture: [u8; 36] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 0xEE, 0xEE, 0xEE, 0xEE, //
+            11, 12, 13, 14, 15, 16, 17, 18, 0xEE, 0xEE, 0xEE, 0xEE, //
+            21, 22, 23, 24, 25, 26, 27, 28, 0xEE, 0xEE, 0xEE, 0xEE,
+        ];
+        let packed: [u8; 24] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23, 24, 25, 26, 27, 28,
+        ];
+        let data = texture.as_mut_ptr().cast();
+        let mapped = |data, pitch| D3D11_MAPPED_SUBRESOURCE {
+            pData: data,
+            RowPitch: pitch,
+            DepthPitch: pitch * 3,
+        };
+        let meta = FrameMeta {
+            capture: CaptureId(1),
+            display: PhysicalRect {
+                origin: [0, 0],
+                size: [2, 3],
+            },
+            dpi: 96,
+            acquired_after_ms: 0,
+        };
+        let not_implemented = Err(Failure::Fault(0x8000_4001_u32.cast_signed()));
+        let mut frame = RawFrame::default();
+        for bad in [mapped(std::ptr::null_mut(), 12), mapped(data, 7)] {
+            assert_eq!(copy_rows(&mapped(data, 12), 2, 3, &mut frame), Ok(()));
+            frame.commit(meta).expect("a full copy commits");
+            assert_eq!(frame.image(), Some((meta, &packed[..])));
+            assert_eq!(copy_rows(&bad, 2, 3, &mut frame), not_implemented);
+            assert_eq!(frame.image(), None);
+        }
+    }
 
     fn primary() -> DisplayRef {
         // SAFETY: asks which monitor is primary; no pointers.
