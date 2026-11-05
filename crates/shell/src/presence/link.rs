@@ -387,6 +387,7 @@ impl Presence {
                 });
             }
         }
+        self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
         // Listening keeps its label until the gesture ends.
