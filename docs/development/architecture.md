@@ -155,9 +155,14 @@ faces, clips near and guard planes in f64, projects, snaps and shades into reser
 Every source face shares one reciprocal-depth plane across its triangles. Camera defaults target
 the 3D bounds' centre; authored cameras can enter geometry, and clipping rather than a distance
 clamp handles that case. The near plane includes a world-coordinate precision floor. These scene
-primitives exist, but 3D admission and the shell host are still staged. The next split adds picking
-from the displayed image's frozen ids and per-axis mapping; later the host must publish image,
-ids, camera, pose and revision together at paint, never on worker completion alone.
+primitives exist, but 3D admission and the shell host are still staged. Scene picking reads an
+owned `DisplayedFrame`: ids, camera, sampled poses, geometry revision, solid-to-part handles and
+the frozen logical destination/DPI/exact integer raster dimensions. Each pointer axis maps
+independently; labelled geometry returns a part, unlabelled geometry blocks and background misses.
+An edge neighbourhood of one internal texel can differ from an exact ray; translucent ids follow
+the approximate painted order. The later host must publish the image and this entire snapshot
+together at accepted paint, never on worker completion alone. A worker writes only the other
+owned id buffer; failed, skipped or superseded paints leave the displayed pair unchanged.
 
 ## Esc
 

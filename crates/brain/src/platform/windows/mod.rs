@@ -1,5 +1,6 @@
 //! Win32 implementations of the brain's platform functions.
 
+mod capture;
 mod credential;
 #[cfg(test)]
 pub(crate) mod fake_claude;
@@ -15,6 +16,7 @@ mod protected;
 mod root_store;
 mod spawn;
 
+pub(crate) use capture::screen_capturer;
 pub(crate) use credential::WindowsCredentialStore;
 #[cfg(debug_assertions)]
 pub(crate) use fault::call_throwing_export;
@@ -27,7 +29,10 @@ pub use job::{ChildPipes, Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
 };
-pub use pipe::{Instance, PipeServer, client_image, create_owner_only, server_image, session_id};
+pub use pipe::{
+    Instance, PipeServer, client_image, client_process, create_owner_only, has_exited,
+    process_image, server_image, session_id,
+};
 #[cfg(test)]
 pub(crate) use pipe::{PipeClient, test_pair};
 pub use policy::{managed_presence, system_env};

@@ -316,7 +316,7 @@ impl Accounts {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.catalog.models.clone().unwrap_or_default(),
-                        #[cfg(debug_assertions)]
+                        #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
                     });
                 }
@@ -325,7 +325,10 @@ impl Accounts {
             AccountView::SignedIn {
                 recovery: Some(AccountRecovery::SignInAgain),
                 ..
-            } => error(ErrorKey::SessionEnded, Action::SignIn),
+            } => error(
+                self.state.ended_by().unwrap_or(ErrorKey::SessionEnded),
+                Action::SignIn,
+            ),
             AccountView::SignedIn {
                 plan: PlanState::Declined,
                 ..

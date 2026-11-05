@@ -2,8 +2,9 @@
 //! each refusal does, and what a sign-out landing mid-flight leaves. Results are fed in as data.
 
 use super::*;
-use crate::connections::http_client::HttpError;
+use crate::connections::http_client::{HttpError, Response};
 use crate::connections::marker::MarkerUpdate;
+use crate::connections::oauth::exchange::parse_response;
 
 const CLIENT: &str = "client-saved";
 
@@ -279,6 +280,7 @@ fn a_session_the_provider_ended_keeps_only_the_registration() {
             "{code:?}"
         );
         assert_eq!(h.account(), Some(ended()), "{code:?}");
+        assert_eq!(h.state.ended_by(), Some(ErrorKey::SessionEnded), "{code:?}");
         assert_eq!(
             h.view(),
             &signed_in(PlanState::Declined, Some(AccountRecovery::SignInAgain)),
@@ -321,11 +323,6 @@ fn other_refusals_keep_the_credentials() {
             OAuthCode::Other,
             failed(ErrorKey::AccountOffline, &[Action::Retry]),
         ),
-        (
-            400,
-            OAuthCode::Other,
-            failed(ErrorKey::AccountMisconfigured, &[]),
-        ),
     ] {
         let mut h = Harness::seeded("refresh-refused", account_at(NOW, None));
         h.access(1, NOW);
@@ -340,8 +337,72 @@ fn other_refusals_keep_the_credentials() {
     }
 }
 
-/// A timeout after the request went out may have consumed the token: the session ends, and the
-/// token stays for sign-out to revoke but is never sent again, after a restart too.
+/// A timeout after the request went out may have consumed the token: the session ends, saying
+/// the renewal wasn't confirmed (OSC-223 gap 8), and the token stays for sign-out to revoke but
+/// is never sent again, after a restart too.
+/// P169-H1: an unlisted refusal, parsed as the provider sends it, shows neither that nothing was
+/// issued nor that the session ended. So the set stays exactly as it was, marked as sent and never
+/// sent again, the outcome is unknown, and Sign in is offered, across a restart too.
+#[test]
+fn an_unlisted_refusal_keeps_the_marked_set_and_offers_sign_in() {
+    let mut kept = saved_account("subject-1", "refresh-old").expose().clone();
+    let tokens = kept.tokens.as_mut().expect("tokens");
+    tokens.expires_at = NOW;
+    tokens.refresh_sent = true;
+    let ended = signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain));
+    for (status, code) in [
+        (401, "unlisted_code"),
+        (408, "temporarily_unavailable"),
+        (409, "conflict"),
+        (425, "too_early"),
+        (400, "rate_limit_error"),
+    ] {
+        let response = Response {
+            status,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(
+                format!(r#"{{"error":"{code}"}}"#).into_bytes(),
+            )),
+        };
+        let mut h = Harness::seeded("refresh-unlisted", account_at(NOW, None));
+        h.access(1, NOW);
+        h.refreshed(parse_response(&response).map_err(|error| {
+            assert_eq!(
+                error,
+                ExchangeError::OAuth {
+                    status,
+                    code: OAuthCode::Other
+                },
+                "{status}"
+            );
+            error
+        }));
+        assert_eq!(
+            h.answers,
+            [(1, failed(ErrorKey::RenewalUnconfirmed, &[Action::SignIn]))],
+            "{status}"
+        );
+        assert_eq!(h.account(), Some(kept.clone()), "{status}");
+        assert_eq!(h.marker(), marker(&["outcome_unknown"]), "{status}");
+        assert_eq!(h.view(), &ended, "{status}");
+        h.access(2, NOW);
+        assert_eq!(h.answers[1..], [(2, Err(Denied::Unusable))], "{status}");
+        assert_eq!(h.refreshes.len(), 1, "{status}: never sent again");
+        let mut h = h.restart();
+        assert_eq!(
+            h.state.ended_by(),
+            Some(ErrorKey::RenewalUnconfirmed),
+            "{status}: read from the set's own mark"
+        );
+        assert_eq!(h.view(), &ended, "{status}");
+        assert_eq!(h.account(), Some(kept.clone()), "{status}");
+        assert_eq!(h.marker(), marker(&["outcome_unknown"]), "{status}");
+        h.access(3, NOW);
+        assert_eq!(h.answers, [(3, Err(Denied::Unusable))], "{status}");
+        assert!(h.refreshes.is_empty(), "{status}");
+    }
+}
+
 #[test]
 fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     let mut h = Harness::seeded("refresh-ambiguous", account_at(NOW, None));
@@ -349,7 +410,7 @@ fn an_ambiguous_refresh_keeps_the_credentials_and_its_uncertainty() {
     h.refreshed(Err(ExchangeError::Http(HttpError::Timeout)));
     assert_eq!(
         h.answers,
-        [(1, failed(ErrorKey::SessionEnded, &[Action::SignIn]))]
+        [(1, failed(ErrorKey::RenewalUnconfirmed, &[Action::SignIn]))]
     );
     assert_eq!(h.refresh_token(), Some("refresh-old".to_owned()));
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
@@ -716,6 +777,7 @@ fn a_refresh_unanswered_at_a_crash_is_never_sent_again() {
     assert_eq!(h.refreshes.len(), 1);
     assert!(h.tokens().refresh_sent, "marked before it went out");
     let mut h = h.restart();
+    assert_eq!(h.state.ended_by(), Some(ErrorKey::RenewalUnconfirmed));
     assert_eq!(h.view(), &ended);
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
     h.access(2, NOW);

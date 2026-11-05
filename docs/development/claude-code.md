@@ -30,8 +30,9 @@ sequenceDiagram
   Otherwise it sends nothing and exits 1.
 - **Lines.** A stdin line holds at most 512 KiB. A longer one gets `-32600` with a null id, and the
   rest of it is discarded up to the next newline. Batches, a missing or wrong `jsonrpc`, and an id
-  that is null, an object, a float, past `i64`, or a string over 29 bytes are `-32600`; an
-  unknown method is `-32601`; bad JSON is `-32700`.
+  that is null, an object, a float, past `i64`, or a string over 29 bytes are `-32600`, and so
+  is a request whose `params` are present but neither an object nor an array; an unknown method
+  is `-32601`; bad JSON is `-32700`. A notification is never answered, whatever its params.
 - **Ids** go back by value: a number as itself, a string re-escaped from its decoded value. On the
   pipe a call is keyed `m:n:<number>` or `m:s:<hex of the string's bytes>`, so the two never
   collide.
@@ -49,6 +50,12 @@ sequenceDiagram
   the deadline in `Hello` passes, the call in flight gets `-32603` and the bridge exits 1. Every
   wait counts against that deadline, pipe writes included: a brain that stops reading can't hold
   the bridge past it, and a write it cut short ends the connection rather than being retried.
+- **stdin's end wins over waiting.** The stdin thread raises a flag the moment a read sees EOF,
+  before it queues its last lines, and the `Hello` wait, every pipe write and every wait for
+  stdout space end on it. Lines still queued then are dropped: nobody is left to read their
+  replies. The exit is 0, or 1 when stdout can't take its last lines within the flush wait. The
+  guarantee covers only an end the reader has seen: a reader blocked on a full line queue (16
+  lines behind a stalled write) can't read the EOF, and the deadline ends that case.
 - **Stdout is bounded.** At most four lines wait for stdout. When a reader stops reading, the
   relay waits instead of queueing, and at the end the bridge gives stdout one second to take its
   last lines before it exits 1.
@@ -58,6 +65,48 @@ sequenceDiagram
   hook installed.
 - **Threads.** stdin and stdout run on their own threads. The pipe runs on a current-thread tokio
   runtime, because synchronous Windows pipe I/O serializes reads and writes on one file object.
+
+## The listener
+
+The brain's end of a launch's pipe (`bridge::listener`). C5a creates it for each launch, before it
+writes `mcp.json`, under a fresh `LaunchId`; it's never recreated for the same launch.
+
+- **One instance, one client.** The pipe is owner-only, refuses remote clients, and is created as
+  the first and only instance of its name (`Instance::Only`, an OS maximum of one), so a taken
+  name fails the launch and nobody can add a second server instance. `serve` consumes the
+  listener: the first connection uses up the session, refusals included.
+- **The client checks**, on one process handle opened from the pid the pipe reports, before any
+  byte is written: the process hasn't exited, it runs the brain's executable, and it's inside this
+  launch's own run job. Any failure ends the session with no `Hello`, and C5a fails the launch.
+- **What the checks prove** (Captain's ruling, 2026-11-05). The DACL admits only the owner's
+  account, and code running as that account can already read its Credential Manager entries and
+  open Kumochi's processes. So the checks turn away stray and unrelated connections (another app,
+  an earlier launch's bridge, another executable, a process outside the launch's job); they aren't
+  a defence against same-user code. They don't prove the connection's opener is the process the
+  pid now names: the opener can exit and its pid be reused, or hand its pipe handle to another
+  process. Job membership proves a process came from the run, not that it's the one bridge, so
+  execution stays gated by the audit, the bind and revocation.
+- **Requests.** One at a time, every read and write raced against the launch's deadline. A
+  request's first chunk fixes its key, which must be one the bridge makes (`m:n:<i64>` or
+  `m:s:<hex>` of at most 29 bytes), and its method; a chunk that doesn't continue it, an
+  `initialized` inside it, or the pipe's end inside it ends the session `Broken`. A request over
+  512 KiB gets one `-32603` when its last chunk arrives, and the session goes on.
+- **Methods.** `initialize` echoes a protocol version it knows, or offers `2025-06-18`.
+  `tools/list` gives the launch's frozen tools whatever the gate says, so the audit can see them.
+  `tools/call` takes named params only (`name`, `arguments`, `_meta`); anything else, or a tool
+  outside the frozen set, is `-32602` with fixed text.
+- **Admission.** For a well-formed call, the listener reads the launch's `Binding` (set once, at
+  bind), checks the deadline, then loads C3's `AuditGate`, with no wait in between. That load is
+  the instant of admission: a `fail()` before it refuses the call, and one after it doesn't undo it.
+  A refused call gets an error result and is dropped, never held for a later bind. Revocation
+  (C5a: Disconnect, the route turned off, thread deletion) must fail the gate before it ends the
+  launch, since killing the job doesn't stop input already in the pipe.
+- **No tool runs yet.** An admitted call gets the error result "This tool isn't available over MCP
+  yet." C4b-2 hands its origin (`McpOrigin { run, launch, key }`) to the dispatcher.
+- **Nothing the client sent is printed.** Error bodies are fixed; `McpOrigin` and `SessionEnd`
+  print kinds, ids and lengths only.
+- **macOS counterpart:** the peer pid through `LOCAL_PEERPID` and a process-group check, which is
+  weaker (unverified).
 
 ## The launch policy
 
