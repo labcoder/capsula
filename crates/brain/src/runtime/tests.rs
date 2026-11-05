@@ -27,6 +27,8 @@ use crate::test_support::{self, Scratch};
 
 #[path = "account_tests.rs"]
 mod accounts;
+#[path = "claude_publish_tests.rs"]
+mod claude_publish;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]
