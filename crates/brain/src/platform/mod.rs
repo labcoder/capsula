@@ -26,10 +26,18 @@ pub fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "calls into the pinned sherpa-onnx C API")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "PR 4b's speech worker calls it")
+)]
+pub(crate) mod sherpa;
+
+#[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, config_dir, create_owner_only,
-    data_dir, free_space, launch_detached, links_unsupported, replace_file, session_id,
-    session_lock_path, trust_roots,
+    data_dir, free_space, launch_detached, links_unsupported, replace_file, server_image,
+    session_id, session_lock_path, trust_roots,
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};

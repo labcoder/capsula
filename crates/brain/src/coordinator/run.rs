@@ -49,6 +49,13 @@ impl Coordinator {
         if !current.started() || current.finishing {
             return Err(Stale);
         }
+        if current
+            .build
+            .as_ref()
+            .is_some_and(|build| build.inline.is_some())
+        {
+            return self.compact_event(run, event, effects);
+        }
         match event {
             TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
             // A draw the request didn't offer has no effect (D13-H2).
