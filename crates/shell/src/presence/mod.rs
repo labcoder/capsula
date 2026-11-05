@@ -857,8 +857,6 @@ pub(crate) fn open(
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let threads = cx.new(|_| Threads::default());
-    let chat = cx.new(|_| Threads::chat());
     let settings = cx.new(|_| Settings::default());
     // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
     let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
@@ -884,8 +882,8 @@ pub(crate) fn open(
             thread_panel: None,
             settings_panel: None,
             settings,
-            threads,
-            chat,
+            threads: cx.new(|_| Threads::default()),
+            chat: cx.new(|_| Threads::chat()),
             events,
             link,
             session: None,

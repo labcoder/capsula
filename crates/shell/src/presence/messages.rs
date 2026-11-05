@@ -3,7 +3,7 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render,
     Styled as _, Subscription, WeakEntity, Window, div, list, px,
 };
@@ -17,7 +17,7 @@ gpui_kit::actions!(thread_messages, [EarlierMessages, LaterMessages]);
 
 pub(super) struct Messages {
     model: Entity<Threads>,
-    messages: MessageList,
+    list: MessageList,
     focus: FocusHandle,
     shown_thread: Option<ThreadId>,
     newest: Option<EventId>,
@@ -55,9 +55,9 @@ impl Messages {
             let count = state.events.len();
             let newest = state.events.first().map(|event| event.id);
             if view.shown_thread == state.open && view.newest == newest && count >= view.count {
-                view.messages.splice(0..0, count - view.count);
+                view.list.splice(0..0, count - view.count);
             } else {
-                view.messages.reset(count);
+                view.list.reset(count);
             }
             view.shown_thread = state.open;
             view.newest = newest;
@@ -66,7 +66,7 @@ impl Messages {
         });
         Self {
             model,
-            messages,
+            list: messages,
             focus: cx.focus_handle().tab_stop(true),
             shown_thread,
             newest,
@@ -95,10 +95,10 @@ impl Render for Messages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.rem != window.rem_size() {
             self.rem = window.rem_size();
-            self.messages.splice(0..self.count, self.count);
+            self.list.splice(0..self.count, self.count);
         }
         let model = self.model.clone();
-        let messages = list(self.messages.clone(), move |ix, _, cx| {
+        let messages = list(self.list.clone(), move |ix, _, cx| {
             let state = model.read(cx);
             let Some(event) = state.events.iter().rev().nth(ix) else {
                 return div().into_any_element();
@@ -148,24 +148,24 @@ impl Render for Messages {
                 }),
             )
             .on_action(cx.listener(|view, _: &EarlierMessages, _, cx| {
-                view.messages
-                    .scroll_by(-view.messages.viewport_bounds().size.height * 0.9);
+                view.list
+                    .scroll_by(-view.list.viewport_bounds().size.height * 0.9);
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &LaterMessages, _, cx| {
-                view.messages
-                    .scroll_by(view.messages.viewport_bounds().size.height * 0.9);
+                view.list
+                    .scroll_by(view.list.viewport_bounds().size.height * 0.9);
                 cx.notify();
             }))
             .child(messages)
-            .child(Scrollbar::vertical(&self.messages))
+            .child(Scrollbar::vertical(&self.list))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::{Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point, size};
+    use gpui_kit::{AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point, size};
     use kumochi_protocol::message::{PageEvent, RunId};
 
     fn event(id: u64) -> PageEvent {
@@ -216,8 +216,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update(cx, |view, _| {
-            assert_eq!(view.messages.item_count(), 10);
-            view.messages.scroll_to(ListOffset {
+            assert_eq!(view.list.item_count(), 10);
+            view.list.scroll_to(ListOffset {
                 item_ix: 5,
                 offset_in_item: px(0.0),
             });
@@ -228,8 +228,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update(cx, |view, _| {
-            assert_eq!(view.messages.item_count(), 12);
-            assert_eq!(view.messages.logical_scroll_top().item_ix, 7);
+            assert_eq!(view.list.item_count(), 12);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 7);
             assert_eq!(view.shown_thread, Some(ThreadId(1)));
         });
         model.update(cx, |state, cx| {
@@ -238,7 +238,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.update(cx, |view, _| {
-            assert_eq!(view.messages.item_count(), 0);
+            assert_eq!(view.list.item_count(), 0);
             assert_eq!(view.shown_thread, Some(ThreadId(2)));
             assert_eq!(view.newest, None);
         });

@@ -264,12 +264,14 @@ impl Presence {
         self.runs.settings(view.main_thread);
         self.clear_refusal(cx);
         self.sync_settings_notice(cx);
-        for model in [&self.threads, &self.chat] {
-            model.update(cx, |state, cx| {
-                state.set_settings(view.clone());
-                cx.notify();
-            });
-        }
+        self.threads.update(cx, |state, cx| {
+            state.set_settings(view.clone());
+            cx.notify();
+        });
+        self.chat.update(cx, |state, cx| {
+            state.set_settings(view);
+            cx.notify();
+        });
     }
 
     /// Shows the brain's error in both panels and on the connected dock.
