@@ -253,19 +253,9 @@ pub(super) fn freeze_detached(
 pub(super) fn charge<'a>(
     versions: impl IntoIterator<Item = (&'a WireId, &'a Object)>,
 ) -> Result<Usage, ErrorCode> {
-    let mut objects = BTreeMap::<&WireId, (&Object, Usage, BTreeMap<&'static str, Motion>)>::new();
+    let mut objects = BTreeMap::<&WireId, Vec<&Object>>::new();
     for (id, object) in versions {
-        let entry = objects
-            .entry(id)
-            .or_insert_with(|| (object, object.work.usage, BTreeMap::new()));
-        entry.1 = entry.1.peak(object.work.usage);
-        for (key, value) in &object.work.motion {
-            entry
-                .2
-                .entry(key)
-                .and_modify(|previous| *previous = previous.peak(*value))
-                .or_insert(*value);
-        }
+        objects.entry(id).or_default().push(object);
     }
     if objects.len() > MAX_LIVE_OBJECTS {
         return Err(ErrorCode::OverBudget(Budget::LiveObjects));
@@ -276,8 +266,20 @@ pub(super) fn charge<'a>(
         scenes: 1,
         ..Usage::default()
     };
-    for (object, work, motions) in objects.values() {
-        usage = usage.add(*work);
+    for versions in objects.values() {
+        let object = versions[0];
+        let mut work = Usage::default();
+        let mut motions = BTreeMap::<&'static str, Motion>::new();
+        for version in versions {
+            work = work.peak(version.work.usage);
+            for (key, value) in &version.work.motion {
+                motions
+                    .entry(key)
+                    .and_modify(|previous| *previous = previous.peak(*value))
+                    .or_insert(*value);
+            }
+        }
+        usage = usage.add(work);
         usage.tracks += motions.len();
         usage.keys += motions.values().map(|m| m.keys).sum::<usize>();
         if object.kind == Kind::Solid
