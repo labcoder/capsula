@@ -27,6 +27,17 @@ pub(crate) struct Pump {
     held: Option<TtsEvent>,
 }
 
+impl std::fmt::Debug for Pump {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pump")
+            .field("run", &self.run)
+            .field("credit", &self.credit)
+            .field("segment", &self.active.as_ref().map(|(segment, _)| segment))
+            .field("held", &self.held.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Pump {
     pub(crate) fn new(tts: TtsHandle) -> Self {
         Self {
