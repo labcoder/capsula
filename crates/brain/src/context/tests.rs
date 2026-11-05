@@ -19,8 +19,8 @@ use crate::test_support::Scratch;
 const TIME: &str = "Tuesday 4 November 2026, 09:30";
 
 struct World {
-    scratch: Scratch,
     store: Store,
+    scratch: Scratch,
     main: ThreadId,
 }
 
@@ -30,10 +30,18 @@ fn world(name: &str) -> World {
     store.recover().expect("recovered");
     let main = store.main_thread().expect("main");
     World {
-        scratch,
         store,
+        scratch,
         main,
     }
+}
+
+#[test]
+fn dropping_the_world_removes_its_scratch_folder() {
+    let world = world("drop-world");
+    let dir = world.scratch.dir().to_path_buf();
+    drop(world);
+    assert!(!dir.exists(), "the store closes before scratch cleanup");
 }
 
 impl World {

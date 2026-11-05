@@ -1,5 +1,6 @@
 //! Win32 implementations of the brain's platform functions.
 
+mod capture;
 mod credential;
 mod fault;
 mod folders;
@@ -13,6 +14,7 @@ mod protected;
 mod root_store;
 mod spawn;
 
+pub(crate) use capture::screen_capturer;
 pub(crate) use credential::WindowsCredentialStore;
 #[cfg(debug_assertions)]
 pub(crate) use fault::call_throwing_export;
