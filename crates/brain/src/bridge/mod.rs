@@ -29,9 +29,12 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+pub(crate) use self::id::LaunchId;
+pub(crate) use self::wire::CallKey;
+
 use self::id::JsonRpcId;
 use self::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
-use self::wire::{CallKey, Method, Reassembly, ToBrain, ToBridge, chunks};
+use self::wire::{Method, Reassembly, ToBrain, ToBridge, chunks};
 
 /// The longest stdin line, newline excluded [guess: call arguments].
 pub(crate) const MAX_INCOMING: usize = 512 * 1024;

@@ -9,6 +9,7 @@ pub mod connections;
 mod context;
 pub mod coordinator;
 pub mod credential;
+pub mod dispatch;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
