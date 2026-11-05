@@ -6,11 +6,21 @@ use std::{
 thread_local! {
     static COUNT: Cell<Option<[usize; 4]>> = const { Cell::new(None) };
     static LARGEST_RELEASE: Cell<usize> = const { Cell::new(0) };
+    static MATCHING_RELEASES: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
 struct CountingAllocator;
 
 fn bump(index: usize, size: usize) {
+    if index == 1 {
+        let _ = MATCHING_RELEASES.try_with(|count| {
+            if let Some((target, releases)) = count.get()
+                && size == target
+            {
+                count.set(Some((target, releases.saturating_add(1))));
+            }
+        });
+    }
     // A destroyed thread-local slot only disables counting during shutdown.
     let _ = COUNT.try_with(|count| {
         if let Some(mut value) = count.get() {
@@ -76,4 +86,17 @@ pub(super) fn usage<T>(run: impl FnOnce() -> T) -> (T, [usize; 2], [usize; 2]) {
 
 pub(super) fn largest_release() -> usize {
     LARGEST_RELEASE.with(Cell::get)
+}
+
+pub(super) fn releases_of_size<T>(size: usize, run: impl FnOnce() -> T) -> (T, usize) {
+    MATCHING_RELEASES.with(|count| {
+        assert!(
+            count.replace(Some((size, 0))).is_none(),
+            "release scopes cannot nest"
+        );
+    });
+    let value = run();
+    let (_, releases) =
+        MATCHING_RELEASES.with(|count| count.replace(None).expect("release scope is active"));
+    (value, releases)
 }
