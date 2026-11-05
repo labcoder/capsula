@@ -4,12 +4,38 @@ use kumochi_protocol::constants::{
 };
 use std::collections::BTreeSet;
 
-/// Every name the vault writes or deletes is a write-once generation name: it never touches a
-/// legacy name, and everything it wrote but no longer holds current is deleted again.
+/// Every name the vault writes is a write-once generation name, and everything it wrote but no
+/// longer holds current is deleted again. The only legacy mutations are the open's deletes of
+/// all 262 earlier names, each once.
 #[test]
 fn every_vault_write_and_delete_uses_generation_names_only() {
     let (_scratch, path, service, store) = setup("vault-inventory");
+    let legacy: Vec<_> = account_targets(&service).collect();
+    for name in &legacy {
+        store
+            .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
+            .expect("legacy name");
+    }
+    store.0.lock().expect("fake lock").mutations.clear();
     let mut vault = open(&store, &service, &path);
+    {
+        let state = store.0.lock().expect("fake lock");
+        let swept: Vec<_> = state.mutations[..legacy.len()]
+            .iter()
+            .map(|mutation| match mutation {
+                Mutation::Delete(target) => target.clone(),
+                Mutation::Set(target) => panic!("a legacy write: {target}"),
+            })
+            .collect();
+        assert_eq!(swept, legacy, "the open deletes every legacy name once");
+        assert_eq!(state.mutations.len(), legacy.len(), "and nothing else");
+    }
+    assert_eq!(
+        store.names(),
+        Vec::<String>::new(),
+        "no legacy name is left"
+    );
+    store.0.lock().expect("fake lock").mutations.clear();
     store.arm(usize::MAX, Fault::Refuse);
     vault.host_id().expect("host");
     committed(vault.save_account(&account("old")));
@@ -38,12 +64,9 @@ fn every_vault_write_and_delete_uses_generation_names_only() {
     vault
         .anthropic(crate::connections::anthropic::KeyOp::Remove)
         .expect("remove fake key");
-    let legacy: BTreeSet<_> = account_targets(&service)
-        .chain([
-            anthropic_key_target(&service),
-            anthropic_staging_target(&service),
-        ])
-        .collect();
+    let legacy: BTreeSet<_> = legacy.into_iter().collect();
+    assert!(legacy.contains(&anthropic_key_target(&service)));
+    assert!(legacy.contains(&anthropic_staging_target(&service)));
     let prefix = format!("{service}/gen/");
     let (written, deleted) = {
         let state = store.0.lock().expect("fake lock");
@@ -83,4 +106,28 @@ fn every_vault_write_and_delete_uses_generation_names_only() {
         "every replaced or removed generation, and nothing current, was deleted"
     );
     assert_only_current(&vault, &store);
+}
+
+/// A refused legacy delete never blocks the open; the next open deletes the name.
+#[test]
+fn a_refused_legacy_delete_waits_for_the_next_open() {
+    let (_scratch, path, service, store) = setup("vault-legacy-refused");
+    let legacy: Vec<_> = account_targets(&service).collect();
+    for name in &legacy {
+        store
+            .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
+            .expect("legacy name");
+    }
+    store.0.lock().expect("fake lock").refusing = true;
+    let mut sorted = legacy.clone();
+    sorted.sort();
+    drop(open(&store, &service, &path));
+    assert_eq!(store.names(), sorted, "every refused name is still there");
+    store.0.lock().expect("fake lock").refusing = false;
+    drop(open(&store, &service, &path));
+    assert_eq!(
+        store.names(),
+        Vec::<String>::new(),
+        "the next open deletes them"
+    );
 }

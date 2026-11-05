@@ -13,8 +13,8 @@ The saved key is the [credential authority](#credential-authority)'s `anthropic`
 reads its current generation, and Remove commits the removal first, then sweeps the names, so a
 removed key is never read again even while Credential Manager still serves it. The shell still
 stages a paste at keyring's `anthropic-key-staged.{service}` target, but the brain doesn't adopt
-it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed) and the staged entry is
-left for C7, which stages a paste through the authority. Neither that name nor the old
+it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed), and the next open deletes
+the staged entry with the other legacy names. C7 stages a paste through the authority instead. Neither that name nor the old
 `anthropic-key.{service}` record is read. All work runs on the credential worker under the
 vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
 read is blocked runs after it, and the stale Check's result is dropped by its generation. A
@@ -44,8 +44,10 @@ The vault writes only write-once generation names, `<service>/gen/<kind>/<genera
 bounded `account_targets(service)` inventory name what earlier builds wrote: host, sign-out
 marker, chatgpt/revoke manifests, and each record's two slots of 64 chunks, plus the active and
 staged Anthropic targets in their dot form. These are 262 exact targets, not a service-prefix
-match. The vault never reads or writes them; the shell still writes the staging name. Their
-exact-name cleanup is the next change.
+match. The vault never reads or writes them; the shell still writes the staging name. Every
+open deletes all 262 by exact name before its first sweep; a refused delete waits for the next
+open, and no first-run state is kept. Anyone signed in on an earlier build sees Signed out and
+connects again, and the revocations it still owed are dropped unsent.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
 `capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
@@ -794,5 +796,4 @@ back or resurrect names, so those cases run offline.
 
 The vault reads and writes every record through the authority. It runs one sweep pass of 16
 generations (`SWEEP`) when it opens and after each commit or removal. Generations past a
-pass's 16, and any whose names come back, stay owed to later passes and opens. Removing the legacy names is the
-next change.
+pass's 16, and any whose names come back, stay owed to later passes and opens.
