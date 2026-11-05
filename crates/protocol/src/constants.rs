@@ -97,8 +97,6 @@ pub const CLAUDE_CODE_DIR: &str = "claude-code";
 pub const ENGINE_DIR: &str = "engine";
 /// The MCP server name Claude Code sees, so its tools are `mcp__kumochi__*`.
 pub const MCP_SERVER_NAME: &str = "kumochi";
-/// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`] and a dash.
-pub const BRIDGE_PIPE: &str = "claude-bridge";
 /// The Credential Manager account under [`CREDENTIAL_SERVICE`] holding the Anthropic API key.
 pub const ANTHROPIC_KEY_ACCOUNT: &str = "anthropic-key";
 /// The account the shell stages a pasted key in, for the brain to check and move.
