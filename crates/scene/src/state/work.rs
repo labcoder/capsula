@@ -149,7 +149,6 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
                     crate::record::Head::None
                 },
             );
-            work.dash = line_length(r).filter(|_| r.dash);
         }
         Op::Path(r) => {
             if let Some(at) = &r.at {
@@ -282,6 +281,7 @@ fn anchor_offset(anchor: &Anchor) -> f32 {
 }
 
 fn line_geometry(work: &mut Work, r: &crate::record::Line, head: crate::record::Head) {
+    work.dash = line_length(r).filter(|_| r.dash);
     work.offset = anchor_offset(&r.from).max(anchor_offset(&r.to));
     work.extent = work.offset;
     work.offset = 0.0;
