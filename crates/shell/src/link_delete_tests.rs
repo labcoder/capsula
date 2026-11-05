@@ -18,7 +18,7 @@ fn handle() -> LinkHandle {
 }
 
 #[test]
-fn repeated_quit_requests_admit_one_shutdown_and_one_quitting_message() {
+fn quit_admission_is_single_use_for_a_connected_transport() {
     let link = handle();
     let name = format!(
         r"\\.\pipe\{}-test-{}-settings-quit",

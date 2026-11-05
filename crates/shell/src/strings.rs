@@ -83,6 +83,7 @@ pub(crate) enum Text {
     SettingsVersion,
     SettingsCopyBuild,
     SettingsPositionUnavailable,
+    SettingsTaskbar,
     DockBrainError,
     MaxFrameRate,
     FrameRateAutomatic,
@@ -135,7 +136,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 121] = [
+    const ALL: [Self; 122] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -209,6 +210,7 @@ impl Text {
         Self::SettingsVersion,
         Self::SettingsCopyBuild,
         Self::SettingsPositionUnavailable,
+        Self::SettingsTaskbar,
         Self::DockBrainError,
         Self::MaxFrameRate,
         Self::FrameRateAutomatic,
@@ -280,6 +282,7 @@ impl Text {
             Self::SettingsVersion => "settings-version",
             Self::SettingsCopyBuild => "settings-copy-build",
             Self::SettingsPositionUnavailable => "settings-position-unavailable",
+            Self::SettingsTaskbar => "settings-taskbar",
             Self::AccountProvider => "accounts-provider",
             Self::AccountWaiting => "accounts-waiting",
             Self::AccountOffline => "accounts-offline",
@@ -419,7 +422,7 @@ impl Strings {
     pub(crate) fn taskbar(&self) -> String {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
-        self.format("settings-taskbar", Some(&args))
+        self.format(Text::SettingsTaskbar.id(), Some(&args))
     }
 
     /// Loads the English catalog compiled into the binary.

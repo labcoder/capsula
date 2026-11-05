@@ -70,7 +70,9 @@ separate platform change, so saving this preference alone does not add a button 
 General's three-by-three picker reads the model's effective dock choice. Its change uses the
 same send path as the tray but placement without dismissal, keeping Settings attached to the
 dock. The version/build row displays `protocol::BUILD_ID`; Kit's Clipboard control copies
-that same value and provides its normal keyboard access and copied feedback.
+that same value. Its click handler writes the configured value to the clipboard and shows a
+check icon for two seconds. A headless interaction test reads the copied contents; native
+keyboard behavior remains unverified.
 
 Taskbar choices use the existing answer FIFO, with a distinct slot kind. The newest unfailed
 pending choice wins until an answer supplies the saved value. The checkbox is unavailable
