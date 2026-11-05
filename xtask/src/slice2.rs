@@ -221,7 +221,7 @@ fn turn(client: &mut Client, thread: Option<ThreadId>, text: &str) -> Result<(Ru
         turn: 1,
         screen: kumochi_protocol::message::ScreenChoice::None,
         thread,
-        text: text.to_owned(),
+        text: text.into(),
     })?;
     client.until(PATIENCE, |seen| match seen.frame {
         Frame::Control(ControlToShell::RunState {

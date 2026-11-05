@@ -21,9 +21,10 @@ use super::{
 };
 use crate::coordinator::MAX_TEXT;
 
-/// The script runs use unless a dev build names another in [`constants::FIXTURE_ENV`].
+/// A sample script, which a dev build plays when [`constants::FIXTURE_ENV`] names its file.
 ///
 /// [`constants::FIXTURE_ENV`]: kumochi_protocol::constants::FIXTURE_ENV
+#[cfg(test)]
 pub(crate) const DEFAULT: &str = include_str!("../../fixtures/default.txt");
 
 /// The id of the fixture's one draw call.
@@ -302,7 +303,7 @@ mod tests {
         core.handle(Input::Turn {
             turn: 1,
             thread: Some(ThreadId(1)),
-            text: "go".to_owned(),
+            text: "go".into(),
         })
         .expect("a turn is never stale");
         core.handle(Input::TurnStored { run: RunId(3) })

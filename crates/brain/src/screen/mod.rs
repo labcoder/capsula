@@ -1,11 +1,16 @@
 //! Killable screen work, isolated from the brain's async runtime.
 
+mod capture;
+mod frame;
 mod supervisor;
 mod wire;
 mod worker;
 
-pub use supervisor::{REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor, WorkerLost};
+pub use crate::supervise::WorkerLost;
+pub use supervisor::{CaptureError, REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor};
 #[cfg(debug_assertions)]
 pub use wire::WorkerFault;
-pub use wire::{ReplyBody, RequestBody, ScreenError};
+pub use wire::{
+    CaptureId, Exclusion, FrameMeta, Refusal, ReplyBody, RequestBody, ScreenError, TicketWire,
+};
 pub use worker::serve;

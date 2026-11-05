@@ -108,7 +108,7 @@ async fn a_long_tasks_done_run_titles_it_then_stores_a_summary_of_its_oldest_run
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(task),
-            text: "one more".to_owned(),
+            text: "one more".into(),
         };
         shell
             .data_out

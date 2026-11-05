@@ -8,7 +8,8 @@ use kumochi_protocol::constants;
 
 fn main() -> ExitCode {
     let mut args = std::env::args();
-    if args.nth(1).as_deref() == Some(kumochi_brain::MCP_BRIDGE) {
+    let worker = args.nth(1);
+    if worker.as_deref() == Some(kumochi_brain::MCP_BRIDGE) {
         let launch = args.next().unwrap_or_default();
         return match kumochi_brain::bridge::serve(&launch) {
             Ok(()) => ExitCode::SUCCESS,
@@ -18,12 +19,22 @@ fn main() -> ExitCode {
             }
         };
     }
-    if std::env::args().nth(1).as_deref() == Some(kumochi_brain::SCREEN_WORKER) {
+    if worker.as_deref() == Some(kumochi_brain::SCREEN_WORKER) {
         if logging::init(constants::SCREEN_LOG).is_err() {
             return ExitCode::FAILURE;
         }
         if kumochi_brain::screen::serve().is_err() {
             tracing::error!(code = 1, "screen transport failed");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+    if worker.as_deref() == Some(kumochi_brain::SPEECH_WORKER) {
+        if logging::init(constants::SPEECH_LOG).is_err() {
+            return ExitCode::FAILURE;
+        }
+        if kumochi_brain::speech::serve().is_err() {
+            tracing::error!(code = 1, "speech transport failed");
             return ExitCode::FAILURE;
         }
         return ExitCode::SUCCESS;

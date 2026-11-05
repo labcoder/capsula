@@ -286,7 +286,7 @@ mod tests {
             Ok(Frame::Data(
                 DataToShell::AssistantText {
                     run: RunId(3),
-                    delta: format!("{NAME} {TITLE}"),
+                    delta: format!("{NAME} {TITLE}").into(),
                 },
                 0,
             )),

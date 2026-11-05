@@ -36,6 +36,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const BRAIN_LOG: &str = "kumochi-brain";
 /// See [`BRAIN_LOG`]; the screen worker's own file.
 pub const SCREEN_LOG: &str = "kumochi-screen";
+/// See [`BRAIN_LOG`]; the speech worker's own file.
+pub const SPEECH_LOG: &str = "kumochi-speech";
 /// See [`BRAIN_LOG`]; Claude Code's MCP bridge, in the launch's own folder.
 pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
@@ -123,17 +125,18 @@ pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        assert!(
-            !BRAIN_LOG.starts_with(SHELL_LOG),
-            "{BRAIN_LOG} starts with {SHELL_LOG}"
-        );
-        assert!(
-            !SHELL_LOG.starts_with(BRAIN_LOG),
-            "{SHELL_LOG} starts with {BRAIN_LOG}"
-        );
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
+        for one in logs {
+            for other in logs {
+                assert!(
+                    one == other || !one.starts_with(other),
+                    "{one} starts with {other}"
+                );
+            }
+        }
     }
 }
