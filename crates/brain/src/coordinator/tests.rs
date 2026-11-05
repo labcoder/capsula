@@ -1019,6 +1019,29 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
     );
 }
 
+/// OSC-228: a step's label is model text, so the store write that carries it prints its length,
+/// never the label.
+#[test]
+fn a_step_write_prints_its_labels_length_never_the_label() {
+    const SENTINEL: &str = "zqxprivatelabel";
+    let write = StoreOp::CommitStep {
+        thread: T,
+        run: R,
+        text: None,
+        scene: SceneTarget::Existing(S),
+        index: 0,
+        step: step(SENTINEL),
+    };
+    let shown = format!("{write:?}");
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    assert!(!shown.contains(SENTINEL), "the label leaked: {shown}");
+    assert!(
+        !shown.contains(byte_list.trim_matches(['[', ']'])),
+        "the bytes leaked"
+    );
+    assert!(shown.contains("label_len: 15"), "{shown}");
+}
+
 /// H159-1: neither the typed prompt nor the answer's text prints through the input or the
 /// outermost effects that carry them: the turn's write, the answer's frames and its last write.
 #[test]
