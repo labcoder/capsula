@@ -105,12 +105,20 @@ impl Render for Messages {
             };
             let strings = cx.global::<Strings>();
             let label = match event.kind {
-                PageEventKind::User => strings.get(Text::ThreadUser),
-                PageEventKind::AssistantText => strings.assistant(state.settings.as_ref().map_or(
-                    kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
-                    |settings| settings.assistant_name.as_str(),
-                )),
-                PageEventKind::SceneStep => strings.get(Text::ThreadStep),
+                PageEventKind::User => Some(strings.get(Text::ThreadUser)),
+                PageEventKind::AssistantText => {
+                    Some(strings.assistant(state.settings.as_ref().map_or(
+                        kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
+                        |settings| settings.assistant_name.as_str(),
+                    )))
+                }
+                PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
+                PageEventKind::Issue { .. } => None,
+            };
+            let text = if label.is_some() {
+                event.text.clone()
+            } else {
+                strings.issue_draft(&event.text)
             };
             div()
                 .id(("event", event.id.0))
@@ -118,13 +126,13 @@ impl Render for Messages {
                 .p_3()
                 .border_b_1()
                 .border_color(cx.theme().border)
-                .child(
+                .children(label.map(|label| {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(label),
-                )
-                .child(div().text_sm().child(event.text.clone()))
+                        .child(label)
+                }))
+                .child(div().text_sm().child(text))
                 .children(event.cut.then(|| {
                     div()
                         .text_xs()

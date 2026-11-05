@@ -114,7 +114,7 @@ pub fn account_target(service: &str, entry: &str) -> String {
     format!("{service}/{entry}")
 }
 
-/// Every target the account vault can write or delete, including both record slots.
+/// Every account/key target, including both vault slots and the shell's key staging record.
 pub fn account_targets(service: &str) -> impl Iterator<Item = String> + '_ {
     ["host", "signout"]
         .into_iter()
@@ -125,6 +125,10 @@ pub fn account_targets(service: &str) -> impl Iterator<Item = String> + '_ {
                     .map(move |index| account_target(service, &format!("{record}/{slot}/{index}")))
             }))
         }))
+        .chain([
+            anthropic_key_target(service),
+            anthropic_staging_target(service),
+        ])
 }
 
 /// The keyring account for a Windows session's capability.
@@ -177,6 +181,18 @@ pub const MCP_SERVER_NAME: &str = "kumochi";
 pub const ANTHROPIC_KEY_ACCOUNT: &str = "anthropic-key";
 /// The account the shell stages a pasted key in, for the brain to check and move.
 pub const ANTHROPIC_STAGING_ACCOUNT: &str = "anthropic-key-staged";
+
+/// The exact active-key target shared by the vault and purge inventory.
+#[must_use]
+pub fn anthropic_key_target(service: &str) -> String {
+    format!("{ANTHROPIC_KEY_ACCOUNT}.{service}")
+}
+
+/// The exact staging target shared by the shell, vault and purge inventory.
+#[must_use]
+pub fn anthropic_staging_target(service: &str) -> String {
+    format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}")
+}
 /// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
 pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
@@ -202,16 +218,16 @@ mod identity_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
-        for one in logs {
-            for other in logs {
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG];
+        for (index, one) in logs.iter().enumerate() {
+            for other in &logs[index + 1..] {
                 assert!(
-                    one == other || !one.starts_with(other),
-                    "{one} starts with {other}"
+                    !one.starts_with(other) && !other.starts_with(one),
+                    "{one} and {other} overlap"
                 );
             }
         }

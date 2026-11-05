@@ -79,11 +79,14 @@ pub enum ErrorKey {
     ClaudeCodeBudget,
     /// A Claude Code disconnect still has cleanup to finish.
     ClaudeCodeCleanupPending,
+    /// The provider never confirmed a sign-in renewal that may have gone through, so the session
+    /// can't go on safely; the saved registration signs in again.
+    RenewalUnconfirmed,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -118,6 +121,7 @@ impl ErrorKey {
         Self::ClaudeCodeInputUnsupported,
         Self::ClaudeCodeBudget,
         Self::ClaudeCodeCleanupPending,
+        Self::RenewalUnconfirmed,
     ];
 }
 

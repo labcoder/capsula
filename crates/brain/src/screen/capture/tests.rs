@@ -32,15 +32,17 @@ impl Capturer for Fake {
     ) -> Result<Acquired, Failure> {
         let knobs = &self.0;
         knobs.calls.set(knobs.calls.get() + 1);
-        if let Some(failure) = knobs.fail.get() {
-            return Err(failure);
-        }
         let arrived = knobs.clock.get();
         if arrived >= until {
             return Err(Refusal::Expired.into());
         }
         let [width, height] = knobs.size.get();
-        frame.begin(width, height)?.fill(knobs.fill.get());
+        let bytes = frame.begin(width, height)?;
+        if let Some(failure) = knobs.fail.get() {
+            bytes[0] = knobs.fill.get();
+            return Err(failure);
+        }
+        bytes.fill(knobs.fill.get());
         knobs.clock.set(arrived + knobs.takes.get());
         Ok(Acquired { arrived, dpi: 144 })
     }
@@ -158,6 +160,21 @@ fn a_frame_that_completes_after_expiry_is_never_published() {
     rig.knobs.fail.set(Some(Failure::Retire(-7)));
     assert_eq!(rig.take(3, [4, 3], 0), Err(Failure::Retire(-7)));
     assert_eq!(rig.screen.frame().image(), None);
+}
+
+#[test]
+fn a_copy_that_fails_partway_after_a_good_frame_leaves_no_image() {
+    let mut rig = Rig::new([4, 3], 7);
+    for (generation, failure) in [(2, Failure::Fault(-5)), (4, Failure::Retire(-7))] {
+        rig.knobs.fail.set(None);
+        assert_eq!(
+            rig.take(generation - 1, [4, 3], 0),
+            Ok(meta(generation - 1, [4, 3], 0))
+        );
+        rig.knobs.fail.set(Some(failure));
+        assert_eq!(rig.take(generation, [4, 3], 0), Err(failure));
+        assert_eq!(rig.screen.frame().image(), None);
+    }
 }
 
 #[test]
