@@ -31,6 +31,8 @@ mod leases;
 mod scenes;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
+#[path = "tools_tests.rs"]
+mod tools;
 
 const T: ThreadId = ThreadId(4);
 const R: RunId = RunId(10);

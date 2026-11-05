@@ -10,6 +10,7 @@ pub(crate) mod context;
 mod drawing;
 mod pages;
 mod purge;
+mod rounds;
 mod scenes;
 mod schema;
 mod side;
@@ -94,6 +95,9 @@ pub enum StoreError {
     /// A stored scene row didn't decode; it's skipped. Only its id is named, never its content.
     #[error("stored scene row {0} doesn't decode")]
     SceneRow(i64),
+    /// A round's native item or result doesn't decode or is over its bound.
+    #[error("a stored round record doesn't decode")]
+    RoundRecord,
 }
 
 /// What an event records. Media are referenced by asset id once assets arrive.
@@ -113,6 +117,10 @@ pub enum EventKind {
     SceneCleared,
     /// An authoritative cut in a typed scene's lifetime log.
     SceneCut,
+    /// A native output item of a model round, kept for replay.
+    OutputItem,
+    /// The result Kumochi answered a model's call with.
+    ToolResult,
 }
 
 impl EventKind {
@@ -125,6 +133,8 @@ impl EventKind {
             Self::SceneBegin => "scene_begin",
             Self::SceneCleared => "scene_cleared",
             Self::SceneCut => "scene_cut",
+            Self::OutputItem => "output_item",
+            Self::ToolResult => "tool_result",
         }
     }
 }

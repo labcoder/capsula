@@ -25,8 +25,14 @@ flowchart LR
 | Raw runs | Up to the newest 8 runs, the current one included, oldest dropped first while over the bound. A run is kept or dropped whole, so a tool call never travels without its result. |
 | Current turn | The user's text, plus their local time to the minute (SQLite's `localtime`, so the system's time zone on every platform). It's never dropped. |
 
-Reasoning items (PR 13b) are replayed only when they came from the connection the run uses now.
-That's the connection the run was bound to when its turn arrived, recorded in its snapshot.
+**Stored rounds** (runs.md, "The tool loop") replay per run (D13-M1). A run whose native items came
+from the connection this run uses replays its rounds natively: each round's items in output order,
+then its results, and of its text only what was written after its last round, such as a Stop's
+partial answer, as one assistant message. The text before that is already in the items. A run from
+another connection replays as its text only, with no items and no results, so no call travels
+without its result. The connection is the one the run was bound to when its turn arrived, recorded
+in its snapshot. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
+fails the build, and their bytes count toward the bound.
 
 ## Origin and references
 
@@ -267,8 +273,8 @@ round on the account.
 `function`), `reasoning.effort`, `include: ["reasoning.encrypted_content"]`, `store: false` and
 `stream: true`. It never sends `context_management`, `max_output_tokens` or
 `prompt_cache_retention`. Input items are messages with their role, `function_call`,
-`function_call_output`, and stored reasoning items sent back as the same JSON value (its strings exact, its spacing and escapes not). The serialised
-body is checked against the 512 KiB bound again, and a stored reasoning item that isn't JSON
+`function_call_output`, and stored native items sent back as the same JSON value (its strings exact, its spacing and escapes not). The serialised
+body is checked against the 512 KiB bound again, and a stored native item that isn't JSON
 builds nothing.
 
 **One round's stream** maps to `TurnEvent`s in arrival order:
@@ -317,8 +323,8 @@ isn't needed:
    end follows its last events.
 
 A dev build caps its requests with `KUMOCHI_LIVE_BUDGET` (`Budget::from_env`); a release build
-has no cap. One round per run: the tool loop that starts the next round, the store's round kinds
-and replay are 13b-2's.
+has no cap. Each round is one start; the coordinator's tool loop starts the next (runs.md, "The
+tool loop").
 
 ## The Claude Code stream
 

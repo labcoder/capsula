@@ -23,7 +23,7 @@ pub(super) fn item_bytes(item: &InputItem) -> usize {
                 arguments,
             } => escaped(call.as_str()) + escaped(name) + escaped(arguments),
             InputItem::FunctionOutput { call, output } => escaped(call.as_str()) + escaped(output),
-            InputItem::Reasoning(item) => item.size(),
+            InputItem::Native(item) => item.size(),
         }
 }
 
