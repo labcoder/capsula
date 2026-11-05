@@ -29,11 +29,12 @@ impl Presence {
         position: Option<DockPosition>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        let Some(position) = restored_position(
-            position,
-            self.line.position_index(),
-            cx.has_global::<Observer>(),
-        ) else {
+        let mode = if cx.has_global::<Observer>() {
+            RestoreMode::ObserverSeed
+        } else {
+            RestoreMode::Saved
+        };
+        let Some(position) = restored_position(position, self.line.position_index(), mode) else {
             return Ok(());
         };
         self.place_position(position, cx)
@@ -111,7 +112,7 @@ impl Presence {
             Some((status_open, self.panel_window, &mut status_bounds)),
         ];
         for (visible, handle, bounds) in panels.into_iter().flatten() {
-            let Some(next) = panel_bounds(visible, self.layout, area, *bounds) else {
+            let Some(next) = panel_bounds(visible.then_some(*bounds), self.layout, area) else {
                 continue;
             };
             handle
@@ -128,12 +129,17 @@ impl Presence {
     }
 }
 
+enum RestoreMode {
+    Saved,
+    ObserverSeed,
+}
+
 fn restored_position(
     position: Option<DockPosition>,
     current: Option<usize>,
-    observing: bool,
+    mode: RestoreMode,
 ) -> Option<Position> {
-    if observing {
+    if matches!(mode, RestoreMode::ObserverSeed) {
         return None;
     }
     let position = position?;
@@ -144,13 +150,8 @@ fn restored_position(
     (current != Some(index)).then(|| position.into())
 }
 
-fn panel_bounds(
-    visible: bool,
-    layout: Layout,
-    area: [i32; 4],
-    bounds: [i32; 4],
-) -> Option<[i32; 4]> {
-    visible.then(|| layout.anchored_panel(area, [bounds[2], bounds[3]]))
+fn panel_bounds(bounds: Option<[i32; 4]>, layout: Layout, area: [i32; 4]) -> Option<[i32; 4]> {
+    bounds.map(|bounds| layout.anchored_panel(area, [bounds[2], bounds[3]]))
 }
 
 #[cfg(test)]
@@ -160,22 +161,30 @@ mod tests {
     #[test]
     fn observer_preserves_the_launch_seed_while_normal_snapshots_restore() {
         assert_eq!(
-            restored_position(Some(DockPosition::BottomRight), Some(3), true),
+            restored_position(
+                Some(DockPosition::BottomRight),
+                Some(3),
+                RestoreMode::ObserverSeed
+            ),
             None
         );
         assert_eq!(
-            restored_position(Some(DockPosition::TopCenter), Some(3), true),
+            restored_position(
+                Some(DockPosition::TopCenter),
+                Some(3),
+                RestoreMode::ObserverSeed
+            ),
             None
         );
         assert_eq!(
-            restored_position(Some(DockPosition::BottomRight), Some(3), false),
+            restored_position(Some(DockPosition::BottomRight), Some(3), RestoreMode::Saved),
             Some(Position::BottomRight)
         );
         assert_eq!(
-            restored_position(Some(DockPosition::BottomRight), Some(8), false),
+            restored_position(Some(DockPosition::BottomRight), Some(8), RestoreMode::Saved),
             None
         );
-        assert_eq!(restored_position(None, Some(3), false), None);
+        assert_eq!(restored_position(None, Some(3), RestoreMode::Saved), None);
     }
 
     #[test]
@@ -188,8 +197,8 @@ mod tests {
             ([0, 20, 380, 140], [620, 640, 380, 140]),
             ([0, 20, 300, 120], [700, 660, 300, 120]),
         ] {
-            assert_eq!(panel_bounds(true, layout, area, old), Some(expected));
-            assert_eq!(panel_bounds(false, layout, area, old), None);
+            assert_eq!(panel_bounds(Some(old), layout, area), Some(expected));
+            assert_eq!(panel_bounds(None, layout, area), None);
         }
     }
 }
