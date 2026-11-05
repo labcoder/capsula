@@ -2,8 +2,8 @@
 use crate::{
     Budget, ErrorCode,
     limits::{
-        MAX_GLOBAL_CHART_MARKS, MAX_GLOBAL_LIVE_OBJECTS, MAX_GLOBAL_PATH_SEGMENTS,
-        MAX_GLOBAL_TABLE_CELLS, MAX_VISIBLE_SCENES,
+        MAX_GLOBAL_CHART_MARKS, MAX_GLOBAL_DASH_PIECES, MAX_GLOBAL_LIVE_OBJECTS,
+        MAX_GLOBAL_PATH_SEGMENTS, MAX_GLOBAL_TABLE_CELLS, MAX_VISIBLE_SCENES,
     },
 };
 use std::sync::Arc;
@@ -19,6 +19,8 @@ pub struct Usage {
     pub marks: usize,
     /// Flattened path segments.
     pub segments: usize,
+    /// Dash pieces of dashed strokes whose geometry is explicit; font-dependent ones charge 0.
+    pub dash_pieces: usize,
     /// Explicit motion property owners; generated effects are bounded by object count.
     pub tracks: usize,
     /// Key storage reserved for explicit owners.
@@ -33,6 +35,7 @@ impl Usage {
             cells: self.cells + rhs.cells,
             marks: self.marks + rhs.marks,
             segments: self.segments + rhs.segments,
+            dash_pieces: self.dash_pieces + rhs.dash_pieces,
             tracks: self.tracks + rhs.tracks,
             keys: self.keys + rhs.keys,
             scenes: self.scenes + rhs.scenes,
@@ -44,6 +47,7 @@ impl Usage {
             cells: self.cells.max(rhs.cells),
             marks: self.marks.max(rhs.marks),
             segments: self.segments.max(rhs.segments),
+            dash_pieces: self.dash_pieces.max(rhs.dash_pieces),
             tracks: self.tracks.max(rhs.tracks),
             keys: self.keys.max(rhs.keys),
             scenes: self.scenes.max(rhs.scenes),
@@ -67,6 +71,10 @@ impl Usage {
                 .segments
                 .checked_sub(rhs.segments)
                 .expect("scene segments were charged"),
+            dash_pieces: self
+                .dash_pieces
+                .checked_sub(rhs.dash_pieces)
+                .expect("scene dash pieces were charged"),
             tracks: self
                 .tracks
                 .checked_sub(rhs.tracks)
@@ -91,6 +99,7 @@ impl Usage {
                 MAX_GLOBAL_PATH_SEGMENTS,
                 Budget::PathSegments,
             ),
+            (self.dash_pieces, MAX_GLOBAL_DASH_PIECES, Budget::DashPieces),
             (self.scenes, MAX_VISIBLE_SCENES, Budget::VisibleScenes),
         ] {
             if actual > cap {

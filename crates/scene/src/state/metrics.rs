@@ -5,9 +5,11 @@ use super::{
 use crate::{
     Budget, ErrorCode, FieldPath, Step, StepError, WireId,
     budget::Usage,
+    display::dash_bound,
     limits::{
         MAX_CHART_SERIES, MAX_COMPOSED_SCALE, MAX_COORD, MAX_DIAGRAM_EDGES, MAX_DIAGRAM_NODES,
-        MAX_KEYS, MAX_LIVE_OBJECTS, MAX_OBJECT_DEPTH, MAX_TABLE_ROWS, MAX_TRACKS,
+        MAX_GLOBAL_DASH_PIECES, MAX_KEYS, MAX_LIVE_OBJECTS, MAX_OBJECT_DEPTH, MAX_TABLE_ROWS,
+        MAX_TRACKS,
     },
     record::{ChartKind, Point},
 };
@@ -66,6 +68,16 @@ pub(super) fn validate(
                 .scale;
             object.work.usage.segments = path.segments(scale).map_err(&fail)?;
             path.composed_scale = scale;
+        }
+        if let Some(length) = object.work.dash {
+            // Two pieces per edge, and one more for f32 rounding once there is an edge to paint.
+            let edges = object.work.usage.segments;
+            object.work.usage.dash_pieces = dash_bound(
+                usize::from(edges > 0),
+                length,
+                edges,
+                MAX_GLOBAL_DASH_PIECES,
+            );
         }
         if object.kind == Kind::Series
             && let Some(chart) = object.work.chart

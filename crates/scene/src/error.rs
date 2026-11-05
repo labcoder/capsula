@@ -21,6 +21,8 @@ pub enum Budget {
     PathPoints,
     /// `PathSegments` budget.
     PathSegments,
+    /// `DashPieces` budget: fewer or shorter dashed strokes.
+    DashPieces,
     /// Tracks budget.
     Tracks,
     /// Keys budget.

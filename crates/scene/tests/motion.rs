@@ -30,44 +30,6 @@ fn fresh() -> (SceneState, GlobalBudget, SceneView) {
     (scene, GlobalBudget::default(), view)
 }
 
-#[test]
-fn a_frame_accounts_for_both_reserved_buffers() {
-    let (frame, [allocations, _], [allocated, _]) = allocation::usage(Frame::new);
-    assert_eq!(allocations, 2);
-    assert_eq!(frame.resident_bytes(), allocated);
-    let ((), _, [_, released]) = allocation::usage(|| drop(frame));
-    assert_eq!(released, allocated);
-}
-
-#[test]
-fn a_resting_view_covers_its_independently_measured_storage() {
-    let mut scene = new_scene("view_storage");
-    let mut budget = GlobalBudget::default();
-    let empty = LayoutState::new(&scene);
-    let filled = prepared(
-        &mut scene,
-        &mut budget,
-        &empty,
-        json!({
-            "id":"one", "put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}}]
-        }),
-    );
-    for layout in [&empty, &filled.after] {
-        let (view, _, [allocated, temporary]) = allocation::usage(|| SceneView::new(layout, 0));
-        let retained = allocated - temporary;
-        assert!(allocated > 0);
-        assert!(
-            view.resident_bytes() >= retained,
-            "charge={} retained={retained} allocated={allocated} temporary={temporary}",
-            view.resident_bytes()
-        );
-        let ((), _, [_, released]) = allocation::usage(|| drop(view));
-        assert_eq!(
-            released, retained,
-            "the original layouts still own shared geometry"
-        );
-    }
-}
 fn commit(
     scene: &mut SceneState,
     budget: &mut GlobalBudget,
@@ -214,6 +176,85 @@ fn retained_history(
         history.push((step, held));
     }
     (scene, history)
+}
+
+#[test]
+fn a_frame_accounts_for_both_reserved_buffers() {
+    let (frame, [allocations, _], [allocated, _]) = allocation::usage(Frame::new);
+    assert_eq!(allocations, 2);
+    assert_eq!(frame.resident_bytes(), allocated);
+    let ((), _, [_, released]) = allocation::usage(|| drop(frame));
+    assert_eq!(released, allocated);
+}
+
+/// Requested bytes of one `Arc<()>`: the version header a cloned layout shares, not copies.
+fn shared_version_header() -> usize {
+    let (version, [allocations, _], [allocated, _]) = allocation::usage(|| Arc::new(()));
+    assert_eq!(allocations, 1, "one independent Arc header allocation");
+    drop(version);
+    allocated
+}
+
+#[test]
+fn a_resting_view_covers_its_independently_measured_storage() {
+    let shared_version = shared_version_header();
+    let mut scene = new_scene("view_storage");
+    let mut budget = GlobalBudget::default();
+    let empty = LayoutState::new(&scene);
+    let filled = prepared(
+        &mut scene,
+        &mut budget,
+        &empty,
+        json!({
+            "id":"one", "put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}}]
+        }),
+    );
+    for layout in [&empty, &filled.after] {
+        let (view, _, [allocated, temporary]) = allocation::usage(|| SceneView::new(layout, 0));
+        let retained = allocated - temporary;
+        assert_eq!(
+            view.resident_bytes(),
+            retained + shared_version,
+            "the index copy is charged the version allocation it shares with its layout"
+        );
+        let ((), _, [_, released]) = allocation::usage(|| drop(view));
+        assert_eq!(
+            released, retained,
+            "the original layouts still own shared geometry"
+        );
+    }
+}
+
+#[test]
+fn an_active_view_releases_its_whole_charge_but_the_shared_version() {
+    let shared_version = shared_version_header();
+    let two = json!([[0, 0], [100, 1]]);
+    let five = json!([[0, 0], [10, 0.5], [25, 1], [50, 0], [100, 1]]);
+    for (keys, at_25) in [(two, 0.25_f32), (five, 1.0)] {
+        let (mut scene, mut budget, mut view) = fresh();
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut view,
+            json!({"id":"fade","put":[
+                {"shape":{"id":"s","kind":"rect","box":[0,0,10,10],"fill":"blue"}},
+                {"anim":{"target":"s","track":"opacity","ease":"linear","keys":keys}}
+            ]}),
+            0,
+        );
+        assert_eq!(
+            opacity(&view, 25, "s"),
+            at_25.to_bits(),
+            "the track is live"
+        );
+        // The clone keeps the shared geometry and version alive, so the drop frees only what the
+        // view owns: its index copy, nodes, paint order, tracks, keys and generation.
+        let layout = view.layout().clone();
+        let charge = view.resident_bytes();
+        let ((), _, [_, released]) = allocation::usage(|| drop(view));
+        assert_eq!(charge, released + shared_version);
+        drop(layout);
+    }
 }
 
 #[test]

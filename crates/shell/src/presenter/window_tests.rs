@@ -15,6 +15,9 @@ use super::{
     settle,
 };
 
+const FRAME_CACHE_METADATA_BYTES: usize =
+    size_of::<std::cell::RefCell<super::super::paint::Frames>>() + 2 * size_of::<usize>();
+
 fn answer(presenter: &mut Presenter, job: PrepareJob, at: Instant) -> Vec<Effect> {
     presenter
         .completed(job.run(&mut Shaper), at)
@@ -425,8 +428,7 @@ fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
         let empty = rest.resident_bytes()
             + kumochi_scene::SceneView::new(&rest, 0).resident_bytes()
             + kumochi_scene::Frame::new().resident_bytes()
-            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
-            + 2 * size_of::<usize>();
+            + FRAME_CACHE_METADATA_BYTES;
         presenter
             .returned
             .store(MAX_RESIDENT_BYTES - empty + over, Ordering::Relaxed);
@@ -474,8 +476,7 @@ fn recovery_checks_its_view_and_frame_at_the_cap() {
         let picture = scenes[0].2
             + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
             + kumochi_scene::Frame::new().resident_bytes()
-            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
-            + 2 * size_of::<usize>();
+            + FRAME_CACHE_METADATA_BYTES;
         let returned = MAX_RESIDENT_BYTES - picture + over;
         presenter.returned.store(returned, Ordering::Relaxed);
         let effects = presenter.completed(done, now).expect("recovery adoption");
@@ -517,8 +518,7 @@ fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
         let picture = scenes[0].2
             + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
             + kumochi_scene::Frame::new().resident_bytes()
-            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
-            + 2 * size_of::<usize>();
+            + FRAME_CACHE_METADATA_BYTES;
         let pair = super::step(
             r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
         );

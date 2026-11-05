@@ -2,7 +2,7 @@ use super::{PrepareError, heap, primitives};
 use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
     deferred::Deferred,
-    display::Item,
+    display::{Item, PaintWork},
     geom::{Affine, Vec2},
     mermaid::Extra,
     record::{Direction, KeyValue, Rgb, Track},
@@ -80,6 +80,8 @@ pub(super) struct Placed {
     pub inherited_opacity: f32,
     /// The measured size of a group's private title, which its band reserves.
     pub title: Option<Vec2>,
+    /// Paint work of `item.primitives`, set once at the step that built them.
+    pub work: PaintWork,
 }
 
 impl Placed {
@@ -98,6 +100,7 @@ impl Placed {
             chart_basis: cached.and_then(|old| old.chart_basis.as_ref().map(Arc::clone)),
             inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
             title: cached.and_then(|old| old.title),
+            work: PaintWork::default(),
         }
     }
 }
@@ -199,6 +202,12 @@ impl LayoutState {
             + heap::btree::<u32, Arc<BTreeMap<usize, Extra>>>(self.extras.len())
             + 2 * ids
             + heap::ARC_HEADER
+    }
+    /// Paint work of every placed item, summed in O(objects); preparation counted each item.
+    pub fn paint_work(&self) -> PaintWork {
+        self.objects
+            .values()
+            .fold(PaintWork::default(), |sum, object| sum + object.work)
     }
     /// Every placed handle in order: what a Stop at rest reveals, without building a view.
     pub fn revealed_at_rest(&self) -> Vec<Handle> {

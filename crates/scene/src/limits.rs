@@ -50,6 +50,12 @@ pub const MAX_PATH_POINTS: usize = 512;
 pub const MAX_PATH_SEGMENTS: usize = 4_096;
 /// Maximum flattened path segments across visible scenes.
 pub const MAX_GLOBAL_PATH_SEGMENTS: usize = 20_000;
+/// Maximum dash pieces across visible scenes.
+pub const MAX_GLOBAL_DASH_PIECES: usize = 512;
+/// Maximum fill tessellation vertices across visible scenes.
+pub const MAX_GLOBAL_FILL_VERTICES: usize = 512;
+/// Maximum rect fallback outline points across visible scenes.
+pub const MAX_GLOBAL_OUTLINE_POINTS: usize = 512;
 /// Maximum tracks per scene.
 pub const MAX_TRACKS: usize = 256;
 /// Maximum put operations in one step: objects plus tracks.
