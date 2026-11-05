@@ -876,6 +876,80 @@ async fn a_retained_file_another_account_may_read_is_refused() {
     assert_eq!(base.starts(), Vec::<String>::new());
 }
 
+/// Asserts a config folder whose DACL adds `extra`, a grant of no read right, is refused and left
+/// exactly as it was.
+async fn assert_config_refused_unchanged(name: &str, extra: &str) {
+    let base = Base::new(name);
+    let config = base.owned().join("config");
+    let before = {
+        fs::create_dir_all(&config).expect("the folders");
+        set_dacl(&config, |user| format!("D:P(A;OICI;FA;;;{user}){extra}"));
+        dacl_sddl(&config)
+    };
+    assert_eq!(
+        version_with_config(&base, extra).await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(dacl_sddl(&config), before, "not re-secured");
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_reused_config_folder_whose_new_files_another_account_may_re_acl_is_refused() {
+    assert_config_refused_unchanged(
+        "config-inherits-write-dac",
+        "(A;OICIIO;0x00040000;;;S-1-5-21-1-2-3-1002)",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_reused_config_folder_whose_new_files_another_account_may_take_is_refused() {
+    assert_config_refused_unchanged(
+        "config-inherits-write-owner",
+        "(A;OICIIO;0x00080000;;;S-1-5-21-1-2-3-1002)",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_retained_file_another_account_may_re_acl_is_refused() {
+    let base = Base::new("config-file-write-dac");
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folders");
+    let kept = config.join("kept.json");
+    fs::write(&kept, b"{}").expect("a file left in it");
+    set_dacl(&kept, |user| {
+        format!("D:P(A;;FA;;;{user})(A;;0x00040000;;;S-1-5-21-1-2-3-1002)")
+    });
+    let before = dacl_sddl(&kept);
+    assert_eq!(
+        version_with_config(&base, "(A;OICI;FA;;;SY)").await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(dacl_sddl(&kept), before, "not re-secured");
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_retained_file_another_account_may_write_is_refused() {
+    let base = Base::new("config-file-data");
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folders");
+    let kept = config.join("kept.json");
+    fs::write(&kept, b"{}").expect("a file left in it");
+    set_dacl(&kept, |user| {
+        format!("D:P(A;;FA;;;{user})(A;;0x00000002;;;S-1-5-21-1-2-3-1002)")
+    });
+    let before = dacl_sddl(&kept);
+    assert_eq!(
+        version_with_config(&base, "(A;OICI;FA;;;SY)").await,
+        Err(Failure::Folders)
+    );
+    assert_eq!(dacl_sddl(&kept), before, "not re-secured");
+    assert_eq!(base.starts(), Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn a_sign_in_the_fake_writes_gets_only_this_users_access() {
     let base = Base::new("sign-in-private");

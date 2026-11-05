@@ -171,9 +171,12 @@ sequenceDiagram
   held. Before Version every managed-policy source must be absent; before Status the reviewed
   row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
   held from the volume root. Then the whole `claude-code` folder is walked without following
-  anything: no one but the user and SYSTEM may read any folder or file in it, or, through an
-  inheritable entry, what's made in its folders. A folder or file that fails is refused, never
-  re-secured, so Claude Code's own sign-in file stays readable by the user and SYSTEM only. A refusal starts nothing and makes no folder. When another brain
+  anything. Every folder and file in it must pass the held-path checks (a trusted owner, and no
+  one untrusted may change it or its security), no one but the user and SYSTEM may read it, and
+  through an inheritable entry no one untrusted may read or change the security of what's made
+  in its folders. One that fails is refused, never re-secured, so Claude Code's own sign-in file
+  stays readable by the user and SYSTEM only. A refusal starts nothing; a policy or lock refusal
+  also makes no folder, but the walk runs after missing standard folders are made, so they stay. When another brain
   holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
 - **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
   as `configDirectory`, byte for byte; anything else fails closed.

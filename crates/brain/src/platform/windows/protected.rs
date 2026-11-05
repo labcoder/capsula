@@ -246,35 +246,35 @@ fn check_marker(marker: &File, path: &Path) -> Result<(), Untrusted> {
     Ok(())
 }
 
-/// Checks that no one but this user and SYSTEM may read `path` or anything in it, nor, through an
-/// inheritable entry, anything made in its folders. Each entry is opened without following it, and
-/// a reparse point is refused. Its parent must be held.
+/// Checks `path` and everything in it, each entry opened without following it: it must pass the
+/// held-folder or held-file checks, no one but this user and SYSTEM may read it, and no one
+/// untrusted may read a folder's new entries or change their security through an inheritable
+/// entry. Nothing is re-secured. Its parent must be held.
 pub(crate) fn private_tree(path: &Path) -> Result<(), Untrusted> {
-    private_entry(path, &Trusted::readers()?)
+    private_entry(path, &Trusted::readers()?, &Trusted::new()?)
 }
 
-fn private_entry(path: &Path, readers: &Trusted) -> Result<(), Untrusted> {
+fn private_entry(path: &Path, readers: &Trusted, trusted: &Trusted) -> Result<(), Untrusted> {
     // A file someone holds without sharing still opens for its attributes and security alone.
     let entry = match open(path, Kind::Folder, FILE_LIST_DIRECTORY) {
         Err(Untrusted::Io) => open(path, Kind::Folder, 0)?,
         opened => opened?,
     };
-    let attributes = attributes(&entry)?;
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(Untrusted::Reparse);
-    }
-    let folder = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    let aces = if folder {
-        Aces::Inheritable
+    let (kind, counted) = if attributes(&entry)? & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        (Kind::Folder, Aces::Inheritable)
     } else {
-        Aces::Effective
+        (Kind::File, Aces::Effective)
     };
-    if Security::read(&entry)?.others_may(READS, readers, aces)? {
+    check(&entry, path, kind, trusted)?;
+    let security = Security::read(&entry)?;
+    if security.others_may(WRITE_DAC | WRITE_OWNER, trusted, counted)?
+        || security.others_may(READS, readers, counted)?
+    {
         return Err(Untrusted::Unsafe);
     }
-    if folder {
+    if kind == Kind::Folder {
         for name in names(&entry)? {
-            match private_entry(&path.join(name), readers) {
+            match private_entry(&path.join(name), readers, trusted) {
                 Ok(()) | Err(Untrusted::Missing) => {}
                 Err(error) => return Err(error),
             }
@@ -469,7 +469,12 @@ fn check(opened: &File, path: &Path, kind: Kind, trusted: &Trusted) -> Result<()
     if !same_final_path(opened, path)? {
         return Err(Untrusted::Reparse);
     }
-    let security = Security::read(opened)?;
+    trusted_security(&Security::read(opened)?, kind, trusted)
+}
+
+/// Whether `security` has a trusted owner, no label below medium, and no ACE that lets someone
+/// untrusted change the object.
+fn trusted_security(security: &Security, kind: Kind, trusted: &Trusted) -> Result<(), Untrusted> {
     if !trusted.contains(security.owner) || security.writable_from_below()? {
         return Err(Untrusted::Unsafe);
     }
@@ -746,6 +751,36 @@ impl Security {
         })
     }
 
+    /// The owner and DACL `sddl` describes, for tests to judge without a file.
+    #[cfg(test)]
+    fn parse(sddl: &str) -> Self {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
+        let descriptor = Descriptor::new(sddl).expect("the SDDL parses");
+        let (mut owner, mut defaulted) = (std::ptr::null_mut(), 0);
+        // SAFETY: the descriptor is live and both outputs are writable locals.
+        let read = unsafe {
+            GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut defaulted)
+        };
+        assert_ne!(read, 0, "the owner reads");
+        let (mut present, mut dacl): (_, *mut ACL) = (0, std::ptr::null_mut());
+        // SAFETY: the descriptor is live and every output is a writable local.
+        let read = unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
+        };
+        assert!(read != 0 && present != 0, "the DACL reads");
+        Self {
+            owner,
+            dacl,
+            sacl: std::ptr::null(),
+            descriptor,
+        }
+    }
+
     /// Whether an ACE `counted` covers grants someone untrusted one of `rights`. A null DACL grants
     /// everyone everything, and an allow ACE of a kind not read here counts.
     fn others_may(&self, rights: u32, trusted: &Trusted, counted: Aces) -> Result<bool, Untrusted> {
@@ -849,4 +884,22 @@ fn mapped(mut mask: u32) -> u32 {
         unsafe { MapGenericMask(&raw mut mask, &raw const mapping) };
     }
     mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Kind, Security, Trusted, Untrusted, this_user, trusted_security};
+
+    #[test]
+    fn only_an_owner_in_the_trusted_set_is_trusted() {
+        let user = this_user();
+        let judged = |owner: &str| {
+            let security = Security::parse(&format!("O:{owner}D:P(A;OICI;FA;;;{user})"));
+            trusted_security(&security, Kind::Folder, &Trusted::new().expect("the set"))
+        };
+        assert_eq!(judged(&user), Ok(()));
+        assert_eq!(judged("SY"), Ok(()));
+        assert_eq!(judged("BA"), Ok(()));
+        assert_eq!(judged("S-1-5-21-1-2-3-1002"), Err(Untrusted::Unsafe));
+    }
 }
