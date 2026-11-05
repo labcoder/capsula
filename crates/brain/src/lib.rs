@@ -9,6 +9,7 @@ pub mod connections;
 mod context;
 pub mod coordinator;
 pub mod credential;
+pub mod dispatch;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
@@ -135,8 +136,9 @@ pub async fn run() -> Result<(), BrainError> {
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
     let config = config::Config::load(platform::config_dir(), main_thread);
+    let claude_on = config.claude_code_enabled();
     // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let account = accounts().map_err(BrainError::Accounts)?;
+    let (account, vault_held) = accounts().map_err(BrainError::Accounts)?;
     let mut brain = Brain::new(
         store,
         main_thread,
@@ -148,6 +150,11 @@ pub async fn run() -> Result<(), BrainError> {
     )
     .map_err(BrainError::StoreThread)?;
     let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    brain.attach_claude(if claude_on {
+        claude(vault_held, &jobs)
+    } else {
+        runtime::claude::Claude::turned_off()
+    });
     let screen = screen::ScreenSupervisor::start(exe.clone(), std::sync::Arc::clone(&jobs))
         .map_err(BrainError::Helpers)?;
     let mut bytes = [0; CAPABILITY_LEN];
@@ -181,8 +188,12 @@ pub async fn run() -> Result<(), BrainError> {
     ended.map(|_| ()).map_err(BrainError::from)
 }
 
-/// The account system on the real credential store, browser, clock and network.
-fn accounts() -> io::Result<runtime::account::Accounts> {
+/// The account system on the real credential store, browser, clock and network, and the fact that
+/// its worker holds the session lock.
+fn accounts() -> io::Result<(
+    runtime::account::Accounts,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)> {
     use std::sync::Arc;
 
     use connections::account::Worker;
@@ -196,7 +207,52 @@ fn accounts() -> io::Result<runtime::account::Accounts> {
         launcher: Arc::new(SystemBrowser),
         clock: Arc::new(SystemClock),
     };
-    runtime::account::Accounts::spawn(worker, net)
+    let held = worker.held();
+    Ok((runtime::account::Accounts::spawn(worker, net)?, held))
+}
+
+/// Claude Code's connection: its lane on the installed `claude.exe`. A lane that can't start
+/// leaves nothing found.
+fn claude(
+    vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    jobs: &std::sync::Arc<Job>,
+) -> runtime::claude::Claude {
+    use engines::claude_code::install::{FindError, locate};
+    use engines::claude_code::lane::{Host, Lane, Program};
+
+    let base = match platform::local_app_data() {
+        Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
+        Err(error) => {
+            tracing::warn!(kind = ?error.kind(), "no local data folder for Claude Code");
+            return runtime::claude::Claude::default();
+        }
+    };
+    if let Err(error) = std::fs::create_dir(&base)
+        && error.kind() != io::ErrorKind::AlreadyExists
+    {
+        tracing::warn!(kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
+        return runtime::claude::Claude::default();
+    }
+    let host = Host {
+        find: Box::new(|| {
+            let profile = platform::profile_dir().map_err(|_| FindError::NotFound)?;
+            locate(&profile).map(|exe| Program {
+                exe,
+                prefix: Vec::new(),
+            })
+        }),
+        base,
+        vault_held,
+        managed: Box::new(platform::managed_presence),
+        brain_job: std::sync::Arc::clone(jobs),
+    };
+    match Lane::start(host) {
+        Ok(lane) => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
+        Err(error) => {
+            tracing::warn!(kind = ?error.kind(), "Claude Code's lane didn't start");
+            runtime::claude::Claude::default()
+        }
+    }
 }
 
 /// The engine runs use: in a dev build that names a script in

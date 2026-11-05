@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
 };
 
-use super::settings_view::SettingsView;
+use super::SettingsView;
 use crate::accounts::Accounts;
 use crate::strings::{Strings, Text};
 
@@ -212,7 +212,11 @@ impl SettingsView {
             )
     }
 
-    pub(super) fn confirm_sign_out(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn confirm_sign_out(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if window.has_active_dialog(cx) {
             return;
         }

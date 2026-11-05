@@ -1,2 +1,3 @@
 /crates/brain/fixtures/responses/** -text
 /crates/brain/fixtures/claude-code/** -text
+/crates/brain/fixtures/anthropic/** -text

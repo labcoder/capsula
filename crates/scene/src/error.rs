@@ -31,6 +31,14 @@ pub enum Budget {
     VisibleScenes,
     /// Residency budget.
     Residency,
+    /// Solids per scene.
+    Solids,
+    /// Triangles per scene and across visible scenes.
+    Triangles,
+    /// 3D views per scene.
+    Views,
+    /// Triangles in a view with a 3D track.
+    MovingTriangles,
 }
 
 /// A stable diagnostic code; never contains drawing content.

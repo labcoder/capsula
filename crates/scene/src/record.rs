@@ -364,6 +364,8 @@ pub struct Change {
     pub data: Option<Bounded<Point, MAX_SERIES_POINTS>>,
     /// emphasis.
     pub emphasis: Option<bool>,
+    /// Descriptive text of a solid.
+    pub info: Option<Text>,
 }
 /// Line record fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

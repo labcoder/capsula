@@ -368,7 +368,7 @@ impl Solid {
         }
         match self.shape {
             Extrude if self.points.len() < 3 => return Err(fail("points", ErrorCode::OutOfRange)),
-            Extrude if self.points.len() > 128 => {
+            Extrude if self.points.len() > crate::limits::MAX_EXTRUDE_POINTS => {
                 return Err(fail("points", ErrorCode::OverBudget(Budget::PathPoints)));
             }
             Lathe if self.points.len() < 2 => return Err(fail("points", ErrorCode::OutOfRange)),

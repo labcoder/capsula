@@ -1,168 +1,179 @@
-//! General fields and the Accounts tab, composed from retained Kit controls.
-
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+#[cfg(test)]
+use gpui_kit::InteractiveElement as _;
+use gpui_kit::base::RadioGroup as PositionGroup;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::input::Input;
 use gpui_kit::component::radio::{Radio, RadioGroup};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, scroll::ScrollableElement as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div,
+    Context, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
+    div,
 };
-use kumochi_protocol::message::{MaxFrameRate, NameError};
+use kumochi_protocol::{
+    BUILD_ID,
+    message::{DockPosition, MaxFrameRate, NameError},
+};
 
-use super::{Presence, PresenceEvent, frame_rate, send};
-use crate::settings::{Error, Field, Settings};
+use super::super::{PresenceEvent, frame_rate, send};
+use super::SettingsView;
+use crate::settings::{Error, Field, Settings, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
-pub(super) struct SettingsView {
-    pub(super) model: Entity<Settings>,
-    pub(super) owner: WeakEntity<Presence>,
-    pub(super) confirmation: Option<u64>,
-    #[cfg(debug_assertions)]
-    pub(super) fixture: bool,
-    events: async_channel::Sender<PresenceEvent>,
-    inputs: [Entity<InputState>; 2],
-    focus: FocusHandle,
-    editing: Option<Field>,
-    tab: usize,
-    pub(super) stop: bool,
-    _events: Vec<Subscription>,
-    _watch: Subscription,
-    /// Redraws the effective rate when the window's display or its refresh changes.
-    _display: Subscription,
-}
-
 impl SettingsView {
-    pub(super) fn new(
-        model: Entity<Settings>,
-        owner: WeakEntity<Presence>,
-        events: async_channel::Sender<PresenceEvent>,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Self {
-        cx.bind_keys([KeyBinding::new("escape", Escape, Some("SettingsPanel"))]);
-        let inputs = [Field::Assistant, Field::User].map(|field| {
-            cx.new(|cx| {
-                let mut input = InputState::new(window, cx);
-                let value = model.read(cx).value(field).to_owned();
-                input.set_value(value, window, cx);
-                input
-            })
-        });
-        let subscriptions = [Field::Assistant, Field::User]
-            .into_iter()
-            .zip(&inputs)
-            .map(|(field, input)| {
-                cx.subscribe_in(input, window, move |view, input, event, window, cx| {
-                    match event {
-                        InputEvent::Focus => view.editing = Some(field),
-                        InputEvent::Change => {
-                            let value = input.read(cx).value();
-                            view.model.update(cx, |state, cx| {
-                                state.change(field, &value);
-                                cx.notify();
-                            });
-                        }
-                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
-                            if view.editing == Some(field) {
-                                view.editing = None;
-                            }
-                            let _gone = view
-                                .owner
-                                .update(cx, |owner, cx| owner.save_setting(field, cx));
-                            if matches!(event, InputEvent::PressEnter { .. }) {
-                                window.focus(&view.focus, cx);
-                            }
-                        }
-                        InputEvent::PressEnter { .. } => {}
-                    }
-                    cx.notify();
-                })
-            })
-            .collect();
-        let watch = cx.observe_in(&model, window, |view, _, window, cx| {
-            let account = &view.model.read(cx).accounts;
-            if view.confirmation.is_some_and(|generation| {
-                account.generation != Some(generation)
-                    || !matches!(
-                        account.view,
-                        Some(kumochi_protocol::message::AccountView::SignedIn { .. })
+    pub(super) fn general(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let quit = self.events.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .children(
+                self.model
+                    .read(cx)
+                    .view()
+                    .is_none()
+                    .then(|| div().text_sm().child(strings.get(Text::SettingsOffline))),
+            )
+            .children(self.general_notice.map(|notice| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(strings.get(notice))
+            }))
+            .children(self.model.read(cx).notice().map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(strings.error(error))
+            }))
+            .child(self.field(Field::Assistant, cx))
+            .child(self.field(Field::User, cx))
+            .child(self.frame_rate(window, cx))
+            .child(self.dock_positions(cx))
+            .child(self.taskbar(cx))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::SettingsSaveHelp)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_sm().child(strings.get(Text::SettingsVersion)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(BUILD_ID),
+                            ),
                     )
-            }) {
-                view.confirmation = None;
-                window.close_dialog(cx);
-                window.focus(&view.focus, cx);
-            }
-            for (field, input) in [Field::Assistant, Field::User]
-                .into_iter()
-                .zip(&view.inputs)
-            {
-                let value = view.model.read(cx).value(field);
-                if input.read(cx).value().as_ref() != value {
-                    let value = value.to_owned();
-                    input.update(cx, |input, cx| input.set_value(value, window, cx));
+                    .child(
+                        Clipboard::new("settings-copy-build")
+                            .value(BUILD_ID)
+                            .accessibility_label(strings.get(Text::SettingsCopyBuild)),
+                    ),
+            )
+            .child(
+                Button::new("settings-quit")
+                    .outline()
+                    .label(strings.get(Text::Quit))
+                    .on_click(move |_, _, _| send(&quit, PresenceEvent::Quit)),
+            )
+    }
+
+    fn dock_positions(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let state = self.model.read(cx);
+        let selected = dock_choice_index(state);
+        let label = strings.get(Text::DockPosition);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_sm().child(label.clone()))
+            .child(
+                PositionGroup::new("settings-dock-position")
+                    .aria_label(label)
+                    .grid()
+                    .grid_cols(3)
+                    .gap_2()
+                    .children(
+                        DockPosition::ALL
+                            .into_iter()
+                            .zip(Text::POSITIONS)
+                            .enumerate()
+                            .map(|(ix, (position, label))| {
+                                Radio::new(("dock-position", ix))
+                                    .label(strings.get(label))
+                                    .checked(selected == Some(ix))
+                                    .on_change(cx.listener(move |view, _, _, cx| {
+                                        let owner = view.owner.clone();
+                                        let view = cx.weak_entity();
+                                        cx.defer(move |cx| {
+                                            let moved = owner
+                                                .update(cx, |owner, cx| {
+                                                    owner.save_dock_position(position, cx)
+                                                })
+                                                .is_ok_and(|result| result.is_ok());
+                                            let _gone = view.update(cx, |view, cx| {
+                                                view.general_notice = (!moved)
+                                                    .then_some(Text::SettingsPositionUnavailable);
+                                                cx.notify();
+                                            });
+                                        });
+                                    }))
+                                    .map(|radio| {
+                                        #[cfg(test)]
+                                        {
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("dock-position-{ix}")
+                                                })
+                                                .child(radio)
+                                        }
+                                        #[cfg(not(test))]
+                                        {
+                                            radio
+                                        }
+                                    })
+                            }),
+                    ),
+            )
+    }
+
+    fn taskbar(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        Checkbox::new("settings-taskbar")
+            .label(cx.global::<Strings>().taskbar())
+            .checked(state.taskbar_choice() == Some(TaskbarChoice::Shown))
+            .disabled(state.view().is_none())
+            .on_change(cx.listener(|view, checked, _, cx| {
+                let choice = if *checked {
+                    TaskbarChoice::Shown
+                } else {
+                    TaskbarChoice::Hidden
+                };
+                if view.model.read(cx).taskbar_choice() == Some(choice) {
+                    return;
                 }
-            }
-            let _gone = view.owner.update(cx, |owner, cx| owner.refresh_dock(cx));
-            cx.notify();
-        });
-        let view = cx.entity_id();
-        let display = window.observe_window_display(move |_, cx| cx.notify(view));
-        Self {
-            model,
-            owner,
-            confirmation: None,
-            #[cfg(debug_assertions)]
-            fixture: false,
-            events,
-            inputs,
-            focus: cx.focus_handle().tab_stop(true),
-            editing: None,
-            tab: 0,
-            stop: false,
-            _events: subscriptions,
-            _watch: watch,
-            _display: display,
-        }
-    }
-
-    pub(super) fn editing(&self) -> Option<Field> {
-        self.editing
-    }
-
-    #[cfg(debug_assertions)]
-    pub(super) fn fixture_general(&mut self) {
-        self.fixture = true;
-    }
-
-    #[cfg(debug_assertions)]
-    pub(super) fn fixture_accounts(&mut self) {
-        self.tab = 1;
-        self.fixture = true;
-    }
-
-    pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        window.focus(&self.focus, cx);
-    }
-
-    pub(super) fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.confirmation = None;
-        window.close_all_dialogs(cx);
-        self.editing = None;
-        window.focus(&self.focus, cx);
-        cx.notify();
-    }
-
-    pub(super) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if let Some(field) = self.editing.take() {
-            self.model.update(cx, |state, cx| {
-                state.cancel(field);
+                let sent = view
+                    .owner
+                    .update(cx, |owner, cx| owner.save_taskbar(choice, cx))
+                    .unwrap_or(false);
+                view.general_notice = (!sent).then_some(Text::SettingsUnavailable);
                 cx.notify();
-            });
-        }
-        window.focus(&self.focus, cx);
-        cx.notify();
+            }))
     }
 
     fn field(&self, field: Field, cx: &Context<'_, Self>) -> impl IntoElement {
@@ -272,102 +283,11 @@ fn rate_at(ix: usize) -> Option<MaxFrameRate> {
     }
 }
 
-impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let strings = cx.global::<Strings>();
-        let events = self.events.clone();
-        let close = self.owner.clone();
-        let stop_events = self.events.clone();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .key_context("SettingsPanel")
-            .track_focus(&self.focus)
-            .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
-            .child(
-                div()
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_lg().child(strings.get(Text::Settings)))
-                    .child(
-                        Button::new("close-settings")
-                            .ghost()
-                            .label(strings.get(Text::CloseSettings))
-                            .on_click(move |_, _, cx| {
-                                let owner = close.clone();
-                                cx.defer(move |cx| {
-                                    if let Ok(Err(error)) =
-                                        owner.update(cx, Presence::dismiss_settings)
-                                    {
-                                        tracing::error!(%error, "can't dismiss settings");
-                                    }
-                                });
-                            }),
-                    ),
-            )
-            .child(
-                div().px_4().child(
-                    TabBar::new("settings-tabs")
-                        .selected_index(self.tab)
-                        .child(Tab::new().label(strings.get(Text::General)))
-                        .child(Tab::new().label(strings.get(Text::Accounts)))
-                        .on_click(cx.listener(|view, tab, window, cx| {
-                            view.confirmation = None;
-                            window.close_all_dialogs(cx);
-                            view.tab = *tab;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                div()
-                    .id("settings-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(
-                        div()
-                            .p_4()
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .children((self.tab == 0).then(|| {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_4()
-                                    .children(self.model.read(cx).view().is_none().then(|| {
-                                        div().text_sm().child(strings.get(Text::SettingsOffline))
-                                    }))
-                                    .child(self.field(Field::Assistant, cx))
-                                    .child(self.field(Field::User, cx))
-                                    .child(self.frame_rate(window, cx))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(strings.get(Text::SettingsSaveHelp)),
-                                    )
-                            }))
-                            .children((self.tab == 1).then(|| self.accounts(cx))),
-                    ),
-            )
-            .children(self.stop.then(|| {
-                div().p_4().child(
-                    Button::new("stop")
-                        .label(strings.get(Text::Stop))
-                        .on_click(move |_, _, _| send(&stop_events, PresenceEvent::Escape)),
-                )
-            }))
-    }
+fn dock_choice_index(state: &Settings) -> Option<usize> {
+    let choice = state.dock_position_choice()?;
+    DockPosition::ALL
+        .iter()
+        .position(|position| *position == choice)
 }
 
 #[cfg(test)]
@@ -382,9 +302,71 @@ mod tests {
     };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
-    use super::{choice_index, rate_at};
+    use super::{choice_index, dock_choice_index, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
+
+    #[test]
+    fn the_checked_dock_cell_follows_saved_pending_and_refused_choices() {
+        use kumochi_protocol::message::{DockPosition, ErrorKey, UserError};
+        for (position, index) in [
+            (DockPosition::TopLeft, 0),
+            (DockPosition::TopCenter, 1),
+            (DockPosition::TopRight, 2),
+            (DockPosition::MiddleLeft, 3),
+            (DockPosition::Center, 4),
+            (DockPosition::MiddleRight, 5),
+            (DockPosition::BottomLeft, 6),
+            (DockPosition::BottomCenter, 7),
+            (DockPosition::BottomRight, 8),
+        ] {
+            let mut model = Settings::default();
+            assert_eq!(dock_choice_index(&model), None);
+            let mut snapshot = saved();
+            snapshot.dock_position = position;
+            model.set_view(snapshot, Update::Unsolicited);
+            assert_eq!(dock_choice_index(&model), Some(index));
+            model.send_dock_position(DockPosition::BottomLeft, |_| true);
+            assert_eq!(dock_choice_index(&model), Some(6));
+            model.send_dock_position(DockPosition::Center, |_| true);
+            assert_eq!(dock_choice_index(&model), Some(4));
+            let mut answer = saved();
+            answer.dock_position = DockPosition::BottomLeft;
+            model.set_view(answer.clone(), Update::Answer);
+            assert_eq!(dock_choice_index(&model), Some(4));
+            model.error(UserError::from(ErrorKey::SettingsRefused));
+            assert_eq!(dock_choice_index(&model), Some(6));
+            model.set_view(answer, Update::Answer);
+            assert_eq!(dock_choice_index(&model), Some(6));
+        }
+    }
+
+    #[gpui::test]
+    fn an_offline_dock_cell_still_delivers_its_pick(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        cx.update(|cx| {
+            view.read(cx).model.clone().update(cx, |model, cx| {
+                model.disconnected();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let point = visual
+            .debug_bounds("dock-position-0")
+            .expect("top left cell")
+            .center();
+        visual.simulate_click(point, gpui_kit::Modifiers::default());
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).general_notice,
+                Some(crate::strings::Text::SettingsPositionUnavailable),
+                "the unavailable fixture owner refuses an admitted offline pick"
+            );
+        });
+    }
 
     fn saved() -> SettingsView {
         SettingsView {

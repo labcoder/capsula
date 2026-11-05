@@ -15,6 +15,8 @@ use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 mod admission;
 #[path = "availability_tests.rs"]
 mod availability;
+#[path = "calls_tests.rs"]
+mod calls;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]

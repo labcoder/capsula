@@ -31,6 +31,8 @@ pub(crate) mod sherpa;
 
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use windows::call_throwing_export;
+#[cfg(all(test, windows))]
+pub(crate) use windows::fake_claude::FAKE_CLAUDE;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
 #[cfg(windows)]
@@ -44,6 +46,8 @@ pub use windows::{
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
+#[cfg(windows)]
+pub(crate) use windows::{Untrusted, hold_chain, local_app_data, owner_only_dir, profile_dir};
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 

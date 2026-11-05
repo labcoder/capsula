@@ -11,7 +11,7 @@ use super::availability::sign_in_needed;
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
-use crate::engines::{DRAW, RunRequest};
+use crate::engines::{DRAW, RunRequest, ToolName};
 use crate::store::Failure;
 
 /// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
@@ -93,6 +93,8 @@ pub(super) struct Build {
     admitted: bool,
     /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
     offers_draw: bool,
+    /// The dispatcher's tools the admitted request offered.
+    offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
     sources: Vec<ThreadId>,
     /// An inline compaction's progress; `None` for a normal build.
@@ -107,6 +109,7 @@ impl Build {
             blocked: BTreeSet::new(),
             admitted: false,
             offers_draw: false,
+            offered: Vec::new(),
             sources: Vec::new(),
             inline,
         }
@@ -124,6 +127,10 @@ impl Build {
 
     pub(super) fn offers_draw(&self) -> bool {
         self.offers_draw
+    }
+
+    pub(super) fn offered(&self) -> &[ToolName] {
+        &self.offered
     }
 
     pub(super) fn key(&self) -> BuildKey {
@@ -249,6 +256,12 @@ impl Coordinator {
         let thread = current.thread;
         let build = current.build.as_mut().expect("the build was just matched");
         build.offers_draw = offers_draw;
+        build.offered = made
+            .request
+            .tools
+            .iter()
+            .filter_map(|tool| crate::dispatch::named(tool.name))
+            .collect();
         let voided = build.voided(&made.sources);
         if !voided.is_empty() {
             self.rebuild(key, &voided, &pending, effects);

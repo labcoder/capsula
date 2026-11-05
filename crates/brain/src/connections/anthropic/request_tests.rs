@@ -25,6 +25,12 @@ fn preserves_structured_input_and_all_supported_efforts() {
         "cache_control":{"type":"string"}}}}]);
     value["messages"][0]["content"] = json!([{"type":"tool_use","id":"one","name":"example",
         "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]);
+    let structured = value["messages"][0]["content"].clone();
+    value["messages"] = json!([
+        {"role":"user","content":"first"},
+        {"role":"assistant","content":structured},
+        {"role":"user","content":"next"}
+    ]);
     for effort in ["low", "medium", "high", "xhigh", "max"] {
         value["output_config"] = json!({"effort":effort});
         let body = MessagesBody::new(&value).expect("supported envelope");
@@ -79,6 +85,13 @@ fn rejects_missing_mistyped_and_unsupported_fields() {
 
 #[test]
 fn cache_belongs_only_to_the_last_stable_prefix_block() {
+    let mut message_cache = request();
+    message_cache["messages"] = json!([
+        {"role":"user","content":"first"},
+        {"role":"assistant","content":"second","cache_control":{"type":"ephemeral"}},
+        {"role":"user","content":"third"}
+    ]);
+    refused(&message_cache);
     let mut value = request();
     value["tools"] = json!([{"name":"first"},{"name":"last","cache_control":{"type":"ephemeral"}}]);
     refused(&value);

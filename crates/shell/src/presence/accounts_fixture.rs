@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
     MaxFrameRate, PlanState, SettingsView as Snapshot, ThreadId, UserError,
 };
 
-use super::{OpenError, settings_view::SettingsView};
+use super::{OpenError, settings::SettingsView};
 use crate::settings::{Field, Settings, Update};
 use crate::strings::{Strings, Text};
 
