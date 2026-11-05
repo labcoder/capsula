@@ -450,7 +450,7 @@ fn sharing_violation(result: io::Result<()>) -> bool {
     result.err().and_then(|error| error.raw_os_error()) == Some(32)
 }
 
-fn icacls(path: &Path, args: &[&str]) {
+pub(crate) fn icacls(path: &Path, args: &[&str]) {
     run(std::process::Command::new("icacls").arg(path).args(args));
 }
 
@@ -505,7 +505,7 @@ fn set_label(path: &Path, sacl: &str) {
 
 /// Makes the empty folder `dir` a junction to `target` in place: a mount-point reparse point set
 /// through a handle opened for write-data and write-attributes, the rights NTFS asks for.
-fn set_junction(dir: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn set_junction(dir: &Path, target: &Path) -> io::Result<()> {
     junction_through(&mutation_handle(dir)?, target)
 }
 

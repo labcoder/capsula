@@ -28,7 +28,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> bool {
         let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
+        let sent = self.settings.update(cx, |state, cx| {
             let sent = state.send_taskbar(choice, |op| {
                 session
                     .as_ref()
@@ -38,7 +38,28 @@ impl Presence {
                 cx.notify();
             }
             sent
-        })
+        });
+        if sent {
+            self.sync_taskbar(cx);
+        }
+        sent
+    }
+
+    pub(in crate::presence) fn sync_taskbar(&mut self, cx: &mut Context<'_, Self>) {
+        let native = &mut self.native;
+        self.settings.update(cx, |state, cx| {
+            state.apply_taskbar(|choice| {
+                native
+                    .set_taskbar_button(choice)
+                    .err()
+                    .map(|_| match choice {
+                        TaskbarChoice::Shown => Text::TaskbarAddFailed,
+                        TaskbarChoice::Hidden => Text::TaskbarRemoveFailed,
+                    })
+            });
+            cx.notify();
+        });
+        self.refresh_dock(cx);
     }
 
     pub(in crate::presence) fn dismiss_account_confirmation(

@@ -283,7 +283,8 @@ fn another_run_starts_over_without_credit() {
     );
 
     let new = harness.speak(2, 0);
-    send(&old, 2);
+    // The owner may already have dropped A's stream; either way, none of A comes out.
+    let _ = old.send(Ok(vec![0.0; 2]));
     send(&new, 3);
     harness.assert_pending();
     harness.pump.credit(RunId(2), 1);
