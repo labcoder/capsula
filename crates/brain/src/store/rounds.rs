@@ -7,14 +7,16 @@ use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
 use crate::context::{Body, ConnectionTag};
+use crate::dispatch::ToolOutput;
 use crate::engines::{CallId, Opaque};
 
-/// The longest stored result read back [guess].
-const MAX_RESULT: usize = 64 * 1024;
+/// The longest stored result read back: a full tool output, plus its call id, escaped, and the
+/// framing around them.
+const MAX_RESULT: usize = crate::dispatch::MAX_OUTPUT + 1024;
 
 impl Store {
     /// Appends one round to an active run in one transaction: the text streamed since the last
-    /// write, the native items in the order given, then each call's result.
+    /// write, the native items in the order given, then each call's answer.
     ///
     /// # Errors
     /// [`StoreError::RoundRecord`] when an item isn't a JSON object, and whatever
@@ -25,7 +27,7 @@ impl Store {
         connection: ConnectionTag,
         text: Option<&str>,
         items: &[Opaque],
-        results: &[(&CallId, &str)],
+        results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
         let natives = items
             .iter()
@@ -64,9 +66,9 @@ fn native_body(connection: ConnectionTag, item: &Opaque) -> Result<String, Store
     Ok(json!({ "connection": connection.0, "item": item }).to_string())
 }
 
-/// A result's body: the call it answers and its output.
-fn result_body(call: &CallId, output: &str) -> String {
-    json!({ "call": call.as_str(), "output": output }).to_string()
+/// A result's body: the call it answers and its tagged output.
+fn result_body(call: &CallId, output: &ToolOutput) -> String {
+    json!({ "call": call.as_str(), "output": output.json() }).to_string()
 }
 
 pub(super) fn native(body: &str) -> Result<Body, StoreError> {
@@ -91,9 +93,17 @@ pub(super) fn result(body: &str) -> Result<Body, StoreError> {
     }
     let value: Value = serde_json::from_str(body).map_err(|_| StoreError::RoundRecord)?;
     let call = value["call"].as_str().ok_or(StoreError::RoundRecord)?;
-    let output = value["output"].as_str().ok_or(StoreError::RoundRecord)?;
-    Ok(Body::Result {
-        call: CallId::new(call).map_err(|_| StoreError::RoundRecord)?,
-        output: output.to_owned(),
-    })
+    let call = CallId::new(call).map_err(|_| StoreError::RoundRecord)?;
+    let output = match &value["output"] {
+        // A result written before outputs were tagged (PR 13b-2) is the model's text already.
+        Value::String(text) => text.clone(),
+        tagged => match ToolOutput::from_stored(&tagged.to_string()) {
+            Some(ToolOutput::Text(text)) => text,
+            // shortcut: history replays as its references' JSON, not the re-read ranges, until
+            // the first history tool (PR 15) builds them into native rounds.
+            Some(other) => other.stored(),
+            None => return Err(StoreError::RoundRecord),
+        },
+    };
+    Ok(Body::Result { call, output })
 }

@@ -6,8 +6,8 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. No production tool exists yet: 14b adds the history tools, 15 adds
-`create_task` and `focus`, and slice 4's B10 adds `draw`'s ledger entry. Until then the test tools
+`Coordinator::tool_call`. No production tool exists yet: 15 adds `create_task` and `focus`, and
+slice 4's B10 adds `draw`'s ledger entry. Until then the test tools
 in `dispatch/tests.rs` exercise the path.
 
 ## Who made a call
@@ -65,6 +65,29 @@ flowchart TD
   joins it. A failed write fails the run as `failed(store)`. An acknowledgement for a run that ended
   confirms storage only. One for a launch no longer authorized answers nobody.
 
+## A round's calls
+
+The model's calls stream in with the round. When the engine finishes the round, the loop hands
+each call to the dispatcher in call order, and the round is stored once every call has its
+answer: at once for a refusal or a finished call, on `CallCommitted` for a new one. The round's
+write holds one result per call, tagged as in [Results](#results), and the next round is built
+from the store.
+
+- **Ids.** A round refuses a second call with an id it already has, which fails the run. The same
+  id in a later round is the same ledger key: identical arguments get the stored answer with no
+  second write, and others get `Reused`.
+- **A voided build.** When the first call finds that a delete reached a thread the build rendered,
+  the round's calls, items and unstored text are dropped, and the round is built again. Steps the
+  response drew and text already on screen stay (a `shortcut:` until B10).
+- **A delete during a call's write.** The round is checked again when its last call is answered.
+  If a delete reached a rendered thread meanwhile, the calls stay settled in the ledger but the
+  round is dropped and built again as above; a call the new round repeats gets the ledger's
+  answer, so it never runs or writes twice.
+- **Stop.** A stop while a call's write is pending ends the run; the write's late acknowledgement
+  is stale, and no round is stored.
+- **Failure.** A failed call write fails the run as `failed(store)`. The store reports it as
+  `StoreError::Call`, which carries no SQLite text.
+
 ## The ledger
 
 The run holds its ledger in memory, and it's dropped with the run. The run's 16-call budget bounds
@@ -77,9 +100,11 @@ its row.
 
 `ToolOutput` is `Text`, `History` or `Error`, stored as tagged JSON: `{"text": …}`,
 `{"history": [{"thread", "first", "last"}]}` or `{"error": "unknown tool"}`. A history result is
-references only. The context builder re-reads each range from live tasks at every build, and 12b's
-admission and send lease fence that request against deletes, so a deleted task's text is never
-copied into the ledger or another task.
+references only. Today a stored `History` result replays as its reference JSON, not as the re-read
+content, and no production tool returns one. Before the first history tool is enabled, its results
+must go through the context builder's live re-read of each range at every build, fenced against
+deletes by 12b's admission and send lease, so a deleted task's text is never copied into the
+ledger or another task.
 
 History tools are **model-only**. MCP gets no schema for them, and the dispatcher refuses them from
 `Mcp`, because an MCP reply doesn't pass through a model build's delete fence. Before history is

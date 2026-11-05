@@ -79,7 +79,7 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
             ConnectionTag(7),
             None,
             &[Opaque::new(item.into_bytes()).expect("small")],
-            &[(&call, MARKER)],
+            &[(call, crate::dispatch::ToolOutput::Text(MARKER.to_owned()))],
         )
         .expect("round");
     // A scene of one step: its `scene_begin`, a `scene_step` whose label is the marker, and its
