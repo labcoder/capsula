@@ -1,6 +1,6 @@
 //! The diagnostic-only animated painter fixture: real resting frame items from one native-font
 //! preparation, painted by the production `paint_item` in a click-through window over the
-//! primary display. It never activates a view, conducts or sends StepShown; its motion is
+//! primary display. It never activates a view, conducts or sends `StepShown`; its motion is
 //! fixture-local translation, opacity, reveal and dash flow on cloned items, never font size.
 
 use std::{
@@ -30,6 +30,13 @@ const LIFETIME: Duration = Duration::from_secs(60);
 const START: f32 = 10.0;
 const END: f32 = 40.0;
 
+type PaintUnit = (FrameItem, Arc<[Prim]>);
+
+enum Mode {
+    Rest,
+    Animated,
+}
+
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
 /// self-crossing stroke, a dashed line, a translucent star fill and a note the fixture turns.
 const STEP: &str = r##"{"step":{"id":"fixture","put":[{"shape":{"id":"card","kind":"rect","box":[120,120,360,220],"radius":8,"fill":"#1d1b26","color":"#3b82f6","width":3,"label":"Upright label"}},{"shape":{"id":"tilted","kind":"rect","box":[560,140,220,140],"radius":8,"fill":"#7c3aed","color":"#e5e7eb","width":2}},{"line":{"id":"cross","from":[120,420],"via":[[520,620],[520,420]],"to":[120,620],"width":24,"color":"#22c55e","opacity":0.5}},{"line":{"id":"dashed","from":[600,420],"to":[1000,560],"width":3,"color":"#f59e0b","dash":true}},{"shape":{"id":"star","kind":"polygon","points":[[800,700],[860,880],[700,770],[900,770],[740,880]],"fill":"#ef4444","opacity":0.5}},{"text":{"id":"note","at":[120,720],"text":"Turned anchor, upright glyphs","size":18,"bold":true}}]}}"##;
@@ -42,10 +49,7 @@ const TURNED: [(usize, Vec2); 2] = [
 
 /// The fixture step prepared with `measure` at rest: each paint unit with its own primitives,
 /// in paint order, and the rest's paint work.
-fn resting(
-    measure: &mut dyn TextMeasure,
-    logical_size: [f32; 2],
-) -> (Vec<(FrameItem, Arc<[Prim]>)>, PaintWork) {
+fn resting(measure: &mut dyn TextMeasure, logical_size: [f32; 2]) -> (Vec<PaintUnit>, PaintWork) {
     let header =
         br#"{"begin":{"v":1,"scene":"fixture","surface":"overlay","alt":"painter fixture"}}"#;
     let Ok(Record::Begin(begin)) = parse_record(header) else {
@@ -100,7 +104,7 @@ struct Row {
 }
 
 struct Picture {
-    items: Vec<(FrameItem, Arc<[Prim]>)>,
+    items: Vec<PaintUnit>,
     epoch: Instant,
     animated: bool,
     rows: Vec<Row>,
@@ -176,11 +180,11 @@ impl Render for Probe {
 }
 
 #[expect(
-    clippy::print_stdout,
     clippy::too_many_lines,
     reason = "one bounded native probe and its content-free samples"
 )]
-fn run(animated: bool) {
+fn run(mode: Mode) {
+    let animated = matches!(mode, Mode::Animated);
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
         std::process::exit(124);
@@ -332,11 +336,11 @@ fn the_fixture_is_a_legal_resting_picture_of_every_mapping() {
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s resting overlay through production paint_item, no input"]
 fn measure_primary_overlay_at_rest() {
-    run(false);
+    run(Mode::Rest);
 }
 
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s diagnostic-only animated painter fixture, no input"]
 fn measure_primary_overlay_animated() {
-    run(true);
+    run(Mode::Animated);
 }
