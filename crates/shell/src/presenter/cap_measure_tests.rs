@@ -311,21 +311,18 @@ fn measure_native_eight_window_residency_at_paint_caps() {
         std::process::exit(124);
     });
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            let text = std::sync::Arc::clone(cx.text_system());
-            let family = cx.theme().font_family.clone();
-            let worker = cx.background_executor().spawn(async move {
-                window_residency(&mut super::super::Measure::new(text, family))
-            });
-            cx.spawn(async move |cx| {
-                sender.send(worker.await).expect("receiver");
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
-        });
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let family = app.update(|cx| {
+        gpui_kit::init(cx);
+        cx.theme().font_family.clone()
+    });
+    let text = app.text_system();
+    app.background_executor()
+        .spawn(async move {
+            let peak = window_residency(&mut super::super::Measure::new(text, family));
+            sender.send(peak).expect("receiver");
+        })
+        .detach();
     let peak = receiver
         .recv_timeout(Duration::from_secs(150))
         .expect("native windows");
