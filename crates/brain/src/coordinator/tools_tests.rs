@@ -13,7 +13,7 @@ use crate::coordinator::{
     BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_CALLS, MAX_ROUNDS, RoundItems, Stale,
     StoreOp,
 };
-use crate::dispatch::{Route, ToolError, ToolOutput, schemas};
+use crate::dispatch::{Caller, Dispatch, Route, ToolError, ToolOutput, schemas};
 use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd};
 
@@ -445,6 +445,106 @@ fn a_response_from_a_build_a_delete_voided_is_dropped_and_its_round_built_again(
         core.handle(ack),
         Ok(vec![answered(1, None, vec![(id(1), probed("hi"))])]),
         "only the rebuilt round, its text and its call, and the same id runs fresh"
+    );
+}
+
+#[test]
+fn a_delete_while_a_calls_write_is_pending_drops_the_round_and_the_call_never_runs_again() {
+    let mut core = probing(&[T, B]);
+    core.handle(engine(R, TurnEvent::TextDelta("from b".to_owned())))
+        .expect("current");
+    play(
+        &mut core,
+        [TurnEvent::OutputItem {
+            index: 0,
+            item: item("zqxfromtaskb"),
+        }],
+    );
+    play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
+    let ack = commits(&mut core);
+    assert_eq!(
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false,
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
+    );
+    assert_eq!(
+        core.handle(ack),
+        Ok(vec![Effect::CancelEngine { run: R }]),
+        "the call settles, but its round is not stored and the rebuild waits for B"
+    );
+    let effects = core
+        .handle(Input::Deleted {
+            thread: B,
+            outcome: Deleted::Hidden,
+            last_run: None,
+        })
+        .expect("answered");
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::Store(StoreOp::BuildContext(build))) if build.key == attempt(1, 2)
+        ),
+        "{effects:?}"
+    );
+    assert!(starts_round(
+        &core
+            .handle(offering(attempt(1, 2), &[T]))
+            .expect("admitted"),
+        1
+    ));
+    play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![answered(1, None, vec![(id(1), probed("zqxfromtaskb"))])]),
+        "the ledger's answer with no second write, and no text or item of the voided round"
+    );
+}
+
+#[test]
+fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_order() {
+    let mut core = probing(&[T]);
+    play(&mut core, probe(1, r#"{"word":"one"}"#));
+    play(&mut core, probe(2, r#"{"word":"two"}"#));
+    let effects = core.handle(completed()).expect("current");
+    let [
+        Effect::Store(StoreOp::CommitCall(first)),
+        Effect::Store(StoreOp::CommitCall(second)),
+    ] = effects.as_slice()
+    else {
+        panic!("two writes, not {effects:?}");
+    };
+    let ack = |key: &crate::dispatch::LedgerKey| Input::CallCommitted {
+        key: key.clone(),
+        committed: true,
+    };
+    let (first, second) = (ack(&first.key), ack(&second.key));
+    assert_eq!(
+        core.handle(second),
+        Ok(Vec::new()),
+        "the first acknowledgement stores nothing"
+    );
+    let mut joined = Vec::new();
+    assert_eq!(
+        core.tool_call(
+            Caller::Model { run: R, call: id(1) },
+            ToolName::Probe,
+            br#"{"word":"one"}"#,
+            &mut joined,
+        ),
+        Dispatch::Joined
+    );
+    assert_eq!(joined, Vec::new());
+    assert_eq!(
+        core.handle(first),
+        Ok(vec![answered(
+            1,
+            None,
+            vec![(id(1), probed("one")), (id(2), probed("two"))]
+        )]),
+        "one record in call order, and the joined answer adds no result"
     );
 }
 

@@ -224,9 +224,23 @@ impl Coordinator {
         run: RunId,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        let pending = self.pending_deletes();
         let current = self.current(run)?;
         if current.tools.open.iter().any(|open| open.output.is_none()) {
             return Ok(());
+        }
+        // A delete accepted while the calls were written reached what the build rendered: the
+        // calls stay settled in the ledger, but the response is dropped and the round built again.
+        if let Some(build) = current.build.as_ref() {
+            let voided = build.voided(build.sources());
+            if !voided.is_empty() {
+                let key = build.key();
+                current.tools.drop_round();
+                current.unstored.clear();
+                effects.push(Effect::CancelEngine { run });
+                self.rebuild(key, &voided, &pending, effects);
+                return Ok(());
+            }
         }
         let Some(connection) = current.connection else {
             return self.fail(run, Failure::Engine, effects);
