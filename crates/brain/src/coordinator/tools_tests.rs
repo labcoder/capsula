@@ -13,6 +13,7 @@ use crate::coordinator::{
     BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_CALLS, MAX_ROUNDS, RoundItems, Stale,
     StoreOp,
 };
+use crate::dispatch::{ToolError, ToolOutput};
 use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd};
 
@@ -53,7 +54,10 @@ fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<Ca
         connection: ConnectionTag(0),
         text: text.map(Into::into),
         items,
-        calls,
+        calls: calls
+            .into_iter()
+            .map(|call| (call, ToolOutput::Error(ToolError::Unknown)))
+            .collect(),
     }))
 }
 
@@ -459,7 +463,7 @@ fn round_writes_show_lengths_never_content() {
         connection: ConnectionTag(0),
         text: Some(format!("said {MARKER}").into()),
         items: vec![item(&format!("{{\"text\":\"{MARKER}\"}}"))],
-        calls: vec![call.clone()],
+        calls: vec![(call.clone(), ToolOutput::Text(format!("says {MARKER}")))],
     }));
     let result = crate::context::Body::Result {
         call: call.clone(),

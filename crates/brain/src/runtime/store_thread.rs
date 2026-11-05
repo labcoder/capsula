@@ -18,7 +18,7 @@ use kumochi_protocol::message::{Deleted, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::coordinator::{Input, StoreOp, UNKNOWN_TOOL};
+use crate::coordinator::{Input, StoreOp};
 use crate::store::{
     Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
 };
@@ -646,18 +646,13 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 })
         }),
         StoreOp::RoundItems(round) => write(store, purger, acks, round.run, "round", |store| {
-            let results: Vec<_> = round
-                .calls
-                .iter()
-                .map(|call| (call, UNKNOWN_TOOL))
-                .collect();
             store
                 .append_round(
                     (round.thread, round.run),
                     round.connection,
                     round.text.as_deref(),
                     &round.items,
-                    &results,
+                    &round.calls,
                 )
                 .map(|()| Input::RoundStored {
                     run: round.run,

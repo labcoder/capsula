@@ -1235,8 +1235,11 @@ fn round(world: &mut World, at: (ThreadId, RunId), text: &str, items: &[Value], 
         .map(|call| CallId::new(call).expect("short"))
         .collect();
     let results: Vec<_> = calls
-        .iter()
-        .map(|call| (call, crate::coordinator::UNKNOWN_TOOL))
+        .into_iter()
+        .map(|call| {
+            let unknown = crate::dispatch::ToolError::Unknown;
+            (call, crate::dispatch::ToolOutput::Error(unknown))
+        })
         .collect();
     world
         .store
