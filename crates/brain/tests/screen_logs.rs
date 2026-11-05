@@ -110,13 +110,24 @@ async fn exit_at_launch_fixture() {
     let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
         .expect("supervisor");
     let mut losses = screen.lost();
-    for _ in 0..3 {
+    let mut at = Vec::new();
+    for _ in 0..5 {
         let loss = tokio::time::timeout(PATIENCE, losses.recv()).await;
         assert_eq!(
             loss.expect("lost with nothing pending").expect("loss"),
             WorkerLost
         );
+        at.push(std::time::Instant::now());
     }
+    // A child that exits at every launch respawns in milliseconds; only backoff spaces these.
+    assert!(
+        at[3] - at[2] >= Duration::from_millis(200),
+        "third loss waited"
+    );
+    assert!(
+        at[4] - at[3] >= Duration::from_secs(1),
+        "fourth loss waited"
+    );
     assert_eq!(
         screen.request(RequestBody::Ping).await,
         Err(ScreenError::WorkerLost)

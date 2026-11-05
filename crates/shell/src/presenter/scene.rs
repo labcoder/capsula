@@ -9,7 +9,7 @@ use std::{
 
 use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, SceneId};
 use kumochi_scene::{
-    Preparation, SceneBinding, SceneEvent, StopCut,
+    Preparation, SceneBinding, SceneEvent, SceneView, StopCut,
     deferred::Deferred,
     layout::{LayoutState, PreparedStep},
     text::Bounded,
@@ -25,6 +25,12 @@ pub(super) struct Scene {
     /// The layout at the activated bound: recovered at rest, empty, or the last consumed step's.
     pub(super) rest: LayoutState,
     pub(super) retained: usize,
+    /// The sampled source of the rest, replaced with it; B6 activates it.
+    pub(super) view: SceneView,
+    /// The view's bytes, cached when it is replaced.
+    pub(super) view_bytes: usize,
+    /// The frame reserved for this scene in the presenter's [`super::Frames`].
+    pub(super) frame_bytes: usize,
     pub(super) queue: VecDeque<Ticket>,
     pub(super) running: Option<Running>,
     /// Prepared and not consumed, oldest first.
@@ -100,7 +106,13 @@ impl Out {
 }
 
 impl Scene {
-    pub(super) fn new(state: SceneBinding, rest: LayoutState, retained: usize) -> Self {
+    pub(super) fn new(
+        state: SceneBinding,
+        rest: LayoutState,
+        retained: usize,
+        view: SceneView,
+        frame_bytes: usize,
+    ) -> Self {
         let cut = if matches!(
             state.view().recovery_log().last(),
             Some(SceneEvent::Stop(_))
@@ -111,6 +123,9 @@ impl Scene {
         };
         Self {
             retained,
+            view_bytes: view.resident_bytes(),
+            view,
+            frame_bytes,
             state,
             rest,
             queue: VecDeque::new(),
@@ -145,12 +160,20 @@ impl Scene {
     }
 
     pub(super) fn residency(&self) -> usize {
-        self.ready.iter().fold(self.retained, |sum, ready| {
+        self.ready.iter().fold(self.held(), |sum, ready| {
             sum.saturating_add(ready.step.resident_bytes)
         })
     }
 
-    /// What the dropper is told this scene owns: its prepared layouts and its semantic state.
+    /// What stays charged while its prepared work goes: the rest, its view and its frame.
+    pub(super) fn held(&self) -> usize {
+        self.retained
+            .saturating_add(self.view_bytes)
+            .saturating_add(self.frame_bytes)
+    }
+
+    /// What the dropper is told this scene owns: its prepared layouts, its view and frame, and
+    /// its semantic state.
     pub(super) fn attributed(&self) -> usize {
         self.residency()
             .saturating_add(self.state.view().attributed_bytes())
@@ -166,7 +189,7 @@ impl Scene {
             std::mem::take(&mut self.queue),
             self.state.view().attributed_bytes(),
         ));
-        let bytes = self.residency().saturating_sub(self.retained);
+        let bytes = self.residency().saturating_sub(self.held());
         drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
         self.pending_consumption = None;
     }

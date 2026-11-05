@@ -20,10 +20,12 @@ impl Presence {
         }
         self.refresh_conversation(cx);
         self.link.delete(thread);
-        self.threads.update(cx, |state, cx| {
-            state.delete_failed = false;
-            cx.notify();
-        });
+        for model in [&self.threads, &self.chat] {
+            model.update(cx, |state, cx| {
+                state.delete_failed = false;
+                cx.notify();
+            });
+        }
         self.send_deletes(cx);
     }
 
@@ -64,14 +66,16 @@ impl Presence {
         self.grant(credit);
         self.link.settle_delete(thread);
         if held {
-            self.threads.update(cx, |state, cx| {
-                if outcome == Deleted::NotHidden {
-                    state.delete_failed = true;
-                } else {
-                    state.deleted(thread);
-                }
-                cx.notify();
-            });
+            for model in [&self.threads, &self.chat] {
+                model.update(cx, |state, cx| {
+                    if outcome == Deleted::NotHidden {
+                        state.delete_failed = true;
+                    } else {
+                        state.deleted(thread);
+                    }
+                    cx.notify();
+                });
+            }
         }
         self.sync_deletes(cx);
         self.request_pages(cx);
@@ -81,12 +85,14 @@ impl Presence {
     pub(super) fn sync_deletes(&self, cx: &mut Context<'_, Self>) {
         let deleting = self.runs.deleting().to_vec();
         let full = !self.runs.can_delete();
-        self.threads.update(cx, |state, cx| {
-            if state.deleting != deleting || state.deletes_full != full {
-                state.deleting = deleting;
-                state.deletes_full = full;
-                cx.notify();
-            }
-        });
+        for model in [&self.threads, &self.chat] {
+            model.update(cx, |state, cx| {
+                if state.deleting != deleting || state.deletes_full != full {
+                    state.deleting.clone_from(&deleting);
+                    state.deletes_full = full;
+                    cx.notify();
+                }
+            });
+        }
     }
 }

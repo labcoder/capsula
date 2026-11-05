@@ -216,7 +216,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         Some(request)
     );
     let list = DataToShell::ThreadList {
-        request: 1,
+        request: 2,
         threads: vec![ThreadRow {
             id: ThreadId(3),
             title: "a private title".to_owned(),
