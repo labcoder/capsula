@@ -19,13 +19,14 @@ use kumochi_protocol::message::{
 use super::signin::{VIEW, Wire, harness};
 use crate::slice2::client::Frame;
 
-/// How long discovery may take: `--version` and the status call, each under the lane's 10 s.
+/// The harness's whole budget for discovery [guess]. It isn't derived: the lane bounds each
+/// call's root run at 10 s, but its teardown and the folder checks come on top.
 const FIND: Duration = Duration::from_secs(30);
 /// How long the sign-in may take to settle: the lane ends `claude`'s login at 5 minutes, then
 /// reads the status under 10 s. One deadline, however many views arrive.
 const SIGNIN: Duration = Duration::from_secs(330);
-/// How long Disconnect may take: the logout, the deletion, then discovery again, each lane call
-/// under 10 s.
+/// The harness's whole budget for Disconnect [guess]: the logout, the deletion and discovery
+/// again. The lane bounds each call's root run at 10 s; teardown and the deletion come on top.
 const CLEANUP: Duration = Duration::from_secs(45);
 
 /// The copied harness: starts the brain with no model budget, signs Claude Code in or out, and
@@ -57,7 +58,7 @@ fn drive(wire: &mut impl Wire, out: &mut impl Write, ask: Ask) -> Result<()> {
     writeln!(out, "claude code: {}", state(found))?;
     match ask {
         Ask::SignIn => sign_in(wire, out, found),
-        Ask::Disconnect => sign_out(wire, out),
+        Ask::Disconnect => sign_out(wire, out, found),
     }
 }
 
@@ -72,7 +73,7 @@ fn sign_in(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) ->
         other => bail!("not signing in while claude code is {}", state(other)),
     }
     send(wire, ConnectionOp::ConnectClaudeCode)?;
-    let mut now = answer(wire, "answer to ConnectClaudeCode")?;
+    let mut now = ack(wire, found, "ConnectClaudeCode")?;
     if now == ClaudeCodeView::SigningIn {
         writeln!(
             out,
@@ -91,9 +92,14 @@ fn sign_in(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) ->
 }
 
 /// Ok only when the cleanup finished and left nothing signed in.
-fn sign_out(wire: &mut impl Wire, out: &mut impl Write) -> Result<()> {
+fn sign_out(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) -> Result<()> {
+    // The brain ignores Disconnect then, so no answer would tell it apart from a stale snapshot.
+    ensure!(
+        found != ClaudeCodeView::CleanupPending,
+        "a cleanup is already pending; the brain retries it as it starts"
+    );
     send(wire, ConnectionOp::DisconnectClaudeCode)?;
-    let now = answer(wire, "answer to DisconnectClaudeCode")?;
+    let now = ack(wire, found, "DisconnectClaudeCode")?;
     ensure!(
         now == ClaudeCodeView::CleanupPending,
         "disconnect wasn't taken; claude code is {}",
@@ -151,6 +157,14 @@ fn answer(wire: &mut impl Wire, what: &str) -> Result<ClaudeCodeView> {
         Next::Closed => bail!("the brain closed the pipe before the {what}"),
         Next::TimedOut => bail!("no {what} in {VIEW:?}"),
     }
+}
+
+/// The op's answer: the first view within [`VIEW`] that isn't `before`, one deadline for all.
+/// Snapshots the brain sends for other reasons, such as the Anthropic key's checks, may still
+/// show `before` after the op was sent.
+fn ack(wire: &mut impl Wire, before: ClaudeCodeView, op: &str) -> Result<ClaudeCodeView> {
+    leave(wire, before, before, VIEW, "waiting for an answer")?
+        .ok_or_else(|| anyhow!("no answer to {op} in {VIEW:?}"))
 }
 
 /// Reads views from `view` on until one isn't `stay`, for at most `limit`; `None` past it.
@@ -302,9 +316,18 @@ mod tests {
 
     enum Step {
         View(ClaudeCodeView),
+        /// A snapshot the brain sent for the key's sake: Claude Code's half and the key's.
+        Snapshot(ClaudeCodeView, KeyView),
         Closed,
         /// The client's deadline, with the tail it would print.
         Late,
+    }
+
+    fn connections(claude_code: ClaudeCodeView, anthropic: KeyView) -> Frame {
+        Frame::Control(ControlToShell::Connections(ConnectionsView {
+            anthropic,
+            claude_code,
+        }))
     }
 
     fn fixture(steps: Vec<Step>) -> Fixture {
@@ -312,12 +335,8 @@ mod tests {
         for step in steps {
             frames.extend(unrelated());
             frames.push_back(match step {
-                Step::View(claude_code) => Ok(Frame::Control(ControlToShell::Connections(
-                    ConnectionsView {
-                        anthropic: KeyView::Missing,
-                        claude_code,
-                    },
-                ))),
+                Step::View(claude_code) => Ok(connections(claude_code, KeyView::Missing)),
+                Step::Snapshot(claude_code, anthropic) => Ok(connections(claude_code, anthropic)),
                 Step::Closed => Ok(Frame::Closed),
                 Step::Late => Err(anyhow!("nothing expected arrived; last: {TOKEN} {PATH}")),
             });
@@ -387,7 +406,8 @@ mod tests {
         let [first, finding, found, answer, settle, again] = brain.limits[..] else {
             panic!("six waits: {:?}", brain.limits);
         };
-        assert_eq!((first, answer), (VIEW, VIEW));
+        assert_eq!(first, VIEW);
+        assert!(answer <= VIEW, "{answer:?}");
         assert!(
             finding <= FIND && found < finding,
             "{finding:?} then {found:?}"
@@ -496,14 +516,65 @@ mod tests {
     }
 
     #[test]
-    fn a_connect_the_brain_doesnt_take_fails_on_its_answer() {
-        let mut brain = fixture(vec![Step::View(signed_out()), Step::View(signed_out())]);
-        let (out, error, _) = run(&mut brain, Ask::SignIn);
-        assert_eq!(out, "claude code: signed out\nclaude code: signed out\n");
+    fn a_connect_with_no_answer_fails_at_one_deadline() {
+        let mut brain = fixture(vec![
+            Step::View(signed_out()),
+            Step::Snapshot(signed_out(), KeyView::Checking),
+            Step::Snapshot(signed_out(), KeyView::Ready),
+            Step::Late,
+        ]);
+        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+        assert_eq!(out, "claude code: signed out\n");
         assert_eq!(
             error.as_deref(),
-            Some("sign-in ended with claude code signed out")
+            Some("no answer to ConnectClaudeCode in 10s")
         );
+        assert_eq!(brain.sent, [CONNECT, QUIT]);
+        assert!(quit_sent);
+        let [first, one, two, three] = brain.limits[..] else {
+            panic!("four waits: {:?}", brain.limits);
+        };
+        assert_eq!(first, VIEW);
+        assert!(
+            one <= VIEW && two < one && three < two,
+            "{one:?}, {two:?}, {three:?}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_still_showing_signed_out_isnt_the_connects_answer() {
+        let mut brain = fixture(vec![
+            Step::View(signed_out()),
+            Step::Snapshot(signed_out(), KeyView::Checking),
+            Step::View(ClaudeCodeView::SigningIn),
+            Step::View(ready()),
+        ]);
+        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+        assert_eq!(
+            out,
+            format!("claude code: signed out\n{WAITING}claude code: ready\n")
+        );
+        assert_eq!(error, None);
+        assert_eq!(brain.sent, [CONNECT, QUIT]);
+        assert!(quit_sent);
+    }
+
+    #[test]
+    fn a_snapshot_still_showing_ready_isnt_the_disconnects_answer() {
+        let mut brain = fixture(vec![
+            Step::View(ready()),
+            Step::Snapshot(ready(), KeyView::Checking),
+            Step::View(ClaudeCodeView::CleanupPending),
+            Step::View(signed_out()),
+        ]);
+        let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
+        assert_eq!(
+            out,
+            format!("claude code: ready\n{CLEANING}claude code: signed out\n")
+        );
+        assert_eq!(error, None);
+        assert_eq!(brain.sent, [DISCONNECT, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -542,7 +613,8 @@ mod tests {
         let [first, answer, cleanup, again] = brain.limits[..] else {
             panic!("four waits: {:?}", brain.limits);
         };
-        assert_eq!((first, answer), (VIEW, VIEW));
+        assert_eq!(first, VIEW);
+        assert!(answer <= VIEW, "{answer:?}");
         assert!(
             cleanup <= CLEANUP && again < cleanup,
             "{cleanup:?} then {again:?}"
@@ -550,16 +622,41 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_the_brain_doesnt_take_fails_at_once() {
+    fn a_disconnect_the_brain_doesnt_take_fails() {
         let off = ClaudeCodeView::Unsupported(Unsupported::SignInStore);
-        let mut brain = fixture(vec![Step::View(off), Step::View(off)]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
+        let mut ignored = fixture(vec![
+            Step::View(off),
+            Step::Snapshot(off, KeyView::Checking),
+            Step::Late,
+        ]);
+        let (out, error, quit_sent) = run(&mut ignored, Ask::Disconnect);
         assert_eq!(out, "claude code: unsupported: sign-in store\n");
         assert_eq!(
             error.as_deref(),
-            Some("disconnect wasn't taken; claude code is unsupported: sign-in store")
+            Some("no answer to DisconnectClaudeCode in 10s")
         );
-        assert_eq!(brain.sent, [DISCONNECT, QUIT]);
+        assert_eq!(ignored.sent, [DISCONNECT, QUIT]);
+        assert!(quit_sent);
+
+        let mut refused = fixture(vec![
+            Step::View(ready()),
+            Step::View(ClaudeCodeView::Unavailable),
+        ]);
+        let (_, error, _) = run(&mut refused, Ask::Disconnect);
+        assert_eq!(
+            error.as_deref(),
+            Some("disconnect wasn't taken; claude code is unavailable")
+        );
+        assert_eq!(refused.sent, [DISCONNECT, QUIT]);
+
+        let mut pending = fixture(vec![Step::View(ClaudeCodeView::CleanupPending)]);
+        let (out, error, quit_sent) = run(&mut pending, Ask::Disconnect);
+        assert_eq!(out, "claude code: cleanup pending\n");
+        assert_eq!(
+            error.as_deref(),
+            Some("a cleanup is already pending; the brain retries it as it starts")
+        );
+        assert_eq!(pending.sent, [QUIT]);
         assert!(quit_sent);
     }
 
