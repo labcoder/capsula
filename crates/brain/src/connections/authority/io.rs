@@ -39,18 +39,47 @@ fn chunk(bytes: &[u8], layout: Layout, index: usize) -> Result<&[u8], AuthorityE
         .ok_or(AuthorityError::Bounds)
 }
 
+/// Monotonic time and waiting, so the settle tests move time without sleeping.
+pub(super) trait Clock {
+    fn now(&self) -> Instant;
+    fn sleep(&self, duration: Duration);
+}
+
+struct System;
+
+impl Clock for System {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
 /// Writes the plan's names once each, then reads each until it holds exactly what was written.
-/// Absence is waited out until `settle`; any other content fails at once.
+/// Absence is waited out for [`SETTLE`] in all; any other content fails at once.
 ///
 /// # Errors
 /// Bounds when the value doesn't fit the plan, Store for a refused write or read, and Unsettled
-/// for a name still absent at the deadline or holding other bytes.
+/// for a name not seen in time or holding other bytes.
 pub(crate) fn write(
     store: &dyn CredentialStore,
     service: &str,
     plan: WritePlan,
     secret: &SecretBytes,
+) -> Result<Verified, AuthorityError> {
+    write_within(store, service, plan, secret, SETTLE, &System)
+}
+
+/// [`write`] with one `settle` budget across every chunk: a read seen at or after the deadline
+/// doesn't count, and no wait runs past it.
+pub(super) fn write_within(
+    store: &dyn CredentialStore,
+    service: &str,
+    plan: WritePlan,
+    secret: &SecretBytes,
     settle: Duration,
+    clock: &dyn Clock,
 ) -> Result<Verified, AuthorityError> {
     let bytes = secret.expose();
     if bytes.len() != plan.layout.bytes() {
@@ -60,17 +89,26 @@ pub(crate) fn write(
         let part = Secret::new(Zeroizing::new(chunk(bytes, plan.layout, index)?.to_vec()));
         store.set(&target(service, plan.kind, plan.generation, index), &part)?;
     }
-    let deadline = Instant::now() + settle;
+    let deadline = clock.now() + settle;
     for index in 0..plan.layout.chunks() {
         let name = target(service, plan.kind, plan.generation, index);
         let expected = chunk(bytes, plan.layout, index)?;
         loop {
-            match store.get(&name)? {
-                Some(found) if found.expose().as_slice() == expected => break,
-                Some(_) => return Err(AuthorityError::Unsettled),
-                None if Instant::now() >= deadline => return Err(AuthorityError::Unsettled),
-                None => thread::sleep(POLL),
+            let found = store.get(&name)?;
+            if found
+                .as_ref()
+                .is_some_and(|found| found.expose().as_slice() != expected)
+            {
+                return Err(AuthorityError::Unsettled);
             }
+            let now = clock.now();
+            if now >= deadline {
+                return Err(AuthorityError::Unsettled);
+            }
+            if found.is_some() {
+                break;
+            }
+            clock.sleep(POLL.min(deadline - now));
         }
     }
     Ok(Verified(plan))

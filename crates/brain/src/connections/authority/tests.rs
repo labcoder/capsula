@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
@@ -7,7 +8,7 @@ use kumochi_protocol::constants::generation_target;
 use rusqlite::Connection;
 use zeroize::Zeroizing;
 
-use super::io::{self, SETTLE};
+use super::io;
 use super::*;
 use crate::connections::vault::fake::FakeStore;
 use crate::platform::credential::{CredentialStore, SecretBytes};
@@ -52,7 +53,7 @@ impl Setup {
         let plan = authority
             .begin(kind, revision, secret.expose().len())
             .expect("begin");
-        let verified = io::write(&self.store, SERVICE, plan, secret, SETTLE).expect("write");
+        let verified = io::write(&self.store, SERVICE, plan, secret).expect("write");
         authority.activate(verified, None).expect("activate")
     }
 }
@@ -72,6 +73,76 @@ fn names(active: &ActiveRef) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// A monotonic clock that moves only when a wait asks it to.
+struct FakeClock {
+    start: Instant,
+    elapsed: Mutex<Duration>,
+}
+
+impl FakeClock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            elapsed: Mutex::new(Duration::ZERO),
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        *self.elapsed.lock().expect("clock lock")
+    }
+}
+
+impl io::Clock for FakeClock {
+    fn now(&self) -> Instant {
+        self.start + self.elapsed()
+    }
+    fn sleep(&self, duration: Duration) {
+        *self.elapsed.lock().expect("clock lock") += duration;
+    }
+}
+
+/// Hides chunk `i` of every name until the clock reaches `visible[i]` milliseconds.
+struct Late<'a> {
+    store: &'a FakeStore,
+    clock: &'a FakeClock,
+    visible: &'a [u64],
+}
+
+impl CredentialStore for Late<'_> {
+    fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
+        let index: usize = target
+            .rsplit('/')
+            .next()
+            .and_then(|index| index.parse().ok())
+            .expect("chunk index");
+        if self.clock.elapsed() < Duration::from_millis(self.visible[index]) {
+            return Ok(None);
+        }
+        self.store.get(target)
+    }
+    fn set(&self, target: &str, value: &SecretBytes) -> Result<(), CredentialStoreError> {
+        self.store.set(target, value)
+    }
+    fn delete(&self, target: &str) -> Result<(), CredentialStoreError> {
+        self.store.delete(target)
+    }
+}
+
+/// Begins an Account candidate of `len` bytes and writes it under `clock` within `budget`.
+fn settle(
+    authority: &mut Authority,
+    store: &dyn CredentialStore,
+    clock: &FakeClock,
+    len: usize,
+    budget: Duration,
+) -> Result<(), AuthorityError> {
+    let revision = authority.current(Kind::Account).expect("head").revision;
+    let plan = authority
+        .begin(Kind::Account, revision, len)
+        .expect("begin");
+    io::write_within(store, SERVICE, plan, &secret(6, len), budget, clock).map(drop)
 }
 
 /// Serves other bytes at every present name.
@@ -138,7 +209,7 @@ fn begin_and_activate_compare_and_swap_the_head() {
     let first = authority.begin(Kind::Account, 0, 10).expect("first");
     let second = authority.begin(Kind::Account, 0, 10).expect("second");
     assert_ne!(first.generation, second.generation, "fresh generations");
-    let stale = io::write(&setup.store, SERVICE, first, &secret(1, 10), SETTLE).expect("first");
+    let stale = io::write(&setup.store, SERVICE, first, &secret(1, 10)).expect("first");
     assert!(
         matches!(
             authority.activate(stale, None),
@@ -146,12 +217,12 @@ fn begin_and_activate_compare_and_swap_the_head() {
         ),
         "a superseded candidate never activates"
     );
-    let newer = io::write(&setup.store, SERVICE, second, &secret(2, 10), SETTLE).expect("second");
+    let newer = io::write(&setup.store, SERVICE, second, &secret(2, 10)).expect("second");
     authority.activate(newer, None).expect("current candidate");
     let moved = authority.begin(Kind::Account, 1, 10).expect("third");
     let moved_generation = moved.generation;
     authority.remove(&[Kind::Account], None).expect("remove");
-    let late = io::write(&setup.store, SERVICE, moved, &secret(3, 10), SETTLE).expect("third");
+    let late = io::write(&setup.store, SERVICE, moved, &secret(3, 10)).expect("third");
     assert!(
         matches!(
             authority.activate(late, None),
@@ -164,7 +235,7 @@ fn begin_and_activate_compare_and_swap_the_head() {
         authority.current(Kind::Host).expect("other head").revision,
         0
     );
-    let retired = authority.retired(16).expect("retired");
+    let retired = authority.retired(None, 16).expect("retired");
     assert!(
         retired
             .iter()
@@ -178,7 +249,7 @@ fn a_candidate_never_activates_over_a_head_that_moved() {
     let setup = Setup::new("auth-moved-head");
     let mut authority = setup.open();
     let plan = authority.begin(Kind::Host, 0, 45).expect("begin");
-    let verified = io::write(&setup.store, SERVICE, plan, &secret(1, 45), SETTLE).expect("write");
+    let verified = io::write(&setup.store, SERVICE, plan, &secret(1, 45)).expect("write");
     setup
         .raw()
         .execute("UPDATE heads SET revision = 5 WHERE kind = 'host'", [])
@@ -196,7 +267,7 @@ fn a_candidate_from_before_a_restart_never_activates() {
     let mut authority = setup.open();
     let old = setup.save(&mut authority, Kind::Account, &secret(1, 30));
     let plan = authority.begin(Kind::Account, 1, 30).expect("begin");
-    let verified = io::write(&setup.store, SERVICE, plan, &secret(2, 30), SETTLE).expect("write");
+    let verified = io::write(&setup.store, SERVICE, plan, &secret(2, 30)).expect("write");
     drop(authority);
     let mut authority = setup.open();
     assert!(matches!(
@@ -208,7 +279,7 @@ fn a_candidate_from_before_a_restart_never_activates() {
         Some(old)
     );
     assert_eq!(
-        authority.retired(16).expect("retired").len(),
+        authority.retired(None, 16).expect("retired").len(),
         1,
         "the candidate is owed a sweep"
     );
@@ -223,7 +294,7 @@ fn a_removal_stays_final_when_the_store_serves_the_deleted_value_again() {
     authority
         .remove(&[Kind::AnthropicKey], None)
         .expect("remove");
-    let retired = authority.retired(16).expect("retired");
+    let retired = authority.retired(None, 16).expect("retired");
     assert_eq!(
         io::sweep(&setup.store, SERVICE, &retired[0]),
         Observed::Absent
@@ -293,43 +364,98 @@ fn a_chunk_of_the_wrong_length_or_a_missing_one_is_unsettled() {
 fn a_save_waits_out_absence_but_not_other_bytes() {
     let setup = Setup::new("auth-settle");
     let mut authority = setup.open();
+    let clock = FakeClock::new();
     setup.store.0.lock().expect("fake lock").missed_reads = 20;
-    setup.save(&mut authority, Kind::Account, &secret(5, 4_017));
+    settle(
+        &mut authority,
+        &setup.store,
+        &clock,
+        4_017,
+        Duration::from_secs(2),
+    )
+    .expect("twenty misses fit the budget");
+    assert_eq!(clock.elapsed(), Duration::from_millis(200));
+
+    let clock = FakeClock::new();
     setup.store.0.lock().expect("fake lock").missed_reads = usize::MAX;
-    let plan = authority.begin(Kind::Account, 1, 10).expect("begin");
     assert!(matches!(
-        io::write(
+        settle(
+            &mut authority,
             &setup.store,
-            SERVICE,
-            plan,
-            &secret(6, 10),
+            &clock,
+            10,
             Duration::from_millis(50)
         ),
         Err(AuthorityError::Unsettled)
     ));
+    assert_eq!(
+        clock.elapsed(),
+        Duration::from_millis(50),
+        "it waits the budget, no more"
+    );
     setup.store.0.lock().expect("fake lock").missed_reads = 0;
 
-    let plan = authority.begin(Kind::Account, 1, 10).expect("begin");
-    let started = Instant::now();
+    let clock = FakeClock::new();
     assert!(matches!(
-        io::write(
+        settle(
+            &mut authority,
             &Other(setup.store.clone()),
-            SERVICE,
-            plan,
-            &secret(6, 10),
+            &clock,
+            10,
             Duration::from_secs(30)
         ),
         Err(AuthorityError::Unsettled)
     ));
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
+    assert_eq!(
+        clock.elapsed(),
+        Duration::ZERO,
         "other bytes fail without waiting"
     );
-    let plan = authority.begin(Kind::Account, 1, 10).expect("begin");
+    let plan = authority.begin(Kind::Account, 0, 10).expect("begin");
     assert!(matches!(
-        io::write(&setup.store, SERVICE, plan, &secret(6, 11), SETTLE),
+        io::write(&setup.store, SERVICE, plan, &secret(6, 11)),
         Err(AuthorityError::Bounds)
     ));
+    assert_eq!(authority.current(Kind::Account).expect("head").active, None);
+}
+
+#[test]
+fn the_settle_deadline_is_exact_and_shared_by_every_chunk() {
+    let setup = Setup::new("auth-deadline");
+    let mut authority = setup.open();
+    // (ms each chunk first reads present, budget ms, outcome, ms waited); polls are 10 ms apart.
+    for (visible, budget, expected, waited) in [
+        (&[20][..], 25, "settled", 20),
+        (&[25][..], 25, "unsettled", 25),
+        (&[26][..], 25, "unsettled", 25),
+        (&[60, 90][..], 100, "settled", 90),
+        (&[60, 120][..], 100, "unsettled", 100),
+    ] {
+        let clock = FakeClock::new();
+        let late = Late {
+            store: &setup.store,
+            clock: &clock,
+            visible,
+        };
+        let result = settle(
+            &mut authority,
+            &late,
+            &clock,
+            2_000 * visible.len(),
+            Duration::from_millis(budget),
+        );
+        let outcome = match result {
+            Ok(()) => "settled",
+            Err(AuthorityError::Unsettled) => "unsettled",
+            Err(_) => "other",
+        };
+        assert_eq!(
+            (outcome, clock.elapsed()),
+            (expected, Duration::from_millis(waited)),
+            "visible at {visible:?} within {budget} ms"
+        );
+    }
+    assert_eq!(authority.current(Kind::Account).expect("head").active, None);
 }
 
 #[test]
@@ -339,13 +465,13 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     let active = setup.save(&mut authority, Kind::Host, &secret(1, 45));
     let before = setup.store.snapshot();
     authority.remove(&[Kind::Host], None).expect("remove");
-    let retired = authority.retired(16).expect("retired")[0];
+    let retired = authority.retired(None, 16).expect("retired")[0];
     assert_eq!(io::sweep(&setup.store, SERVICE, &retired), Observed::Absent);
     authority
         .observed(&retired, Observed::Absent)
         .expect("observed");
     assert_eq!(
-        authority.retired(16).expect("still owed").len(),
+        authority.retired(None, 16).expect("still owed").len(),
         1,
         "same open isn't enough"
     );
@@ -366,7 +492,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
         .observed(&retired, Observed::Absent)
         .expect("observed");
     assert_eq!(
-        authority.retired(16).expect("retired").len(),
+        authority.retired(None, 16).expect("retired").len(),
         1,
         "the resurrection reset the clock to this open"
     );
@@ -377,7 +503,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
         .observed(&retired, Observed::Absent)
         .expect("observed");
     assert!(
-        authority.retired(16).expect("retired").is_empty(),
+        authority.retired(None, 16).expect("retired").is_empty(),
         "now Swept"
     );
     assert!(matches!(
@@ -393,8 +519,50 @@ fn one_sweep_pass_is_bounded_however_many_generations_retired() {
     for round in 0..20 {
         setup.save(&mut authority, Kind::Account, &secret(round, 10));
     }
-    assert_eq!(authority.retired(100).expect("all").len(), 19);
-    assert_eq!(authority.retired(16).expect("one pass").len(), 16);
+    assert_eq!(authority.retired(None, 100).expect("all").len(), 19);
+    assert_eq!(authority.retired(None, 16).expect("one pass").len(), 16);
+}
+
+#[test]
+fn a_bounded_sweep_reaches_every_retired_generation() {
+    let setup = Setup::new("auth-sweep-cursor");
+    let mut authority = setup.open();
+    let mut active = None;
+    for round in 0..33 {
+        active = Some(setup.save(&mut authority, Kind::Account, &secret(round, 10)));
+    }
+    let first = authority.retired(None, 16).expect("first pass");
+    for retired in &first {
+        assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
+        authority
+            .observed(retired, Observed::Absent)
+            .expect("observed");
+    }
+    let second = authority.retired(first.last(), 16).expect("second pass");
+    assert_eq!((first.len(), second.len()), (16, 16));
+    for retired in &second {
+        assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
+        authority
+            .observed(retired, Observed::Absent)
+            .expect("observed");
+    }
+    assert_eq!(
+        setup.store.names(),
+        names(&active.expect("saved")),
+        "every retired generation's names were visited"
+    );
+    assert!(
+        authority
+            .retired(second.last(), 16)
+            .expect("end")
+            .is_empty(),
+        "the round ends"
+    );
+    assert_eq!(
+        authority.retired(None, 16).expect("next round"),
+        first,
+        "a new round revisits what is still owed"
+    );
 }
 
 #[test]
@@ -499,9 +667,12 @@ fn debug_output_names_no_generation_or_value() {
     let hex = plan.generation.hex();
     let shown = format!("{plan:?} {authority:?}");
     assert!(!shown.contains(&hex), "no generation in Debug");
-    let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4), SETTLE).expect("write");
+    let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4)).expect("write");
     let active = authority.activate(verified, None).expect("activate");
-    let shown = format!("{active:?} {:?}", authority.retired(16).expect("retired"));
+    let shown = format!(
+        "{active:?} {:?}",
+        authority.retired(None, 16).expect("retired")
+    );
     assert!(
         !shown.contains(&hex) && !shown.contains("SSSS"),
         "no secret or generation"
@@ -516,4 +687,16 @@ fn the_fake_store_fails_a_second_write_of_one_name() {
     store.set("name", &secret(1, 1)).expect("first");
     store.delete("name").expect("delete");
     store.set("name", &secret(1, 1)).ok();
+}
+
+#[test]
+#[should_panic(expected = "a write-once credential name was written twice")]
+fn a_forked_fake_store_still_fails_a_second_write() {
+    let store = FakeStore::default();
+    store.0.lock().expect("fake lock").write_once = true;
+    store.set("name", &secret(1, 1)).expect("first");
+    store.0.lock().expect("fake lock").refusing = true;
+    let fork = store.fork();
+    fork.delete("name").expect("a fork arms no faults");
+    fork.set("name", &secret(1, 1)).ok();
 }

@@ -757,9 +757,10 @@ stateDiagram-v2
 
 - **Save.** `begin` checks the head revision the caller expects and commits a Pending row for a
   fresh generation. Then `io::write` writes each name once and reads each back. It waits out
-  absence for up to 2 s (`SETTLE`, a guess at about 16 times the 120 ms miss). Waiting is safe
-  because a write-once name can only hold those bytes or nothing. Different bytes fail at once
-  as `Unsettled`. Only a full read-back yields `Verified`. `activate` takes that, checks that
+  absence within one 2 s budget for all the chunks together (`SETTLE`, a guess at about 16 times
+  the 120 ms miss), polling every 10 ms and never sleeping past the deadline. A name first seen
+  at or after the deadline doesn't count. Waiting is safe because a write-once name can only
+  hold those bytes or nothing. Different bytes fail at once as `Unsettled`. Only a full read-back yields `Verified`. `activate` takes that, checks that
   the candidate is still Pending and that the head hasn't moved, and then, in one transaction,
   makes it Active, retires its predecessor, bumps the revision and, optionally, sets the marker.
 - **Read.** `io::read` reads the Active generation's names once, each at its exact length. A
@@ -769,8 +770,10 @@ stateDiagram-v2
 - **Remove.** `remove` retires every Active and Pending generation of the given kinds and bumps
   their heads, with the marker in the same transaction. It reads nothing from the store first,
   so an unsettled store can't block sign-out.
-- **Sweep.** `retired(limit)` lists the oldest Removed generations, so each pass is bounded.
-  `io::sweep` deletes each name and reads it once, and `observed` records the result. A
+- **Sweep.** `retired(after, limit)` lists at most `limit` Removed generations, oldest first,
+  after the last one the previous pass returned, so each pass is bounded and later passes reach
+  the newest. An empty list ends a round. The next round starts over from `None` and revisits
+  whatever is still Removed, failures included. `io::sweep` deletes each name and reads it once, and `observed` records the result. A
   generation becomes Swept, and loses its layout, only after a clean sweep in a later open than
   its last delete. That way, a delete that comes back is caught by the next open's sweep.
 

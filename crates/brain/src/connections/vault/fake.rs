@@ -41,10 +41,13 @@ pub(crate) struct FakeState {
 pub(crate) struct FakeStore(pub(crate) Arc<Mutex<FakeState>>);
 
 impl FakeStore {
+    /// A copy of the values and the write-once history, with no faults armed.
     pub(crate) fn fork(&self) -> Self {
-        let values = self.0.lock().expect("fake lock").values.clone();
+        let state = self.0.lock().expect("fake lock");
         Self(Arc::new(Mutex::new(FakeState {
-            values,
+            values: state.values.clone(),
+            write_once: state.write_once,
+            written: state.written.clone(),
             ..FakeState::default()
         })))
     }

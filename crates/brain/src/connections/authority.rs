@@ -220,9 +220,9 @@ pub(crate) struct Current {
 #[derive(Debug)]
 #[must_use = "an unwritten plan stays Pending until the next open retires it"]
 pub(crate) struct WritePlan {
-    pub(crate) kind: Kind,
-    pub(crate) generation: Generation,
-    pub(crate) layout: Layout,
+    kind: Kind,
+    generation: Generation,
+    layout: Layout,
     base: u64,
 }
 
@@ -235,12 +235,14 @@ pub(crate) enum Observed {
     Remains,
 }
 
-/// A Removed generation whose names a sweep still owes.
+/// A Removed generation whose names a sweep still owes; only [`Authority::retired`] makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Retired {
-    pub(crate) kind: Kind,
-    pub(crate) generation: Generation,
-    pub(crate) layout: Layout,
+    kind: Kind,
+    generation: Generation,
+    layout: Layout,
+    /// Its place in the backlog, so the next pass starts after it.
+    row: i64,
 }
 
 /// The open authority, held by the credential worker under its session lock.
@@ -451,31 +453,39 @@ impl Authority {
         write_marker(&self.conn, marker)
     }
 
-    /// The oldest Removed generations, at most `limit`, so a sweep pass is bounded however many
-    /// generations were ever made.
+    /// The oldest Removed generations after `after`, at most `limit`, so a sweep pass is bounded
+    /// however many were ever made and still reaches the newest. An empty list ends a round; the
+    /// next round starts from `None` and revisits what remained. A cursor is for this open only.
     ///
     /// # Errors
     /// Fails on a SQLite failure or an invalid row.
-    pub(crate) fn retired(&self, limit: usize) -> Result<Vec<Retired>, AuthorityError> {
+    pub(crate) fn retired(
+        &self,
+        after: Option<&Retired>,
+        limit: usize,
+    ) -> Result<Vec<Retired>, AuthorityError> {
         let limit = i64::try_from(limit).map_err(|_| AuthorityError::Bounds)?;
         let mut statement = self.conn.prepare(
-            "SELECT generation, kind, chunks, bytes FROM generations
-             WHERE state = 'removed' ORDER BY rowid LIMIT ?1",
+            "SELECT generation, kind, chunks, bytes, rowid FROM generations
+             WHERE state = 'removed' AND rowid > ?1 ORDER BY rowid LIMIT ?2",
         )?;
-        let rows = statement.query_map([limit], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })?;
+        let rows =
+            statement.query_map(params![after.map_or(0, |after| after.row), limit], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
         rows.map(|row| {
-            let (generation, kind, chunks, bytes) = row?;
+            let (generation, kind, chunks, bytes, row) = row?;
             Ok(Retired {
                 kind: Kind::parse(&kind)?,
                 generation: Generation::from_sql(&generation)?,
                 layout: Layout::from_sql(chunks, bytes)?,
+                row,
             })
         })
         .collect()
