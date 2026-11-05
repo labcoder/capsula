@@ -1,4 +1,4 @@
-use std::io::{self, Write as _};
+use std::io;
 use std::time::Instant;
 
 use kumochi_protocol::frame;
@@ -45,6 +45,8 @@ pub fn serve() -> Result<(), frame::FrameError> {
         let received = Instant::now();
         #[cfg(debug_assertions)]
         {
+            use std::io::Write as _;
+
             if let RequestBody::Fault(requested) = body {
                 fault = Some(requested);
             }
