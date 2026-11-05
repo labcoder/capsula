@@ -143,6 +143,8 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         main_thread: ThreadId(9),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     frame::write(
         &mut &link.control,
@@ -832,6 +834,8 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         main_thread: ThreadId(9),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
+        dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+        show_in_taskbar: false,
     };
     for message in [
         ControlToShell::Welcome {

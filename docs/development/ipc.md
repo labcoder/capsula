@@ -91,11 +91,11 @@ flowchart LR
   shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over
   them breaks the connection like any malformed frame. The settings model retains the brain
-  error and its field attribution; Presence caches its localized presentation for the typing
+  error and its setting attribution; Presence caches its localized presentation for the typing
   panel and tasks panel, with a short **Check settings** dock label for settings keys and
   **Needs attention** for any other brain error.
   It clears when a turn is successfully sent or a successful answer settles a retry of the
-  settings field that produced it. An unsolicited view, reconnect, or another field's success
+  setting kind that produced it. An unsolicited view, reconnect, or another setting's success
   cannot clear it. Only `SettingsRefused` and `ConfigUnreadable` are attributed to the settings
   FIFO's unanswered head operation. Other keys remain general brain errors and never fail a
   pending settings save.

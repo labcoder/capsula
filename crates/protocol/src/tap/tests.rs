@@ -33,6 +33,8 @@ fn view() -> ControlToShell {
             main_thread: ThreadId(1),
             max_frame_rate: crate::message::MaxFrameRate::AUTOMATIC,
             default_model: None,
+            dock_position: crate::message::DockPosition::TopCenter,
+            show_in_taskbar: false,
         },
         answer: true,
     }
