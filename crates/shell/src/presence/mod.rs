@@ -261,7 +261,7 @@ impl Presence {
             .filter(|notice| {
                 *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
             })
-            .or(self.settings.read(cx).taskbar_notice);
+            .or(self.settings.read(cx).native_taskbar_notice);
         self.panel.update(cx, |panel, cx| {
             if panel.notice != notice {
                 panel.notice = notice;

@@ -41,7 +41,7 @@ impl SettingsView {
                 [
                     self.dock_notice,
                     self.taskbar_notice,
-                    self.model.read(cx).taskbar_notice,
+                    self.model.read(cx).native_taskbar_notice,
                 ]
                 .into_iter()
                 .flatten()
@@ -346,31 +346,38 @@ mod tests {
         let (window, view) = open(cx);
         let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
         visual.simulate_resize(size(px(768.), px(1000.)));
-        visual.run_until_parked();
-        visual.update(|window, cx| window.draw(cx).clear(cx));
-        let point = visual
-            .debug_bounds("dock-position-0")
-            .expect("top left radio")
-            .center();
-        visual.simulate_click(point, gpui_kit::Modifiers::default());
-        visual.run_until_parked();
-        visual.update(|window, cx| window.draw(cx).clear(cx));
-        let point = visual
-            .debug_bounds("settings-taskbar")
-            .expect("taskbar checkbox")
-            .center();
-        visual.simulate_click(point, gpui_kit::Modifiers::default());
-        visual.run_until_parked();
-        visual.update(|_, cx| {
-            assert_eq!(
-                view.read(cx).dock_notice,
-                Some(crate::strings::Text::SettingsPositionUnavailable)
-            );
-            assert_eq!(
-                view.read(cx).taskbar_notice,
-                Some(crate::strings::Text::SettingsUnavailable)
-            );
-        });
+        for selectors in [
+            ["dock-position-0", "settings-taskbar"],
+            ["settings-taskbar", "dock-position-0"],
+        ] {
+            visual.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.dock_notice = None;
+                    view.taskbar_notice = None;
+                    cx.notify();
+                });
+            });
+            for selector in selectors {
+                visual.run_until_parked();
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+                let point = visual
+                    .debug_bounds(selector)
+                    .expect("General control")
+                    .center();
+                visual.simulate_click(point, gpui_kit::Modifiers::default());
+            }
+            visual.run_until_parked();
+            visual.update(|_, cx| {
+                assert_eq!(
+                    view.read(cx).dock_notice,
+                    Some(crate::strings::Text::SettingsPositionUnavailable)
+                );
+                assert_eq!(
+                    view.read(cx).taskbar_notice,
+                    Some(crate::strings::Text::SettingsUnavailable)
+                );
+            });
+        }
     }
 
     #[test]

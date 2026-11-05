@@ -28,11 +28,11 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
     assert!(state.view().expect("saved snapshot").show_in_taskbar);
     assert_eq!(
-        state.taskbar_notice,
+        state.native_taskbar_notice,
         Some(crate::strings::Text::TaskbarAddFailed)
     );
     state.apply_taskbar(|_| None);
-    assert_eq!(state.taskbar_notice, None);
+    assert_eq!(state.native_taskbar_notice, None);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
 }
 

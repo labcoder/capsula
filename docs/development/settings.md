@@ -86,8 +86,9 @@ primary monitor origin. It uses `WS_POPUP | WS_SYSMENU` and exactly
 `SW_SHOWNA` shows it without focus; turning the choice off destroys it. No existing window's
 styles or dock proxy change. GPUI's Windows options do not expose this taskbar policy.
 Active/restore/minimize messages open the existing status panel; Close requests the same
-idempotent Quit as the tray. All other system commands are consumed so they cannot move,
-resize or maximize the window into view. `TaskbarCreated` hides/shows the same HWND for
+idempotent Quit as the tray. Move, Size and Maximize are consumed so they cannot bring the
+window into view; all other system commands retain the OS's default handling, including
+screen saver, monitor power and keyboard shortcuts. `TaskbarCreated` hides/shows the same HWND for
 Explorer to rediscover. Native refusal leaves the desired preference intact and adds a
 localized General/status notice, separate from backend save errors. Disconnect leaves the
 last applied native state until a new authoritative snapshot arrives.

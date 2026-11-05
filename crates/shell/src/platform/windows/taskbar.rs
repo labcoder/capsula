@@ -6,18 +6,15 @@ use async_channel::Sender;
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use std::fmt;
 use windows::Win32::Foundation::{
-    ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SetLastError, WPARAM,
-};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, SetLastError, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
     IDI_APPLICATION, IsWindowVisible, LoadIconW, RegisterClassExW, RegisterWindowMessageW,
-    SC_CLOSE, SC_MINIMIZE, SC_RESTORE, SW_HIDE, SW_SHOWNA, SetWindowLongPtrW, ShowWindow,
-    UnregisterClassW, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE, WM_SYSCOMMAND, WNDCLASSEXW,
-    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_POPUP, WS_SYSMENU,
+    SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE, SC_RESTORE, SC_SIZE, SW_HIDE, SW_SHOWNA,
+    SetWindowLongPtrW, ShowWindow, UnregisterClassW, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE,
+    WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_POPUP, WS_SYSMENU,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -81,7 +78,7 @@ struct NativeWindow {
     class: HSTRING,
     atom: u16,
     hwnd: HWND,
-    state: Box<State>,
+    state: *mut State,
 }
 
 impl NativeWindow {
@@ -100,10 +97,10 @@ impl NativeWindow {
             class: HSTRING::from(format!("{OBJECT_PREFIX}-taskbar")),
             atom: 0,
             hwnd: HWND::default(),
-            state: Box::new(State {
+            state: Box::into_raw(Box::new(State {
                 events,
                 taskbar_created,
-            }),
+            })),
         };
         // SAFETY: loads a shared stock icon, which must not be destroyed.
         let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.map_err(|_| TaskbarError)?;
@@ -121,16 +118,6 @@ impl NativeWindow {
         if native.atom == 0 {
             return Err(TaskbarError);
         }
-        // SAFETY: DEFAULTTOPRIMARY selects the primary monitor for this screen point.
-        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
-        let mut info = MONITORINFO {
-            cbSize: struct_size::<MONITORINFO>(),
-            ..Default::default()
-        };
-        // SAFETY: info is sized writable storage for this live monitor.
-        if !unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
-            return Err(TaskbarError);
-        }
         let title = HSTRING::from(DISPLAY_NAME);
         // shortcut: Alt-Tab has a blank preview; add a DWM iconic thumbnail if the owner wants one.
         // SAFETY: class/strings outlive the call; no owner, parent, menu or pixels are supplied.
@@ -140,8 +127,8 @@ impl NativeWindow {
                 PCWSTR(native.class.as_ptr()),
                 &title,
                 WS_POPUP | WS_SYSMENU,
-                info.rcMonitor.left,
-                info.rcMonitor.top,
+                0,
+                0,
                 0,
                 0,
                 None,
@@ -151,10 +138,10 @@ impl NativeWindow {
             )
         }
         .map_err(|_| TaskbarError)?;
-        let state = (&raw const *native.state).expose_provenance().cast_signed();
+        let state = native.state.expose_provenance().cast_signed();
         // SAFETY: clears this thread's error slot so a zero previous value is distinguishable from failure.
         unsafe { SetLastError(ERROR_SUCCESS) };
-        // SAFETY: the boxed state remains stable until its UI-thread owner detaches it.
+        // SAFETY: this live HWND is ours; its raw-owned state outlives callbacks until destruction or detachment.
         let previous = unsafe { SetWindowLongPtrW(native.hwnd, GWLP_USERDATA, state) };
         // SAFETY: reads this thread's error slot immediately after the native operation.
         let error = unsafe { GetLastError() };
@@ -188,6 +175,8 @@ impl Drop for NativeWindow {
                 tracing::warn!("can't destroy the taskbar window");
             }
         }
+        // SAFETY: into_raw transferred this allocation to us; destruction or detachment ended callbacks.
+        drop(unsafe { Box::from_raw(self.state) });
         if self.atom != 0 {
             // SAFETY: unregisters this owner's class after destroying its window.
             if unsafe { UnregisterClassW(PCWSTR(self.class.as_ptr()), Some(self.instance)) }
@@ -217,7 +206,8 @@ fn action(message: u32, value: usize, taskbar_created: u32) -> Action {
         WM_SYSCOMMAND => match u32::try_from(value & 0xfff0).unwrap_or(0) {
             SC_RESTORE | SC_MINIMIZE => Action::Status,
             SC_CLOSE => Action::Quit,
-            _ => Action::Ignore,
+            SC_MOVE | SC_SIZE | SC_MAXIMIZE => Action::Ignore,
+            _ => Action::Default,
         },
         _ if message == taskbar_created && taskbar_created != 0 => Action::Readd,
         _ => Action::Default,

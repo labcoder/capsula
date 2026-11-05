@@ -23,7 +23,7 @@ While disconnected, a pick still moves the dock and the latest choice is saved a
 The taskbar checkbox saves whether Kumochi should also have a Windows taskbar button. Its
 button opens the status panel; **Close window** requests Quit. If Windows refuses the change,
 General reports it without changing the saved preference. While enabled, Alt-Tab has a blank
-preview. The installed-build checks for these Windows interactions are still pending.
+preview.
 
 **Version and build** identifies the running app. Its copy button copies that complete value.
 **Quit** ends Kumochi through the same shutdown path as the tray, and remains available offline.

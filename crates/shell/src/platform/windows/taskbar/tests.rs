@@ -1,10 +1,11 @@
 use super::*;
 use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::SC_SCREENSAVE;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GWL_STYLE, GWLP_HWNDPARENT, GetForegroundWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SC_MAXIMIZE, SC_MOVE, SC_SIZE,
-    SendMessageW, WA_ACTIVE, WA_CLICKACTIVE, WS_CLIPSIBLINGS, WS_VISIBLE,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SC_MAXIMIZE, SC_MONITORPOWER, SC_MOVE,
+    SC_SIZE, SC_TASKLIST, SendMessageW, WA_ACTIVE, WA_CLICKACTIVE, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::core::BOOL;
 
@@ -13,7 +14,7 @@ fn word(value: u32) -> usize {
 }
 
 #[test]
-fn taskbar_messages_open_status_quit_or_ignore_without_default_system_commands() {
+fn taskbar_messages_open_status_quit_and_ignore_geometry_commands() {
     let registered = 0xc123;
     for active in [WA_ACTIVE, WA_CLICKACTIVE] {
         assert_eq!(
@@ -38,7 +39,7 @@ fn taskbar_messages_open_status_quit_or_ignore_without_default_system_commands()
         action(WM_SYSCOMMAND, word(SC_CLOSE | 15), registered),
         Action::Quit
     );
-    for command in [SC_SIZE, SC_MOVE, SC_MAXIMIZE, 0, 0xfff0] {
+    for command in [SC_SIZE, SC_MOVE, SC_MAXIMIZE] {
         assert_eq!(
             action(WM_SYSCOMMAND, word(command), registered),
             Action::Ignore
@@ -47,6 +48,21 @@ fn taskbar_messages_open_status_quit_or_ignore_without_default_system_commands()
     assert_eq!(action(registered, 0, registered), Action::Readd);
     assert_eq!(action(registered, 0, 0), Action::Default);
     assert_eq!(action(0, 0, 0), Action::Default);
+}
+
+#[test]
+fn os_power_and_shortcut_commands_keep_default_handling_without_exposing_the_window() {
+    for command in [SC_SCREENSAVE, SC_MONITORPOWER, SC_TASKLIST, 0, 0xfff0] {
+        for low in [0, 15] {
+            assert_eq!(
+                action(WM_SYSCOMMAND, word(command | low), 0xc123),
+                Action::Default
+            );
+        }
+    }
+    for command in [SC_MOVE, SC_SIZE, SC_MAXIMIZE] {
+        assert_eq!(action(WM_SYSCOMMAND, word(command), 0xc123), Action::Ignore);
+    }
 }
 
 #[test]
@@ -147,8 +163,10 @@ fn taskbar_native_lifecycle_readd_commands_and_zero_area() {
             [0, 0, 0, 0]
         );
     }
-    // SAFETY: simulates Explorer's broadcast only on this test's own window.
-    unsafe { SendMessageW(hwnd, window.state.taskbar_created, None, None) };
+    // SAFETY: window owns this raw allocation until destruction, after this read.
+    let taskbar_created = unsafe { (*window.state).taskbar_created };
+    // SAFETY: dispatches only to this thread's live test window.
+    unsafe { SendMessageW(hwnd, taskbar_created, None, None) };
     // SAFETY: observes the test's live window.
     assert!(unsafe { IsWindowVisible(hwnd) }.as_bool());
     assert!(matches!(
