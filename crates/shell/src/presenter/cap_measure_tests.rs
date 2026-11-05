@@ -110,55 +110,51 @@ fn measure_native_full_preparation_at_paint_caps() {
         std::process::exit(124);
     });
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            let text = std::sync::Arc::clone(cx.text_system());
-            let family = cx.theme().font_family.clone();
-            let worker = cx.background_executor().spawn(async move {
-                let mut measure = Timed {
-                    inner: super::super::Measure::new(text, family),
-                    nanos: 0,
-                    calls: 0,
-                };
-                let mut rows = Vec::new();
-                for iteration in 0..136 {
-                    for extra in if iteration % 2 == 0 { [0, 40] } else { [40, 0] } {
-                        let source = drawing(iteration, extra);
-                        let (mut presenter, now) = live();
-                        begin(&mut presenter, LIVE, now);
-                        measure.nanos = 0;
-                        measure.calls = 0;
-                        let start = Instant::now();
-                        let job =
-                            only_job(commit(&mut presenter, LIVE, 0, source, now).expect("admit"));
-                        let admitted = start.elapsed().as_nanos();
-                        let prepare_start = Instant::now();
-                        let done = job.run(&mut measure);
-                        let prepared = prepare_start.elapsed().as_nanos();
-                        let effects = presenter.completed(done, now).expect("install");
-                        let full = start.elapsed().as_nanos();
-                        assert!(controls(&effects).is_empty());
-                        let work = presenter.paint_work();
-                        assert_eq!(
-                            (work.dash_pieces, work.fill_vertices, work.outline_points),
-                            (512, 512, 512)
-                        );
-                        assert_eq!(measure.calls, 4 + extra);
-                        if iteration >= 8 {
-                            rows.push((extra, admitted, prepared, measure.nanos, full));
-                        }
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let family = app.update(|cx| {
+        gpui_kit::init(cx);
+        cx.theme().font_family.clone()
+    });
+    let text = app.text_system();
+    app.background_executor()
+        .spawn(async move {
+            let mut measure = Timed {
+                inner: super::super::Measure::new(text, family),
+                nanos: 0,
+                calls: 0,
+            };
+            let mut rows = Vec::new();
+            for iteration in 0..136 {
+                for extra in if iteration % 2 == 0 { [0, 40] } else { [40, 0] } {
+                    let source = drawing(iteration, extra);
+                    let (mut presenter, now) = live();
+                    begin(&mut presenter, LIVE, now);
+                    measure.nanos = 0;
+                    measure.calls = 0;
+                    let start = Instant::now();
+                    let job =
+                        only_job(commit(&mut presenter, LIVE, 0, source, now).expect("admit"));
+                    let admitted = start.elapsed().as_nanos();
+                    let prepare_start = Instant::now();
+                    let done = job.run(&mut measure);
+                    let prepared = prepare_start.elapsed().as_nanos();
+                    let effects = presenter.completed(done, now).expect("install");
+                    let full = start.elapsed().as_nanos();
+                    assert!(controls(&effects).is_empty());
+                    let work = presenter.paint_work();
+                    assert_eq!(
+                        (work.dash_pieces, work.fill_vertices, work.outline_points),
+                        (512, 512, 512)
+                    );
+                    assert_eq!(measure.calls, 4 + extra);
+                    if iteration >= 8 {
+                        rows.push((extra, admitted, prepared, measure.nanos, full));
                     }
                 }
-                rows
-            });
-            cx.spawn(async move |cx| {
-                sender.send(worker.await).expect("measurement receiver");
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
-        });
+            }
+            sender.send(rows).expect("measurement receiver");
+        })
+        .detach();
     let rows = receiver
         .recv_timeout(Duration::from_secs(150))
         .expect("bounded worker");
