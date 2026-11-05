@@ -104,7 +104,6 @@ impl Geometry {
         }
         let span = |span: Option<[i32; 2]>| span.unwrap_or([0; 2]);
         for (y, row) in (top..top + height).zip(self.spans.iter_mut()) {
-            *row = Row::default();
             let [drawn_left, drawn_right] = span(
                 (paint_top..paint_top + paint_height)
                     .contains(&y)
