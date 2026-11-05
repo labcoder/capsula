@@ -9,7 +9,7 @@ const ITEM_OVERHEAD: usize = 64;
 const BODY_OVERHEAD: usize = 512;
 
 /// `text` as a JSON string.
-fn escaped(text: &str) -> usize {
+pub(super) fn escaped(text: &str) -> usize {
     serde_json::to_string(text).map_or(text.len().saturating_mul(6), |json| json.len())
 }
 
