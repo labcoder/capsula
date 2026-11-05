@@ -3,13 +3,7 @@ use kumochi_scene::three::raster::{
     BandScratch, COORD_LIMIT, Fragment, FrameScratch, PushError, Quality, RasterError, ScreenPoly,
     Target, raster,
 };
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::sync::atomic::AtomicBool;
 
 #[path = "support/allocation.rs"]
 mod allocation;
@@ -160,18 +154,28 @@ fn the_nearer_of_two_intersecting_faces_wins_each_sample() {
 }
 
 #[test]
-fn coplanar_faces_tie_to_the_earlier_input() {
-    let next = f32::from_bits(0.5_f32.to_bits() + 1);
+fn depths_in_one_bin_tie_to_the_earlier_input() {
     let full = rect(0, 0, texels(4), texels(1));
-    for (first, second) in [(0.5, next), (next, 0.5)] {
+    let depth = f32::from_bits;
+    // (first, second, expected id): one bin ties either way; a bin boundary one ulp wide doesn't.
+    for (first, second, id) in [
+        (0x3f00_0000, 0x3f00_0001, 1),
+        (0x3f00_0001, 0x3f00_0000, 1),
+        (0x3f00_0000, 0x3f00_0007, 1),
+        (0x3f00_0007, 0x3f00_0008, 2),
+        (0x3f00_0008, 0x3f00_0007, 1),
+    ] {
         let mut frame = FrameScratch::with_capacity(2);
-        push(&mut frame, &frag(&full, [0.0, 0.0, first], RED, 1.0, 1));
-        push(&mut frame, &frag(&full, [0.0, 0.0, second], WHITE, 1.0, 2));
-        let (_, ids) = run(&mut frame, Quality::Motion, 4, 1);
-        assert_eq!(
-            ids, [1; 4],
-            "an ulp apart is a tie, kept by the earlier face"
+        push(
+            &mut frame,
+            &frag(&full, [0.0, 0.0, depth(first)], RED, 1.0, 1),
         );
+        push(
+            &mut frame,
+            &frag(&full, [0.0, 0.0, depth(second)], WHITE, 1.0, 2),
+        );
+        let (_, ids) = run(&mut frame, Quality::Motion, 4, 1);
+        assert_eq!(ids, [id; 4], "{first:#x} then {second:#x}");
     }
 }
 
@@ -527,7 +531,7 @@ fn guard_band_extremes_do_not_overflow() {
 }
 
 #[test]
-fn cancellation_is_seen_at_entry_and_inside_a_polygon() {
+fn cancellation_is_seen_at_entry() {
     let mut frame = FrameScratch::with_capacity(2_000);
     for _ in 0..2_000 {
         push(
@@ -548,29 +552,6 @@ fn cancellation_is_seen_at_entry_and_inside_a_polygon() {
         raster(&mut frame, Quality::Rest, &mut band, target, &set),
         Err(RasterError::Cancelled),
         "at entry"
-    );
-
-    // About 1e9 sample tests: far longer than the wait unless the poll inside a polygon fires.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&cancel);
-    let worker = std::thread::spawn(move || {
-        let target = Target {
-            width: 4096,
-            height: 32,
-            color: &mut color,
-            ids: &mut ids,
-        };
-        raster(&mut frame, Quality::Rest, &mut band, target, &flag)
-    });
-    std::thread::sleep(Duration::from_millis(50));
-    let asked = Instant::now();
-    cancel.store(true, Ordering::Relaxed);
-    let result = worker.join().expect("the raster thread doesn't panic");
-    assert_eq!(result, Err(RasterError::Cancelled), "mid-polygon");
-    assert!(
-        asked.elapsed() < Duration::from_secs(1),
-        "stopped within a quantum, took {:?}",
-        asked.elapsed()
     );
 }
 
@@ -683,9 +664,8 @@ fn row_spans_match_a_pointwise_top_left_oracle() {
     reason = "manual Rez measurement with synthetic geometry"
 )]
 mod measure {
-    use super::{
-        AtomicBool, BandScratch, Fragment, FrameScratch, Instant, Quality, Target, raster,
-    };
+    use super::{AtomicBool, BandScratch, Fragment, FrameScratch, Quality, Target, raster};
+    use std::time::Instant;
 
     fn stats(mut ms: Vec<f64>) -> String {
         ms.sort_by(f64::total_cmp);

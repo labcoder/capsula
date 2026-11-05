@@ -9,13 +9,13 @@ use std::{
 
 use kumochi_protocol::message::SceneId;
 use kumochi_scene::{
-    GlobalBudget, SceneBinding, SceneEvent, deferred::Deferred, layout::SceneRecovery,
-    limits::MAX_RESIDENT_BYTES,
+    Frame, GlobalBudget, SceneBinding, SceneEvent, SceneView, deferred::Deferred,
+    layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
 };
 
 use super::{
     BOUND, Broken, Effect, LAYOUT_VERSION, MAX_WORKERS, Out, Presenter, RECOVERY_DEADLINE,
-    RecoveryJob, Scene,
+    RecoveryJob,
     snapshot::{self, Source},
 };
 
@@ -171,10 +171,12 @@ impl Presenter {
         });
         drop(rejected);
         for (scene, state, rest, retained) in adopted {
+            let view = SceneView::new(&rest, state.activated());
+            let frame = Frame::new();
             let bytes = state.attributed_bytes();
             let state =
                 SceneBinding::bind(Deferred::new(state, bytes), &mut self.global).expect(BOUND);
-            self.scenes.insert(scene, Scene::new(state, rest, retained));
+            self.install(scene, state, rest, retained, view, frame);
         }
         for (scene, ..) in recovery.scenes {
             if !self.scenes.contains_key(&scene) {

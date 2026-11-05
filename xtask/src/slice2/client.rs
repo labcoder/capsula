@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use kumochi_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
+use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello,
@@ -350,7 +350,7 @@ fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<JoinHandle<
 }
 
 fn capability(session: u32) -> Result<Secret<[u8; CAPABILITY_LEN]>> {
-    let account = format!("{INSTANCE_ACCOUNT}-{session}");
+    let account = instance_entry(session);
     let bytes = keyring::Entry::new(INSTANCE_SERVICE, &account)?.get_secret()?;
     let bytes: [u8; CAPABILITY_LEN] = bytes
         .try_into()

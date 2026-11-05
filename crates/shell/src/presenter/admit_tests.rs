@@ -495,7 +495,8 @@ fn a_late_admission_on_a_recovered_scene_releases_its_rest_and_resends_its_clear
     let rest = presenter.scenes[&LIVE].retained;
     assert!(rest > 0, "the recovered rest is charged");
     let kept = presenter.scenes[&OTHER].residency();
-    assert_eq!(presenter.residency(), kept + rest);
+    let picture = presenter.scenes[&LIVE].view_bytes + presenter.scenes[&LIVE].frame_bytes;
+    assert_eq!(presenter.residency(), kept + rest + picture);
     let both = presenter.global.usage();
     assert_eq!((both.objects, both.scenes), (2, 2));
     let frame = commit_frame(LIVE, 1, rect("b"));

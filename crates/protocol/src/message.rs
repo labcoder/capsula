@@ -18,6 +18,7 @@ mod scenes;
 #[macro_use]
 mod settings;
 mod threads;
+mod voice;
 pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
     MAX_EMAIL_BYTES, PlanState,
@@ -43,6 +44,12 @@ pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
     MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError, ThreadKind, ThreadOp,
     ThreadTitle,
+};
+pub use voice::{
+    Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
+    MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
+    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, SegmentId,
+    SpeechPcm, StepRef, Transcript, VoiceBound, check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -215,6 +222,8 @@ pub enum Phase {
     Failed,
     /// A recognized hold is waiting for input.
     Listening,
+    /// A released hold's audio is being transcribed.
+    Transcribing,
 }
 
 /// Shell to brain, on the control pipe.
@@ -298,11 +307,18 @@ pub enum ControlToBrain {
         thread: Option<ThreadId>,
         /// The exclusion lease protecting capture.
         lease: LeaseGeneration,
+        /// When the hold was recognized, in QPC ticks.
+        t_qpc: u64,
     },
     /// The hold key was released.
     KeyUp {
         /// The released gesture.
         gesture: GestureId,
+        /// When it was released, in QPC ticks.
+        t_qpc: u64,
+        /// How many [`MicPcm`] chunks the hold sent, at most [`MAX_HOLD_CHUNKS`]; fewer
+        /// arriving fails the hold.
+        chunks: u32,
     },
     /// The shell cancelled the hold.
     GestureCancel {
@@ -328,6 +344,48 @@ pub enum ControlToBrain {
     Warm {
         /// The thread.
         thread: ThreadId,
+    },
+    /// The hold key went down; only reloads speech input, and starts nothing.
+    KeyDown {
+        /// The gesture the shell will recognize, if the hold lasts.
+        gesture: GestureId,
+        /// When the key went down, in QPC ticks.
+        t_qpc: u64,
+    },
+    /// How much of a segment has played, at most every [`PROGRESS_INTERVAL_MS`].
+    SpeechProgress {
+        /// The run.
+        run: RunId,
+        /// The playing segment.
+        segment: SegmentId,
+        /// Samples of it played.
+        sample: u32,
+        /// When that sample played, in QPC ticks.
+        t_qpc: u64,
+    },
+    /// The shell's output for `run` is quiet after a Stop or [`ControlToShell::SpeechRevoked`]:
+    /// it dropped all of the run's queued audio and presentation. Sent once for each.
+    SpeechStopped {
+        /// The run.
+        run: RunId,
+        /// Where playback stopped; none when none of the run's audio played.
+        cursor: Option<Cursor>,
+    },
+    /// A segment's last sample played.
+    SegmentPlayed {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// Its total samples.
+        samples: u32,
+    },
+    /// The output device's rate, and its generation, which changes with each device.
+    AudioOutput {
+        /// The rate in Hz, [`MIN_RATE`] to [`MAX_RATE`].
+        rate: u32,
+        /// The device's generation.
+        generation: OutputGeneration,
     },
 }
 
@@ -444,6 +502,12 @@ pub enum ControlToShell {
     /// Both Claude connections: once per connection after `Settings` and `Account` and before
     /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
     Connections(ConnectionsView),
+    /// Drop all of `run`'s outstanding speech and its queued presentation; the shell answers
+    /// with one [`ControlToBrain::SpeechStopped`] once its output is quiet.
+    SpeechRevoked {
+        /// The run.
+        run: RunId,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -475,6 +539,8 @@ pub enum DataToBrain {
         /// The list and its continuation.
         page: PageOf,
     },
+    /// 20 ms of a recognized hold's microphone audio.
+    MicPcm(MicPcm),
 }
 
 /// Brain to shell, on the data pipe.
@@ -595,6 +661,20 @@ pub enum DataToShell {
         /// At most [`MAX_MODELS`], in the catalog's order.
         models: Vec<ModelInfo>,
     },
+    /// What a hold said.
+    Transcript(Transcript),
+    /// A segment will be spoken: after the text before it, or with `step` when it's a step's
+    /// `say`. The text stays in the brain.
+    SegmentQueued {
+        /// The run.
+        run: RunId,
+        /// The segment, counted from 0 within the run, at most [`MAX_SEGMENTS_PER_RUN`].
+        segment: SegmentId,
+        /// The step it narrates.
+        step: Option<StepRef>,
+    },
+    /// Audio of a queued segment.
+    SpeechPcm(SpeechPcm),
 }
 
 #[cfg(test)]
