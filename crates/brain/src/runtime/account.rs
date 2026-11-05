@@ -544,7 +544,10 @@ impl Brain {
         };
         frames.iter().try_for_each(|frame| link.control(frame))?;
         match self.account.models_unsent() {
-            Some(models) => link.data(&DataToShell::Models { models }),
+            Some(models) => link.data(&DataToShell::Models {
+                connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                models,
+            }),
             None => Ok(()),
         }
     }

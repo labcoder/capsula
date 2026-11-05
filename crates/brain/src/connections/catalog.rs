@@ -37,6 +37,7 @@ pub(crate) fn default_model(
     Some(ModelChoice {
         model: model.slug.clone(),
         effort: Effort::Low,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     })
 }
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    Action, Effort, ErrorKey, ModelChoice, ModelSlug, RunId, ThreadId, UserError,
+    Action, ConnectionKind, Effort, ErrorKey, ModelChoice, ModelSlug, RunId, ThreadId, UserError,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
@@ -55,6 +55,7 @@ fn request(model: Option<&str>) -> RunRequest {
     request.request.choice = model.map(|slug| ModelChoice {
         model: ModelSlug::new(slug).expect("slug"),
         effort: Effort::Low,
+        connection: ConnectionKind::ChatGpt,
     });
     request
 }

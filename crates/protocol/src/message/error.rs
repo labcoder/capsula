@@ -53,11 +53,37 @@ pub enum ErrorKey {
     SignInNeeded,
     /// The run's model isn't in the account's catalog.
     ModelUnavailable,
+    /// Anthropic refused the API key.
+    AnthropicKeyRejected,
+    /// The pasted text isn't shaped like an Anthropic API key.
+    AnthropicKeyFormat,
+    /// Anthropic couldn't be reached.
+    AnthropicUnreachable,
+    /// Anthropic limited the key's rate.
+    AnthropicRateLimited,
+    /// The key's Anthropic account is out of credit.
+    AnthropicCredit,
+    /// No installed Claude Code was found.
+    ClaudeCodeNotFound,
+    /// The installed Claude Code isn't one Kumochi uses.
+    ClaudeCodeUnsupported,
+    /// Claude Code isn't signed in.
+    ClaudeCodeSignedOut,
+    /// Claude Code didn't pass its check before a question.
+    ClaudeCodeAuditFailed,
+    /// A policy closed the Claude Code route.
+    ClaudeCodePolicy,
+    /// Claude Code can't take this input, such as a screenshot.
+    ClaudeCodeInputUnsupported,
+    /// The Claude Code allowance ran out.
+    ClaudeCodeBudget,
+    /// A Claude Code disconnect still has cleanup to finish.
+    ClaudeCodeCleanupPending,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 34] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -79,6 +105,19 @@ impl ErrorKey {
         Self::ResponseUnreadable,
         Self::SignInNeeded,
         Self::ModelUnavailable,
+        Self::AnthropicKeyRejected,
+        Self::AnthropicKeyFormat,
+        Self::AnthropicUnreachable,
+        Self::AnthropicRateLimited,
+        Self::AnthropicCredit,
+        Self::ClaudeCodeNotFound,
+        Self::ClaudeCodeUnsupported,
+        Self::ClaudeCodeSignedOut,
+        Self::ClaudeCodeAuditFailed,
+        Self::ClaudeCodePolicy,
+        Self::ClaudeCodeInputUnsupported,
+        Self::ClaudeCodeBudget,
+        Self::ClaudeCodeCleanupPending,
     ];
 }
 

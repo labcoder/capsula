@@ -503,6 +503,19 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ResponseUnreadable => "error-response-unreadable",
         ErrorKey::SignInNeeded => "error-sign-in-needed",
         ErrorKey::ModelUnavailable => "error-model-unavailable",
+        ErrorKey::AnthropicKeyRejected => "error-anthropic-key-rejected",
+        ErrorKey::AnthropicKeyFormat => "error-anthropic-key-format",
+        ErrorKey::AnthropicUnreachable => "error-anthropic-unreachable",
+        ErrorKey::AnthropicRateLimited => "error-anthropic-rate-limited",
+        ErrorKey::AnthropicCredit => "error-anthropic-credit",
+        ErrorKey::ClaudeCodeNotFound => "error-claude-code-not-found",
+        ErrorKey::ClaudeCodeUnsupported => "error-claude-code-unsupported",
+        ErrorKey::ClaudeCodeSignedOut => "error-claude-code-signed-out",
+        ErrorKey::ClaudeCodeAuditFailed => "error-claude-code-audit-failed",
+        ErrorKey::ClaudeCodePolicy => "error-claude-code-policy",
+        ErrorKey::ClaudeCodeInputUnsupported => "error-claude-code-input-unsupported",
+        ErrorKey::ClaudeCodeBudget => "error-claude-code-budget",
+        ErrorKey::ClaudeCodeCleanupPending => "error-claude-code-cleanup-pending",
     }
 }
 
