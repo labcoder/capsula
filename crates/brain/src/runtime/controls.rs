@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES};
+use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, check_rate};
 use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
@@ -79,11 +79,23 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.
         message @ (ControlToBrain::HoldRecognized { .. }
+        | ControlToBrain::KeyDown { .. }
         | ControlToBrain::KeyUp { .. }
         | ControlToBrain::GestureCancel { .. }
         | ControlToBrain::FocusHint { .. }
         | ControlToBrain::ExclusionLapsed { .. }) => {
             tracing::debug!(op = message.op(), "hold control ignored");
+            None
+        }
+        ControlToBrain::AudioOutput { rate, .. } if check_rate(rate).is_err() => {
+            return Err(Ended::Broken("an output rate out of bounds"));
+        }
+        // shortcut: slice 7's PR 7 drains spoken replies with these.
+        message @ (ControlToBrain::SpeechProgress { .. }
+        | ControlToBrain::SpeechStopped { .. }
+        | ControlToBrain::SegmentPlayed { .. }
+        | ControlToBrain::AudioOutput { .. }) => {
+            tracing::debug!(op = message.op(), "speech control ignored");
             None
         }
         // shortcut: nothing answers Connection or Warm until A1, C2 and C5b build them.

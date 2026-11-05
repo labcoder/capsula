@@ -7,9 +7,14 @@ on:
   push:
     branches: ['batch/**']
   workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * *'
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' }}
   cancel-in-progress: true
 
 env:
@@ -27,16 +32,45 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Detect dependency changes
+        id: dependencies
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if ($env:EVENT -in @('schedule', 'workflow_dispatch')) {
+            'changed=True' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:HEAD)) { throw 'Missing dependency comparison head' }
+          $base = $env:BASE
+          if ($env:EVENT -eq 'push') {
+            $base = git merge-base origin/main $env:HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Could not find the main merge base' }
+          }
+          if ([string]::IsNullOrWhiteSpace($base)) { throw 'Missing dependency comparison base' }
+          $changed = git diff --name-only "$base...$env:HEAD" -- Cargo.lock Cargo.toml '**/Cargo.toml' deny.toml .cargo/config.toml .github/workflows/ci.yml
+          if ($LASTEXITCODE -ne 0) { throw 'Could not compare dependency files' }
+          "changed=$([bool]$changed)" >> $env:GITHUB_OUTPUT
+          if (-not $changed) {
+            Write-Output "::notice::cargo deny skipped: no dependency or CI configuration changes since $base"
+          }
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
+        if: steps.dependencies.outputs.changed == 'True'
         with:
           tool: cargo-deny@0.20.2
       - run: cargo fmt --all --check
       - run: cargo deny --locked check
+        if: steps.dependencies.outputs.changed == 'True'
       - run: cargo xtask check-vendor
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked

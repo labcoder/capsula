@@ -12,6 +12,7 @@ use crate::test_support::Scratch;
 
 mod anthropic;
 mod bounds;
+mod inventory;
 mod marker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
