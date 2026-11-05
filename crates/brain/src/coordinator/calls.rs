@@ -39,14 +39,14 @@ impl Coordinator {
         if run.finishing {
             return ended;
         }
-        let ctx = RunCtx {
+        let mut ctx = RunCtx {
             thread,
             reach,
             offered: build.offered(),
             mcp: run.mcp,
             ledger: &mut run.ledger,
         };
-        match dispatch::call(ctx, caller, tool, args) {
+        match dispatch::call(&mut ctx, caller, tool, args) {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
             Step::Commit(call) => {
@@ -56,19 +56,11 @@ impl Coordinator {
         }
     }
 
-    /// A call's write was acknowledged. Its callers are answered only while their run is current
-    /// and, for MCP, its launch is still the authorized one; a failed write fails the run.
-    pub(super) fn call_committed(
-        &mut self,
-        key: &LedgerKey,
-        committed: bool,
-        effects: &mut Vec<Effect>,
-    ) -> Result<(), Stale> {
+    /// A call's write committed. Its callers are answered only while their run is current and,
+    /// for MCP, its launch is still the authorized one.
+    pub(super) fn call_committed(&mut self, key: &LedgerKey) -> Result<(), Stale> {
         let run = self.current(key.run)?;
-        let answers = run.ledger.committed(key, committed);
-        if !committed {
-            return self.fail(key.run, Failure::Store, effects);
-        }
+        let answers = run.ledger.committed(key);
         let authorized = |caller: &Caller| match caller {
             Caller::Model { .. } => true,
             Caller::Mcp { launch, .. } => run.mcp == Some(*launch),
@@ -79,5 +71,15 @@ impl Coordinator {
             .collect();
         run.answered.extend(answers);
         Ok(())
+    }
+
+    /// A call's write failed: its key stays refused and the run fails.
+    pub(super) fn call_failed(
+        &mut self,
+        key: &LedgerKey,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        self.current(key.run)?.ledger.failed(key);
+        self.fail(key.run, Failure::Store, effects)
     }
 }

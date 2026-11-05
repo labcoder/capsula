@@ -5,7 +5,7 @@ use kumochi_protocol::message::{RunId, ThreadId};
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, Stale, StoreOp, T, fresh};
 use crate::bridge::{CallKey, LaunchId};
 use crate::context::{Built, ModelRequest};
-use crate::dispatch::{Caller, Dispatch, ToolError, ToolOutput, schemas};
+use crate::dispatch::{Caller, Dispatch, Route, ToolError, ToolOutput, schemas};
 use crate::engines::{CallId, ToolName};
 use crate::store::{Failure, RunEnd};
 
@@ -42,7 +42,7 @@ fn offering(key: BuildKey) -> Input {
                 choice: None,
                 instructions: "built".to_owned(),
                 input: Vec::new(),
-                tools: schemas(crate::context::Origin::Task(T), false),
+                tools: schemas(crate::context::Origin::Task(T), Route::Model),
             },
             sources: vec![T],
         }),
@@ -88,10 +88,17 @@ fn answered(core: &Coordinator) -> &[(Caller, ToolOutput)] {
     &core.current.as_ref().expect("a current run").answered
 }
 
-fn ack(caller: &Caller, committed: bool) -> Input {
+fn ack(caller: &Caller) -> Input {
     Input::CallCommitted {
         key: caller.key(),
-        committed,
+        committed: true,
+    }
+}
+
+fn refused(caller: &Caller) -> Input {
+    Input::CallCommitted {
+        key: caller.key(),
+        committed: false,
     }
 }
 
@@ -99,10 +106,13 @@ fn ack(caller: &Caller, committed: bool) -> Input {
 fn a_call_is_answered_only_on_its_writes_acknowledgement() {
     let mut core = fresh();
     running(&mut core, R, None);
-    assert_eq!(call(&mut core, model(R, "c1")), (Dispatch::Committing, true));
+    assert_eq!(
+        call(&mut core, model(R, "c1")),
+        (Dispatch::Committing, true)
+    );
     assert_eq!(call(&mut core, model(R, "c1")), (Dispatch::Joined, false));
     assert_eq!(answered(&core), []);
-    assert_eq!(core.handle(ack(&model(R, "c1"), true)), Ok(Vec::new()));
+    assert_eq!(core.handle(ack(&model(R, "c1"))), Ok(Vec::new()));
     assert_eq!(
         answered(&core),
         [(model(R, "c1"), probed()), (model(R, "c1"), probed())]
@@ -162,7 +172,11 @@ fn an_mcp_call_needs_the_launch_authorized_now() {
     let mut core = fresh();
     running(&mut core, R, None);
     let refused = Dispatch::Answered(ToolOutput::Error(ToolError::NotHere));
-    assert_eq!(call(&mut core, mcp(L1)), (refused.clone(), false), "none bound");
+    assert_eq!(
+        call(&mut core, mcp(L1)),
+        (refused.clone(), false),
+        "none bound"
+    );
     core.current.as_mut().expect("current").mcp = Some(L2);
     assert_eq!(call(&mut core, mcp(L1)), (refused, false), "another launch");
     core.current.as_mut().expect("current").mcp = Some(L1);
@@ -176,7 +190,7 @@ fn a_write_accepted_before_revocation_lands_but_answers_nobody() {
     core.current.as_mut().expect("current").mcp = Some(L1);
     assert_eq!(call(&mut core, mcp(L1)), (Dispatch::Committing, true));
     core.current.as_mut().expect("current").mcp = None;
-    assert_eq!(core.handle(ack(&mcp(L1), true)), Ok(Vec::new()));
+    assert_eq!(core.handle(ack(&mcp(L1))), Ok(Vec::new()));
     assert_eq!(answered(&core), []);
 }
 
@@ -184,22 +198,28 @@ fn a_write_accepted_before_revocation_lands_but_answers_nobody() {
 fn an_acknowledgement_after_stop_changes_nothing() {
     let mut core = fresh();
     running(&mut core, R, None);
-    assert_eq!(call(&mut core, model(R, "c1")), (Dispatch::Committing, true));
+    assert_eq!(
+        call(&mut core, model(R, "c1")),
+        (Dispatch::Committing, true)
+    );
     core.handle(Input::Stop {
         run: R,
         revealed: Vec::new(),
     })
     .expect("stop");
-    assert_eq!(core.handle(ack(&model(R, "c1"), true)), Err(Stale));
-    assert_eq!(core.handle(ack(&model(R, "c1"), false)), Err(Stale));
+    assert_eq!(core.handle(ack(&model(R, "c1"))), Err(Stale));
+    assert_eq!(core.handle(refused(&model(R, "c1"))), Err(Stale));
 }
 
 #[test]
 fn a_failed_write_fails_the_run_with_a_store_failure() {
     let mut core = fresh();
     running(&mut core, R, None);
-    assert_eq!(call(&mut core, model(R, "c1")), (Dispatch::Committing, true));
-    let effects = core.handle(ack(&model(R, "c1"), false)).expect("current");
+    assert_eq!(
+        call(&mut core, model(R, "c1")),
+        (Dispatch::Committing, true)
+    );
+    let effects = core.handle(refused(&model(R, "c1"))).expect("current");
     assert!(
         effects.iter().any(|effect| matches!(
             effect,

@@ -75,16 +75,15 @@ impl Ledger {
         );
     }
 
-    /// The store answered `key`'s write: every caller waiting on it with the output, or nobody
-    /// when the write failed and the key stays refused.
-    pub(crate) fn committed(&mut self, key: &LedgerKey, ok: bool) -> Vec<(Caller, ToolOutput)> {
+    /// The store committed `key`'s write: every caller waiting on it, with the output.
+    pub(crate) fn committed(&mut self, key: &LedgerKey) -> Vec<(Caller, ToolOutput)> {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {
             Some(Entry::Running {
                 hash,
                 output,
                 waiting,
-            }) if ok => {
+            }) => {
                 let answers = waiting
                     .into_iter()
                     .map(|caller| (caller, output.clone()))
@@ -92,15 +91,19 @@ impl Ledger {
                 self.entries.insert(id, Entry::Done { hash, output });
                 answers
             }
-            Some(Entry::Running { .. }) => {
-                self.entries.insert(id, Entry::Refused(ToolError::Ended));
-                Vec::new()
-            }
             Some(other) => {
                 self.entries.insert(id, other);
                 Vec::new()
             }
             None => Vec::new(),
+        }
+    }
+
+    /// The store refused `key`'s write: nobody is answered and the key stays refused.
+    pub(crate) fn failed(&mut self, key: &LedgerKey) {
+        let id = (key.route, key.call.clone());
+        if let Some(entry @ Entry::Running { .. }) = self.entries.get_mut(&id) {
+            *entry = Entry::Refused(ToolError::Ended);
         }
     }
 }

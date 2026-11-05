@@ -700,9 +700,14 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
-            Input::CallCommitted { key, committed } => {
-                self.call_committed(&key, committed, &mut effects)?;
-            }
+            Input::CallCommitted {
+                key,
+                committed: true,
+            } => self.call_committed(&key)?,
+            Input::CallCommitted {
+                key,
+                committed: false,
+            } => self.call_failed(&key, &mut effects)?,
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);

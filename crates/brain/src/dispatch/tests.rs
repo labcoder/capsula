@@ -115,7 +115,7 @@ fn mcp(launch: LaunchId, key: &str) -> Caller {
 /// One call by `caller` in a task run whose launch L1 is authorized.
 fn send(ledger: &mut Ledger, caller: Caller, tool: ToolName, args: &str) -> Step {
     call(
-        ctx(ledger, Origin::Task(T), Some(L1)),
+        &mut ctx(ledger, Origin::Task(T), Some(L1)),
         caller,
         tool,
         args.as_bytes(),
@@ -172,34 +172,66 @@ fn a_first_valid_call_sends_its_write_its_output_and_its_key() {
     );
     assert_eq!(
         (sent.thread, sent.tool, &sent.write, &sent.output),
-        (T, "probe", &LocalWrite::Title("Renamed".to_owned()), &text("probed hi"))
+        (
+            T,
+            "probe",
+            &LocalWrite::Title("Renamed".to_owned()),
+            &text("probed hi")
+        )
     );
 }
 
 #[test]
 fn a_duplicate_while_running_joins_and_after_the_ack_gets_the_stored_output() {
     let mut ledger = Ledger::default();
-    let first = commit(send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#));
+    let first = commit(send(
+        &mut ledger,
+        model("c1"),
+        ToolName::Probe,
+        r#"{"word":"hi"}"#,
+    ));
     assert_step(
-        &send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#),
+        &send(
+            &mut ledger,
+            model("c1"),
+            ToolName::Probe,
+            r#"{"word":"hi"}"#,
+        ),
         &Step::Join,
     );
     assert_eq!(
-        ledger.committed(&first.key, true),
-        vec![(model("c1"), text("probed hi")), (model("c1"), text("probed hi"))],
+        ledger.committed(&first.key),
+        vec![
+            (model("c1"), text("probed hi")),
+            (model("c1"), text("probed hi"))
+        ],
         "the first caller and the one that joined"
     );
     assert_step(
-        &send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#),
+        &send(
+            &mut ledger,
+            model("c1"),
+            ToolName::Probe,
+            r#"{"word":"hi"}"#,
+        ),
         &Step::Answer(text("probed hi")),
     );
-    assert_eq!(ledger.committed(&first.key, true), [], "a second ack answers nobody");
+    assert_eq!(
+        ledger.committed(&first.key),
+        [],
+        "a second ack answers nobody"
+    );
 }
 
 #[test]
 fn whitespace_key_order_and_an_omitted_default_hash_the_same_and_a_new_value_does_not() {
     let mut ledger = Ledger::default();
-    commit(send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi","count":1}"#));
+    commit(send(
+        &mut ledger,
+        model("c1"),
+        ToolName::Probe,
+        r#"{"word":"hi","count":1}"#,
+    ));
     for same_call in [
         r#"{ "count" : 1 , "word" : "hi" }"#,
         r#"{"word":"hi"}"#,
@@ -217,7 +249,12 @@ fn whitespace_key_order_and_an_omitted_default_hash_the_same_and_a_new_value_doe
         );
     }
     assert_step(
-        &send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#),
+        &send(
+            &mut ledger,
+            model("c1"),
+            ToolName::Probe,
+            r#"{"word":"hi"}"#,
+        ),
         &Step::Join,
     );
 }
@@ -225,18 +262,26 @@ fn whitespace_key_order_and_an_omitted_default_hash_the_same_and_a_new_value_doe
 #[test]
 fn another_tool_under_the_same_key_is_refused_and_leaves_the_first_call() {
     let mut ledger = Ledger::default();
-    let first = commit(send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#));
+    let first = commit(send(
+        &mut ledger,
+        model("c1"),
+        ToolName::Probe,
+        r#"{"word":"hi"}"#,
+    ));
     let recall = r#"{"task":5,"first":1,"last":2}"#;
     let kumo = |ledger: &mut Ledger| {
         call(
-            ctx(ledger, Origin::Kumo, None),
+            &mut ctx(ledger, Origin::Kumo, None),
             model("c1"),
             ToolName::Recall,
             recall.as_bytes(),
         )
     };
     assert_step(&kumo(&mut ledger), &error(ToolError::Reused));
-    assert_eq!(ledger.committed(&first.key, true), [(model("c1"), text("probed hi"))]);
+    assert_eq!(
+        ledger.committed(&first.key),
+        [(model("c1"), text("probed hi"))]
+    );
     assert_step(&kumo(&mut ledger), &error(ToolError::Reused));
 }
 
@@ -268,7 +313,12 @@ fn a_refused_key_stays_refused_and_a_new_key_runs() {
 #[test]
 fn malformed_duplicates_never_change_a_running_or_finished_call() {
     let mut ledger = Ledger::default();
-    let first = commit(send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#));
+    let first = commit(send(
+        &mut ledger,
+        model("c1"),
+        ToolName::Probe,
+        r#"{"word":"hi"}"#,
+    ));
     let oversized = format!(r#"{{"word":"{}"}}"#, "x".repeat(MAX_ARGS));
     let malformed = [r#"{"word":"hi","extra":1}"#, "{", "", oversized.as_str()];
     for args in malformed {
@@ -278,10 +328,15 @@ fn malformed_duplicates_never_change_a_running_or_finished_call() {
         );
     }
     assert_step(
-        &send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#),
+        &send(
+            &mut ledger,
+            model("c1"),
+            ToolName::Probe,
+            r#"{"word":"hi"}"#,
+        ),
         &Step::Join,
     );
-    assert_eq!(ledger.committed(&first.key, true).len(), 2);
+    assert_eq!(ledger.committed(&first.key).len(), 2);
     for args in malformed {
         assert_step(
             &send(&mut ledger, model("c1"), ToolName::Probe, args),
@@ -289,7 +344,12 @@ fn malformed_duplicates_never_change_a_running_or_finished_call() {
         );
     }
     assert_step(
-        &send(&mut ledger, model("c1"), ToolName::Probe, r#"{"word":"hi"}"#),
+        &send(
+            &mut ledger,
+            model("c1"),
+            ToolName::Probe,
+            r#"{"word":"hi"}"#,
+        ),
         &Step::Answer(text("probed hi")),
     );
 }
@@ -312,9 +372,19 @@ fn an_output_over_its_cap_is_refused_before_any_write() {
     let mut ledger = Ledger::default();
     let fits = (MAX_OUTPUT - r#"{"text":"probed "}"#.len()) / 4;
     let count = |n: usize| format!(r#"{{"word":"abcd","count":{n}}}"#);
-    commit(send(&mut ledger, model("fits"), ToolName::Probe, &count(fits)));
+    commit(send(
+        &mut ledger,
+        model("fits"),
+        ToolName::Probe,
+        &count(fits),
+    ));
     assert_step(
-        &send(&mut ledger, model("over"), ToolName::Probe, &count(fits + 1)),
+        &send(
+            &mut ledger,
+            model("over"),
+            ToolName::Probe,
+            &count(fits + 1),
+        ),
         &error(ToolError::TooLarge),
     );
 }
@@ -326,7 +396,7 @@ fn the_same_id_on_each_route_and_under_each_launch_is_a_different_call() {
     let by_model = commit(send(&mut ledger, model("c1"), ToolName::Probe, args));
     let by_l1 = commit(send(&mut ledger, mcp(L1, "c1"), ToolName::Probe, args));
     let by_l2 = commit(call(
-        ctx(&mut ledger, Origin::Task(T), Some(L2)),
+        &mut ctx(&mut ledger, Origin::Task(T), Some(L2)),
         mcp(L2, "c1"),
         ToolName::Probe,
         args.as_bytes(),
@@ -347,7 +417,7 @@ fn a_launch_that_isnt_authorized_is_refused_without_using_up_its_key() {
     let args = r#"{"word":"hi"}"#;
     for authorized in [None, Some(L2)] {
         let step = call(
-            ctx(&mut ledger, Origin::Task(T), authorized),
+            &mut ctx(&mut ledger, Origin::Task(T), authorized),
             mcp(L1, "k"),
             ToolName::Probe,
             args.as_bytes(),
@@ -362,10 +432,21 @@ fn history_is_kumo_only_and_model_only() {
     let recall = r#"{"task":5,"first":7,"last":9}"#;
     let mut ledger = Ledger::default();
     let from = |ledger: &mut Ledger, reach, caller| {
-        call(ctx(ledger, reach, Some(L1)), caller, ToolName::Recall, recall.as_bytes())
+        call(
+            &mut ctx(ledger, reach, Some(L1)),
+            caller,
+            ToolName::Recall,
+            recall.as_bytes(),
+        )
     };
-    assert_step(&from(&mut ledger, Origin::Kumo, mcp(L1, "m")), &error(ToolError::NotHere));
-    assert_step(&from(&mut ledger, Origin::Kumo, mcp(L1, "m")), &error(ToolError::NotHere));
+    assert_step(
+        &from(&mut ledger, Origin::Kumo, mcp(L1, "m")),
+        &error(ToolError::NotHere),
+    );
+    assert_step(
+        &from(&mut ledger, Origin::Kumo, mcp(L1, "m")),
+        &error(ToolError::NotHere),
+    );
     assert_step(
         &from(&mut ledger, Origin::Task(T), model("t")),
         &error(ToolError::NotHere),
@@ -379,22 +460,31 @@ fn history_is_kumo_only_and_model_only() {
             last: EventId(9),
         }])
     );
-    let names = |reach, mcp| -> Vec<&str> {
-        schemas(reach, mcp).iter().map(|schema| schema.name).collect()
+    let names = |reach, route| -> Vec<&str> {
+        schemas(reach, route)
+            .iter()
+            .map(|schema| schema.name)
+            .collect()
     };
-    assert_eq!(names(Origin::Kumo, false), ["probe", "recall"]);
-    assert_eq!(names(Origin::Kumo, true), ["probe"]);
-    assert_eq!(names(Origin::Task(T), false), ["probe"]);
+    assert_eq!(names(Origin::Kumo, Route::Model), ["probe", "recall"]);
+    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
+    assert_eq!(names(Origin::Task(T), Route::Model), ["probe"]);
 }
 
 #[test]
 fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
     let mut ledger = Ledger::default();
     let args = r#"{"word":"hi"}"#;
-    assert_step(&send(&mut ledger, model("u"), ToolName::Unknown, args), &error(ToolError::Unknown));
-    assert_step(&send(&mut ledger, model("u"), ToolName::Probe, args), &error(ToolError::Unknown));
+    assert_step(
+        &send(&mut ledger, model("u"), ToolName::Unknown, args),
+        &error(ToolError::Unknown),
+    );
+    assert_step(
+        &send(&mut ledger, model("u"), ToolName::Probe, args),
+        &error(ToolError::Unknown),
+    );
     let unoffered = call(
-        RunCtx {
+        &mut RunCtx {
             thread: T,
             reach: Origin::Task(T),
             offered: &[],
@@ -406,7 +496,10 @@ fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
         args.as_bytes(),
     );
     assert_step(&unoffered, &error(ToolError::NotHere));
-    assert_step(&send(&mut ledger, model("n"), ToolName::Probe, args), &error(ToolError::NotHere));
+    assert_step(
+        &send(&mut ledger, model("n"), ToolName::Probe, args),
+        &error(ToolError::NotHere),
+    );
 }
 
 #[test]
@@ -414,9 +507,15 @@ fn a_failed_write_answers_nobody_and_its_key_stays_refused() {
     let mut ledger = Ledger::default();
     let args = r#"{"word":"hi"}"#;
     let first = commit(send(&mut ledger, model("c1"), ToolName::Probe, args));
-    assert_step(&send(&mut ledger, model("c1"), ToolName::Probe, args), &Step::Join);
-    assert_eq!(ledger.committed(&first.key, false), []);
-    assert_step(&send(&mut ledger, model("c1"), ToolName::Probe, args), &error(ToolError::Ended));
+    assert_step(
+        &send(&mut ledger, model("c1"), ToolName::Probe, args),
+        &Step::Join,
+    );
+    ledger.failed(&first.key);
+    assert_step(
+        &send(&mut ledger, model("c1"), ToolName::Probe, args),
+        &error(ToolError::Ended),
+    );
 }
 
 #[test]
@@ -432,7 +531,10 @@ fn outputs_round_trip_through_their_stored_json() {
             ToolOutput::History(refs),
             r#"{"history":[{"first":7,"last":9,"thread":5}]}"#,
         ),
-        (ToolOutput::Error(ToolError::Unknown), r#"{"error":"unknown tool"}"#),
+        (
+            ToolOutput::Error(ToolError::Unknown),
+            r#"{"error":"unknown tool"}"#,
+        ),
     ];
     for (output, stored) in cases {
         assert_eq!(
@@ -490,11 +592,14 @@ fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
         format!("{:?}", model(MARKER)),
         format!("{:?}", mcp(L1, MARKER)),
         format!("{sent:?}"),
-        format!("{:?}", crate::coordinator::StoreOp::CommitCall(sent.clone())),
+        format!(
+            "{:?}",
+            crate::coordinator::StoreOp::CommitCall(sent.clone())
+        ),
         format!(
             "{:?}",
             crate::coordinator::Input::CallCommitted {
-                key: sent.key.clone(),
+                key: sent.key,
                 committed: true
             }
         ),

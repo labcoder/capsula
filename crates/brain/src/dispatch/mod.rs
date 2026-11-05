@@ -80,7 +80,9 @@ impl fmt::Debug for Caller {
             Self::Model { run, .. } => ("Model", run),
             Self::Mcp { run, .. } => ("Mcp", run),
         };
-        f.debug_struct(kind).field("run", run).finish_non_exhaustive()
+        f.debug_struct(kind)
+            .field("run", run)
+            .finish_non_exhaustive()
     }
 }
 
@@ -230,7 +232,10 @@ impl fmt::Debug for ToolOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(text) => f.debug_struct("Text").field("bytes", &text.len()).finish(),
-            Self::History(refs) => f.debug_struct("History").field("refs", &refs.len()).finish(),
+            Self::History(refs) => f
+                .debug_struct("History")
+                .field("refs", &refs.len())
+                .finish(),
             Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
         }
     }
@@ -251,7 +256,10 @@ impl fmt::Debug for LocalWrite {
         match self {
             Self::None => f.write_str("None"),
             #[cfg(test)]
-            Self::Title(title) => f.debug_struct("Title").field("bytes", &title.len()).finish(),
+            Self::Title(title) => f
+                .debug_struct("Title")
+                .field("bytes", &title.len())
+                .finish(),
         }
     }
 }
@@ -344,14 +352,19 @@ fn tool(name: ToolName) -> Option<&'static Tool> {
 
 /// The tool a request offers under `wire`.
 pub(crate) fn named(wire: &str) -> Option<ToolName> {
-    TOOLS.iter().find(|tool| tool.wire == wire).map(|tool| tool.name)
-}
-
-/// The schemas a run with `reach` is offered on a route.
-pub(crate) fn schemas(reach: Origin, mcp: bool) -> Vec<ToolSchema> {
     TOOLS
         .iter()
-        .filter(|tool| (!tool.kumo_only || reach == Origin::Kumo) && (tool.mcp || !mcp))
+        .find(|tool| tool.wire == wire)
+        .map(|tool| tool.name)
+}
+
+/// The schemas a run with `reach` is offered on `route`.
+pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
+    TOOLS
+        .iter()
+        .filter(|tool| {
+            (!tool.kumo_only || reach == Origin::Kumo) && (tool.mcp || route == Route::Model)
+        })
         .map(|tool| ToolSchema {
             name: tool.wire,
             description: tool.description,
@@ -367,7 +380,10 @@ fn parameters<A: schemars::JsonSchema>() -> Value {
 
 /// Parses `args` into the tool's closed struct and hashes the tool and the parsed fields, so
 /// whitespace and key order don't change the hash.
-fn parse<A: DeserializeOwned + Serialize>(wire: &str, args: &[u8]) -> Result<(A, [u8; 32]), ToolError> {
+fn parse<A: DeserializeOwned + Serialize>(
+    wire: &str,
+    args: &[u8],
+) -> Result<(A, [u8; 32]), ToolError> {
     let parsed: A = serde_json::from_slice(args).map_err(|_| ToolError::Invalid)?;
     let fields = serde_json::to_vec(&parsed).map_err(|_| ToolError::Invalid)?;
     let mut hash = Sha256::new();
@@ -379,7 +395,7 @@ fn parse<A: DeserializeOwned + Serialize>(wire: &str, args: &[u8]) -> Result<(A,
 
 /// Dispatches `caller`'s call in the run it resolved to (B4). An existing entry for its key
 /// always decides, so a retry never changes a refused, running or finished call.
-pub(crate) fn call(run: RunCtx<'_>, caller: Caller, name: ToolName, args: &[u8]) -> Step {
+pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &[u8]) -> Step {
     if let Caller::Mcp { launch, .. } = &caller
         && run.mcp != Some(*launch)
     {
@@ -389,7 +405,7 @@ pub(crate) fn call(run: RunCtx<'_>, caller: Caller, name: ToolName, args: &[u8])
     if let Some(step) = run.ledger.retry(&key, caller.clone(), name, args) {
         return step;
     }
-    match first(&run, &caller, name, args) {
+    match first(run, &caller, name, args) {
         Err(error) => {
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))

@@ -63,7 +63,11 @@ fn a_call_and_its_write_commit_together_and_survive_a_restart() {
     let scratch = Scratch::new("calls-commit");
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
-    assert!(store.commit_call(&renaming(thread, run, "c1")).expect("recorded"));
+    assert!(
+        store
+            .commit_call(&renaming(thread, run, "c1"))
+            .expect("recorded")
+    );
     drop(store);
     let conn = Connection::open(scratch.db()).expect("reopen");
     assert_eq!(title(&conn, thread), "After");
@@ -99,7 +103,11 @@ fn a_call_in_a_thread_being_deleted_writes_nothing() {
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
     store.begin_delete(thread).expect("hidden");
-    assert!(!store.commit_call(&renaming(thread, run, "c1")).expect("no error"));
+    assert!(
+        !store
+            .commit_call(&renaming(thread, run, "c1"))
+            .expect("no error")
+    );
     assert_eq!(title(&store.conn, thread), "Before");
     assert_eq!(rows(&store.conn), []);
 }
@@ -112,7 +120,11 @@ fn deleting_a_thread_removes_its_calls() {
     let mut mcp = renaming(thread, run, "m:n:1");
     mcp.key.route = Route::Mcp(crate::bridge::LaunchId(0xab));
     mcp.write = LocalWrite::None;
-    assert!(store.commit_call(&renaming(thread, run, "c1")).expect("recorded"));
+    assert!(
+        store
+            .commit_call(&renaming(thread, run, "c1"))
+            .expect("recorded")
+    );
     assert!(store.commit_call(&mcp).expect("recorded"));
     assert_eq!(
         rows(&store.conn)[1].0,
