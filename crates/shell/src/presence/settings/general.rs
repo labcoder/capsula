@@ -528,7 +528,10 @@ mod tests {
             });
             cx.run_until_parked();
             let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
-            assert!(frame.debug_bounds("account-sign-in-recovery").is_some(), "{key:?}");
+            assert!(
+                frame.debug_bounds("account-sign-in-recovery").is_some(),
+                "{key:?}"
+            );
         }
     }
 
