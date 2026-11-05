@@ -28,13 +28,13 @@ pub struct Ready {
     /// The account's catalog; empty until it's read.
     pub(crate) models: Vec<ModelInfo>,
     /// The dev fixture answers, so its draw calls draw though no request offers the tool.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) trusted_draw: bool,
 }
 
 impl Ready {
     /// The dev fixture is selected: it answers every run, with no account or catalog.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn fixture() -> Self {
         Self {
             connection: ConnectionTag(0),
@@ -43,12 +43,12 @@ impl Ready {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     fn trusted(&self) -> bool {
         self.trusted_draw
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(test, debug_assertions)))]
     #[expect(clippy::unused_self, reason = "a release build never trusts a draw")]
     fn trusted(&self) -> bool {
         false

@@ -301,7 +301,7 @@ impl Accounts {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.catalog.models.clone().unwrap_or_default(),
-                        #[cfg(debug_assertions)]
+                        #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
                     });
                 }

@@ -3,11 +3,15 @@
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt as _;
-use std::os::windows::io::{AsRawHandle, FromRawHandle as _, OwnedHandle};
+use std::os::windows::io::{
+    AsHandle as _, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle,
+};
 use std::path::PathBuf;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_SUCCESS, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -20,8 +24,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+    WaitForSingleObject,
 };
 
 /// The brain's end of a pipe.
@@ -56,10 +61,13 @@ pub enum Instance {
     First,
     /// Replaces an instance this process holds, so the name is never free in between.
     Next,
+    /// The first and only instance: the OS refuses any later one, whatever its flags.
+    Only,
 }
 
 /// Creates an instance of `name`, refusing remote clients and every other user. At most two
-/// instances exist: the one in use and its replacement while it's swapped in.
+/// instances exist, the one in use and its replacement while it's swapped in, or one for
+/// [`Instance::Only`].
 ///
 /// # Errors
 /// Fails when the name is taken (another brain got there first), the OS refuses, or the DACL
@@ -99,8 +107,8 @@ pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipe
     // SAFETY: `attributes` and the descriptor it points to are valid for the whole call.
     let server = unsafe {
         ServerOptions::new()
-            .first_pipe_instance(instance == Instance::First)
-            .max_instances(2)
+            .first_pipe_instance(instance != Instance::Next)
+            .max_instances(if instance == Instance::Only { 1 } else { 2 })
             .reject_remote_clients(true)
             .create_with_security_attributes_raw(name, (&raw mut attributes).cast())
     };
@@ -261,12 +269,35 @@ fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
 /// # Errors
 /// Fails when no client is connected or its process can't be queried.
 pub fn client_image(server: &NamedPipeServer) -> io::Result<PathBuf> {
+    process_image(client_process(server)?.as_handle())
+}
+
+/// The process connected to `server`, opened by the pid the pipe reports, with query and
+/// wait rights. The handle keeps every check on one process object; it doesn't prove that
+/// object opened the connection, since the pid can be reused once the opener exits.
+///
+/// # Errors
+/// Fails when no client is connected or its process can't be opened.
+pub fn client_process(server: &NamedPipeServer) -> io::Result<OwnedHandle> {
     let mut pid = 0;
     // SAFETY: the handle is open for the borrow and `pid` is a writable u32.
     if unsafe { GetNamedPipeClientProcessId(server.as_raw_handle(), &raw mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    process_image(pid)
+    open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
+}
+
+/// Whether `process` has exited. An exited process still opens while anyone holds it.
+///
+/// # Errors
+/// Fails when the handle lacks the right to wait on it.
+pub fn has_exited(process: BorrowedHandle<'_>) -> io::Result<bool> {
+    // SAFETY: the handle is open for the borrow; a zero timeout only polls.
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        _ => Err(io::Error::last_os_error()),
+    }
 }
 
 /// The executable of the process serving the pipe `client` is connected to.
@@ -279,17 +310,27 @@ pub fn server_image(client: &impl AsRawHandle) -> io::Result<PathBuf> {
     if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &raw mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    process_image(pid)
+    process_image(open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)?.as_handle())
 }
 
-fn process_image(pid: u32) -> io::Result<PathBuf> {
+fn open_process(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> io::Result<OwnedHandle> {
     // SAFETY: plain call; a null result is checked below.
-    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let raw = unsafe { OpenProcess(rights, 0, pid) };
     if raw.is_null() {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `raw` is a process handle we own; OwnedHandle closes it once.
-    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
+/// The executable `process` runs.
+///
+/// # Errors
+/// Fails when the handle can't be queried.
+///
+/// # Panics
+/// Never: the buffer's length fits `u32`, and `u32` fits `usize` on Windows.
+pub fn process_image(process: BorrowedHandle<'_>) -> io::Result<PathBuf> {
     let mut buffer = vec![0u16; 32 * 1024];
     let mut len = u32::try_from(buffer.len()).expect("32K fits in u32");
     // SAFETY: `buffer` holds `len` writable units, and `len` is updated to the units written.
