@@ -288,7 +288,8 @@ host must retain its previous displayed frame. Frame construction allocates noth
 camera, composed sampled pose per solid, frozen `Mapping` and solid-index-to-`Handle` map. Parts
 carry existing host handles, not user labels; handles retain their original commit identities.
 Construction checks the exact width × height id length, at most 160 matching poses/parts and
-every one-based solid id. Background is 0. There are no mutable accessors; retirement consumes
+every one-based solid id. That scan visits every id, so the raster worker builds the frame, not
+the UI thread. Background is 0. There are no mutable accessors; retirement consumes
 the frame with `into_parts` to return the id allocation for reuse.
 
 `Mapping` snapshots the logical destination origin/extent, effective DPI (physical pixels per

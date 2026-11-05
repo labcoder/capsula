@@ -132,7 +132,8 @@ impl std::fmt::Debug for DisplayedFrame {
 impl DisplayedFrame {
     /// Freezes a completed raster and its corresponding geometry snapshot without copying.
     ///
-    /// Id 0 is background; id `n` refers to `parts[n - 1]`. Validation visits every id once.
+    /// Id 0 is background; id `n` refers to `parts[n - 1]`. Validation scans every id once,
+    /// so construct it on the raster worker, never on the UI thread.
     /// # Errors
     /// Refuses an id length other than width × height, more than 160 solids, mismatched
     /// pose/part counts or an id outside the supplied part map.

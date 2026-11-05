@@ -102,6 +102,14 @@ fn scaled_and_half_resolution_mapping_has_independent_axes_and_half_open_bounds(
             Pick::Part(handle(0))
         );
     }
+    // 0.3 + 0.7 rounds to 1.0, so the last pointer before that end scales to exactly 2 texels.
+    let edge = 1.0_f64.next_down();
+    let map = Mapping::new([0.3; 2], [0.7; 2], 1.0, [2, 2]).expect("fixture mapping");
+    let frame = DisplayedFrame::new(state(map, vec![Some(handle(0)), None]), vec![0, 1, 2, 0])
+        .expect("fixture frame");
+    assert_eq!(pick(&frame, [edge, 0.3]), Pick::Part(handle(0)));
+    assert_eq!(pick(&frame, [0.3, edge]), Pick::Blocked);
+    assert_eq!(pick(&frame, [edge, edge]), Pick::Miss);
 }
 
 #[test]
