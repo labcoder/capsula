@@ -20,7 +20,12 @@ fn handle() -> LinkHandle {
 #[test]
 fn repeated_quit_requests_admit_one_shutdown_and_one_quitting_message() {
     let link = handle();
-    let (pipe, _peer) = crate::platform::test_pair("settings-quit").expect("pipe pair");
+    let name = format!(
+        r"\\.\pipe\{}-test-{}-settings-quit",
+        kumochi_protocol::constants::OBJECT_PREFIX,
+        std::process::id()
+    );
+    let (pipe, _peer) = crate::platform::test_pair(&name).expect("pipe pair");
     let (control, queued) = bounded(4);
     let (data, _data) = bounded(1);
     *link.shared.outbox.lock().expect("outbox") = Some(super::Outbox {
