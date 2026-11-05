@@ -9,7 +9,8 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 - Lint: `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`
 - Licenses, advisories, duplicates: `cargo deny check`
 - Dev tasks: `cargo xtask help`
-- CI (`.github/workflows/ci.yml`, Windows) runs fmt, deny, clippy and tests; all must pass.
+- CI (`.github/workflows/ci.yml`, Windows) runs fmt, clippy and tests; all must pass.
+  Deny runs when dependency files or its CI configuration change, plus weekly advisories on main.
 
 ## Layout
 ```
