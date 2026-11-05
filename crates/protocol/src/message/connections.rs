@@ -133,6 +133,9 @@ pub enum ClaudeCodeView {
     PolicyFailed(PolicyFailed),
     /// A Disconnect's cleanup is still to finish.
     CleanupPending,
+    /// Another Kumochi holds Claude Code, or this one doesn't hold its own accounts yet; nothing
+    /// was started.
+    InUse,
 }
 
 /// Why a found Claude Code isn't used.

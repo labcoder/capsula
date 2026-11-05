@@ -1,7 +1,8 @@
 //! The lane against a fake `claude.exe`: this test binary, entered through
 //! [`FAKE_CLAUDE`](crate::platform::FAKE_CLAUDE) before libtest's `main`. Every fake start but a
-//! held grandchild's appends a line to `starts.log` in its working folder: its arguments, a tab,
-//! then its whole environment.
+//! held grandchild's appends a line to `starts.log` in the test's base folder, two above its
+//! working folder, so the log outlives a Disconnect: its arguments, a tab, then its whole
+//! environment.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -13,7 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, OBJECT_PREFIX};
+use kumochi_protocol::constants::{
+    CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, OBJECT_PREFIX,
+};
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
 
 use super::{
@@ -22,6 +25,8 @@ use super::{
 };
 use crate::engines::claude_code::auth::StatusFailure;
 use crate::engines::claude_code::install::FindError;
+use crate::platform::Stdio;
+use crate::platform::sherpa::tests::set_junction;
 use crate::platform::{FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, local_app_data};
 
 /// The version every fake reports.
@@ -35,7 +40,10 @@ pub(crate) const V: ClaudeVersion = ClaudeVersion {
 ///
 /// Modes: `out` and `in` (signed out or in), `hang`, `version:N` (`--version` prints exactly N
 /// bytes), `status:N` (the status JSON padded to N bytes), `stderr:N` (N bytes of stderr first),
-/// `exit:N` (status exits N) and `linger:PATH` (leaves a grandchild holding PATH and stdout).
+/// `exit:N` (status exits N), `linger:PATH` (leaves a grandchild holding PATH and stdout),
+/// `loginhang` (`auth login` never ends) and `logoutfail` (`auth logout` exits 3). Whatever the
+/// mode, `auth login` leaves a sign-in in the config folder, which `auth status` then reports and
+/// `auth logout` removes, noting whether the Disconnect marker was down.
 pub(crate) fn fake(args: Vec<OsString>) -> i32 {
     let mut args = args
         .into_iter()
@@ -73,8 +81,26 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         stdout.flush().expect("stdout");
         return 0;
     }
-    let signed_in = kind == "in";
     let config = std::env::var("CLAUDE_CONFIG_DIR").expect("the lane sets it");
+    let token = Path::new(&config).join("signed-in");
+    match rest.get(1).map(String::as_str) {
+        Some("login") => {
+            if kind == "loginhang" {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            fs::write(&token, b"").expect("sign in");
+            return 0;
+        }
+        Some("logout") => {
+            if Path::new("../..").join(CLAUDE_CODE_DELETING).exists() {
+                fs::write("../../logout-saw-marker", b"").expect("note");
+            }
+            fs::remove_file(&token).ok();
+            return if kind == "logoutfail" { 3 } else { 0 };
+        }
+        _ => {}
+    }
+    let signed_in = kind == "in" || token.exists();
     let mut json = format!(
         r#"{{"loggedIn":{signed_in},"authMethod":"none","configDirectory":{}}}"#,
         serde_json::to_string(&config).expect("a string")
@@ -98,7 +124,7 @@ fn record(args: &[String]) {
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("starts.log")
+        .open("../../starts.log")
         .expect("the working folder is writable");
     writeln!(log, "{}\t{}", args.join(" "), env.join("\u{1f}")).expect("log");
 }
@@ -160,7 +186,7 @@ impl Base {
 
     /// Every recorded start, oldest first.
     pub(crate) fn starts(&self) -> Vec<String> {
-        fs::read_to_string(self.owned().join("work").join("starts.log"))
+        fs::read_to_string(self.0.join("starts.log"))
             .map(|log| log.lines().map(str::to_owned).collect())
             .unwrap_or_default()
     }
@@ -175,6 +201,10 @@ impl Base {
 
     fn lock(&self) -> PathBuf {
         self.0.join(CLAUDE_CODE_LOCK)
+    }
+
+    pub(crate) fn marker(&self) -> PathBuf {
+        self.0.join(CLAUDE_CODE_DELETING)
     }
 }
 
@@ -227,12 +257,45 @@ pub(crate) fn host_finding(
             },
         }),
         brain_job: Arc::new(Job::new().expect("brain job")),
+        console: Stdio::Null,
+        terminate: Job::terminate,
     };
     (host, switches)
 }
 
 pub(crate) fn soon() -> tokio::time::Instant {
     tokio::time::Instant::now() + Duration::from_secs(5)
+}
+
+/// Waits until the fake has recorded `args`.
+pub(crate) async fn started(base: &Base, args: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !base.calls().iter().any(|call| call == args) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the call started");
+}
+
+/// A Disconnect's marker and a file in Kumochi's folder, as a brain stopped part way leaves them;
+/// the file's path.
+pub(crate) fn marked(base: &Base) -> PathBuf {
+    let config = base.owned().join("config");
+    fs::create_dir_all(&config).expect("the folder");
+    let left = config.join("left.json");
+    fs::write(&left, b"{}").expect("a file in it");
+    fs::write(base.marker(), b"").expect("the marker");
+    left
+}
+
+/// `path` open with no sharing, so it can't be deleted while this lives.
+pub(crate) fn locked(path: &Path) -> fs::File {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .expect("held")
 }
 
 async fn next(lane: &mut Lane) -> Done {
@@ -308,7 +371,7 @@ async fn the_child_sees_only_kumochis_folders_and_the_system_environment() {
     );
     assert!(lane.close(soon()).await);
     let starts = base.starts();
-    assert_eq!(starts.len(), 1, "the log is in the owned work folder");
+    assert_eq!(starts.len(), 1, "one start");
     let (args, env) = starts[0].split_once('\t').expect("args and env");
     assert_eq!(args, "--version");
     let env: Vec<(&str, &str)> = env
@@ -445,7 +508,7 @@ async fn without_the_vault_or_with_the_claude_lock_busy_nothing_starts() {
     let (without_vault, switches) = host(&base, "out");
     switches.vault_held.store(false, Ordering::SeqCst);
     let mut lane = Lane::start(without_vault).expect("lane");
-    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Refused));
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Busy));
     assert!(!base.owned().exists(), "no folder was made");
     assert!(
         SessionLock::try_acquire(&base.lock()).is_ok(),
@@ -456,7 +519,7 @@ async fn without_the_vault_or_with_the_claude_lock_busy_nothing_starts() {
     let (host, _switches) = host(&base, "out");
     let other = SessionLock::try_acquire(&base.lock()).expect("another brain's lock");
     let mut lane = Lane::start(host).expect("lane");
-    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Refused));
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Busy));
     assert!(lane.close(soon()).await);
     drop(other);
     assert!(!base.owned().exists(), "no folder was made");
@@ -608,4 +671,187 @@ async fn a_full_queue_refuses_without_waiting() {
         );
     }
     assert!(lane.close(soon()).await);
+}
+
+#[tokio::test]
+async fn a_marked_folder_is_deleted_before_anything_starts() {
+    let base = Base::new("marked");
+    let left = marked(&base);
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert!(lane.close(soon()).await);
+    assert!(!left.exists(), "the old folder went first");
+    assert!(!base.marker().exists());
+    assert_eq!(base.calls(), ["--version"]);
+}
+
+#[tokio::test]
+async fn while_the_marked_folder_cant_be_deleted_nothing_starts() {
+    let base = Base::new("marked-locked");
+    let left = marked(&base);
+    let held = locked(&left);
+    let (host, _switches) = host(&base, "in");
+    let mut lane = Lane::start(host).expect("lane");
+    for work in [Work::Version, Work::Status, Work::Login] {
+        assert_eq!(
+            call(&mut lane, work).await,
+            Err(Failure::Cleanup),
+            "{work:?}"
+        );
+    }
+    assert_eq!(base.calls(), Vec::<String>::new());
+    assert!(
+        base.marker().exists(),
+        "the marker stays until the folder is gone"
+    );
+    drop(held);
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert!(lane.close(soon()).await);
+    assert!(!left.exists());
+    assert!(!base.marker().exists());
+}
+
+#[tokio::test]
+async fn a_reparse_point_in_the_folder_is_refused_and_its_target_kept() {
+    let base = Base::new("marked-reparse");
+    marked(&base);
+    let outside = base.0.join("outside");
+    fs::create_dir(&outside).expect("outside");
+    let kept = outside.join("kept.txt");
+    fs::write(&kept, b"kept").expect("a file outside");
+    let link = base.owned().join("config").join("link");
+    fs::create_dir(&link).expect("an empty folder");
+    set_junction(&link, &outside).expect("a junction out of the folder");
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Cleanup));
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(&kept).expect("still there"), b"kept");
+    assert!(link.exists(), "refused, not removed");
+    assert!(base.marker().exists());
+    assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+/// Version, a sign-in and a Status on the fake in `mode`, then a Disconnect's result.
+async fn disconnected(base: &Base, mode: &str) -> Result<Outcome, Failure> {
+    let (host, _switches) = host(base, mode);
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert_eq!(call(&mut lane, Work::Login).await, Ok(Outcome::LoginEnded));
+    assert_eq!(
+        call(&mut lane, Work::Status).await,
+        Ok(Outcome::Status {
+            version: V,
+            signed_in: true
+        })
+    );
+    let disconnected = call(&mut lane, Work::Disconnect { logout: true }).await;
+    assert!(lane.close(soon()).await);
+    disconnected
+}
+
+#[tokio::test]
+async fn disconnect_marks_the_folder_signs_out_then_deletes_it() {
+    let base = Base::new("disconnect");
+    assert_eq!(disconnected(&base, "out").await, Ok(Outcome::Removed));
+    assert_eq!(
+        base.calls(),
+        [
+            "--version",
+            "auth login",
+            "auth status --json",
+            "auth logout"
+        ]
+    );
+    assert!(
+        base.0.join("logout-saw-marker").exists(),
+        "the marker was down before the sign-out"
+    );
+    assert!(!base.owned().exists());
+    assert!(!base.marker().exists());
+}
+
+#[tokio::test]
+async fn a_failed_sign_out_still_deletes_the_folder() {
+    let base = Base::new("logout-fails");
+    assert_eq!(
+        disconnected(&base, "logoutfail").await,
+        Ok(Outcome::Removed)
+    );
+    assert_eq!(base.calls().last().map(String::as_str), Some("auth logout"));
+    assert!(!base.owned().exists());
+    assert!(!base.marker().exists());
+}
+
+#[tokio::test]
+async fn a_marker_that_cant_be_written_signs_nothing_out_and_deletes_nothing() {
+    let base = Base::new("marker-fails");
+    let (host, _switches) = host(&base, "in");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    fs::create_dir(base.marker()).expect("a folder where the marker goes");
+    assert_eq!(
+        call(&mut lane, Work::Disconnect { logout: true }).await,
+        Err(Failure::Cleanup)
+    );
+    assert!(lane.close(soon()).await);
+    assert_eq!(base.calls(), ["--version"]);
+    assert!(base.owned().join("config").exists());
+}
+
+#[tokio::test]
+async fn a_newer_generation_ends_a_running_sign_in() {
+    let base = Base::new("login-fenced");
+    let (host, _switches) = host(&base, "loginhang");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert!(lane.submit(0, Work::Login));
+    started(&base, "auth login").await;
+    let fenced = Instant::now();
+    lane.fence(1);
+    assert!(lane.submit(1, Work::Status));
+    let done = next(&mut lane).await;
+    assert_eq!(
+        (done.generation, done.result),
+        (1, Ok(SIGNED_OUT)),
+        "the ended sign-in says nothing"
+    );
+    assert!(
+        fenced.elapsed() < Duration::from_secs(5),
+        "ended by the fence, not the fake's 60 s"
+    );
+    assert!(lane.close(soon()).await);
+}
+
+#[tokio::test]
+async fn a_lane_that_cant_confirm_a_call_ended_keeps_its_lock_and_starts_nothing_more() {
+    let base = Base::new("stuck");
+    let (mut host, _switches) = host(&base, "out");
+    host.terminate = |_| Err(io::ErrorKind::Other.into());
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Refused));
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Refused));
+    assert_eq!(base.calls(), ["--version"], "nothing started after");
+    assert!(!lane.close(soon()).await, "close can't confirm it");
+    // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
+    assert!(
+        SessionLock::try_acquire(&base.lock()).is_err(),
+        "no other brain may take Claude Code over"
+    );
 }

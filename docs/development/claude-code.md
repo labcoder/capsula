@@ -170,7 +170,8 @@ sequenceDiagram
   vault's, and takes it on its first call only while the account worker reports the vault lock
   held. Before Version every managed-policy source must be absent; before Status the reviewed
   row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
-  held from the volume root. A refusal starts nothing and makes no folder.
+  held from the volume root. A refusal starts nothing and makes no folder. When another brain
+  holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
 - **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
   as `configDirectory`, byte for byte; anything else fails closed.
 - **One job per process,** nested in the brain job. A call ends only when its root has exited, its
@@ -184,15 +185,49 @@ sequenceDiagram
   separate: up to 5 seconds for its job to be confirmed empty, then about a second for each pipe
   to end. The lock stays held throughout, so a call can take up to about 17 seconds.
 - **The fence.** Each job carries the generation it was queued under, and a job from an older
-  generation does nothing. Finds asked for while one runs coalesce into one more.
+  generation does nothing. A call running when a newer generation starts is ended, and its
+  result is dropped before it's sent. Finds asked for while one runs coalesce into one more.
 - **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
   running call's processes end, queued jobs are dropped, and the lock goes only once every job was
   confirmed empty.
-- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect does
-  nothing, and a signed-out install shows `Unsupported(SignInStore)`. Connect, Cancel and
-  Disconnect come with C2b.
+- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect,
+  Cancel and Disconnect do nothing, and a signed-out install shows `Unsupported(SignInStore)`.
+  Everything under "Signing in and out" below is built and tested against the fake, and stays
+  dormant until the owner picks `FileWithDacl`. Under `Undecided`, a sign-in found in the owned
+  folder is shown but must never be used: C5a's question path checks the store, not only Ready.
 - **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
   half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
+
+### Signing in and out
+
+```mermaid
+stateDiagram-v2
+    SignedOut --> SigningIn: Connect
+    SigningIn --> SignedOut: Cancel, then Status
+    SigningIn --> Ready: login ends, then Status
+    Ready --> CleanupPending: Disconnect
+    SigningIn --> CleanupPending: Disconnect
+    CleanupPending --> SignedOut: folder and marker gone, then Version and Status
+    CleanupPending --> CleanupPending: a file is locked, or a reparse point is inside
+```
+
+- **Connect** runs `auth login` in a console the user answers, in its own job, for up to 5 minutes,
+  then a Status. A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
+  new generation, and the running call ends at once: its job is terminated and its late result is
+  dropped.
+- **Disconnect** writes and flushes `claude-code.deleting` beside the folder, then runs
+  `auth logout` and deletes the folder, then the marker. If the marker can't be written, nothing
+  is signed out or deleted and the view stays `CleanupPending`. A failed sign-out still ends in
+  the deletion. A second Disconnect while one is pending is ignored.
+- **While the marker stands,** every call that would start `claude` first tries the deletion, and
+  if it can't finish, starts nothing and answers `CleanupPending`. So a brain that stopped part
+  way finishes the deletion before its first discovery. A Find while it's pending retries the
+  deletion alone. With the off switch, only that deletion runs.
+- **The deletion** holds the chain from the volume root, walks Kumochi's folder without following
+  anything, and refuses any reparse point inside it, leaving its target alone and the marker down.
+  The marker's name and the folder are constants, never a path from input.
+- shortcut: a pending deletion is retried at each start and each Find, not on a timer; add one if
+  locked files turn out to outlive a session.
 
 ## The audit
 

@@ -149,10 +149,11 @@ pub async fn run() -> Result<(), BrainError> {
     )
     .map_err(BrainError::StoreThread)?;
     let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
-    brain.attach_claude(if claude_on {
-        claude(vault_held, &jobs)
-    } else {
-        runtime::claude::Claude::turned_off()
+    let lane = claude_lane(vault_held, &jobs);
+    brain.attach_claude(match lane {
+        Some(lane) if claude_on => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
+        None if claude_on => runtime::claude::Claude::default(),
+        lane => runtime::claude::Claude::turned_off(lane),
     });
     let screen = screen::ScreenSupervisor::start(exe.clone(), std::sync::Arc::clone(&jobs))
         .map_err(BrainError::Helpers)?;
@@ -210,12 +211,11 @@ fn accounts() -> io::Result<(
     Ok((runtime::account::Accounts::spawn(worker, net)?, held))
 }
 
-/// Claude Code's connection: its lane on the installed `claude.exe`. A lane that can't start
-/// leaves nothing found.
-fn claude(
+/// Claude Code's lane on the installed `claude.exe`; none when it can't start.
+fn claude_lane(
     vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
     jobs: &std::sync::Arc<Job>,
-) -> runtime::claude::Claude {
+) -> Option<engines::claude_code::lane::Lane> {
     use engines::claude_code::install::{FindError, locate};
     use engines::claude_code::lane::{Host, Lane, Program};
 
@@ -223,14 +223,14 @@ fn claude(
         Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
         Err(error) => {
             tracing::warn!(kind = ?error.kind(), "no local data folder for Claude Code");
-            return runtime::claude::Claude::default();
+            return None;
         }
     };
     if let Err(error) = std::fs::create_dir(&base)
         && error.kind() != io::ErrorKind::AlreadyExists
     {
         tracing::warn!(kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
-        return runtime::claude::Claude::default();
+        return None;
     }
     let host = Host {
         find: Box::new(|| {
@@ -244,14 +244,14 @@ fn claude(
         vault_held,
         managed: Box::new(platform::managed_presence),
         brain_job: std::sync::Arc::clone(jobs),
+        console: platform::Stdio::Console,
+        terminate: Job::terminate,
     };
-    match Lane::start(host) {
-        Ok(lane) => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
-        Err(error) => {
-            tracing::warn!(kind = ?error.kind(), "Claude Code's lane didn't start");
-            runtime::claude::Claude::default()
-        }
-    }
+    Lane::start(host)
+        .inspect_err(
+            |error| tracing::warn!(kind = ?error.kind(), "Claude Code's lane didn't start"),
+        )
+        .ok()
 }
 
 /// The engine runs use: in a dev build that names a script in

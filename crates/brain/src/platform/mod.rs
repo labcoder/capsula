@@ -47,7 +47,9 @@ pub use windows::{
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(windows)]
-pub(crate) use windows::{Untrusted, hold_chain, local_app_data, owner_only_dir, profile_dir};
+pub(crate) use windows::{
+    Untrusted, hold_chain, local_app_data, owner_only_dir, profile_dir, remove_tree,
+};
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 

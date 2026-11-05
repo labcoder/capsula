@@ -1,16 +1,18 @@
 //! The one place `claude` starts. One process at a time, each in its own job nested in the brain
 //! job, under this brain's Claude Code lock, after the launch policy's checks; a job admitted
-//! under an older generation does nothing. C5a adds questions to this lane.
+//! under an older generation does nothing, and a newer generation ends the call running. While a
+//! Disconnect's marker stands, the folder is deleted before anything starts, or nothing does.
+//! C5a adds questions to this lane.
 
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
+use kumochi_protocol::constants::{CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +32,8 @@ pub(crate) const STDERR_CAP: usize = 64 * 1024;
 /// How long a call may run before it's ended [guess]. Ending it then takes up to the job's own
 /// bound to confirm empty, and up to [`PIPE_GRACE`] for each pipe.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
+/// How long Claude Code's own sign-in may hold the lane.
+pub(crate) const LOGIN_DEADLINE: Duration = Duration::from_mins(5);
 /// How often a running call looks at its deadline and at closing.
 const POLL: Duration = Duration::from_millis(20);
 /// How long the pipes get to end once the call's job is empty.
@@ -55,6 +59,10 @@ pub(crate) struct Host {
     pub(crate) managed: Box<dyn Fn() -> ManagedPresence + Send>,
     /// Every call's job nests in this one.
     pub(crate) brain_job: Arc<Job>,
+    /// How `auth login` starts: the brain's opens a console the user answers.
+    pub(crate) console: Stdio,
+    /// Ends a call's job and confirms it empty: the brain's is [`Job::terminate`].
+    pub(crate) terminate: fn(&Job) -> io::Result<()>,
 }
 
 /// A call the core asks for.
@@ -64,6 +72,13 @@ pub(crate) enum Work {
     Version,
     /// Ask the version found last whether it's signed in.
     Status,
+    /// Claude Code's own sign-in, for up to [`LOGIN_DEADLINE`].
+    Login,
+    /// Mark Kumochi's folder for deletion, sign out first when `logout` and an install was found,
+    /// then delete the folder and the marker. A failed sign-out still ends in the deletion.
+    Disconnect { logout: bool },
+    /// Finish a deletion already marked, and nothing else.
+    Cleanup,
 }
 
 /// What a call found.
@@ -74,19 +89,28 @@ pub(crate) enum Outcome {
         version: ClaudeVersion,
         signed_in: bool,
     },
+    /// The sign-in ended, however it went; a Status tells.
+    LoginEnded,
+    /// Kumochi's folder and its marker are gone, or there was no marker.
+    Removed,
 }
 
 /// Why a call gave nothing. It carries nothing Claude Code printed and no path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
-    /// Nothing started: another brain may own Claude Code, an earlier call's processes weren't
-    /// confirmed ended, or the lane is closing.
+    /// Nothing started: an earlier call's processes weren't confirmed ended, or the lane is
+    /// closing.
     Refused,
+    /// Nothing started: another brain holds Claude Code's lock, or this one doesn't hold the
+    /// vault's.
+    Busy,
     Find(FindError),
     Unsupported(Unsupported),
     Policy(PolicyFailed),
     /// Kumochi's folders couldn't be made or trusted.
     Folders,
+    /// Kumochi's folder is marked for deletion and isn't deleted yet.
+    Cleanup,
     /// It couldn't be started.
     Spawn,
     /// It didn't exit and close its pipes in time.
@@ -146,7 +170,12 @@ impl Lane {
                     if generation != worker.current.load(Ordering::Acquire) {
                         continue;
                     }
-                    let result = worker.run(work);
+                    let result = worker.run(generation, work);
+                    // A call a newer generation ended, or one that finished as it came, says
+                    // nothing.
+                    if generation != worker.current.load(Ordering::Acquire) {
+                        continue;
+                    }
                     if done_tx.send(Done { generation, result }).is_err() {
                         break;
                     }
@@ -215,7 +244,7 @@ struct Worker {
     guard: Option<SessionLock>,
     /// A call's processes weren't confirmed ended: nothing else starts.
     stuck: bool,
-    /// The last install `Version` found, for `Status`.
+    /// The last install `Version` found, for the calls after it.
     found: Option<(Program, ClaudeVersion)>,
     current: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
@@ -228,14 +257,25 @@ struct Folders {
 }
 
 impl Worker {
-    fn run(&mut self, work: Work) -> Result<Outcome, Failure> {
+    fn run(&mut self, generation: u64, work: Work) -> Result<Outcome, Failure> {
+        let piped = |cap| Call {
+            generation,
+            stdio: Stdio::Piped,
+            cap,
+            deadline: DEADLINE,
+        };
         match work {
             Work::Version => {
                 self.found = None;
+                self.settle()?;
                 let program = (self.host.find)().map_err(Failure::Find)?;
                 let folders = self.preflight(None)?;
-                let (exit, stdout) =
-                    self.call(&program, &folders.paths, &EntryPoint::Version, VERSION_CAP)?;
+                let (exit, stdout) = self.call(
+                    &program,
+                    &folders.paths,
+                    &EntryPoint::Version,
+                    piped(VERSION_CAP),
+                )?;
                 let version = (exit == 0)
                     .then(|| install::parse_version(&stdout))
                     .flatten()
@@ -245,36 +285,102 @@ impl Worker {
                 Ok(Outcome::Version(version))
             }
             Work::Status => {
-                let (program, version) = self
-                    .found
-                    .clone()
-                    .ok_or(Failure::Find(FindError::NotFound))?;
-                let reviewed = policy::reviewed(version).map_err(Failure::Unsupported)?;
-                let folders = self.preflight(Some(reviewed.policy))?;
-                let (exit, stdout) =
-                    self.call(&program, &folders.paths, &EntryPoint::Status, STATUS_CAP)?;
+                self.settle()?;
+                let (program, version) = self.found()?;
+                let folders = self.preflight(Some(policy_of(version)?))?;
+                let (exit, stdout) = self.call(
+                    &program,
+                    &folders.paths,
+                    &EntryPoint::Status,
+                    piped(STATUS_CAP),
+                )?;
                 let signed_in = auth::parse_status(&stdout, exit, &folders.paths.config)
                     .map_err(Failure::Status)?;
                 Ok(Outcome::Status { version, signed_in })
             }
+            Work::Login => {
+                self.settle()?;
+                let (program, version) = self.found()?;
+                let folders = self.preflight(Some(policy_of(version)?))?;
+                let login = Call {
+                    generation,
+                    stdio: self.host.console,
+                    cap: 0,
+                    deadline: LOGIN_DEADLINE,
+                };
+                match self.call(&program, &folders.paths, &EntryPoint::Login, login) {
+                    Err(Failure::Refused) => Err(Failure::Refused),
+                    _ => Ok(Outcome::LoginEnded),
+                }
+            }
+            Work::Disconnect { logout } => {
+                self.hold()?;
+                File::create(self.host.base.join(CLAUDE_CODE_DELETING))
+                    .and_then(|marker| marker.sync_all())
+                    .map_err(|_| Failure::Cleanup)?;
+                if logout && let Ok((program, version)) = self.found() {
+                    let folders =
+                        policy_of(version).and_then(|policy| self.preflight(Some(policy)));
+                    if let Ok(folders) = folders {
+                        let logout = piped(STATUS_CAP);
+                        // How the sign-out went changes nothing: the folder goes either way.
+                        self.call(&program, &folders.paths, &EntryPoint::Logout, logout)
+                            .ok();
+                    }
+                }
+                self.found = None;
+                self.settle()?;
+                Ok(Outcome::Removed)
+            }
+            Work::Cleanup => {
+                self.settle()?;
+                Ok(Outcome::Removed)
+            }
         }
+    }
+
+    fn found(&self) -> Result<(Program, ClaudeVersion), Failure> {
+        self.found.clone().ok_or(Failure::Find(FindError::NotFound))
+    }
+
+    /// Deletes Kumochi's folder and then the marker, when a Disconnect left one; until both are
+    /// gone, nothing else starts.
+    fn settle(&mut self) -> Result<(), Failure> {
+        let marker = self.host.base.join(CLAUDE_CODE_DELETING);
+        match fs::symlink_metadata(&marker) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(Failure::Cleanup),
+            Ok(_) => {}
+        }
+        self.hold()?;
+        let _held = platform::hold_chain(&self.host.base).map_err(|_| Failure::Cleanup)?;
+        platform::remove_tree(&self.host.base.join(CLAUDE_CODE_DIR))
+            .map_err(|_| Failure::Cleanup)?;
+        fs::remove_file(&marker).map_err(|_| Failure::Cleanup)
+    }
+
+    /// The lane open and not stuck, and this brain's lock, taken on first use only while this
+    /// brain holds the vault's.
+    fn hold(&mut self) -> Result<(), Failure> {
+        if self.stuck || self.closing.load(Ordering::Acquire) {
+            return Err(Failure::Refused);
+        }
+        if self.guard.is_none() {
+            if !self.host.vault_held.load(Ordering::Acquire) {
+                return Err(Failure::Busy);
+            }
+            let lock = SessionLock::try_acquire(&self.host.base.join(CLAUDE_CODE_LOCK))
+                .map_err(|_| Failure::Busy)?;
+            self.guard = Some(lock);
+        }
+        Ok(())
     }
 
     /// Everything that must hold before a start: the lane open and not stuck, this brain's
     /// lock, the managed-policy sources (all absent before the version is known, then the
     /// reviewed row's policy), and Kumochi's folders made and held.
     fn preflight(&mut self, policy: Option<LaunchPolicy>) -> Result<Folders, Failure> {
-        if self.stuck || self.closing.load(Ordering::Acquire) {
-            return Err(Failure::Refused);
-        }
-        if self.guard.is_none() {
-            if !self.host.vault_held.load(Ordering::Acquire) {
-                return Err(Failure::Refused);
-            }
-            let lock = SessionLock::try_acquire(&self.host.base.join(CLAUDE_CODE_LOCK))
-                .map_err(|_| Failure::Refused)?;
-            self.guard = Some(lock);
-        }
+        self.hold()?;
         let managed = (self.host.managed)();
         match policy {
             Some(policy) => policy::may_launch(policy, managed).map_err(Failure::Policy)?,
@@ -290,14 +396,15 @@ impl Worker {
         owned_folders(&self.host.base).map_err(|_| Failure::Folders)
     }
 
-    /// Runs one call to its end: its exit within [`DEADLINE`], then its job emptied and both pipes
-    /// ended, each within its own bound. The exit code and stdout, or why not.
+    /// Runs one call to its end: its exit within its deadline, or sooner once a newer generation
+    /// or closing ends it, then its job emptied and both pipes ended, each within its own bound.
+    /// The exit code and stdout, or why not.
     fn call(
         &mut self,
         program: &Program,
         folders: &OwnedFolders,
         entry: &EntryPoint<'_>,
-        cap: usize,
+        how: Call,
     ) -> Result<(u32, Vec<u8>), Failure> {
         let system = platform::system_env().map_err(|_| Failure::Spawn)?;
         let data = policy::launch_data(folders, &system, entry);
@@ -308,16 +415,19 @@ impl Worker {
             args: &args,
             cwd: &folders.work,
             env: &data.env,
-            stdio: Stdio::Piped,
+            stdio: how.stdio,
             jobs: &[&self.host.brain_job, &job],
         })
         .map_err(|_| Failure::Spawn)?;
         drop(spawned.stdin.take());
-        let stdout = spawned.stdout.take().map(|pipe| drain(pipe, cap));
+        let stdout = spawned.stdout.take().map(|pipe| drain(pipe, how.cap));
         let stderr = spawned.stderr.take().map(|pipe| drain(pipe, STDERR_CAP));
-        let deadline = Instant::now() + DEADLINE;
+        let deadline = Instant::now() + how.deadline;
         let exited = loop {
-            if self.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
+            if self.closing.load(Ordering::Acquire)
+                || self.current.load(Ordering::Acquire) != how.generation
+                || Instant::now() >= deadline
+            {
                 break false;
             }
             match spawned.process.exits_within(POLL) {
@@ -328,7 +438,7 @@ impl Worker {
         };
         let exit = exited.then(|| spawned.process.exit_code().ok()).flatten();
         // Whatever the root left running ends here, and nothing else starts until it has.
-        if job.terminate().is_err() {
+        if (self.host.terminate)(&job).is_err() {
             self.stuck = true;
             tracing::warn!("a claude call's processes didn't end; Claude Code stays closed");
             return Err(Failure::Refused);
@@ -336,11 +446,34 @@ impl Worker {
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .max(PIPE_GRACE);
-        let stdout = stdout.and_then(|pipe| pipe.recv_timeout(remaining).ok());
-        let stderr = stderr.and_then(|pipe| pipe.recv_timeout(PIPE_GRACE).ok());
+        // A console call has no pipes to wait for.
+        let ended = |pipe: Option<std_mpsc::Receiver<Drained>>, wait| match pipe {
+            Some(pipe) => pipe.recv_timeout(wait).ok(),
+            None => Some(Drained::default()),
+        };
+        let stdout = ended(stdout, remaining);
+        let stderr = ended(stderr, PIPE_GRACE);
         let exit = exit.ok_or(Failure::Deadline)?;
         Ok((exit, output(stdout, stderr)?))
     }
+}
+
+/// How one call runs.
+#[derive(Clone, Copy)]
+struct Call {
+    /// The generation it runs for; a newer one ends it.
+    generation: u64,
+    stdio: Stdio,
+    /// stdout's cap.
+    cap: usize,
+    deadline: Duration,
+}
+
+/// The reviewed row's policy for `version`, which every call after `--version` needs.
+fn policy_of(version: ClaudeVersion) -> Result<LaunchPolicy, Failure> {
+    policy::reviewed(version)
+        .map(|reviewed| reviewed.policy)
+        .map_err(Failure::Unsupported)
 }
 
 /// Kumochi's Claude Code folder and the folders in it, each owner-only, made if missing and
@@ -372,6 +505,7 @@ fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
 
 /// A pipe read to its end: the first `cap` bytes, whether there were more, and whether a read
 /// failed before the end.
+#[derive(Default)]
 struct Drained {
     bytes: Vec<u8>,
     over: bool,

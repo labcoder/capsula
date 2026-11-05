@@ -176,6 +176,9 @@ pub const CLAUDE_CODE_DIR: &str = "claude-code";
 /// The lock a brain holds, beside [`CLAUDE_CODE_DIR`], for as long as any `claude` it started
 /// may still be running, so no other brain starts one against the same folder.
 pub const CLAUDE_CODE_LOCK: &str = "claude-code.lock";
+/// The marker a Disconnect writes, beside [`CLAUDE_CODE_DIR`], before it signs out; while it
+/// stands, the folder is deleted before any `claude` starts.
+pub const CLAUDE_CODE_DELETING: &str = "claude-code.deleting";
 /// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
 /// `%LOCALAPPDATA%`.
 pub const ENGINE_DIR: &str = "engine";

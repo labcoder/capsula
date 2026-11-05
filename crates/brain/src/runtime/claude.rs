@@ -15,14 +15,8 @@ use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
 pub(crate) enum SignInStore {
     /// Not decided: Connect does nothing and a signed-out install shows as unsupported.
     Undecided,
-    /// Claude Code's own file in Kumochi's owner-only folder (option a).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "owner call 1 picks it; until then only tests sign in"
-        )
-    )]
+    /// Claude Code's own file in Kumochi's owner-only folder (option a). Only it lets Connect,
+    /// Cancel and Disconnect do anything.
     FileWithDacl,
 }
 
@@ -31,15 +25,23 @@ pub(crate) const SIGN_IN: SignInStore = SignInStore::Undecided;
 
 /// The connection's state; the lane does the work.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts about the jobs; no two combine into one state"
+)]
 pub(crate) struct Claude {
     lane: Option<Lane>,
     sign_in: SignInStore,
+    /// False under `[claude_code] enabled = false`, where only a marked deletion runs.
+    finds: bool,
     generation: u64,
     view: ClaudeCodeView,
-    /// A discovery is out.
-    finding: bool,
-    /// Another was asked for while it was.
+    /// A job of this generation is out.
+    out: bool,
+    /// A Find was asked for while it was.
     again: bool,
+    /// A Disconnect is still to finish.
+    cleaning: bool,
 }
 
 impl Default for Claude {
@@ -50,20 +52,26 @@ impl Default for Claude {
 }
 
 impl Claude {
-    fn new(lane: Option<Lane>, sign_in: SignInStore, view: ClaudeCodeView) -> Self {
+    pub(super) fn new(lane: Option<Lane>, sign_in: SignInStore, view: ClaudeCodeView) -> Self {
         Self {
             lane,
             sign_in,
+            finds: true,
             generation: 0,
             view,
-            finding: false,
+            out: false,
             again: false,
+            cleaning: false,
         }
     }
 
-    /// `[claude_code] enabled = false`: nothing is found or started.
-    pub(crate) fn turned_off() -> Self {
-        Self::new(None, SIGN_IN, ClaudeCodeView::TurnedOff)
+    /// `[claude_code] enabled = false`: nothing is found or started, and `lane` only finishes a
+    /// deletion an earlier Disconnect marked.
+    pub(crate) fn turned_off(lane: Option<Lane>) -> Self {
+        let mut claude = Self::new(lane, SIGN_IN, ClaudeCodeView::TurnedOff);
+        claude.finds = false;
+        claude.find();
+        claude
     }
 
     /// Discovery through `lane`, starting now.
@@ -77,37 +85,68 @@ impl Claude {
         self.view
     }
 
-    /// Finds the install again, or once the discovery that's out has ended.
-    fn find(&mut self) {
+    /// Starts `work` under a new generation, which ends whatever an older one still runs.
+    fn begin(&mut self, work: Work) {
         let Some(lane) = &self.lane else {
             return;
         };
-        if self.finding {
+        self.generation += 1;
+        lane.fence(self.generation);
+        self.out = lane.submit(self.generation, work);
+        self.again = false;
+    }
+
+    /// Finds the install again, or retries a deletion still to finish; after the job that's out,
+    /// if one is.
+    fn find(&mut self) {
+        // shortcut: a pending deletion is retried here and at each start, not on a timer; add one
+        // if locked files turn out to outlive a session.
+        if self.out {
             self.again = true;
             return;
         }
-        self.generation += 1;
-        lane.fence(self.generation);
-        self.finding = lane.submit(self.generation, Work::Version);
+        self.begin(match (self.finds, self.cleaning) {
+            (false, _) => Work::Cleanup,
+            (true, true) => Work::Disconnect { logout: false },
+            (true, false) => Work::Version,
+        });
     }
 
     /// One of Claude Code's ops; every one is answered with the view.
     pub(crate) fn op(&mut self, op: ConnectionOp) {
-        // shortcut: Connect, Cancel and Disconnect wait for C2b's sign-in and cleanup; until
-        // then nothing can be signed in, so there's nothing to cancel or delete, and under
-        // Undecided Connect never starts anything.
-        if op == ConnectionOp::FindClaudeCode {
-            self.find();
+        let signs_in = self.sign_in == SignInStore::FileWithDacl;
+        match op {
+            ConnectionOp::FindClaudeCode => self.find(),
+            ConnectionOp::ConnectClaudeCode
+                if signs_in
+                    && !self.out
+                    && matches!(self.view, ClaudeCodeView::SignedOut { .. }) =>
+            {
+                self.view = ClaudeCodeView::SigningIn;
+                self.begin(Work::Login);
+            }
+            // The new generation ends the sign-in; the Status after it shows where it got.
+            ConnectionOp::CancelClaudeSignIn
+                if signs_in && self.view == ClaudeCodeView::SigningIn =>
+            {
+                self.begin(Work::Version);
+            }
+            ConnectionOp::DisconnectClaudeCode if signs_in && self.finds && !self.cleaning => {
+                self.cleaning = true;
+                self.view = ClaudeCodeView::CleanupPending;
+                self.begin(Work::Disconnect { logout: true });
+            }
+            _ => {}
         }
     }
 
     /// A lane result; true when the view may have changed.
     pub(crate) fn done(&mut self, Done { generation, result }: Done) -> bool {
-        if generation != self.generation || !self.finding {
+        if generation != self.generation || !self.out {
             return false;
         }
         match result {
-            Ok(Outcome::Version(_)) => {
+            Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 let lane = self.lane.as_ref().expect("a result comes from the lane");
                 if lane.submit(self.generation, Work::Status) {
                     return false;
@@ -126,13 +165,21 @@ impl Claude {
                     (false, SignInStore::FileWithDacl) => ClaudeCodeView::SignedOut { version },
                 };
             }
+            Ok(Outcome::Removed) => {
+                self.cleaning = false;
+                if self.finds {
+                    self.again = true;
+                } else {
+                    self.view = ClaudeCodeView::TurnedOff;
+                }
+            }
             Err(failure) => {
                 if let Some(view) = failed(failure) {
                     self.view = view;
                 }
             }
         }
-        self.finding = false;
+        self.out = false;
         if std::mem::take(&mut self.again) {
             self.find();
         }
@@ -161,6 +208,8 @@ fn failed(failure: Failure) -> Option<ClaudeCodeView> {
 
     Some(match failure {
         Failure::Refused => return None,
+        Failure::Busy => ClaudeCodeView::InUse,
+        Failure::Cleanup => ClaudeCodeView::CleanupPending,
         Failure::Find(FindError::NotFound) => ClaudeCodeView::NotFound,
         Failure::Find(FindError::Shim) => ClaudeCodeView::Unsupported(Unsupported::Shim),
         Failure::Unsupported(unsupported) => ClaudeCodeView::Unsupported(unsupported),
@@ -218,4 +267,4 @@ impl Brain {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

@@ -9,10 +9,11 @@
 //! isn't defended against here.
 
 use std::ffi::OsString;
+use std::fs;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -177,6 +178,26 @@ pub(crate) fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
 /// held.
 pub(crate) fn hold_file(path: &Path) -> Result<File, Untrusted> {
     open_checked(path, Kind::File, &Trusted::new()?)
+}
+
+/// Deletes `path` and everything in it, a missing one included. A reparse point anywhere in it
+/// is refused, never followed or removed, and stops the deletion. Its parent must be held.
+pub(crate) fn remove_tree(path: &Path) -> Result<(), Untrusted> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(Untrusted::Io),
+    };
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Untrusted::Reparse);
+    }
+    if !metadata.is_dir() {
+        return fs::remove_file(path).map_err(|_| Untrusted::Io);
+    }
+    for entry in fs::read_dir(path).map_err(|_| Untrusted::Io)? {
+        remove_tree(&entry.map_err(|_| Untrusted::Io)?.path())?;
+    }
+    fs::remove_dir(path).map_err(|_| Untrusted::Io)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
