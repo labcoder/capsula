@@ -129,6 +129,7 @@ impl Presence {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 enum RestoreMode {
     Saved,
     ObserverSeed,
