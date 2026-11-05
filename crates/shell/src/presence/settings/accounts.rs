@@ -206,7 +206,11 @@ impl SettingsView {
             )
     }
 
-    pub(super) fn confirm_sign_out(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn confirm_sign_out(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if window.has_active_dialog(cx) {
             return;
         }

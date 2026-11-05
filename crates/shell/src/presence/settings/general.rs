@@ -1,8 +1,13 @@
+use gpui_kit::base::RadioGroup as PositionGroup;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, Window, div,
+    Context, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
+    div,
 };
 use kumochi_protocol::{
     BUILD_ID,
@@ -412,7 +417,3 @@ mod tests {
         assert_eq!(rate_at(6), None);
     }
 }
-use gpui_kit::base::RadioGroup as PositionGroup;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::clipboard::Clipboard;
