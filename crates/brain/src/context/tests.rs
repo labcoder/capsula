@@ -114,6 +114,7 @@ fn snapshot(origin: Origin, user: Option<&str>) -> RunSnapshot {
         choice: Some(ModelChoice {
             model: ModelSlug::new("gpt-6-luna").expect("slug"),
             effort: Effort::Medium,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         }),
         connection: ConnectionTag(7),
     }
@@ -196,6 +197,7 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
         Some(ModelChoice {
             model: ModelSlug::new("gpt-6-luna").expect("slug"),
             effort: Effort::Medium,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         })
     );
     assert_eq!(

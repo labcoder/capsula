@@ -22,6 +22,7 @@ fn request(instructions: &str, input: Vec<InputItem>) -> ModelRequest {
         choice: Some(ModelChoice {
             model: ModelSlug::new("gpt-fixture").expect("slug"),
             effort: Effort::XHigh,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         }),
         instructions: instructions.to_owned(),
         input,

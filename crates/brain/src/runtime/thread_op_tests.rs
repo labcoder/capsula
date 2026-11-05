@@ -48,6 +48,7 @@ async fn a_tasks_rename_and_model_reach_the_list_and_kumos_rename_changes_nothin
     let choice = ModelChoice {
         model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
         effort: Effort::High,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
     let client = async {
         shell.scenes().await;

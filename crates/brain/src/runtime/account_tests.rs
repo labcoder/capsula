@@ -1074,12 +1074,17 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     let luna = ModelChoice {
         model: ModelSlug::new("gpt-6-luna").expect("valid"),
         effort: Effort::Low,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         match timeout(PATIENCE, shell.data()).await.expect("in time") {
-            DataToShell::Models { models } => {
+            DataToShell::Models { connection, models } => {
+                assert_eq!(
+                    connection,
+                    kumochi_protocol::message::ConnectionKind::ChatGpt
+                );
                 assert_eq!(slugs(&models), ["gpt-6-sol", "gpt-6-luna"]);
             }
             other => panic!("expected Models, got {other:?}"),
