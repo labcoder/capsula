@@ -11,7 +11,7 @@ use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
 };
 
-use super::settings_view::SettingsView;
+use super::SettingsView;
 use crate::accounts::Accounts;
 use crate::strings::{Strings, Text};
 

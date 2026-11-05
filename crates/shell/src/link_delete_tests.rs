@@ -17,6 +17,27 @@ fn handle() -> LinkHandle {
     }
 }
 
+#[test]
+fn repeated_quit_requests_admit_one_shutdown_and_one_quitting_message() {
+    let link = handle();
+    let (pipe, _peer) = crate::platform::test_pair("settings-quit").expect("pipe pair");
+    let (control, queued) = bounded(4);
+    let (data, _data) = bounded(1);
+    *link.shared.outbox.lock().expect("outbox") = Some(super::Outbox {
+        generation: 1,
+        control,
+        data,
+        pipe: Arc::new(pipe),
+        submits: std::sync::atomic::AtomicU32::new(0),
+    });
+    assert!(link.begin_quit());
+    assert!(link.shared.tell_quit());
+    assert!(!link.begin_quit());
+    assert!(!link.begin_quit());
+    assert_eq!(queued.try_recv(), Ok(ControlToBrain::Quitting));
+    assert_eq!(queued.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
 /// Queues `handle`'s held deletes on connection `generation`.
 fn queue(
     handle: &LinkHandle,
