@@ -95,6 +95,37 @@ flowchart LR
 - **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
   their messages can carry paths or text. Errors map to content-free `TtsError` values.
 
+### Segments and the reply
+
+A spoken run has two pure parts. Neither does any I/O; slice 7's 7b wires them into the coordinator.
+
+**`voice::segment`** cuts the run's streamed answer into sentences:
+- A segment ends at `.`, `!` or `?` followed by whitespace. Past 120 characters, `,`, `;` or `:` followed by whitespace also ends one.
+- Past 240 characters the segment is cut at its last whitespace, or on a character boundary inside one long token.
+- A mark at the end of a delta waits for the next character, so `3.` then `5` stays `3.5`.
+- A step's `say` first ends the text before it, so speech keeps the answer's order.
+- The producer's close flushes the tail once. Whitespace on its own is never spoken.
+
+**`voice::reply`** holds one run's speech: its segments, the one TTS is making, the audio the shell holds unplayed, and finality.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Open: Queued
+  Open --> Last: TTS done or failed (final chunk sent)
+  Open --> Dropped: its scene failed
+  Last --> Played: SegmentPlayed with the total
+  Last --> Dropped: its scene failed
+```
+
+- **The window.** At most one Speak is out at a time. A new one goes out only while the unplayed audio is under 20 s and at most two segments lie beyond the playing one.
+- **Credit.** The pump reads TTS only on credit, which keeps forwarded audio inside the window. `SpeechProgress` gives credit back as it plays, so a 30 s segment streams through the 20 s window.
+- **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way.
+- **Finality.** Speech is final when the producer has closed, nothing is being spoken, and every surviving segment has played. After a revoke it's final once the shell's `SpeechStopped` arrives instead.
+- **Revoke.** A revoke stops the run's speech for good. A Stop from the shell isn't told back to it; any revoke from the brain sends `SpeechRevoked`. A new output-device generation mid-run revokes too: the text stays, and nothing is replayed at the new rate.
+- **Refused reports.** A report that can't be true is refused: an unknown segment, one out of order, a total that isn't the samples sent, or a quiet answer nobody asked for. A late report for a dropped segment is ignored.
+- **The stall timer.** Every move of a draining run re-arms it, under a new epoch, and only the latest epoch counts. A repeated or backward progress report doesn't re-arm it.
+- **Heard point.** It's the furthest played sample, with the answer's byte offset where heard speech ends.
+
 ## Provenance
 
 - **Speech input:** `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` at

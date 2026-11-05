@@ -49,20 +49,20 @@ fn an_empty_delta_changes_nothing() {
 #[test]
 fn a_clause_ends_a_segment_only_past_120_characters() {
     let at_120 = format!("{}, rest", "a".repeat(CLAUSE_CHARS - 1));
-    assert_eq!(texts(&[&at_120]), [at_120.clone()]);
+    assert_eq!(texts(&[&at_120]), [at_120.as_str()]);
     let at_121 = format!("{}, rest", "a".repeat(CLAUSE_CHARS));
     assert_eq!(
         texts(&[&at_121]),
         [format!("{},", "a".repeat(CLAUSE_CHARS)), " rest".to_owned()]
     );
     let number = format!("{}3,000 more", "a".repeat(CLAUSE_CHARS));
-    assert_eq!(texts(&[&number]), [number.clone()]);
+    assert_eq!(texts(&[&number]), [number.as_str()]);
 }
 
 #[test]
 fn a_long_token_is_cut_at_240_characters() {
     let exact = "b".repeat(MAX_CHARS);
-    assert_eq!(texts(&[&exact]), [exact.clone()]);
+    assert_eq!(texts(&[&exact]), [exact.as_str()]);
     let over = "b".repeat(MAX_CHARS + 5);
     assert_eq!(texts(&[&over]), ["b".repeat(MAX_CHARS), "b".repeat(5)]);
 }
@@ -93,7 +93,7 @@ fn the_tail_is_flushed_once_and_whitespace_alone_is_never_spoken() {
     segmenter.push("First. and a tail", &mut out);
     segmenter.finish(&mut out);
     segmenter.finish(&mut out);
-    segmenter.push(" late.", &mut out);
+    segmenter.push(" late. more ", &mut out);
     segmenter.finish(&mut out);
     let got: Vec<_> = out.into_iter().map(|cut| (cut.range, cut.text)).collect();
     assert_eq!(
