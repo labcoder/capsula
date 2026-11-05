@@ -126,6 +126,27 @@ pub(crate) fn start<K: Kind>(exe: PathBuf, jobs: Arc<Job>) -> io::Result<Handle<
     Ok(Handle { commands, losses })
 }
 
+/// Each request a test plays the worker for: its body and the answer to send.
+#[cfg(test)]
+type Played<K> = mpsc::Receiver<(<K as Kind>::Request, Answer<K>)>;
+
+/// A handle with no worker: each request's body and answer arrive on the returned queue, so a
+/// kind's own tests can play the worker.
+#[cfg(test)]
+pub(crate) fn detached<K: Kind>() -> (Handle<K>, Played<K>) {
+    let (commands, mut receive) = mpsc::channel::<Command<K>>(QUEUE);
+    let (losses, _) = broadcast::channel(QUEUE);
+    let (forward, requests) = mpsc::channel(QUEUE);
+    drop(tokio::spawn(async move {
+        while let Some(command) = receive.recv().await {
+            if forward.send((command.body, command.answer)).await.is_err() {
+                return;
+            }
+        }
+    }));
+    (Handle { commands, losses }, requests)
+}
+
 struct Worker<K: Kind> {
     process: Helper,
     writes: blocking::SyncSender<(u64, K::Request)>,
@@ -288,6 +309,10 @@ async fn run<K: Kind>(
         }
         if losses.send(WorkerLost).is_err() {
             tracing::debug!(kind = K::NAME, "worker lost without watchers");
+        }
+        // Every handle is gone, so a respawn would only land in a closing job.
+        if commands.is_closed() {
+            return;
         }
         loop {
             let delay = backoff(&mut history, Instant::now());

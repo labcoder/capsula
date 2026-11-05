@@ -159,3 +159,22 @@ fn closing_the_job_ends_a_piped_worker() {
     assert!(child.exits_within(PATIENCE).expect("wait"));
     drop(pipes);
 }
+
+#[tokio::test]
+async fn an_idle_worker_killed_from_outside_is_reported_and_replaced() {
+    let job = Arc::new(Job::new().expect("job"));
+    let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
+        .expect("supervisor");
+    let mut losses = screen.lost();
+    assert_eq!(screen.request(RequestBody::Ping).await, Ok(ReplyBody::Pong));
+    job.terminate().expect("kill the idle worker");
+    let loss = tokio::time::timeout(PATIENCE, losses.recv()).await;
+    assert_eq!(
+        loss.expect("lost with nothing pending").expect("loss"),
+        WorkerLost
+    );
+    assert_eq!(screen.request(RequestBody::Ping).await, Ok(ReplyBody::Pong));
+    drop(screen);
+    tokio::task::yield_now().await;
+    job.terminate().expect("end job");
+}
