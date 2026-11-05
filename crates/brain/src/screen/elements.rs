@@ -173,7 +173,10 @@ impl std::fmt::Debug for SourceError {
 
 pub(crate) trait ElementSource {
     type Node;
-    fn root(&mut self, target: ElementTarget) -> Result<(Self::Node, PhysicalRect), SourceError>;
+    fn root(
+        &mut self,
+        target: ElementTarget,
+    ) -> Result<(Self::Node, PhysicalRect, u32), SourceError>;
     fn read(&mut self, node: &Self::Node) -> Result<NodeProps, SourceError>;
     fn first_child(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
     fn next_sibling(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
@@ -223,7 +226,15 @@ impl ElementTree {
     pub(crate) fn finish(&self, masks: &MaskSink) -> bool {
         let completeness = match self.availability {
             Availability::Unavailable(why) => Completeness::Unknown(why),
-            Availability::Read if self.cut.is_some() => Completeness::Partial,
+            Availability::Read
+                if self.cut.is_some()
+                    || self
+                        .elements
+                        .iter()
+                        .any(|element| element.password && element.screen.size.contains(&0)) =>
+            {
+                Completeness::Partial
+            }
             Availability::Read => Completeness::Complete,
         };
         match masks.lock() {
@@ -307,13 +318,11 @@ fn walk_tree<S: ElementSource>(
         cut: None,
         availability: Availability::Read,
     };
-    let rooted = source.root(*target).and_then(|(root, window)| {
+    let rooted = source.root(*target).and_then(|(root, window, pid)| {
         if !intersects(window, *display) {
             return Err(SourceError::NoWindow);
         }
-        if let ElementTarget::Window { pid, .. } = target
-            && platform.excluded(*pid)?
-        {
+        if platform.excluded(pid)? {
             return Err(SourceError::Excluded);
         }
         Ok((root, window))

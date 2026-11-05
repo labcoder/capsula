@@ -130,10 +130,12 @@ carry physical desktop and window-relative rectangles from the same cached prope
 never appear in Debug or errors. Password names are discarded, their rectangles are published
 immediately, and password subtrees are never descended into.
 
-A source validates the root window and pid; the portable layer rejects roots off the captured
-display and excludes Kumochi's process-image names case-insensitively. Each capture owns a fresh
-mask sink with its capture id, generation and completeness. Publishing a rectangle and finishing
-the walk both advance generation. A full walk is Complete, a cut is Partial, and unavailability
+A source validates the root window and pid and returns its owning pid; the portable layer rejects
+roots off the captured display and excludes Kumochi's process-image names case-insensitively for
+every target, including Foreground. Each capture owns a fresh mask sink with its capture id,
+generation and completeness. Publishing a rectangle and finishing
+the walk both advance generation. A full walk is Complete unless a password rectangle has a zero
+side, which leaves masks Partial while retaining that rectangle. A cut is Partial, and unavailability
 is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
 needs masking: image consumers must withhold or flag those frames, not call them fully masked.
 

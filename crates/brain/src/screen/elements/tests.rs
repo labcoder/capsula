@@ -51,14 +51,11 @@ impl FakeSource {
 
 impl ElementSource for FakeSource {
     type Node = usize;
-    fn root(&mut self, target: ElementTarget) -> Result<(usize, PhysicalRect), SourceError> {
+    fn root(&mut self, _: ElementTarget) -> Result<(usize, PhysicalRect, u32), SourceError> {
         if let Some(error) = self.error {
             return Err(error);
         }
-        if target != TARGET {
-            return Err(SourceError::NoWindow);
-        }
-        Ok((0, self.nodes[0].rect))
+        Ok((0, self.nodes[0].rect, 8))
     }
     fn read(&mut self, node: &usize) -> Result<NodeProps, SourceError> {
         if self.fail_at == Some(*node) {
@@ -90,8 +87,8 @@ impl ElementSource for FakeSource {
 #[derive(Clone)]
 pub(crate) struct FakePlatform(pub(crate) bool);
 impl ElementPlatform for FakePlatform {
-    fn excluded(&mut self, _: u32) -> Result<bool, SourceError> {
-        Ok(self.0)
+    fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
+        Ok(self.0 && pid == 8)
     }
 }
 
@@ -421,7 +418,73 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
 }
 
 #[test]
-fn off_display_pid_mismatch_and_excluded_images_are_unavailable() {
+fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
+    for target in [
+        ElementTarget::Foreground,
+        ElementTarget::Window {
+            window: WindowRef(7),
+            pid: 9,
+        },
+    ] {
+        let now = Instant::now();
+        let mut job = job(1, now + Duration::from_secs(1));
+        job.target = target;
+        let mut source = FakeSource::flat(1);
+        assert_eq!(
+            walk(&mut source, &job, &LIMITS, &|| now, &mut FakePlatform(true)).unwrap(),
+            unavailable(CaptureId(1), Unavailable::Excluded)
+        );
+        assert_eq!(source.reads.get(), 0);
+        assert_eq!(
+            job.masks.lock().unwrap().completeness(),
+            Completeness::Unknown(Unavailable::Excluded)
+        );
+    }
+}
+
+#[test]
+fn empty_password_rectangles_leave_masks_partial() {
+    for (size, completeness) in [
+        ([0, 0], Completeness::Partial),
+        ([0, 1], Completeness::Partial),
+        ([1, 0], Completeness::Partial),
+        ([1, 1], Completeness::Complete),
+    ] {
+        let now = Instant::now();
+        let job = job(1, now + Duration::from_secs(1));
+        let mut source = FakeSource::flat(2);
+        source.nodes[1].password = true;
+        source.nodes[1].rect = PhysicalRect {
+            origin: [10, 20],
+            size,
+        };
+        let tree = walk(
+            &mut source,
+            &job,
+            &LIMITS,
+            &|| now,
+            &mut FakePlatform(false),
+        )
+        .unwrap();
+        assert_eq!(tree.availability, Availability::Read);
+        assert_eq!(tree.cut, None);
+        assert_eq!(tree.elements.len(), 2);
+        assert_eq!(source.reads.get(), 2);
+        let masks = job.masks.lock().unwrap();
+        assert_eq!(masks.completeness(), completeness);
+        assert_eq!(masks.generation(), 2);
+        assert_eq!(
+            masks.rects(),
+            [PhysicalRect {
+                origin: [10, 20],
+                size,
+            }]
+        );
+    }
+}
+
+#[test]
+fn off_display_and_excluded_images_are_unavailable() {
     let now = Instant::now();
     let mut job = job(1, now + Duration::from_secs(1));
     let mut source = FakeSource::flat(1);
@@ -438,29 +501,13 @@ fn off_display_pid_mismatch_and_excluded_images_are_unavailable() {
         unavailable(CaptureId(1), Unavailable::NoWindow)
     );
     job.display = RECT;
-    job.target = ElementTarget::Window {
-        window: WindowRef(7),
-        pid: 9,
-    };
-    assert_eq!(
-        walk(
-            &mut source,
-            &job,
-            &LIMITS,
-            &|| now,
-            &mut FakePlatform(false)
-        )
-        .unwrap(),
-        unavailable(CaptureId(1), Unavailable::NoWindow)
-    );
-    job.target = TARGET;
     assert_eq!(
         walk(&mut source, &job, &LIMITS, &|| now, &mut FakePlatform(true)).unwrap(),
         unavailable(CaptureId(1), Unavailable::Excluded)
     );
     assert_eq!(source.reads.get(), 0);
     assert_eq!(job.masks.lock().unwrap().rects(), []);
-    assert_eq!(job.masks.lock().unwrap().generation(), 3);
+    assert_eq!(job.masks.lock().unwrap().generation(), 2);
     assert_eq!(
         job.masks.lock().unwrap().completeness(),
         Completeness::Unknown(Unavailable::Excluded)
