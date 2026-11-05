@@ -370,8 +370,7 @@ fn masks_are_capture_bound_and_completeness_reaches_both_encodings() {
         Completeness::Partial,
         Completeness::Complete,
     ] {
-        let sink: MaskSink =
-            std::sync::Arc::new(std::sync::Mutex::new(MaskSet::new(CaptureId(2))));
+        let sink: MaskSink = std::sync::Arc::new(std::sync::Mutex::new(MaskSet::new(CaptureId(2))));
         let mut masks = sink.lock().unwrap();
         masks.finish(completeness);
         let clean = sanitize(&mut raw, &masks).unwrap();
@@ -393,7 +392,10 @@ fn the_first_finish_wins_so_a_late_complete_cannot_hide_unknown_masks() {
     let mut masks = MaskSet::new(CaptureId(3));
     masks.finish(Completeness::Unknown(Unavailable::Busy));
     masks.finish(Completeness::Complete);
-    assert_eq!(masks.completeness(), Completeness::Unknown(Unavailable::Busy));
+    assert_eq!(
+        masks.completeness(),
+        Completeness::Unknown(Unavailable::Busy)
+    );
     assert_eq!(masks.generation(), 1);
     let mut cut = MaskSet::new(CaptureId(3));
     cut.finish(Completeness::Partial);
