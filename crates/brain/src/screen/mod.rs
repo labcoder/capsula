@@ -1,6 +1,8 @@
 //! Killable screen work, isolated from the brain's async runtime.
 
 mod capture;
+#[cfg_attr(not(test), expect(dead_code, reason = "A3a2 serves the walk"))]
+mod elements;
 mod encode;
 mod frame;
 #[cfg_attr(
@@ -15,6 +17,7 @@ mod worker;
 
 pub use crate::supervise::WorkerLost;
 pub(crate) use capture::{Acquired, Capturer, Failure};
+pub use elements::{Availability, Cut, Element, ElementId, ElementTarget, ElementTree};
 pub(crate) use frame::{RawFrame, display_edges};
 pub use mask::Unavailable;
 pub use supervisor::{CaptureError, REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor};
