@@ -250,7 +250,7 @@ flowchart LR
   blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
   write depth or split. One at authored opacity 0.5 or more writes its solid id, so the id is
   the last qualifying layer in that order, not necessarily the nearest surface. Interpenetrating
-  translucent solids can blend in the wrong order (`shortcut:`, OSC-218).
+  translucent solids can blend in the wrong order (`shortcut:`, OSC-242).
 - **Samples.** Motion frames take one sample at the texel centre; rest frames take four on a
   rotated grid at (−1/8, −3/8), (3/8, −1/8), (−3/8, 1/8) and (1/8, 3/8) from the centre and
   box-resolve them. A texel's id is the most frequent sample id, background included, with ties
@@ -344,7 +344,7 @@ Ids already encode raster coverage and opacity: an opaque unlabelled solid block
 below authored opacity 0.5 passes, and 0.5 blocks. Near-clipped geometry has no id. Rest chooses
 the most frequent of four sample ids, background included, with ties won by the lowest first
 sample index. Translucent ids follow the last qualifying polygon in the approximate painted
-centroid order, **not necessarily the nearest geometric surface** (OSC-218). A pick within one
+centroid order, **not necessarily the nearest geometric surface** (OSC-242). A pick within one
 **internal texel** of an edge, mapped separately through both frozen axis ratios and including
 bilinear filtering, can differ from an exact ray. This is not a one-display-pixel tolerance.
 The scaled pointer/oracle fixtures reuse the frame's independent f64 ray oracle and omit only
