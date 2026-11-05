@@ -131,8 +131,8 @@ that.
 
 A job is one model request outside any run, in a one-job slot the coordinator owns
 (`coordinator/job.rs`; the pure parts are in `jobs.rs` and `context/compact.rs`). A task's run
-starts a title job, and when that ends on its own, a compaction job for the same thread (see
-[Compaction](#compaction)); Kumo's run starts compaction only.
+starts a title job, and when that writes its title or its read finds nothing to do, a compaction
+job for the same thread (see [Compaction](#compaction)); Kumo's run starts compaction only.
 
 ```mermaid
 stateDiagram-v2
@@ -141,7 +141,7 @@ stateDiagram-v2
     Reading --> Sending: the read finds work and no delete reached what it read
     Sending --> Writing: the round completes with a title or summary
     Writing --> Idle: TitleSet or SummaryStored for this job
-    Idle --> Reading: a title job ended on its own, so compaction follows
+    Idle --> Reading: a title job wrote its title or had nothing to do, so compaction follows
     Reading --> Idle: a new run, a delete, sign-out, nothing to do, failure
     Sending --> Idle: a new run, a delete, sign-out, a lease deadline, failure
 ```
@@ -150,7 +150,9 @@ stateDiagram-v2
   account is signed in, no run is current and sends haven't failed closed. The read finds nothing
   once the title isn't first words (a user's rename or an earlier model title), so the trigger
   keeps no state of its own: a failed job, or a first run that didn't end `Done`, tries again at
-  the next `Done`. A job never retries on its own.
+  the next `Done`. A job never retries on its own, and a job whose request went out but wrote
+  nothing (it failed, or a delete voided its answer) ends with nothing after it, so after a
+  usage-limit answer no further automatic request goes out until the next `Done`.
 - **Key.** `JobKey { thread, serial }`, the serial from the build attempts' counter, so no key
   repeats. An input for any other key is stale.
 - **Read.** `StoreOp::ReadJob` runs on the page reader after every op sent before it, in one read

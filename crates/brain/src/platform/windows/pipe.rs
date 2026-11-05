@@ -178,7 +178,7 @@ fn descriptor_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
 }
 
 /// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
-fn user_sid() -> io::Result<String> {
+pub(super) fn user_sid() -> io::Result<String> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: plain call returning a pseudo-handle that needs no closing.
     let process = unsafe { GetCurrentProcess() };

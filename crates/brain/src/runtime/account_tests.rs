@@ -28,7 +28,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::context::ConnectionTag;
-use crate::coordinator::{Availability, Ready, StoreOp};
+use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
 use crate::engines::responses::Bearer;
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
@@ -1246,16 +1246,21 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
     let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     let mut brain = test_support::brain_with(&scratch, "", accounts);
     let mut seen = brain.observe();
-    let mut titles = move || {
-        std::iter::from_fn(|| seen.try_recv().ok())
-            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadJob(_))))
-            .count()
-    };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.finish_task("first").await;
-        assert_eq!(titles(), 1, "the account could send at startup");
+        timeout(PATIENCE, async {
+            while !matches!(
+                seen.recv().await.expect("the brain reports"),
+                Seen::StoreOpQueued(StoreOp::ReadJob(ReadJob {
+                    kind: JobKind::Title,
+                    ..
+                }))
+            ) {}
+        })
+        .await
+        .expect("the account could send at startup, so the title job starts");
         shell
             .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
             .await;
@@ -1263,8 +1268,15 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
             shell.frame().await,
             ControlToShell::Account(AccountView::SignedOut { .. })
         ) {}
+        // The first task's jobs, compaction after its title included, end with the sign-out.
+        while seen.try_recv().is_ok() {}
         shell.finish_task("second").await;
-        assert_eq!(titles(), 0, "signed out, so no job starts");
+        // Done is told in the same step that would start the run's job, after it, so a job
+        // queued for the second task would already be here.
+        let jobs = std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadJob(_))))
+            .count();
+        assert_eq!(jobs, 0, "signed out, so no job starts");
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
