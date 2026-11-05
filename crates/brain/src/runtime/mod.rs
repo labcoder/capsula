@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
     Transcript,
 };
@@ -39,6 +39,7 @@ use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
 };
+use crate::engines::responses::AccessAsk;
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -128,8 +129,12 @@ pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
     #[cfg(debug_assertions)]
     Fixture(Box<dyn Engine>),
-    /// The account's engine answers, so runs need a usable account.
-    Account(Box<dyn Engine>),
+    /// The account's engine answers, so runs need a usable account. Its rounds ask for the
+    /// bearer on `asks`.
+    Account {
+        engine: Box<dyn Engine>,
+        asks: mpsc::UnboundedReceiver<AccessAsk>,
+    },
 }
 
 /// The coordinator and the systems that outlive one shell connection.
@@ -156,6 +161,8 @@ pub(crate) struct Brain {
     pub(crate) compact_at: u64,
     /// Rounds waiting for leave to send.
     asks: Asks,
+    /// Rounds asking for the bearer.
+    access: mpsc::UnboundedReceiver<AccessAsk>,
     /// When each granted send's deadline passes, in no order.
     send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
@@ -233,12 +240,15 @@ impl Brain {
         account: Accounts,
     ) -> std::io::Result<Self> {
         #[cfg(debug_assertions)]
-        let (engine, fixture) = match engine {
-            Selected::Fixture(engine) => (engine, true),
-            Selected::Account(engine) => (engine, false),
+        let (engine, access, fixture) = match engine {
+            Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),
+            Selected::Account { engine, asks } => (engine, asks, false),
         };
         #[cfg(not(debug_assertions))]
-        let Selected::Account(engine) = engine;
+        let Selected::Account {
+            engine,
+            asks: access,
+        } = engine;
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         #[cfg(test)]
@@ -272,6 +282,7 @@ impl Brain {
             job: None,
             compact_at: crate::jobs::compact_at(),
             asks: Asks::default(),
+            access,
             send_deadlines: Vec::new(),
             deadline: None,
             retry_at: None,
@@ -482,6 +493,11 @@ impl Brain {
                     debug_assert!(applied.is_ok(), "applying without a shell can't fail");
                     continue;
                 }
+                Some(ask) = self.access.recv() => {
+                    let answered = self.access_asked(ask, None);
+                    debug_assert!(answered.is_ok(), "answering without a shell can't fail");
+                    continue;
+                }
             };
             self.offline(input);
         }
@@ -654,6 +670,7 @@ impl Brain {
     /// one the store has already moved past. If it hasn't settled within [`SCENES_WAIT`], the
     /// connection ends as unavailable instead. After `Scenes`, the snapshots go out a chunk at
     /// a time whenever the data queue has room, ahead of engine events.
+    #[expect(clippy::too_many_lines, reason = "one arm per source the loop serves")]
     async fn core(
         &mut self,
         controls: &mut mpsc::Receiver<(ControlToBrain, usize)>,
@@ -709,6 +726,12 @@ impl Brain {
                 }
                 input = self.account.next() => {
                     if self.account_input(input, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
+                Some(ask) = self.access.recv() => {
+                    if self.access_asked(ask, Some(&mut link)).is_err() {
                         return Ended::Lost;
                     }
                     continue;
@@ -1019,7 +1042,7 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
 }
 
 /// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (u32, Option<ThreadId>, String);
+type Turn = (u32, Option<ThreadId>, Content);
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.

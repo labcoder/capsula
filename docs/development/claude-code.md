@@ -59,5 +59,71 @@ sequenceDiagram
 - **Threads.** stdin and stdout run on their own threads. The pipe runs on a current-thread tokio
   runtime, because synchronous Windows pipe I/O serializes reads and writes on one file object.
 
+## The launch policy
+
+`REVIEWED_CLAUDE_CODE` (`engines/claude_code/policy.rs`) holds one row per reviewed Claude Code
+version: its launch policy and the facts its audit expects. Any other version is
+`Unsupported::Unreviewed`, with no override. Adding a version is a reviewed PR with its probe.
+
+- **Arguments.** `--version`, `auth status --json`, `auth login` and `auth logout` get only their
+  subcommand. A question gets P0's argv: `-p --restricted --strict-mcp-config --mcp-config <file>
+  --disable-slash-commands --tools "" --no-session-persistence --allowedTools <tools>
+  --input-format stream-json --output-format stream-json --verbose --include-partial-messages
+  --max-turns 8 --exclude-dynamic-system-prompt-sections --model <model>`, then `--effort` when the
+  snapshot names one. `--allowedTools` takes every value up to the next switch, so it never comes
+  last.
+- **Environment, built and never inherited.** `CLAUDE_CONFIG_DIR`, `USERPROFILE`, `HOME`,
+  `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and `CLAUDE_CODE_TMPDIR` point at Kumochi's own
+  folders. Six documented switches are `1`: `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
+  `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
+  `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
+  then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`.
+- **Ownership.** C3 returns owned `LaunchData`; C2 and C5a keep it alive and borrow it into
+  `platform::Launch` with the exe, the `work` folder, the stdio and the jobs. C3 starts nothing.
+- **Before any launch,** `may_launch` refuses with `PolicyFailed::ManagedPolicy` when an endpoint
+  managed source is present or can't be ruled out, or when the policy requires a server-managed
+  signal; and with `TurnCap` when the version's `--max-turns 8` isn't verified. The presence check
+  (`platform::managed_presence`) looks at `C:\Program Files\ClaudeCode\` (`managed-settings.json`,
+  `managed-settings.d`, `managed-mcp.json`) and the `Settings` value under
+  `HKLM\SOFTWARE\Policies\ClaudeCode` and `HKCU\SOFTWARE\Policies\ClaudeCode`. It never enumerates
+  or reads them. Only "file not found" or "path not found" is absent; anything else counts as
+  present. Server-managed policy from a Team or Enterprise organization can't be seen, so it's
+  disclosed instead (`ServerManaged::Disclosed`).
+
+## The audit
+
+`engines/claude_code/audit.rs` judges what C6's mapper parsed, in two parts, and returns an
+`AuditFailed` reason, never what it saw.
+
+```mermaid
+sequenceDiagram
+    participant B as brain (C5b)
+    participant C as claude.exe
+    B->>C: control_request initialize, mcp_status
+    C-->>B: two control_responses
+    Note over B: PreInputAudit: Ready, SignedOut or AuditFailed
+    B->>C: the seed (one user message)
+    C-->>B: system:init
+    Note over B: PostSeedAudit passes, then AuditGate::pass
+    Note over B: tools/call is admitted only while the gate is Passed
+```
+
+- **Before stdin:** the version; no commands; exactly the reviewed agents; then
+  `account.tokenSource`. `"none"` means signed out: the launch is torn down before stdin and the run
+  fails with `ClaudeCodeSignedOut`, not an audit failure. Any other value must be reviewed. Then
+  exactly one server, `kumochi`, `connected`, whose tools are exactly the launch's frozen set. An
+  error response, an unknown or repeated id, or a body of the wrong shape is `Malformed`.
+- **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
+  server, exactly the reviewed plugins each at `builtin`, no skills or slash commands, the reviewed
+  agents and an `apiKeySource` of `none`. A later init must equal the first. `analytics_disabled`
+  is recorded and shown, never judged.
+- **The gate** starts pending. Failure is terminal, so a pass that races a failure loses. A tool
+  already admitted isn't undone; a call still waiting for admission is refused.
+- **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
+  runs before the check.
+- **Signed-in sources aren't recorded yet,** so 2.1.306's row accepts no `tokenSource` but `none`
+  (signed out). The signed-in probe, after owner call 1, adds the value.
+
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).

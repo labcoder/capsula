@@ -235,7 +235,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
-            text: text.to_owned(),
+            text: text.into(),
         };
         let frame = frame::encode(&message, Pipe::Data).expect("encodes");
         self.data_out.write_all(&frame).await.expect("sent");
@@ -499,7 +499,7 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
                 turn,
                 screen: ScreenChoice::None,
                 thread: None,
-                text: text.to_owned(),
+                text: text.into(),
             };
             shell
                 .data_out
@@ -616,7 +616,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             shell.data().await,
             DataToShell::AssistantText {
                 run,
-                delta: "a".to_owned()
+                delta: "a".into()
             }
         );
         assert_eq!(
@@ -645,7 +645,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             shell.data().await,
             DataToShell::AssistantText {
                 run: next,
-                delta: "a".to_owned()
+                delta: "a".into()
             }
         );
         drop(shell);
@@ -695,7 +695,7 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
         }
         let text = |delta: &str| DataToShell::AssistantText {
             run,
-            delta: delta.to_owned(),
+            delta: delta.into(),
         };
         assert_eq!(
             frames,
@@ -790,7 +790,7 @@ async fn a_full_control_queue_still_applies_store_effects() {
         Input::Turn {
             turn: 1,
             thread: None,
-            text: "go".to_owned(),
+            text: "go".into(),
         },
     );
     let stored = brain.inputs.recv().await.expect("a reply");

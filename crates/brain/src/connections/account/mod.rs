@@ -79,6 +79,12 @@ pub enum Input {
     },
     /// The model list refused this account's plan (`subscription_sharing_user_not_eligible`).
     PlanUnavailable,
+    /// A provider refused the bearer of `generation` (a 401): that set is due, so the next
+    /// access refreshes it once.
+    Refused {
+        /// The generation of the set the bearer came from.
+        generation: u64,
+    },
     /// The identity check of `generation`'s rotated set ended.
     Validated {
         /// The account generation it checked.
@@ -181,6 +187,8 @@ pub enum Effect {
     Access {
         /// The caller's ticket.
         ticket: u64,
+        /// The generation of the set the bearer came from.
+        generation: u64,
         /// The bearer, or why there's none.
         result: Result<Secret<Zeroizing<String>>, Denied>,
     },
@@ -247,6 +255,8 @@ pub struct AccountState {
     /// The flight already sent a refresh, so it hands out what that brought rather than
     /// renewing again.
     renewed: bool,
+    /// The generation whose bearer a provider refused, renewed on the next access.
+    refused: Option<u64>,
     /// The wall time the latest timed input carried, for the expiry of a set saved since.
     now: Option<u64>,
     /// The generation a session the provider ended left: the registration and email stay, shown
@@ -285,6 +295,7 @@ impl AccountState {
             validating: None,
             tickets: Vec::new(),
             renewed: false,
+            refused: None,
             now: None,
             ended: None,
             jobs: VecDeque::new(),
@@ -376,6 +387,10 @@ impl AccountState {
                         .as_ref()
                         .is_some_and(|account| account.expose().tokens.is_some());
             }
+            Input::Refused { generation } if generation == self.generation => {
+                self.refused = Some(generation);
+            }
+            Input::Refused { .. } => {}
             Input::Access { ticket, now } => self.access(ticket, now, &mut effects),
             Input::Refreshed {
                 generation,

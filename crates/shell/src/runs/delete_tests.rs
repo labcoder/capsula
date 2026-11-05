@@ -35,7 +35,7 @@ fn submit(runs: &mut Runs) -> Option<ThreadId> {
 fn text(run: u64) -> DataToShell {
     DataToShell::AssistantText {
         run: RunId(run),
-        delta: "t".to_owned(),
+        delta: "t".into(),
     }
 }
 

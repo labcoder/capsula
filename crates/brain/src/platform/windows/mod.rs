@@ -7,6 +7,7 @@ mod fs;
 mod job;
 mod library;
 mod pipe;
+mod policy;
 mod process;
 mod protected;
 mod root_store;
@@ -27,6 +28,7 @@ pub(super) use library::{
 pub use pipe::{Instance, PipeServer, client_image, create_owner_only, server_image, session_id};
 #[cfg(test)]
 pub(crate) use pipe::{PipeClient, test_pair};
+pub use policy::{managed_presence, system_env};
 pub use process::launch_detached;
 pub(super) use protected::{Untrusted, hold_chain, hold_file, local_app_data, owner_only_dir};
 #[cfg(test)]

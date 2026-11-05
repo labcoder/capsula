@@ -1,7 +1,8 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
 use kumochi_protocol::message::{
-    DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
+    Content, DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId,
+    ThreadTitle,
 };
 
 use std::fmt;
@@ -39,11 +40,11 @@ pub enum StoreOp {
         /// The thread.
         thread: ThreadId,
         /// The new thread's title, or `None` for an existing thread.
-        title: Option<String>,
+        title: Option<Content>,
         /// The run.
         run: RunId,
         /// The user's text.
-        text: String,
+        text: Content,
     },
     /// The text streamed since the last write, then one step.
     CommitStep {
@@ -52,7 +53,7 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
         /// Text streamed before the step, if any.
-        text: Option<String>,
+        text: Option<Content>,
         /// A new scene for a run's first step, or the run's scene.
         scene: SceneTarget,
         /// Its index.
@@ -67,7 +68,7 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
         /// Text streamed since the last step, if any.
-        text: Option<String>,
+        text: Option<Content>,
         /// The steps that stayed on screen, when the user stopped the run.
         revealed: Option<Vec<u32>>,
         /// The run's scene, when a Stop kept none of its steps.

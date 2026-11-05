@@ -23,10 +23,7 @@ fn threads() -> PageOf {
 }
 
 async fn queue_turn(turns: &mpsc::Sender<crate::runtime::Turn>, turn: u32, text: &str) {
-    turns
-        .send((turn, None, text.to_owned()))
-        .await
-        .expect("turn");
+    turns.send((turn, None, text.into())).await.expect("turn");
 }
 
 /// The main thread a reply to request 7 lists as a fresh store's only row.
@@ -74,7 +71,7 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
         .handle(Input::Turn {
             turn: 1,
             thread: None,
-            text: "go".to_owned(),
+            text: "go".into(),
         })
         .expect("turn");
     let page = threads();

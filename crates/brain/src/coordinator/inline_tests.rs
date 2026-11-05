@@ -127,7 +127,7 @@ fn compacting() -> Coordinator {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     assert_eq!(
@@ -212,7 +212,7 @@ fn an_empty_summary_or_nothing_to_rewrite_fails_the_run_on_its_budget() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
@@ -232,7 +232,7 @@ fn a_delete_between_the_compact_read_and_the_grant_rebuilds_and_never_compacts_t
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
@@ -284,7 +284,7 @@ fn stop_or_a_replacement_leaves_a_held_summary_ack_stale() {
             core.handle(Input::Turn {
                 turn: 1,
                 thread: Some(T),
-                text: "again".to_owned(),
+                text: "again".into(),
             })
             .expect("a turn is never stale");
         } else {

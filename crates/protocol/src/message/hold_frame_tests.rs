@@ -1,8 +1,8 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, DataToBrain, FocusHint, GestureId,
-    LeaseGeneration, Phase, RunId, RunOrigin, ScreenChoice, ThreadId,
+    CaptureFailure, CaptureFor, Content, ControlToBrain, ControlToShell, DataToBrain, FocusHint,
+    GestureId, LeaseGeneration, Phase, RunId, RunOrigin, ScreenChoice, ThreadId,
 };
 use crate::frame::{self, HEADER_LEN, Pipe};
 use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
@@ -209,7 +209,7 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 turn: u32::MAX,
                 screen,
                 thread: Some(ThreadId(u64::MAX)),
-                text: String::new(),
+                text: Content::default(),
             },
             Pipe::Data,
             size,
