@@ -48,7 +48,21 @@ impl Accounts {
             | ErrorKey::RequestRefused
             | ErrorKey::ResponseUnreadable
             | ErrorKey::SignInNeeded
-            | ErrorKey::ModelUnavailable => {}
+            | ErrorKey::ModelUnavailable
+            // shortcut: the Claude connections' errors have no Accounts row until C7a shows them.
+            | ErrorKey::AnthropicKeyRejected
+            | ErrorKey::AnthropicKeyFormat
+            | ErrorKey::AnthropicUnreachable
+            | ErrorKey::AnthropicRateLimited
+            | ErrorKey::AnthropicCredit
+            | ErrorKey::ClaudeCodeNotFound
+            | ErrorKey::ClaudeCodeUnsupported
+            | ErrorKey::ClaudeCodeSignedOut
+            | ErrorKey::ClaudeCodeAuditFailed
+            | ErrorKey::ClaudeCodePolicy
+            | ErrorKey::ClaudeCodeInputUnsupported
+            | ErrorKey::ClaudeCodeBudget
+            | ErrorKey::ClaudeCodeCleanupPending => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount
@@ -70,6 +84,14 @@ impl Accounts {
 
     pub(crate) fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
+            return false;
+        }
+        if op == AccountOp::SignIn
+            && self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.key() == ErrorKey::RevocationBacklog)
+        {
             return false;
         }
         match (&self.view, op) {

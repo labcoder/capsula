@@ -129,7 +129,7 @@ impl Presence {
         self.runs_changed(cx)
     }
 
-    fn create_text(&self, cx: &mut Context<'_, Self>) -> Result<TextPanel, OpenError> {
+    fn create_text(&mut self, cx: &mut Context<'_, Self>) -> Result<TextPanel, OpenError> {
         let stop = self.escape_hold.shows_stop();
         let events = self.events.clone();
         let close_events = self.events.clone();
@@ -161,6 +161,8 @@ impl Presence {
         window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, events, cx)?;
+                self.input_windows
+                    .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
                 platform::set_capture(window, capture)
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;

@@ -35,6 +35,7 @@ fn started_over(scenes: &[u64]) -> Coordinator {
     let mut core =
         Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(scenes));
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -120,6 +121,7 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
     assert!(!core.clears_in_flight());
     let turn = core
         .handle(Input::Turn {
+            turn: 1,
             thread: None,
             text: "hi".to_owned(),
         })
@@ -246,6 +248,7 @@ fn waiting() -> (Coordinator, Vec<Effect>) {
 fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
     let next = RunId(11);
     let turn = Input::Turn {
+        turn: 1,
         thread: Some(T),
         text: "next".to_owned(),
     };
@@ -292,6 +295,7 @@ fn a_replacement_drops_steps_waiting_for_the_scene_and_the_run_settles() {
     let (mut core, mut effects) = waiting();
     let next = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "next".to_owned(),
         })

@@ -10,7 +10,7 @@ use async_channel::Sender;
 use gpui_kit::{MouseButton, NavigationDirection, Window};
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
@@ -29,16 +29,15 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
-    GetWindowLongPtrW, HICON, HMENU, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA,
-    LoadCursorW, LoadIconW, MA_NOACTIVATE, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SPI_GETWORKAREA,
-    SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, UnregisterClassW, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL,
-    WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, HICON, HMENU, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, LoadCursorW,
+    LoadIconW, MA_NOACTIVATE, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SPI_GETWORKAREA, SWP_HIDEWINDOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    UnregisterClassW, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WNDCLASSEXW, WS_EX_APPWINDOW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, SWP_FRAMECHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
@@ -154,6 +153,8 @@ pub(crate) enum PresenceError {
     /// A frame id didn't fit a message parameter.
     #[error("the frame id doesn't fit a message")]
     FrameId,
+    #[error("no selection surface is bound")]
+    SelectionSurface,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
@@ -339,6 +340,10 @@ impl PresenceNative {
         Ok(())
     }
 
+    pub(crate) fn input_proxy(&self) -> ProxyHandle {
+        ProxyHandle(self.hwnd)
+    }
+
     /// Hides the proxy, so it takes no pointer input; Raw Input and the tray keep working.
     ///
     /// # Errors
@@ -467,11 +472,10 @@ pub(crate) fn configure_presence_window(
     if surface != PresenceSurface::Text {
         style |= flag(WS_EX_NOACTIVATE);
     }
-    style = if surface == PresenceSurface::Overlay {
-        style | pass_through
-    } else {
-        style & !pass_through
-    };
+    if surface != PresenceSurface::Overlay {
+        style &= !pass_through;
+    }
+
     // SAFETY: as above; only flags change.
     unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style) };
     // SAFETY: reads ordinary style flags on this thread's live window.
@@ -517,12 +521,6 @@ pub(crate) fn configure_presence_window(
     } {
         tracing::debug!(%error, "can't remove DWM corner rounding");
     }
-    if surface == PresenceSurface::Overlay {
-        // A layered window stays invisible until it has attributes; full opacity keeps GPUI's alpha.
-        // SAFETY: `hwnd` is live and now layered.
-        unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) }?;
-    }
-
     if surface == PresenceSurface::Text {
         return Ok(());
     }

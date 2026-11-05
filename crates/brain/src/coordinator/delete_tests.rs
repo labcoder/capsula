@@ -49,13 +49,17 @@ fn told(thread: ThreadId, outcome: Deleted, last_run: Option<RunId>) -> Effect {
 
 fn turn(thread: Option<ThreadId>) -> Input {
     Input::Turn {
+        turn: 1,
         thread,
         text: "more".to_owned(),
     }
 }
 
 fn refused(thread: Option<ThreadId>) -> Vec<Effect> {
-    vec![Effect::Control(ControlToShell::TurnRefused { thread })]
+    vec![Effect::Control(ControlToShell::TurnRefused {
+        turn: 1,
+        thread,
+    })]
 }
 
 fn store_delete(thread: ThreadId) -> Effect {
@@ -107,6 +111,7 @@ fn a_delete_ends_the_threads_run_and_its_turns_get_no_run_until_answered() {
 fn a_blank_turn_is_refused_without_a_run() {
     let mut core = fresh();
     let blank = Input::Turn {
+        turn: 1,
         thread: None,
         text: " \n\t ".to_owned(),
     };

@@ -191,6 +191,8 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(9)),
             text: "home".to_owned()
         })
@@ -618,6 +620,7 @@ fn pings_are_answered_and_run_states_passed_on() {
     let pong = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control);
     assert_eq!(pong.expect("read"), Some(ControlToBrain::Pong));
     let state = ControlToShell::RunState {
+        origin: None,
         run: RunId(2),
         thread: ThreadId(3),
         phase: Phase::Failed,
@@ -650,6 +653,8 @@ fn the_ui_s_messages_go_out_on_their_pipes_and_credit_adds_up() {
     let read = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control);
     assert_eq!(read.expect("read"), Some(stop));
     let submit = DataToBrain::TextSubmit {
+        turn: 1,
+        screen: kumochi_protocol::message::ScreenChoice::None,
         thread: None,
         text: "typed".to_owned(),
     };
@@ -874,6 +879,8 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(1)),
             text: "typed".to_owned(),
         })
@@ -934,6 +941,15 @@ fn delete_of(thread: ThreadId, after_turns: u32) -> ControlToBrain {
     }
 }
 
+fn submit_message(turn: u32, thread: ThreadId, text: &str) -> DataToBrain {
+    DataToBrain::TextSubmit {
+        turn,
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        thread: Some(thread),
+        text: text.to_owned(),
+    }
+}
+
 #[test]
 fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answers() {
     let (t, u, v) = (ThreadId(9), ThreadId(3), ThreadId(5));
@@ -950,13 +966,10 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     assert!(runs.confirm_delete(t));
     handle.delete(t);
     assert!(handle.send_deletes(&session));
-    for (thread, typed) in [(u, "u"), (t, "t")] {
+    for (turn, thread, typed) in [(1, u, "u"), (2, t, "t")] {
         assert_eq!(
             frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
-            Some(DataToBrain::TextSubmit {
-                thread: Some(thread),
-                text: typed.to_owned(),
-            })
+            Some(submit_message(turn, thread, typed))
         );
     }
     assert_eq!(
@@ -985,7 +998,10 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             outcome: Deleted::Hidden,
             last_run: None,
         },
-        ControlToShell::TurnRefused { thread: Some(t) },
+        ControlToShell::TurnRefused {
+            turn: 2,
+            thread: Some(t),
+        },
         run_state(1, u, Phase::Done),
     ];
     let mut credit = Vec::new();
@@ -1022,10 +1038,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
     runs.submit("next", send).expect("queued");
     assert_eq!(
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
-        Some(DataToBrain::TextSubmit {
-            thread: Some(ThreadId(1)),
-            text: "next".to_owned(),
-        }),
+        Some(submit_message(3, ThreadId(1), "next")),
         "confirming T's delete returned input to Kumo"
     );
     assert!(runs.confirm_delete(v));
@@ -1114,6 +1127,8 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     assert_eq!(
         frame::read::<DataToBrain>(&mut &b_data, Pipe::Data).expect("read"),
         Some(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(1)),
             text: "next".to_owned(),
         })
@@ -1142,6 +1157,8 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
 
 fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
     ControlToShell::RunState {
+        origin: (phase == Phase::Thinking)
+            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
         run: RunId(run),
         thread,
         phase,
@@ -1154,6 +1171,7 @@ fn answer_stops(server: &PipeClient) {
     while let Ok(Some(message)) = frame::read::<ControlToBrain>(&mut &*server, Pipe::Control) {
         if let ControlToBrain::Stop { run, .. } = message {
             let state = ControlToShell::RunState {
+                origin: None,
                 run,
                 thread: ThreadId(1),
                 phase: Phase::Interrupted,

@@ -48,7 +48,8 @@ fn turn(store: &mut Store, thread: Result<ThreadId, &str>, text: &str) -> (Threa
     (thread, run)
 }
 
-/// A thread with the marker in its title, a user turn, assistant text and a step body.
+/// A thread with the marker in its title, a user turn, assistant text, a step body and its own
+/// summary.
 fn plant(store: &mut Store) -> (ThreadId, RunId) {
     let (thread, run) = turn(
         store,
@@ -79,6 +80,18 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
         )
         .expect("step");
     store.clear_scenes(&[scene]).expect("cleared");
+    let covered = kumochi_protocol::message::EventId(1);
+    assert!(
+        store
+            .store_summary(
+                thread,
+                super::Generation(0),
+                (covered, covered),
+                &format!("summary {MARKER}"),
+                None
+            )
+            .expect("summary")
+    );
     (thread, run)
 }
 
@@ -153,7 +166,7 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 3
+            known: 4
         })
     ));
 }
@@ -519,6 +532,7 @@ fn a_deleted_threads_rows_are_zeroed_in_the_files() {
     store.finish_delete(thread).expect("finish");
     assert_eq!(purge(&mut store), Swap::Done);
     assert!(!contains_marker(&scratch.db()), "found while open");
+    assert_eq!(rows(&store.conn, "summaries"), 0, "its own summary went");
     for table in ["events", "runs", "threads"] {
         assert_eq!(
             rows(&store.conn, table),

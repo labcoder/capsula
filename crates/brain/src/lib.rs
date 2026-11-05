@@ -3,6 +3,7 @@
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
 
+pub mod bridge;
 mod config;
 pub mod connections;
 mod context;
@@ -53,6 +54,9 @@ const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
 
 /// The argument that starts `kumochid` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
+
+/// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
+pub const MCP_BRIDGE: &str = "--mcp-bridge";
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]

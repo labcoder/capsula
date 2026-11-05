@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -82,6 +82,23 @@ ALTER TABLE threads ADD COLUMN title_source TEXT NOT NULL DEFAULT 'words'
 ALTER TABLE threads ADD COLUMN model TEXT;
 ALTER TABLE threads ADD COLUMN effort TEXT CHECK ((model IS NULL) = (effort IS NULL));
 CREATE UNIQUE INDEX threads_main ON threads (kind) WHERE kind = 'main';
+";
+
+/// Summaries of a thread's oldest events, which compaction writes and the context builder reads
+/// in place of the events they cover. They're derived, so they have no full-text index: search
+/// finds the raw events, which stay. A thread's summaries are deleted with it. `model` is NULL
+/// when the engine took no model, as the fixture does.
+const V4: &str = "
+CREATE TABLE summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread INTEGER NOT NULL REFERENCES threads (id),
+    first_event INTEGER NOT NULL,
+    last_event INTEGER NOT NULL CHECK (last_event >= first_event),
+    text TEXT NOT NULL,
+    model TEXT,
+    created_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX summaries_thread ON summaries (thread, id);
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.

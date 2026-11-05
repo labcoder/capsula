@@ -4,6 +4,7 @@ mod folders;
 mod hit_mask;
 mod keyboard;
 mod observer;
+mod overlay_input;
 mod pipe;
 mod presence;
 mod process;
@@ -14,6 +15,7 @@ pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
 pub(crate) use observer::{
     ProxyHandle, ProxyNote, client_origin, performance_frequency, window_handle,
 };
+pub(crate) use overlay_input::OverlayWindows;
 #[cfg(test)]
 pub(crate) use pipe::test_pair;
 pub(crate) use pipe::{PipeClient, session_id};

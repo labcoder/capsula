@@ -232,16 +232,7 @@ mod tests {
     use super::{Placement, S5_LAYOUT, install, link, s5_path, verify};
 
     fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "voice-assets-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("the clock is after 1970")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).expect("scratch folder");
-        path
+        crate::scratch::dir(&format!("voice-assets-{name}"))
     }
 
     fn voice_sha() -> String {

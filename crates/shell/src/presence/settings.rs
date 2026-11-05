@@ -116,7 +116,7 @@ impl Presence {
         Ok(())
     }
 
-    fn create_settings(&self, cx: &mut Context<'_, Self>) -> Result<SettingsPanel, OpenError> {
+    fn create_settings(&mut self, cx: &mut Context<'_, Self>) -> Result<SettingsPanel, OpenError> {
         let model = self.settings.clone();
         let owner = cx.weak_entity();
         let close_owner = owner.clone();
@@ -138,6 +138,8 @@ impl Presence {
         window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, self.events.clone(), cx)?;
+                self.input_windows
+                    .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
                 platform::set_capture(
                     window,
                     if self.gesture.get().holding() {

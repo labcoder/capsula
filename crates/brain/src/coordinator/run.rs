@@ -49,6 +49,13 @@ impl Coordinator {
         if !current.started() || current.finishing {
             return Err(Stale);
         }
+        if current
+            .build
+            .as_ref()
+            .is_some_and(|build| build.inline.is_some())
+        {
+            return self.compact_event(run, event, effects);
+        }
         match event {
             TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
             // A draw the request didn't offer has no effect (D13-H2).
@@ -77,8 +84,9 @@ impl Coordinator {
             TurnEvent::ToolCallReady { call, args } => {
                 self.draw_ready(run, &call, &args, effects)?;
             }
-            // Native items have no reader until the tool loop stores them for replay.
-            TurnEvent::OutputItem { .. } => {}
+            // Native items have no reader until the tool loop stores them, and nothing records
+            // usage yet.
+            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
             // shortcut: a completed round ends the run, draw call and all, which only the fixture
             // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
             TurnEvent::Finished(Finish::Completed)

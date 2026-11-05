@@ -10,7 +10,10 @@
 use std::io::{self, Read, Write};
 
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, encode};
-use crate::message::{AccountOp, ControlToBrain, ControlToShell, DataToBrain, DataToShell};
+use crate::message::{
+    AccountOp, ConnectionOp, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
+    DataToShell,
+};
 
 /// The start of every recording, with the format's version.
 pub const MAGIC: [u8; 5] = *b"KTAP\x02";
@@ -51,6 +54,13 @@ impl Tapped for ControlToBrain {
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
             Self::AccountOp(_) => "AccountOp",
+            Self::HoldRecognized { .. } => "HoldRecognized",
+            Self::KeyUp { .. } => "KeyUp",
+            Self::GestureCancel { .. } => "GestureCancel",
+            Self::FocusHint { .. } => "FocusHint",
+            Self::ExclusionLapsed { .. } => "ExclusionLapsed",
+            Self::Connection(_) => "Connection",
+            Self::Warm { .. } => "Warm",
         }
     }
 
@@ -78,6 +88,16 @@ impl Tapped for ControlToBrain {
                         | AccountOp::EnablePlan
                         | AccountOp::Retry
                 )
+                | Self::Connection(
+                    ConnectionOp::AnthropicKeyStaged
+                        | ConnectionOp::CheckAnthropicKey
+                        | ConnectionOp::RemoveAnthropicKey
+                        | ConnectionOp::ConnectClaudeCode
+                        | ConnectionOp::CancelClaudeSignIn
+                        | ConnectionOp::DisconnectClaudeCode
+                        | ConnectionOp::FindClaudeCode
+                )
+                | Self::Warm { thread: _ }
         )
     }
 }
@@ -98,6 +118,9 @@ impl Tapped for ControlToShell {
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
             Self::ThreadsChanged => "ThreadsChanged",
+            Self::CaptureDone { .. } => "CaptureDone",
+            Self::CaptureFailed { .. } => "CaptureFailed",
+            Self::Connections(_) => "Connections",
         }
     }
 
@@ -111,7 +134,8 @@ impl Tapped for ControlToShell {
                     run: _,
                     thread: _,
                     phase: _,
-                    error: _
+                    error: _,
+                    origin: _
                 }
                 | Self::Ping
                 | Self::Scenes { scenes: _ }
@@ -120,9 +144,14 @@ impl Tapped for ControlToShell {
                     outcome: _,
                     last_run: _
                 }
-                | Self::TurnRefused { thread: _ }
+                | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
                 | Self::ThreadsChanged
+                // Versions, states and content-free reasons only.
+                | Self::Connections(ConnectionsView {
+                    anthropic: _,
+                    claude_code: _
+                })
         )
     }
 }

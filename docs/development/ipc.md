@@ -154,7 +154,7 @@ flowchart LR
 |---|---|---|
 | `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
 | `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
-| `Models` | Data, brain to shell | at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,403 bytes, under the data frame cap |
+| `Models` | Data, brain to shell | the `ConnectionKind` the list belongs to, then at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,404 bytes, under the data frame cap |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
@@ -166,6 +166,24 @@ flowchart LR
   the shell never moves the account on its own. See [accounts](accounts.md).
 - The shell retains the current connection's Account view for Settings → Accounts. Views and
   errors are fenced by the reading connection's generation; disconnect clears the account UI.
+
+## Claude connections
+
+| Message | Pipe | Fields |
+|---|---|---|
+| `Connection` | Control, shell to brain | a `ConnectionOp`: `AnthropicKeyStaged`, `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode` or `FindClaudeCode`; no fields |
+| `Warm` | Control, shell to brain | the `ThreadId` the user is about to type into |
+| `Connections` | Control, brain to shell | a `ConnectionsView`: the key's `KeyView` and Claude Code's `ClaudeCodeView` |
+
+- No key, token or anything Claude Code printed crosses the pipe. The shell stages a pasted key
+  in Credential Manager and sends only `AnthropicKeyStaged`; the brain checks it and moves it.
+- Every reason is a closed enum: a refused key's `KeyRejection`, an `Unsupported` install, the
+  audit check that failed (`AuditFailed`, never what it saw) and the `PolicyFailed` that closed
+  the route. A `ClaudeVersion` is three 16-bit numbers.
+- All three messages are on the tap's content-free list.
+- A `ModelChoice` names its `ConnectionKind`; one saved before Claude existed reads as `ChatGpt`.
+- shortcut: nothing sends or answers these until A1, C2 and C5b, and the shell ignores
+  `Connections` until its Connect screen reads it.
 
 ## Scenes and recovery
 
@@ -239,7 +257,7 @@ stateDiagram-v2
 |---|---|---|
 | `DeleteThread` | Control, shell to brain | `thread`, `after_turns` (the `TextSubmit`s this connection queued before it), `resend` |
 | `ThreadDeleted` | Control, brain to shell | `thread`, `outcome` (`NotHidden`, `Hidden` or `Removed`), `last_run` |
-| `TurnRefused` | Control, brain to shell | the `thread` the refused turn named |
+| `TurnRefused` | Control, brain to shell | `turn` and the `thread` the refused submit named |
 | `ScenesRemoved` | Data, brain to shell | the deleted thread's visible scenes |
 
 ```mermaid
@@ -332,6 +350,40 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   the main id, and submits wait for the new connection's `SettingsView.main_thread`. Opening
   a row only views it: explicit switches and per-turn selection revisions govern targeting,
   as described in [runs](runs.md#the-shells-input-target).
+
+## Hold and screen-choice wire contract
+
+The hold variants are appended to the control enums, and `Listening` is appended to `Phase`.
+Existing handshake bytes stay unchanged; the build-id check still rejects mixed binaries.
+`GestureId(u32)` and `LeaseGeneration(u32)` are shell-owned counters scoped to a connection;
+there is no hold sender yet. A display is a `DisplayRef(PhysicalRect)`, with an `[i32; 2]`
+physical desktop origin and `[u32; 2]` pixel size. Negative origins support displays left of
+or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or CGWindowID on macOS.
+
+| Direction | Control message | Fields |
+| --- | --- | --- |
+| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease` |
+| Shell to brain | `KeyUp`, `GestureCancel` | `gesture` |
+| Shell to brain | `FocusHint` | `gesture`, `hint`: `Region(PhysicalRect)` or `Window(WindowRef)` |
+| Shell to brain | `ExclusionLapsed` | `lease` |
+| Brain to shell | `CaptureDone` | `capture_for`: `Gesture(GestureId)` or `Turn(u32)` |
+| Brain to shell | `CaptureFailed` | `capture_for`, `reason`: `ExclusionUnavailable`, `Cancelled` or `Unavailable` |
+
+These controls are staged: the brain ignores hold controls and logs only their operation
+names until B2a supplies admission and capture tickets; the shell ignores capture results
+until it owns exclusion leases. The tap records only these controls' operation and payload
+length, never coordinates or native window references, even when dumping a forged payload.
+The largest hold control is 42 payload bytes, below the 64 KiB control cap.
+
+Each `TextSubmit` now carries `turn: u32`, counted from one per connection, and
+`screen: ScreenChoice`. The shell advances the count only after a successful enqueue and
+currently always sends `None`; `Include { lease }` is reserved for B3a's setting. The brain
+preserves FIFO admission and copies that submit's `turn` into `TurnRefused` or the admitted
+run's first `RunState.origin: Some(RunOrigin::Typed { turn })`. Later states have `origin: None`.
+`RunOrigin::Hold { gesture }` and `Phase::Listening` are reserved for hold admission. The shell
+still settles pending turns in FIFO order; B2a replaces that with keyed correlation.
+Slice 7 will append `t_qpc` to `HoldRecognized` and `KeyUp`, append `chunks` to `KeyUp`, and
+add `KeyDown`, `MicPcm` and `Transcribing` without renaming these types or allocating another run.
 
 ## Scene v1 wire contract
 
