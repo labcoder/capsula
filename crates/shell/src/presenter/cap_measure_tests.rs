@@ -360,12 +360,21 @@ fn disposal_fixture() -> (super::Presenter, Instant) {
     assert!(controls(&effects).is_empty());
     assert_eq!(presenter.global.usage().objects, 1500);
     assert_eq!(presenter.scenes.len(), 4);
+    let (sample, effects) = presenter.sample(0);
+    assert!(sample.visible);
+    assert!(effects.is_empty());
     (presenter, now)
 }
 
 #[test]
 fn the_disposal_fixture_really_retains_1500_objects_across_four_scenes() {
     let (mut presenter, now) = disposal_fixture();
+    let mut items = 0;
+    assert!(!presenter.frames.borrow().paint(|frame| {
+        items += frame.items().len();
+        Ok::<_, std::fmt::Error>(())
+    }));
+    assert_eq!(items, 1500);
     let effects = presenter.clear(now).expect("global clear");
     assert_eq!(
         controls(&effects),
