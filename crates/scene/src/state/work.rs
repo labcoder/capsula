@@ -10,6 +10,7 @@ use crate::{
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
     record::{Anchor, Anim, Axis, AxisScale, ChartKind, Ease, Enter, KeyValue, Op, Point, Track},
+    three::{self, size::MeshError},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -70,6 +71,17 @@ pub(crate) struct Work {
     pub inherited_rotation: bool,
     pub enter: Option<Enter>,
     pub motion: BTreeMap<&'static str, Motion>,
+    pub solid: Option<SolidWork>,
+}
+
+/// A solid's authored placement, sized before any tessellation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SolidWork {
+    /// Length of the authored translation.
+    pub pos: f64,
+    pub scale: f64,
+    /// Largest local vertex distance from the solid's own origin.
+    pub reach: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -112,8 +124,8 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         enter: entrance(op),
         ..Work::default()
     };
-    let name = super::object::visual(op)
-        .expect("only visual operations get work metadata")
+    let name = super::object::model(op)
+        .expect("only model operations get work metadata")
         .name;
     let fail = |field, code| StepError::in_step(&step.id, op_path(index, name).field(field), code);
     match op {
@@ -187,8 +199,37 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             work.usage.marks = r.data.len();
         }
         Op::Node(_) | Op::Edge(_) => {}
-        Op::Anim(_) | Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => {
-            unreachable!("only visual operations get work metadata")
+        Op::View3d(r) => {
+            work.usage.views = 1;
+            if let Some(b) = r.bounds {
+                work.extent = rect_extent(b).map_err(|code| fail("box", code))?;
+            }
+        }
+        Op::Solid(r) => {
+            let sized = |error| match error {
+                MeshError::Shape(shape) => fail(shape.field, shape.code),
+                MeshError::Degenerate(field) => fail(field, ErrorCode::Degenerate),
+                MeshError::Cancelled | MeshError::Full => {
+                    unreachable!("sizing neither polls nor writes")
+                }
+            };
+            let triangles = three::size::triangles(r).map_err(sized)?;
+            work.usage.solids = 1;
+            work.usage.triangles =
+                usize::try_from(triangles).expect("solid triangle counts fit usize");
+            work.solid = Some(SolidWork {
+                pos: r.pos.map_or(0.0, |p| {
+                    p.iter()
+                        .map(|v| f64::from(v.get()).powi(2))
+                        .sum::<f64>()
+                        .sqrt()
+                }),
+                scale: r.scale.map_or(1.0, |s| f64::from(s.get())),
+                reach: three::size::reach(r).map_err(sized)?,
+            });
+        }
+        Op::Anim(_) | Op::Mermaid(_) => {
+            unreachable!("only model operations get work metadata")
         }
     }
     Ok(work)
@@ -350,6 +391,20 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
             return Err(fail("repeat", ErrorCode::OutOfRange));
         }
     }
+    if anim.track == Track::Pos3 {
+        return Ok(Motion {
+            keys: anim.keys.len(),
+            min: [0.0; 2],
+            max: [pos3_reach(anim), 0.0],
+        });
+    }
+    if anim.track == Track::Rot3 {
+        return Ok(Motion {
+            keys: anim.keys.len(),
+            min: [0.0; 2],
+            max: [0.0; 2],
+        });
+    }
     let mut min = [f32::INFINITY; 2];
     let mut max = [f32::NEG_INFINITY; 2];
     for (_, value) in &*anim.keys {
@@ -383,6 +438,50 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
         min,
         max,
     })
+}
+
+/// Largest offset length a `pos3` track can sample, from rest through every key and, under a
+/// spring, each pair's overshoot in every direction it plays, rounded up so the f32 never
+/// understates it.
+fn pos3_reach(anim: &Anim) -> f32 {
+    let point = |value: &KeyValue| match value {
+        KeyValue::V3(v) => v.map(|c| f64::from(c.get())),
+        _ => unreachable!("pos3 keys were paired with vectors"),
+    };
+    let mut previous = [0.0; 3];
+    let mut reach = 0.0_f64;
+    let length = |p: [f64; 3]| p.iter().map(|c| c * c).sum::<f64>().sqrt();
+    for (_, value) in &*anim.keys {
+        let next = point(value);
+        reach = reach.max(length(next));
+        if anim.ease == Ease::Spring {
+            let k = f64::from(crate::motion::SPRING_OVERSHOOT);
+            reach = reach.max(length(std::array::from_fn(|d| {
+                next[d] + (next[d] - previous[d]) * k
+            })));
+            if anim.yoyo {
+                reach = reach.max(length(std::array::from_fn(|d| {
+                    previous[d] + (previous[d] - next[d]) * k
+                })));
+            }
+        }
+        previous = next;
+    }
+    round_up(reach)
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "narrowing is corrected upwards immediately"
+)]
+fn round_up(value: f64) -> f32 {
+    let narrow = value as f32;
+    if f64::from(narrow) < value {
+        narrow.next_up()
+    } else {
+        narrow
+    }
 }
 
 fn key_vector(value: &KeyValue) -> [f32; 2] {

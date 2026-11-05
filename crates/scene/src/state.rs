@@ -3,6 +3,7 @@ mod binding;
 pub(crate) mod metrics;
 pub(crate) mod object;
 mod retire;
+mod three;
 pub(crate) mod work;
 
 use crate::{
@@ -62,6 +63,25 @@ pub enum StopOutcome {
     Kept,
     /// Nothing had activated.
     Cleared,
+}
+
+/// Refuses 3D views, solids and tracks at an ingress whose displays cannot prepare them yet.
+/// # Errors
+/// Returns `Unsupported` at the first 3D `put`.
+// shortcut: the brain calls this until views prepare (slice 5 PR 6); remove it with that call.
+pub fn refuse_three_dimensional(step: &Step) -> Result<(), StepError> {
+    let index = step.put.iter().position(|op| match op {
+        crate::Op::View3d(_) | crate::Op::Solid(_) => true,
+        crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
+        _ => false,
+    });
+    index.map_or(Ok(()), |index| {
+        Err(StepError::in_step(
+            &step.id,
+            FieldPath::default().field("put").index(index),
+            ErrorCode::Unsupported,
+        ))
+    })
 }
 
 fn serialize_step<S: serde::Serializer>(step: &Step, serializer: S) -> Result<S::Ok, S::Error> {
@@ -411,19 +431,6 @@ impl SceneState {
                 ErrorCode::OverBudget(Budget::Steps),
             ));
         }
-        for (index, op) in step.put.iter().enumerate() {
-            let three = match op {
-                crate::Op::View3d(_) | crate::Op::Solid(_) => true,
-                crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
-                _ => false,
-            };
-            if three {
-                return Err(fail(
-                    FieldPath::default().field("put").index(index),
-                    ErrorCode::Unsupported,
-                ));
-            }
-        }
         if let Start::After { step: earlier, .. } = &step.start
             && !self
                 .step_ids
@@ -440,7 +447,7 @@ impl SceneState {
         minimum.objects += step
             .put
             .iter()
-            .filter(|op| object::visual(op).is_some())
+            .filter(|op| object::model(op).is_some())
             .count();
         minimum.scenes = 1;
         if minimum.objects > MAX_LIVE_OBJECTS {
@@ -497,7 +504,7 @@ impl SceneState {
         let mut owned = self.objects_bytes - heap::btree::<WireId, Object>(self.objects.len());
         let mut created = Vec::new();
         for (index, op) in step.put.iter().enumerate() {
-            if let Some(v) = object::visual(op) {
+            if let Some(v) = object::model(op) {
                 if self.reserved.contains(v.id) || after.contains_key(v.id) {
                     return Err(fail(
                         object::path(index, v.name).field("id"),
@@ -540,6 +547,20 @@ impl SceneState {
             }
         }
         changed.attribute(map_bytes(&changed));
+        three::bounds(
+            &after,
+            after
+                .iter()
+                .chain(self.pending().map(|(id, object)| (id, object)))
+                .chain(changed.iter()),
+        )
+        .map_err(|(handle, code)| {
+            let mut path = FieldPath::default().field("put");
+            if let Some(slot) = expansion.source_slot(handle, revision) {
+                path = path.index(slot);
+            }
+            fail(path, code)
+        })?;
         let usage = metrics::charge(
             after
                 .iter()
@@ -824,6 +845,24 @@ impl SceneState {
         }
         metrics::freeze_detached(&mut after, &revealed).map_err(StepError::new)?;
         discarded.extend(after.extract_if(.., |_, object| !revealed.contains(&object.handle)));
+        // A 3D object never re-roots: it leaves with its view or any attachment ancestor.
+        loop {
+            let orphans: Vec<WireId> = after
+                .iter()
+                .filter(|(_, object)| {
+                    object.kind.three_dimensional()
+                        && object.references.iter().any(|id| !after.contains_key(id))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if orphans.is_empty() {
+                break;
+            }
+            for id in orphans {
+                let object = after.remove(&id).expect("orphans were just found in after");
+                discarded.push((id, object));
+            }
+        }
         let discarded_bytes = records_bytes(&discarded);
         discarded.attribute(discarded_bytes);
         let effective =

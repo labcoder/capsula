@@ -74,6 +74,37 @@ pub fn triangles(solid: &Solid) -> Result<u32, MeshError> {
     })
 }
 
+/// Returns the largest distance of any generated vertex from the solid's own local origin.
+/// # Errors
+/// Rejects the same invalid shape fields as [`Solid::geometry`].
+pub fn reach(solid: &Solid) -> Result<f64, MeshError> {
+    let length = |p: &[f64]| p.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let farthest = |points: &mut dyn Iterator<Item = f64>| points.fold(0.0, f64::max);
+    Ok(match solid.geometry()? {
+        Geometry::Box { size } => 0.5 * length(&size.map(f64::from)),
+        Geometry::Sphere { r } => f64::from(r),
+        Geometry::Cylinder { r, h } => length(&[f64::from(r), 0.5 * f64::from(h)]),
+        Geometry::Cone { r, top, h } => length(&[f64::from(r.max(top)), 0.5 * f64::from(h)]),
+        Geometry::Torus { ring, tube } => f64::from(ring) + f64::from(tube),
+        Geometry::Extrude { outline, depth } => farthest(&mut outline.iter().map(|p| {
+            length(&[
+                f64::from(p[0].get()),
+                f64::from(p[1].get()),
+                0.5 * f64::from(depth),
+            ])
+        })),
+        Geometry::Lathe { profile } => farthest(
+            &mut profile
+                .iter()
+                .map(|p| length(&p.map(|c| f64::from(c.get())))),
+        ),
+        Geometry::Tube { path, thickness } => {
+            farthest(&mut path.iter().map(|p| length(&p.map(|c| f64::from(c.get())))))
+                + f64::from(thickness)
+        }
+    })
+}
+
 pub(super) fn radius(geometry: Geometry<'_>) -> f64 {
     let dimensions = match geometry {
         Geometry::Box { size } => size.map(f64::from),

@@ -68,5 +68,9 @@ pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOLIDS: usize = 160;
 /// Reserved slice 5 cap: triangles per scene and globally.
 pub const MAX_TRIANGLES: usize = 24_000;
+/// Slice 5 guess: triangles in a view with a `pos3` or `rot3` track.
+pub const MAX_MOVING_TRIANGLES: usize = 6_000;
+/// D1 restriction: 3D views per scene.
+pub const MAX_VIEWS: usize = 1;
 /// Reserved slice 5 cap: segments per curved solid.
 pub const MAX_CURVED_SEGMENTS: usize = 48;
