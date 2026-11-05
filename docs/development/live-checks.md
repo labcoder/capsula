@@ -83,9 +83,10 @@ queues a second round, during which the brain drops a Connect.
 - **Anything else** (unsupported, turned off, in use, unavailable, a failed audit or policy, a
   cleanup pending) is printed and refused at once, with no op sent. A main that ships
   `SIGN_IN = Undecided` ends discovery at `unsupported: sign-in store`, so it stops there.
-- **`--disconnect`** refuses while a cleanup is already pending, since the brain then ignores it
-  and retries the cleanup as it starts. Otherwise it sends `DisconnectClaudeCode` after discovery, so the logout has an install to
-  run, and waits for the view to leave `CleanupPending`. It succeeds on signed out or not found. A
+- **`--disconnect`** sends `DisconnectClaudeCode` after discovery, so the logout has an install to
+  run. Only `CleanupPending` answers it, within 10 s: a discovery view that lands late is skipped.
+  Found already `CleanupPending` (a cleanup that failed, which the op retries), that's the answer.
+  It then waits for the view to leave `CleanupPending`. It succeeds on signed out or not found. A
   deletion that fails also stays `CleanupPending`, so it shows as the deadline, and the brain
   retries it as it next starts.
 
@@ -125,7 +126,7 @@ path.
 | The sign-in settling | 330 s from the answer, one deadline however many views arrive: the brain ends its attempt at 5 min | sends `CancelSignIn`, waits 10 s for its answer, fails |
 | Claude Code's discovery | 30 s from the first view [guess]: the harness's budget for `--version` and the status call, not derived from the lane's 10 s root-run bound, since teardown and folder checks come on top | `NotFound` is the answer |
 | Claude Code's sign-in settling | 330 s from the answer, one deadline: the lane ends the login at 5 min, then reads the status | sends `Quitting`, which ends the login, and fails |
-| Claude Code's op answers | 10 s from the op, one deadline: snapshots that still show the view before the op, such as the Anthropic key's, are skipped | fails |
+| Claude Code's op answers | 10 s from the op, one deadline: Connect's answer is the first view unlike the one before it, so stale snapshots such as the Anthropic key's are skipped; Disconnect's is `CleanupPending`, which a pending cleanup already is | fails, naming the last view |
 | Disconnect's cleanup | 45 s from the answer [guess]: the harness's budget for the logout, the deletion and discovery again; the lane bounds root runs, not teardown or deletion | fails; the brain retries the deletion as it starts |
 | The brain exiting after `Quitting` | 15 s | it's ended |
 | Each `taskkill /T /F` | 10 s, then 10 s for the process to go | names every process that may still run |

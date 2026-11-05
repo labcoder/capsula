@@ -93,18 +93,15 @@ fn sign_in(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) ->
 
 /// Ok only when the cleanup finished and left nothing signed in.
 fn sign_out(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) -> Result<()> {
-    // The brain ignores Disconnect then, so no answer would tell it apart from a stale snapshot.
-    ensure!(
-        found != ClaudeCodeView::CleanupPending,
-        "a cleanup is already pending; the brain retries it as it starts"
-    );
     send(wire, ConnectionOp::DisconnectClaudeCode)?;
-    let now = ack(wire, found, "DisconnectClaudeCode")?;
-    ensure!(
-        now == ClaudeCodeView::CleanupPending,
-        "disconnect wasn't taken; claude code is {}",
-        state(now)
-    );
+    // Only `CleanupPending` answers it: a late discovery view can land first. Found pending, a
+    // failed cleanup the op retries, it's already answered.
+    let now = reach(
+        wire,
+        found,
+        ClaudeCodeView::CleanupPending,
+        "DisconnectClaudeCode",
+    )?;
     writeln!(
         out,
         "disconnecting: waiting at most {CLEANUP:?} for the cleanup"
@@ -165,6 +162,27 @@ fn answer(wire: &mut impl Wire, what: &str) -> Result<ClaudeCodeView> {
 fn ack(wire: &mut impl Wire, before: ClaudeCodeView, op: &str) -> Result<ClaudeCodeView> {
     leave(wire, before, before, VIEW, "waiting for an answer")?
         .ok_or_else(|| anyhow!("no answer to {op} in {VIEW:?}"))
+}
+
+/// Reads views from `view` on until one is `want`, within [`VIEW`]; `view` itself may be it.
+fn reach(
+    wire: &mut impl Wire,
+    mut view: ClaudeCodeView,
+    want: ClaudeCodeView,
+    op: &str,
+) -> Result<ClaudeCodeView> {
+    let deadline = Instant::now() + VIEW;
+    while view != want {
+        view = match next(wire, deadline.saturating_duration_since(Instant::now())) {
+            Next::View(view) => view,
+            Next::Closed => bail!("the brain closed the pipe while waiting for an answer"),
+            Next::TimedOut => bail!(
+                "no answer to {op} in {VIEW:?}; claude code is {}",
+                state(view)
+            ),
+        };
+    }
+    Ok(view)
 }
 
 /// Reads views from `view` on until one isn't `stay`, for at most `limit`; `None` past it.
@@ -633,7 +651,9 @@ mod tests {
         assert_eq!(out, "claude code: unsupported: sign-in store\n");
         assert_eq!(
             error.as_deref(),
-            Some("no answer to DisconnectClaudeCode in 10s")
+            Some(
+                "no answer to DisconnectClaudeCode in 10s; claude code is unsupported: sign-in store"
+            )
         );
         assert_eq!(ignored.sent, [DISCONNECT, QUIT]);
         assert!(quit_sent);
@@ -645,18 +665,60 @@ mod tests {
         let (_, error, _) = run(&mut refused, Ask::Disconnect);
         assert_eq!(
             error.as_deref(),
-            Some("disconnect wasn't taken; claude code is unavailable")
+            Some("no answer to DisconnectClaudeCode in 10s; claude code is unavailable")
         );
         assert_eq!(refused.sent, [DISCONNECT, QUIT]);
+    }
 
-        let mut pending = fixture(vec![Step::View(ClaudeCodeView::CleanupPending)]);
-        let (out, error, quit_sent) = run(&mut pending, Ask::Disconnect);
-        assert_eq!(out, "claude code: cleanup pending\n");
+    #[test]
+    fn a_late_discovery_view_isnt_the_disconnects_answer() {
+        for (late, words) in [(signed_out(), "signed out"), (ready(), "ready")] {
+            let mut brain = fixture(vec![
+                Step::View(ClaudeCodeView::NotFound),
+                Step::Late,
+                Step::View(late),
+                Step::View(ClaudeCodeView::CleanupPending),
+                Step::View(signed_out()),
+            ]);
+            let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
+            assert_eq!(
+                out,
+                format!("claude code: not found\n{CLEANING}claude code: signed out\n"),
+                "{words}"
+            );
+            assert_eq!(error, None, "{words}");
+            assert_eq!(brain.sent, [DISCONNECT, QUIT]);
+            assert!(quit_sent);
+        }
+    }
+
+    #[test]
+    fn a_pending_cleanup_is_retried_and_waited_for() {
+        let mut done = fixture(vec![
+            Step::View(ClaudeCodeView::CleanupPending),
+            Step::View(signed_out()),
+        ]);
+        let (out, error, quit_sent) = run(&mut done, Ask::Disconnect);
+        assert_eq!(
+            out,
+            format!("claude code: cleanup pending\n{CLEANING}claude code: signed out\n")
+        );
+        assert_eq!(error, None);
+        assert_eq!(done.sent, [DISCONNECT, QUIT]);
+        assert!(quit_sent);
+
+        let mut stuck = fixture(vec![
+            Step::View(ClaudeCodeView::CleanupPending),
+            Step::Snapshot(ClaudeCodeView::CleanupPending, KeyView::Checking),
+            Step::Late,
+        ]);
+        let (out, error, quit_sent) = run(&mut stuck, Ask::Disconnect);
+        assert_eq!(out, format!("claude code: cleanup pending\n{CLEANING}"));
         assert_eq!(
             error.as_deref(),
-            Some("a cleanup is already pending; the brain retries it as it starts")
+            Some("the cleanup didn't finish in 45s; the brain retries it as it starts")
         );
-        assert_eq!(pending.sent, [QUIT]);
+        assert_eq!(stuck.sent, [DISCONNECT, QUIT]);
         assert!(quit_sent);
     }
 
