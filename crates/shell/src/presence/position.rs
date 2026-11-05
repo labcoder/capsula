@@ -12,6 +12,20 @@ impl Presence {
         position: DockPosition,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        self.send_dock_position(position, cx);
+        self.position(position.into(), cx)
+    }
+
+    pub(super) fn save_dock_position(
+        &mut self,
+        position: DockPosition,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        self.send_dock_position(position, cx);
+        self.place_position(position.into(), cx)
+    }
+
+    fn send_dock_position(&mut self, position: DockPosition, cx: &mut Context<'_, Self>) {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             state.send_dock_position(position, |op| {
@@ -21,7 +35,6 @@ impl Presence {
             });
             cx.notify();
         });
-        self.position(position.into(), cx)
     }
 
     pub(super) fn restore_dock_position(

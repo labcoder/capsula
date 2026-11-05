@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
@@ -157,6 +158,16 @@ pub struct Worker<S: CredentialStore> {
     started: (Option<u64>, Instant),
     /// A clock jump was seen: nothing ages out until the next start.
     jumped: bool,
+    /// Whether this worker holds the vault, and so the session lock: set once it opens, and
+    /// cleared before it drops. Claude Code's lane reads it before taking its own lock.
+    held: Arc<AtomicBool>,
+}
+
+impl<S: CredentialStore> Drop for Worker<S> {
+    fn drop(&mut self) {
+        // Cleared first: the vault, and with it the lock, drops after this.
+        self.held.store(false, Ordering::Release);
+    }
 }
 
 impl<S: CredentialStore> fmt::Debug for Worker<S> {
@@ -194,7 +205,13 @@ impl<S: CredentialStore> Worker<S> {
             started: (clock.unix_seconds(), clock.monotonic()),
             clock,
             jumped: false,
+            held: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The fact that this worker holds the session lock, for Claude Code's lane to read.
+    pub fn held(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.held)
     }
 
     /// Runs one job to its end. Blocking: call it off the core loop.
@@ -327,6 +344,7 @@ impl<S: CredentialStore> Worker<S> {
                 }
             };
             self.vault = Some(vault);
+            self.held.store(true, Ordering::Release);
         }
         let aged = self.now_for_age_out();
         let vault = self.vault.as_mut().expect("opened above");

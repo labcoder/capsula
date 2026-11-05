@@ -140,6 +140,60 @@ version: its launch policy and the facts its audit expects. Any other version is
   present. Server-managed policy from a Team or Enterprise organization can't be seen, so it's
   disclosed instead (`ServerManaged::Disclosed`).
 
+## Discovery and the lane
+
+`engines/claude_code/lane.rs` is the only code that starts `claude`. It runs one call at a time on
+its own thread; `runtime/claude.rs` asks it for work and turns the results into
+`ClaudeCodeView`.
+
+```mermaid
+sequenceDiagram
+    participant R as runtime (Claude)
+    participant L as lane thread
+    participant C as claude.exe
+    R->>L: Version (generation n)
+    Note over L: fence, find, guard, managed sources, owned folders
+    L->>C: --version
+    C-->>L: 2.1.306 (Claude Code)
+    L-->>R: Done(n, Version)
+    R->>L: Status (generation n)
+    Note over L: fence, the reviewed row's may_launch, owned folders
+    L->>C: auth status --json
+    C-->>L: loggedIn, configDirectory
+    L-->>R: Done(n, Status)
+```
+
+- **Finding.** Only `CLAUDE_CODE_PATHS` under the user's profile, never `PATH`. A path that isn't
+  a native `.exe`, or that runs through `node_modules`, is `Unsupported::Shim` before anything is
+  looked at. The version is `--version`'s first word, and it must have a reviewed row.
+- **Before every start.** The lane needs this brain's own lock on `claude-code.lock`, beside the
+  vault's, and takes it on its first call only while the account worker reports the vault lock
+  held. Before Version every managed-policy source must be absent; before Status the reviewed
+  row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
+  held from the volume root. A refusal starts nothing and makes no folder.
+- **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
+  as `configDirectory`, byte for byte; anything else fails closed.
+- **One job per process,** nested in the brain job. A call ends only when its root has exited, its
+  job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
+  empty the lane is stuck: it refuses everything and never lets the lock go.
+- **Bounds.** The queue holds 4 jobs and refuses more without waiting. stdout is capped at 4 KiB for
+  Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
+  A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
+  read is retried.
+- **Time.** A call gets 10 seconds [guess] to exit, then it's ended. Ending it is bounded but
+  separate: up to 5 seconds for its job to be confirmed empty, then about a second for each pipe
+  to end. The lock stays held throughout, so a call can take up to about 17 seconds.
+- **The fence.** Each job carries the generation it was queued under, and a job from an older
+  generation does nothing. Finds asked for while one runs coalesce into one more.
+- **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
+  running call's processes end, queued jobs are dropped, and the lock goes only once every job was
+  confirmed empty.
+- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect does
+  nothing, and a signed-out install shows `Unsupported(SignInStore)`. Connect, Cancel and
+  Disconnect come with C2b.
+- **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
+  half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
+
 ## The audit
 
 `engines/claude_code/audit.rs` judges what C6's mapper parsed, in two parts, and returns an
