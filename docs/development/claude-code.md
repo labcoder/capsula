@@ -181,7 +181,14 @@ sequenceDiagram
   One 10-second deadline [guess] covers the exit and both pipes.
 - **The fence.** Each job carries the generation it was queued under, and a job from an older
   generation does nothing. Finds asked for while one runs coalesce into one more.
-
+- **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
+  running call's processes end, queued jobs are dropped, and the lock goes only once every job was
+  confirmed empty.
+- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect does
+  nothing, and a signed-out install shows `Unsupported(SignInStore)`. Connect, Cancel and
+  Disconnect come with C2b.
+- **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
+  half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
 
 ## The audit
 
