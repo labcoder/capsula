@@ -163,7 +163,18 @@ mod tests {
         for (index, position) in DockPosition::ALL.into_iter().enumerate() {
             assert_eq!(Position::from(position), expected[index]);
         }
-        assert_eq!(DockPosition::ALL.get(9), None);
+        let labels = DockPosition::ALL.map(|position| match position {
+            DockPosition::TopLeft => crate::strings::Text::TopLeft,
+            DockPosition::TopCenter => crate::strings::Text::TopCenter,
+            DockPosition::TopRight => crate::strings::Text::TopRight,
+            DockPosition::MiddleLeft => crate::strings::Text::MiddleLeft,
+            DockPosition::Center => crate::strings::Text::Center,
+            DockPosition::MiddleRight => crate::strings::Text::MiddleRight,
+            DockPosition::BottomLeft => crate::strings::Text::BottomLeft,
+            DockPosition::BottomCenter => crate::strings::Text::BottomCenter,
+            DockPosition::BottomRight => crate::strings::Text::BottomRight,
+        });
+        assert_eq!(crate::strings::Text::POSITIONS, labels);
     }
 
     #[test]

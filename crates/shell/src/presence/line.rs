@@ -283,15 +283,15 @@ pub(super) fn on_next_frame<T: 'static>(
 }
 
 /// The real surfaces: the proxy's mask and visibility, and the dock's overlay window.
-struct Desktop<'a> {
-    native: &'a mut PresenceNative,
-    window: &'a mut Window,
-    cx: &'a mut App,
+struct Desktop<'native, 'ui> {
+    native: &'native mut PresenceNative,
+    window: &'ui mut Window,
+    cx: &'ui mut App,
     /// The observer's state after the last accepted upload, which the dock names when it draws.
     drawn: Drawn,
 }
 
-impl Surfaces for Desktop<'_> {
+impl Surfaces for Desktop<'_, '_> {
     type Error = PresenceError;
 
     fn upload(&mut self, frame: &LineFrame) -> Result<(), PresenceError> {
@@ -377,6 +377,9 @@ impl Presence {
             Attempt::Idle => false,
             Attempt::Placed(placement) => {
                 self.layout = placement.layout;
+                if let Err(error) = self.reanchor_panels(cx) {
+                    tracing::warn!(%error, "can't re-anchor open panels after the dock moved");
+                }
                 let origin = [placement.layout.overlay[0], placement.layout.overlay[1]];
                 self.dock.update(cx, |dock, cx| {
                     dock.paint = Some(placement.frame.paint);

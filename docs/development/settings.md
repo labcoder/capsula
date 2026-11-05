@@ -78,6 +78,10 @@ replays that refused intent. A successful answer clears a refusal only for the s
 kind, independent of its value. Settings answers stay pipe-ordered and generation-fenced.
 Snapshot restoration uses placement without panel dismissal; tray choices retain the usual
 dismissal behavior. The existing layout and native placement interfaces are unchanged.
+After a placement lands, open surfaces follow the new anchor without changing visibility,
+focus or size. A moved anchor ends any active screen selection because its input geometry is
+no longer current. Under `--gate-observer`, snapshots leave the launch seed unchanged so
+the observer's recorded target remains valid; persistence and replay still work normally.
 
 ## Accounts
 

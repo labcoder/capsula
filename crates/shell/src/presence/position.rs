@@ -1,9 +1,9 @@
-use gpui_kit::Context;
+use gpui_kit::{App, Context};
 use kumochi_protocol::message::{ControlToBrain, DockPosition};
 
 use super::{
-    LineFrame, OpenError, PEEK_HEIGHT, PanelVisibility, Placement, Position, Presence, line,
-    platform, scaled,
+    Layout, LineFrame, Observer, OpenError, PEEK_HEIGHT, PanelVisibility, Placement, Position,
+    Presence, line, platform, scaled,
 };
 
 impl Presence {
@@ -29,17 +29,14 @@ impl Presence {
         position: Option<DockPosition>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        let Some(position) = position else {
+        let Some(position) = restored_position(
+            position,
+            self.line.position_index(),
+            cx.has_global::<Observer>(),
+        ) else {
             return Ok(());
         };
-        let index = DockPosition::ALL
-            .iter()
-            .position(|value| *value == position)
-            .expect("every position has a tray entry");
-        if self.line.position_index() != Some(index) {
-            self.place_position(position.into(), cx)?;
-        }
-        Ok(())
+        self.place_position(position, cx)
     }
 
     pub(super) fn position(
@@ -65,6 +62,7 @@ impl Presence {
     ) -> Result<(), OpenError> {
         // shortcut: work-area changes need another position choice; add a monitor watcher later.
         let area = platform::work_area()?;
+        // Moving the anchor invalidates a live selection's screen-space input geometry.
         self.end_selection(
             crate::presenter::overlay_input::ExitCause::DisplayChanged,
             cx,
@@ -87,5 +85,111 @@ impl Presence {
             },
             cx,
         )
+    }
+
+    pub(super) fn reanchor_panels(&mut self, cx: &mut App) -> Result<(), OpenError> {
+        let settings_open = self.settings_open();
+        let threads_open = self.threads_open();
+        let text_open = self.text_open();
+        let status_open = self.panel_visibility == PanelVisibility::Visible;
+        if !settings_open && !threads_open && !text_open && !status_open {
+            return Ok(());
+        }
+        let area = platform::work_area()?;
+        let mut text_bounds = [0, 0, scaled(380.0, self.scale), scaled(140.0, self.scale)];
+        let mut status_bounds = self.layout.panel;
+        let panels = [
+            self.settings_panel
+                .as_mut()
+                .map(|panel| (settings_open, panel.window, &mut panel.bounds)),
+            self.thread_panel
+                .as_mut()
+                .map(|panel| (threads_open, panel.window, &mut panel.bounds)),
+            self.text
+                .as_ref()
+                .map(|panel| (text_open, panel.window, &mut text_bounds)),
+            Some((status_open, self.panel_window, &mut status_bounds)),
+        ];
+        for (visible, handle, bounds) in panels.into_iter().flatten() {
+            let Some(next) = panel_bounds(visible, self.layout, area, *bounds) else {
+                continue;
+            };
+            handle
+                .update(cx, |_, window, cx| {
+                    platform::place_presence_window(window, next)?;
+                    window.bounds_changed(cx);
+                    Ok::<_, platform::PresenceError>(())
+                })
+                .map_err(|error| OpenError::Gpui(error.into()))??;
+            *bounds = next;
+        }
+        self.presenter.input.configure(&mut self.input_windows)?;
+        Ok(())
+    }
+}
+
+fn restored_position(
+    position: Option<DockPosition>,
+    current: Option<usize>,
+    observing: bool,
+) -> Option<Position> {
+    if observing {
+        return None;
+    }
+    let position = position?;
+    let index = DockPosition::ALL
+        .iter()
+        .position(|value| *value == position)
+        .expect("every position has a tray entry");
+    (current != Some(index)).then(|| position.into())
+}
+
+fn panel_bounds(
+    visible: bool,
+    layout: Layout,
+    area: [i32; 4],
+    bounds: [i32; 4],
+) -> Option<[i32; 4]> {
+    visible.then(|| layout.anchored_panel(area, [bounds[2], bounds[3]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observer_preserves_the_launch_seed_while_normal_snapshots_restore() {
+        assert_eq!(
+            restored_position(Some(DockPosition::BottomRight), Some(3), true),
+            None
+        );
+        assert_eq!(
+            restored_position(Some(DockPosition::TopCenter), Some(3), true),
+            None
+        );
+        assert_eq!(
+            restored_position(Some(DockPosition::BottomRight), Some(3), false),
+            Some(Position::BottomRight)
+        );
+        assert_eq!(
+            restored_position(Some(DockPosition::BottomRight), Some(8), false),
+            None
+        );
+        assert_eq!(restored_position(None, Some(3), false), None);
+    }
+
+    #[test]
+    fn open_surfaces_follow_a_landed_anchor_without_resizing_or_showing_closed_ones() {
+        let area = [0, 0, 1000, 800];
+        let layout = Position::BottomRight.layout(area, [100, 20], [300, 120], 0);
+        for (old, expected) in [
+            ([0, 20, 600, 400], [400, 380, 600, 400]),
+            ([0, 20, 768, 544], [232, 236, 768, 544]),
+            ([0, 20, 380, 140], [620, 640, 380, 140]),
+            ([0, 20, 300, 120], [700, 660, 300, 120]),
+        ] {
+            assert_eq!(panel_bounds(true, layout, area, old), Some(expected));
+            assert_eq!(panel_bounds(false, layout, area, old), None);
+        }
     }
 }

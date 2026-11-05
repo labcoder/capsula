@@ -95,7 +95,7 @@ flowchart LR
   panel and tasks panel, with a short **Check settings** dock label for settings keys and
   **Needs attention** for any other brain error.
   It clears when a turn is successfully sent or a successful answer settles a retry of the
-  settings field that produced it. An unsolicited view, reconnect, or another field's success
+  setting kind that produced it. An unsolicited view, reconnect, or another setting's success
   cannot clear it. Only `SettingsRefused` and `ConfigUnreadable` are attributed to the settings
   FIFO's unanswered head operation. Other keys remain general brain errors and never fail a
   pending settings save.
