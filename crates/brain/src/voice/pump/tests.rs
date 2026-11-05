@@ -12,20 +12,28 @@ const WAIT: Duration = Duration::from_secs(5);
 
 type Frame = Result<Vec<f32>, TtsError>;
 
-/// Each stream yields what the test sends it, and ends when the test drops its sender.
-struct Fake(Arc<Mutex<VecDeque<std_mpsc::Receiver<Frame>>>>);
+type Streams = Arc<Mutex<VecDeque<std_mpsc::Receiver<Frame>>>>;
+
+/// Each stream yields what the test sends it, and ends when the test drops its sender. Opening
+/// one tells the test, so it knows which Speak the owner took.
+struct Fake {
+    streams: Streams,
+    entered: std_mpsc::Sender<()>,
+}
 
 impl Engine for Fake {
     type Stream = std_mpsc::IntoIter<Frame>;
     fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
-        let next = self.0.lock().expect("unpoisoned").pop_front();
+        let next = self.streams.lock().expect("unpoisoned").pop_front();
+        self.entered.send(()).expect("the test is alive");
         next.map(IntoIterator::into_iter).ok_or(TtsError::Synthesis)
     }
 }
 
 struct Harness {
     pump: Pump,
-    streams: Arc<Mutex<VecDeque<std_mpsc::Receiver<Frame>>>>,
+    streams: Streams,
+    entered: std_mpsc::Receiver<()>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -35,18 +43,30 @@ impl Harness {
             .enable_time()
             .build()
             .expect("a test runtime");
-        let streams = Arc::new(Mutex::new(VecDeque::new()));
+        let streams = Streams::default();
+        let (entry, entered) = std_mpsc::channel();
         let engine = Arc::clone(&streams);
         let tts = TtsHandle::spawn_with(runtime.handle().clone(), move |_dir: &Path| {
-            Ok(Fake(Arc::clone(&engine)))
+            Ok(Fake {
+                streams: Arc::clone(&engine),
+                entered: entry.clone(),
+            })
         })
         .expect("the owner thread starts");
         tts.load("models".into());
         Self {
             pump: Pump::new(tts),
             streams,
+            entered,
             runtime,
         }
+    }
+
+    /// Waits until the owner has opened the next stream.
+    fn wait_entered(&self) {
+        self.entered
+            .recv_timeout(WAIT)
+            .expect("the owner opens the stream");
     }
 
     /// Speaks `segment` of `run` at 24 kHz and returns the sender that feeds its stream.
@@ -84,9 +104,17 @@ fn pcm(run: u64, segment: u32, samples: usize) -> (RunId, TtsEvent) {
 }
 
 fn send(frames: &std_mpsc::Sender<Frame>, samples: usize) {
+    send_value(frames, samples, 0.0);
+}
+
+fn send_value(frames: &std_mpsc::Sender<Frame>, samples: usize, value: f32) {
     frames
-        .send(Ok(vec![0.0; samples]))
+        .send(Ok(vec![value; samples]))
         .expect("the stream is alive");
+}
+
+fn ended(run: u64, segment: u32, error: TtsError) -> (RunId, TtsEvent) {
+    (RunId(run), TtsEvent::Failed { segment, error })
 }
 
 #[test]
@@ -104,8 +132,6 @@ fn audio_is_read_only_on_credit_and_a_frame_may_overshoot_it() {
     harness.assert_pending();
     harness.pump.credit(RunId(1), 1);
     assert_eq!(harness.next(), pcm(1, 0, 2));
-    harness.assert_pending();
-    harness.pump.credit(RunId(1), 1);
     assert_eq!(
         harness.next(),
         (
@@ -116,6 +142,31 @@ fn audio_is_read_only_on_credit_and_a_frame_may_overshoot_it() {
             }
         )
     );
+    harness.assert_pending();
+}
+
+#[test]
+fn a_failure_or_a_closed_stream_after_the_last_credit_needs_no_more() {
+    let mut harness = Harness::new();
+    let frames = harness.speak(1, 0);
+    harness.pump.credit(RunId(1), 2);
+    send(&frames, 2);
+    frames
+        .send(Ok(vec![f32::NAN]))
+        .expect("the stream is alive");
+    assert_eq!(harness.next(), pcm(1, 0, 2));
+    assert_eq!(harness.next(), ended(1, 0, TtsError::NonFinite));
+
+    let frames = harness.speak(1, 1);
+    harness.wait_entered();
+    harness.wait_entered();
+    harness.pump.credit(RunId(1), 2);
+    send(&frames, 2);
+    assert_eq!(harness.next(), pcm(1, 1, 2));
+    // A cancel the pump didn't make: the owner leaves without Done and closes the stream.
+    harness.pump.tts.cancel();
+    drop(frames);
+    assert_eq!(harness.next(), ended(1, 1, TtsError::Synthesis));
     harness.assert_pending();
 }
 
@@ -146,20 +197,56 @@ fn a_stream_that_closes_without_done_fails_its_segment() {
 fn cancel_keeps_the_runs_credit_and_revoke_ends_it() {
     let mut harness = Harness::new();
     let first = harness.speak(1, 0);
+    harness.wait_entered();
     harness.pump.credit(RunId(1), 10);
     harness.pump.cancel(RunId(1));
-    send(&first, 4);
+    // The old stream's audio is loud and the new one's silent, so they can't be mistaken.
+    send_value(&first, 4, 0.5);
     harness.assert_pending();
 
     let second = harness.speak(1, 1);
+    harness.wait_entered();
     send(&second, 4);
     assert_eq!(harness.next(), pcm(1, 1, 4), "no new credit needed");
-    harness.pump.revoke(RunId(1));
+    send(&second, 6);
+    assert_eq!(harness.next(), pcm(1, 1, 6));
     send(&second, 4);
     harness.assert_pending();
-    harness
-        .pump
-        .speak(RunId(1), SegmentId(2), 24_000, "x".into());
+    harness.pump.cancel(RunId(1));
+    drop(second);
+
+    let third = harness.speak(1, 2);
+    harness.wait_entered();
+    harness.pump.credit(RunId(1), 5);
+    send(&third, 3);
+    assert_eq!(
+        harness.next(),
+        pcm(1, 2, 3),
+        "the held audio went with the cancel"
+    );
+    harness.pump.revoke(RunId(1));
+    drop(third);
+
+    let fourth = harness.speak(1, 3);
+    harness.wait_entered();
+    send(&fourth, 1);
+    harness.assert_pending();
+}
+
+#[test]
+fn a_late_credit_from_a_replaced_run_changes_nothing() {
+    let mut harness = Harness::new();
+    let old = harness.speak(1, 0);
+    harness.wait_entered();
+    harness.pump.credit(RunId(1), 10);
+    let new = harness.speak(2, 0);
+    drop(old);
+    harness.wait_entered();
+    harness.pump.credit(RunId(2), 1);
+    harness.pump.credit(RunId(1), 100);
+    send(&new, 3);
+    assert_eq!(harness.next(), pcm(2, 0, 3));
+    send(&new, 3);
     harness.assert_pending();
 }
 

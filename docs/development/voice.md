@@ -132,9 +132,9 @@ stateDiagram-v2
 
 ### The pump and the resampler
 
-**`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and reads
-it only while the run's reply has granted credit, so a full channel parks the TTS thread, never
-the core loop.
+**`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and
+forwards audio only while the run's reply has granted credit, so a full channel parks the TTS
+thread, never the core loop.
 
 ```mermaid
 flowchart LR
@@ -144,11 +144,16 @@ flowchart LR
   P -->|"next() on credit"| L["core loop"]
 ```
 
-- **One run at a time.** A call for another run stops the held Speak and starts over at zero credit.
-- **Credit** is samples granted minus samples read. A frame may overshoot it; at zero, `next` stays
-  pending. `next` is cancel-safe.
-- **Cancel** stops the current Speak and keeps the run's credit for its next one. **Revoke** stops
-  it and zeroes the credit, so nothing more is read for the run.
+- **One run at a time.** Only a Speak picks the run: a Speak for another run stops the held one and
+  starts over at zero credit. Credit for a run the pump doesn't serve is ignored, so a late grant
+  from a replaced run can't take the pump back.
+- **Credit** is samples granted minus samples forwarded. A TTS event may overshoot it; at zero, the
+  next audio waits, read ahead as the one held event. `Done`, a failure and a closed stream need no
+  credit, so a full window never hides a segment's end, but none passes audio still waiting.
+  `next` is cancel-safe.
+- **Cancel** stops the current Speak, drops any held event and keeps the run's credit for its next
+  one. **Revoke** does the same and zeroes the credit. The reply, not the pump, keeps a revoked run
+  silent for good.
 - **A stream that closes without `Done`**, including a Speak TTS was too busy to take, comes back as
   a `Synthesis` failure for its segment.
 

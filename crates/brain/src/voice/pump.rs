@@ -1,6 +1,7 @@
-//! The brain's one reader of TTS. It holds the current Speak's receiver and reads it only while
-//! the run's [`Reply`](super::reply::Reply) has granted credit, so forwarded audio never passes the
-//! window, and a full channel parks the TTS thread instead of the core loop.
+//! The brain's one reader of TTS. It holds the current Speak's receiver and forwards audio only
+//! while the run's [`Reply`](super::reply::Reply) has granted credit, so forwarded audio never passes
+//! the window, and a full channel parks the TTS thread instead of the core loop. A segment's end
+//! needs no credit, so a full window never hides it.
 
 #[cfg(test)]
 mod tests;
@@ -17,11 +18,13 @@ const CHANNEL: usize = 4;
 
 pub(crate) struct Pump {
     tts: TtsHandle,
-    /// The run whose speech the pump serves; another run's call starts it over.
+    /// The run whose speech the pump serves; only a Speak changes it.
     run: Option<RunId>,
     /// Samples the pump may still read: granted minus read. A frame may overshoot it.
     credit: u64,
     active: Option<(SegmentId, mpsc::Receiver<TtsEvent>)>,
+    /// The one event read ahead: audio waiting for credit, which nothing passes.
+    held: Option<TtsEvent>,
 }
 
 impl Pump {
@@ -31,6 +34,7 @@ impl Pump {
             run: None,
             credit: 0,
             active: None,
+            held: None,
         }
     }
 
@@ -54,10 +58,12 @@ impl Pump {
         self.active = Some((segment, events));
     }
 
-    /// Lets the pump read `samples` more of `run`'s audio.
+    /// Lets the pump forward `samples` more of `run`'s audio. Credit for a run the pump doesn't
+    /// serve, such as a late one from a run already replaced, changes nothing.
     pub(crate) fn credit(&mut self, run: RunId, samples: u64) {
-        self.serve(run);
-        self.credit += samples;
+        if self.run == Some(run) {
+            self.credit = self.credit.saturating_add(samples);
+        }
     }
 
     /// Stops `run`'s current Speak; credit stays for its next one.
@@ -75,20 +81,24 @@ impl Pump {
         }
     }
 
-    /// The next TTS event for the run served, once there's credit to read it. A stream that
-    /// closes without `Done` comes back as a synthesis failure. Pending while there's nothing to
-    /// read; it's cancel-safe.
+    /// The next TTS event for the run served. Audio waits for credit; `Done`, a failure, or a
+    /// stream that closes without `Done` (a synthesis failure) don't, though they never pass
+    /// audio still waiting. Pending while there's nothing to forward; it's cancel-safe.
     pub(crate) async fn next(&mut self) -> (RunId, TtsEvent) {
         let (Some(run), Some((segment, events))) = (self.run, self.active.as_mut()) else {
             return future::pending().await;
         };
-        if self.credit == 0 {
+        if self.held.is_none() {
+            let event = events.recv().await.unwrap_or(TtsEvent::Failed {
+                segment: segment.0,
+                error: TtsError::Synthesis,
+            });
+            self.held = Some(event);
+        }
+        if self.credit == 0 && matches!(self.held, Some(TtsEvent::Pcm { .. })) {
             return future::pending().await;
         }
-        let event = events.recv().await.unwrap_or(TtsEvent::Failed {
-            segment: segment.0,
-            error: TtsError::Synthesis,
-        });
+        let event = self.held.take().expect("an event was just held");
         match &event {
             TtsEvent::Pcm { samples, .. } => {
                 let read = u64::try_from(samples.len()).unwrap_or(u64::MAX);
@@ -107,8 +117,10 @@ impl Pump {
         }
     }
 
-    /// Moves TTS's generation and drops the receiver, which fences every event still coming.
+    /// Moves TTS's generation and drops the receiver and any held event, which fences every
+    /// event still coming.
     fn stop(&mut self) {
+        self.held = None;
         if self.active.take().is_some() {
             self.tts.cancel();
         }
