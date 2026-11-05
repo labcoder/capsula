@@ -1,8 +1,9 @@
 //! `kumochi --gate-observer=<file>`: the gate harness's record of what the dock really did. Each
 //! hit-mask commit logs the exact rows it drew and owned, each dock paint its frame, each frame's
 //! completion its dispatch on the proxy, and each tagged click its receipt, all stamped with the
-//! performance counter. The UI thread only moves fixed-size records into a preallocated bounded
-//! queue; a writer thread formats and flushes them. A dropped record, a shape taller than
+//! performance counter. The UI thread only moves small fixed-size records into a preallocated
+//! bounded queue; a writer thread formats and flushes them. A geometry's rows stay in one of a
+//! fixed set of heap tables that the writer hands back, so no commit allocates or copies a table. A dropped record, a shape taller than
 //! [`ROW_CAP`] or a failed post is counted in the close record, and any of them makes the run
 //! invalid for the gate. Records carry geometry and times, never text or another app's content.
 
@@ -36,17 +37,28 @@ const DRAWN_SPANS: usize = 2;
 /// One row: [`DRAWN_SPANS`] drawn spans, then [`ROW_SPANS`] owned spans, each `[left, right)`.
 /// An empty span has `left == right`; real spans never do.
 type Row = [i32; 2 * (DRAWN_SPANS + ROW_SPANS)];
-static EMPTY_ROWS: [Row; ROW_CAP] = [[0; 2 * (DRAWN_SPANS + ROW_SPANS)]; ROW_CAP];
 
-/// One commit's exact rows: the line's painted pixels and the band the mask is given.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One commit's exact rows: the line's painted pixels and the band the mask is given. The rows
+/// live on the heap, so a record moves a pointer to them, never the table.
+#[derive(Debug)]
 pub(super) struct Geometry {
     origin_y: i32,
     /// Rows from `origin_y`; more than [`ROW_CAP`] is an overflow, and `spans` holds none.
     rows: usize,
     trimmed: bool,
-    spans: [Row; ROW_CAP],
+    /// [`ROW_CAP`] rows; only the first `rows` are this geometry's, and a reused table keeps
+    /// stale ones after them.
+    spans: Box<[Row]>,
 }
+
+impl PartialEq for Geometry {
+    fn eq(&self, other: &Self) -> bool {
+        (self.origin_y, self.rows, self.trimmed) == (other.origin_y, other.rows, other.trimmed)
+            && self.recorded() == other.recorded()
+    }
+}
+
+impl Eq for Geometry {}
 
 impl fmt::Display for Geometry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,7 +71,7 @@ impl fmt::Display for Geometry {
             return f.write_str(" overflow");
         }
         f.write_str(" spans=")?;
-        for (index, row) in self.spans[..self.rows].iter().enumerate() {
+        for (index, row) in self.recorded().iter().enumerate() {
             if index > 0 {
                 f.write_str(";")?;
             }
@@ -75,21 +87,24 @@ impl fmt::Display for Geometry {
 }
 
 impl Geometry {
-    pub(super) fn of(frame: &LineFrame) -> Self {
+    /// Overwrites this geometry with `frame`'s rows, or an empty mask's when it's `None`, in
+    /// its own table.
+    fn fill(&mut self, frame: Option<&LineFrame>) {
+        let Some(frame) = frame else {
+            (self.origin_y, self.rows, self.trimmed) = (0, 0, true);
+            return;
+        };
         let [_, top, _, height] = frame.hit;
         let [paint_left, paint_top, paint_width, paint_height] = frame.paint;
         // The line never carries a previous placement, so its mask is always trimmed.
-        let mut geometry = Self {
-            origin_y: top,
-            rows: usize::try_from(height).unwrap_or(0),
-            trimmed: true,
-            spans: EMPTY_ROWS,
-        };
-        if geometry.overflowed() {
-            return geometry;
+        (self.origin_y, self.rows, self.trimmed) =
+            (top, usize::try_from(height).unwrap_or(0), true);
+        if self.overflowed() {
+            return;
         }
         let span = |span: Option<[i32; 2]>| span.unwrap_or([0; 2]);
-        for (y, row) in (top..top + height).zip(&mut geometry.spans) {
+        for (y, row) in (top..top + height).zip(self.spans.iter_mut()) {
+            *row = Row::default();
             let [drawn_left, drawn_right] = span(
                 (paint_top..paint_top + paint_height)
                     .contains(&y)
@@ -101,20 +116,32 @@ impl Geometry {
                 *at = span(span_of_row);
             }
         }
-        geometry
     }
 
+    /// Copies `other` into this geometry's own table, without allocating.
+    fn copy_from(&mut self, other: &Self) {
+        (self.origin_y, self.rows, self.trimmed) = (other.origin_y, other.rows, other.trimmed);
+        let recorded = other.recorded();
+        self.spans[..recorded.len()].copy_from_slice(recorded);
+    }
+
+    /// An empty mask's geometry with its own zeroed table, allocated here and only here.
     fn empty() -> Self {
         Self {
             origin_y: 0,
             rows: 0,
             trimmed: true,
-            spans: EMPTY_ROWS,
+            spans: vec![Row::default(); ROW_CAP].into_boxed_slice(),
         }
     }
 
     fn overflowed(&self) -> bool {
         self.rows > ROW_CAP
+    }
+
+    /// This geometry's rows: none when it overflowed.
+    fn recorded(&self) -> &[Row] {
+        &self.spans[..if self.overflowed() { 0 } else { self.rows }]
     }
 }
 
@@ -129,7 +156,7 @@ pub(super) struct Drawn {
 /// accepted change advances the epoch.
 #[derive(Debug)]
 struct Ledger {
-    last: Box<Geometry>,
+    last: Geometry,
     last_id: u64,
     accepted: Drawn,
 }
@@ -137,7 +164,7 @@ struct Ledger {
 impl Ledger {
     fn new() -> Self {
         Self {
-            last: Box::new(Geometry::empty()),
+            last: Geometry::empty(),
             last_id: 0,
             accepted: Drawn::default(),
         }
@@ -145,10 +172,10 @@ impl Ledger {
 
     /// Returns whether `geometry` is new to the harness, its id, and the accepted state after.
     fn commit(&mut self, geometry: &Geometry, result: Commit) -> (bool, u64, Drawn) {
-        let new = self.last_id == 0 || *self.last != *geometry;
+        let new = self.last_id == 0 || self.last != *geometry;
         if new {
             self.last_id += 1;
-            *self.last = *geometry;
+            self.last.copy_from(geometry);
         }
         if result != Commit::Failed && self.accepted.geometry != self.last_id {
             self.accepted = Drawn {
@@ -233,10 +260,6 @@ struct Totals {
 }
 
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "records are fixed-size so the UI thread never allocates; the queue is preallocated"
-)]
 enum Record {
     Startup {
         startup: Startup,
@@ -318,8 +341,12 @@ impl Shared {
             return;
         }
         if self.sender.try_send(record).is_err() {
-            self.dropped.set(self.dropped.get() + 1);
+            self.count_drop();
         }
+    }
+
+    fn count_drop(&self) {
+        self.dropped.set(self.dropped.get() + 1);
     }
 }
 
@@ -330,6 +357,10 @@ pub(crate) struct Observer {
     writer: Option<JoinHandle<()>>,
     proxy: Option<ProxyHandle>,
     ledger: Ledger,
+    /// The geometry each commit fills before the ledger compares it.
+    scratch: Geometry,
+    /// Tables the writer has handed back, for the next geometry record.
+    spares: Receiver<Geometry>,
     totals: Totals,
     /// The latest hover show or hide; the panel's paints name it.
     hover: u64,
@@ -351,14 +382,22 @@ impl Observer {
         };
         let file = File::create_new(path)?;
         let (sender, receiver) = async_channel::bounded(QUEUE);
+        let (returns, spares) = async_channel::bounded(QUEUE);
+        for _ in 0..QUEUE {
+            returns
+                .try_send(Geometry::empty())
+                .map_err(|_| io::Error::other("can't preallocate the gate observer's rows"))?;
+        }
         let writer = std::thread::Builder::new()
             .name("gate-observer".to_owned())
-            .spawn(move || write(&receiver, file))?;
+            .spawn(move || write(&receiver, &returns, file))?;
         Ok(Some(Self {
             shared: Rc::new(Shared::new(sender)),
             writer: Some(writer),
             proxy: None,
             ledger: Ledger::new(),
+            scratch: Geometry::empty(),
+            spares,
             totals: Totals::default(),
             hover: 0,
             pending: [None; PENDING],
@@ -431,13 +470,19 @@ pub(super) fn commit(
     let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
     let result = Commit::of(update);
-    let geometry = proposal.map_or_else(Geometry::empty, Geometry::of);
-    let (new, id, drawn) = observer.ledger.commit(&geometry, result);
+    observer.scratch.fill(proposal);
+    let (new, id, drawn) = observer.ledger.commit(&observer.scratch, result);
     if new {
-        if geometry.overflowed() {
+        if observer.scratch.overflowed() {
             observer.totals.overflow += 1;
         }
-        observer.shared.send(Record::Geometry { id, geometry });
+        match observer.spares.try_recv() {
+            Ok(spare) => {
+                let geometry = std::mem::replace(&mut observer.scratch, spare);
+                observer.shared.send(Record::Geometry { id, geometry });
+            }
+            Err(_) => observer.shared.count_drop(),
+        }
     }
     observer.totals.commits += 1;
     observer.shared.epoch.set(drawn.epoch);
@@ -627,8 +672,8 @@ pub(crate) fn release(cx: &mut App) -> Option<Closing> {
 }
 
 /// The writer thread: formats records as they arrive, flushing whenever it catches up, until
-/// the close record.
-fn write(receiver: &Receiver<Record>, file: File) {
+/// the close record. Each geometry's table goes back to `returns` once it's written.
+fn write(receiver: &Receiver<Record>, returns: &Sender<Geometry>, file: File) {
     let mut out = BufWriter::new(file);
     let mut lines = 0_u64;
     let mut errors = 0_u64;
@@ -637,8 +682,12 @@ fn write(receiver: &Receiver<Record>, file: File) {
             Ok(()) => lines += 1,
             Err(_) => errors += 1,
         }
-        if matches!(record, Record::Close(_)) {
-            break;
+        match record {
+            Record::Close(_) => break,
+            Record::Geometry { geometry, .. } => {
+                returns.try_send(geometry).ok();
+            }
+            _ => {}
         }
         if receiver.is_empty() && out.flush().is_err() {
             errors += 1;
@@ -773,14 +822,21 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Commit, Drawn, EMPTY_ROWS, Geometry, Ledger, Observer, ROW_CAP, Record, Shared, Surface,
-        Totals, line,
+        Commit, Drawn, Geometry, Ledger, Observer, ROW_CAP, Record, Row, Shared, Surface, Totals,
+        line, write,
     };
     use crate::presence::line::LineFrame;
 
     /// A line painted at `paint`, owning `hit`.
     fn frame(paint: [i32; 4], hit: [i32; 4]) -> LineFrame {
         LineFrame { paint, hit }
+    }
+
+    /// The geometry a commit of `frame` records, in a fresh table.
+    fn of(frame: &LineFrame) -> Geometry {
+        let mut geometry = Geometry::empty();
+        geometry.fill(Some(frame));
+        geometry
     }
 
     fn text(record: &Record) -> String {
@@ -791,7 +847,7 @@ mod tests {
 
     #[test]
     fn geometry_holds_the_exact_drawn_and_owned_rows() {
-        let geometry = Geometry::of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
+        let geometry = of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
         assert_eq!(
             (geometry.origin_y, geometry.rows, geometry.trimmed),
             (10, 24, true)
@@ -823,10 +879,13 @@ mod tests {
 
     #[test]
     fn a_band_taller_than_the_row_cap_overflows_instead_of_truncating() {
-        let geometry = Geometry::of(&frame([0, 290, 600, 20], [0, 0, 600, 601]));
+        let geometry = of(&frame([0, 290, 600, 20], [0, 0, 600, 601]));
         assert!(geometry.rows > ROW_CAP);
         assert!(geometry.overflowed());
-        assert_eq!(geometry.spans, EMPTY_ROWS, "no partial rows");
+        assert!(
+            geometry.spans.iter().all(|row| *row == Row::default()),
+            "no partial rows"
+        );
         assert_eq!(
             text(&Record::Geometry { id: 4, geometry }),
             "geometry id=4 origin_y=0 rows=601 trimmed=true overflow\n"
@@ -835,8 +894,8 @@ mod tests {
 
     #[test]
     fn only_an_accepted_change_advances_the_epoch() {
-        let resting = Geometry::of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
-        let moved = Geometry::of(&frame([300, 20, 70, 4], [300, 10, 70, 24]));
+        let resting = of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
+        let moved = of(&frame([300, 20, 70, 4], [300, 10, 70, 24]));
         let mut ledger = Ledger::new();
         let first = Drawn {
             epoch: 1,
@@ -894,7 +953,7 @@ mod tests {
 
     #[test]
     fn records_are_one_line_each() {
-        let geometry = Geometry::of(&frame([10, 6, 4, 1], [10, 5, 4, 3]));
+        let geometry = of(&frame([10, 6, 4, 1], [10, 5, 4, 3]));
         assert_eq!(
             text(&Record::Geometry { id: 1, geometry }),
             "geometry id=1 origin_y=5 rows=3 trimmed=true spans=-,-,10:14,-,-,-;10:14,-,10:14,-,-,-;-,-,10:14,-,-,-\n"
@@ -984,6 +1043,74 @@ mod tests {
             })),
             "close commits=4 frames=5 dropped=1 overflow=0 post_failed=2 unposted=3\n"
         );
+    }
+
+    #[test]
+    fn a_record_moves_without_its_rows() {
+        assert!(
+            size_of::<Geometry>() <= 32,
+            "a geometry is {} bytes; its rows belong on the heap",
+            size_of::<Geometry>()
+        );
+        assert!(
+            size_of::<Record>() <= 128,
+            "a record is {} bytes; every push and pop copies it on the stack",
+            size_of::<Record>()
+        );
+    }
+
+    #[test]
+    fn a_reused_table_records_only_its_own_rows() {
+        let tall = frame([10, 20, 70, 4], [10, 10, 70, 24]);
+        let short = frame([10, 6, 4, 1], [10, 5, 4, 3]);
+        let mut reused = of(&tall);
+        reused.fill(Some(&short));
+        assert_eq!(
+            reused,
+            of(&short),
+            "the tall frame's stale rows don't count"
+        );
+        assert_eq!(
+            text(&Record::Geometry {
+                id: 1,
+                geometry: reused
+            }),
+            text(&Record::Geometry {
+                id: 1,
+                geometry: of(&short)
+            })
+        );
+        let mut last = of(&tall);
+        last.copy_from(&of(&short));
+        assert_eq!(last, of(&short));
+        last.fill(None);
+        assert_eq!(last, Geometry::empty());
+    }
+
+    #[test]
+    fn the_writer_hands_each_table_back() {
+        let path = std::env::temp_dir().join(format!(
+            "{}-observer-spares-{}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
+        let file = std::fs::File::create_new(&path).unwrap();
+        let (sender, receiver) = async_channel::bounded(4);
+        let (returns, spares) = async_channel::bounded(4);
+        sender
+            .try_send(Record::Geometry {
+                id: 1,
+                geometry: of(&frame([10, 6, 4, 1], [10, 5, 4, 3])),
+            })
+            .unwrap();
+        sender.try_send(Record::Close(Totals::default())).unwrap();
+        write(&receiver, &returns, file);
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(written.starts_with("geometry id=1 origin_y=5 rows=3 "));
+        let spare = spares.try_recv().unwrap();
+        assert_eq!(spare.spans.len(), ROW_CAP, "the whole table comes back");
+        assert!(spares.is_empty());
     }
 
     #[test]
