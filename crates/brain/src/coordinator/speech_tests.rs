@@ -66,6 +66,36 @@ fn stopped(cursor: Option<Cursor>) -> Input {
     Input::SpeechStopped { run: R, cursor }
 }
 
+fn heard(sample: u32, text: usize) -> Effect {
+    Effect::Store(StoreOp::Heard {
+        run: R,
+        heard: crate::voice::reply::Heard {
+            segment: SEG,
+            sample,
+            text,
+        },
+    })
+}
+
+/// Forty samples into the only segment.
+const CUT: Option<Cursor> = Some(Cursor {
+    segment: SEG,
+    sample: 40,
+});
+
+/// A draining run the shell stopped, whose `EndRun` and its `failed(store)` retry are both
+/// asked for.
+fn stopped_then_failed() -> Coordinator {
+    let mut core = draining();
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("current");
+    core.handle(Input::StoreFailed { run: R }).expect("retried");
+    core
+}
+
 /// "Hello there. " spoken, its 100 samples sent and its final chunk out, the producer finished.
 fn draining() -> Coordinator {
     let mut core = spoken();
@@ -130,7 +160,8 @@ fn a_spoken_answer_ends_done_only_after_its_last_segment_played() {
     );
     assert_eq!(
         core.handle(Input::RunStored { run: R }),
-        Ok(vec![state(R, T, Phase::Done), run_end(R)])
+        Ok(vec![heard(100, 12), state(R, T, Phase::Done), run_end(R)]),
+        "all of the spoken \"Hello there.\" was heard"
     );
 }
 
@@ -198,11 +229,13 @@ fn a_drain_stall_revokes_the_speech_and_tells_the_end_once_stored_and_quiet() {
     );
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
     assert_eq!(
-        core.handle(stopped(Some(Cursor {
-            segment: SEG,
-            sample: 40,
-        }))),
-        Ok(vec![state(R, T, Phase::Interrupted), run_end(R)])
+        core.handle(stopped(CUT)),
+        Ok(vec![
+            heard(40, 0),
+            state(R, T, Phase::Interrupted),
+            run_end(R)
+        ]),
+        "cut mid-segment, so the heard text ends where that segment starts"
     );
     assert_eq!(core.ending_runs(), 0);
     assert_eq!(core.handle(Input::QuietTimeout { run: R }), Err(Stale));
@@ -422,6 +455,61 @@ fn a_store_failure_while_quieting_is_told_once_as_failed() {
         core.handle(Input::RunStored { run: R }),
         Ok(vec![state(R, T, Phase::Failed), run_end(R)])
     );
+}
+
+#[test]
+fn a_run_whose_store_write_failed_stores_no_heard_point() {
+    let mut core = stopped_then_failed();
+    assert_eq!(core.handle(stopped(CUT)), Ok(Vec::new()));
+    assert_eq!(
+        core.handle(Input::RunStored { run: R }),
+        Ok(vec![state(R, T, Phase::Failed), run_end(R)]),
+        "the committed row may lack the heard text"
+    );
+}
+
+#[test]
+fn an_abandoned_run_stores_no_heard_point_and_ignores_late_reports() {
+    let mut core = stopped_then_failed();
+    assert_eq!(
+        core.handle(Input::StoreFailed { run: R }),
+        Ok(vec![state(R, T, Phase::Failed), run_end(R)]),
+        "the retry failed too, so the run is given up and told at once"
+    );
+    assert_eq!(core.ending_runs(), 0);
+    assert_eq!(core.handle(stopped(CUT)), Err(Stale));
+    assert_eq!(core.handle(Input::QuietTimeout { run: R }), Err(Stale));
+}
+
+#[test]
+fn a_deleted_runs_late_reports_store_no_heard_point() {
+    let mut core = draining();
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("current");
+    core.handle(Input::Delete {
+        thread: T,
+        after_turns: 1,
+        resend: false,
+    })
+    .expect("asked");
+    assert_eq!(
+        core.handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::Removed,
+            last_run: None,
+        }),
+        Ok(vec![Effect::Control(ControlToShell::ThreadDeleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::Removed,
+            last_run: Some(R),
+        })])
+    );
+    assert_eq!(core.handle(stopped(CUT)), Err(Stale));
+    assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
+    assert_eq!(core.ending_runs(), 0);
 }
 
 #[test]

@@ -686,6 +686,62 @@ fn every_operation_gets_one_reply_in_order() {
 }
 
 #[test]
+fn a_heard_point_is_stored_and_answers_nothing() {
+    let scratch = Scratch::new("heard-op");
+    let store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let heard = crate::voice::reply::Heard {
+        segment: kumochi_protocol::message::SegmentId(2),
+        sample: 480,
+        text: 17,
+    };
+    for op in [
+        StoreOp::BeginTurn {
+            thread,
+            title: Some("t".into()),
+            run,
+            text: "hi".into(),
+        },
+        StoreOp::EndRun {
+            thread,
+            run,
+            text: None,
+            revealed: None,
+            clear: None,
+            end: RunEnd::Done,
+        },
+        StoreOp::Heard { run, heard },
+        StoreOp::Heard {
+            run: RunId(u64::MAX),
+            heard,
+        },
+    ] {
+        assert!(store.send(op));
+    }
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(
+        got,
+        [Input::TurnStored { run }, Input::RunStored { run }],
+        "a heard point that fails, here on a run id SQLite can't hold, answers nothing either"
+    );
+    let stored: (i64, i64, i64) = rusqlite::Connection::open(scratch.db())
+        .expect("raw open")
+        .query_row(
+            "SELECT heard_segment, heard_sample, heard_text FROM runs WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the run's point");
+    assert_eq!(stored, (2, 480, 17));
+}
+
+#[test]
 fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
     let scratch = Scratch::new("read-during-copy");
     let paused = armed_and_paused(&scratch, &[Point::Snapshot]);
