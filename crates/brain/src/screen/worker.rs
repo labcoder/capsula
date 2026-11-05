@@ -1,8 +1,10 @@
 use std::io::{self, Write as _};
+use std::time::Instant;
 
 use kumochi_protocol::frame::{self, Pipe};
 
-use super::wire::{Request, RequestBody, pong};
+use super::capture::{Capturer, Failure, Screen};
+use super::wire::{ReplyBody, Request, RequestBody, reply};
 
 /// Serves stdin/stdout after the caller initializes content-free logging.
 ///
@@ -21,6 +23,7 @@ use super::wire::{Request, RequestBody, pong};
 pub fn serve() -> Result<(), frame::FrameError> {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
+    let mut screen = Screen::default();
     #[cfg(debug_assertions)]
     let mut fault = std::env::var(kumochi_protocol::constants::SCREEN_FAULT_ENV)
         .ok()
@@ -29,9 +32,15 @@ pub fn serve() -> Result<(), frame::FrameError> {
             "crash" => Some(super::wire::WorkerFault::Crash),
             "garbage" => Some(super::wire::WorkerFault::Garbage),
             "panic" => Some(super::wire::WorkerFault::Panic),
+            "exit" => Some(super::wire::WorkerFault::Exit),
             _ => None,
         });
+    #[cfg(debug_assertions)]
+    if fault == Some(super::wire::WorkerFault::Exit) {
+        return Ok(());
+    }
     while let Some(request) = frame::read::<Request>(&mut input, Pipe::Data)? {
+        let received = Instant::now();
         #[cfg(debug_assertions)]
         {
             if let RequestBody::Fault(requested) = request.body {
@@ -50,13 +59,42 @@ pub fn serve() -> Result<(), frame::FrameError> {
                         continue;
                     }
                     WorkerFault::Panic => panic!("private screen fault payload"),
+                    WorkerFault::Exit => return Ok(()),
                 }
             }
         }
-        #[cfg(not(debug_assertions))]
-        let RequestBody::Ping = request.body;
-        frame::write(&mut output, &pong(request.id)?, Pipe::Data)?;
+        let (body, retire) = match request.body {
+            RequestBody::Ping => (ReplyBody::Pong, false),
+            RequestBody::Capture {
+                ticket,
+                display,
+                exclude,
+            } => match screen.capture(&ticket, &display, exclude, received, &Instant::now, open) {
+                Ok(meta) => (ReplyBody::Captured(meta), false),
+                Err(Failure::Refused(refusal)) => (ReplyBody::Refused(refusal), false),
+                Err(Failure::Fault(code)) => (ReplyBody::Fault(code), false),
+                Err(Failure::Retire(code)) => {
+                    tracing::error!(code, "screen capture didn't stop; retiring the worker");
+                    (ReplyBody::Fault(code), true)
+                }
+            },
+            #[cfg(debug_assertions)]
+            RequestBody::Fault(_) => continue,
+        };
+        frame::write(&mut output, &reply(request.id, &body)?, Pipe::Data)?;
         output.flush()?;
+        if retire {
+            return Ok(());
+        }
     }
     Ok(())
 }
+
+/// No platform captures yet, so every capture is a numeric fault.
+// shortcut: A2b opens Windows Graphics Capture here; macOS will open ScreenCaptureKit.
+fn open() -> Result<Box<dyn Capturer>, i32> {
+    Err(NO_CAPTURER)
+}
+
+/// `E_NOTIMPL`, as the Windows adapter reports an unsupported capture.
+const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();

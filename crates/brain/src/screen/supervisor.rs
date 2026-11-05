@@ -8,7 +8,12 @@ use kumochi_protocol::frame::{self, Pipe};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Instant;
 
-use super::wire::{Assembly, Reply, ReplyBody, Request, RequestBody, ScreenError};
+use kumochi_protocol::geometry::DisplayRef;
+
+use super::wire::{
+    Assembly, Exclusion, FrameMeta, Refusal, Reply, ReplyBody, Request, RequestBody, ScreenError,
+    TicketWire,
+};
 use crate::platform::{Helper, Job};
 
 /// Absolute request budget, including queueing (guess).
@@ -16,6 +21,17 @@ pub const REQUEST_DEADLINE: Duration = Duration::from_millis(1500);
 const WINDOW: Duration = Duration::from_secs(60);
 const QUEUE: usize = 16;
 type Answer = oneshot::Sender<Result<ReplyBody, ScreenError>>;
+
+/// Why a capture produced no frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CaptureError {
+    /// The worker refused the ticket or the display.
+    #[error("capture refused: {0:?}")]
+    Refused(Refusal),
+    /// The worker failed or was lost.
+    #[error(transparent)]
+    Screen(#[from] ScreenError),
+}
 
 /// Every watch owned by the previous worker is now invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +74,33 @@ impl ScreenHandle {
             .await
             .map_err(|_| ScreenError::WorkerLost)?
             .unwrap_or(Err(ScreenError::WorkerLost))
+    }
+
+    /// Takes one frame under `ticket`; the pixels stay in the worker. The worker's validity runs
+    /// from its receipt, so the caller (B2a) still discards a reply past the ticket's own deadline.
+    ///
+    /// # Errors
+    /// The worker's refusal, a platform fault, or `WorkerLost` for any reply that isn't this
+    /// capture's.
+    pub async fn capture(
+        &self,
+        ticket: TicketWire,
+        display: DisplayRef,
+        exclude: Exclusion,
+    ) -> Result<FrameMeta, CaptureError> {
+        let capture = ticket.capture();
+        let body = RequestBody::Capture {
+            ticket,
+            display,
+            exclude,
+        };
+        match self.request(body).await? {
+            ReplyBody::Captured(meta) if meta.capture == capture && meta.display == display.0 => {
+                Ok(meta)
+            }
+            ReplyBody::Refused(refusal) => Err(CaptureError::Refused(refusal)),
+            _ => Err(ScreenError::WorkerLost.into()),
+        }
     }
 
     /// Subscribes before issuing work, so a lost watch generation cannot be missed.
@@ -187,7 +230,7 @@ fn accept(pending: &mut BTreeMap<u64, Pending>, reply: Reply) -> Result<(), Scre
             item.answer,
             match body {
                 ReplyBody::Fault(code) => Err(ScreenError::Fault(code)),
-                ReplyBody::Pong => Ok(ReplyBody::Pong),
+                body => Ok(body),
             },
         );
     }
@@ -254,6 +297,10 @@ async fn run(
         }
         if losses.send(WorkerLost).is_err() {
             tracing::debug!("screen lost without watchers");
+        }
+        // Every handle is gone, so a respawn would only land in a closing job.
+        if commands.is_closed() {
+            return;
         }
         loop {
             let delay = backoff(&mut history, Instant::now());

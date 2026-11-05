@@ -123,17 +123,18 @@ pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        assert!(
-            !BRAIN_LOG.starts_with(SHELL_LOG),
-            "{BRAIN_LOG} starts with {SHELL_LOG}"
-        );
-        assert!(
-            !SHELL_LOG.starts_with(BRAIN_LOG),
-            "{SHELL_LOG} starts with {BRAIN_LOG}"
-        );
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
+        for one in logs {
+            for other in logs {
+                assert!(
+                    one == other || !one.starts_with(other),
+                    "{one} starts with {other}"
+                );
+            }
+        }
     }
 }
