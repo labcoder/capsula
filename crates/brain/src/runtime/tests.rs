@@ -43,6 +43,8 @@ mod pages;
 mod scenes;
 #[path = "settings_tests.rs"]
 mod settings;
+#[path = "speech_tests.rs"]
+mod speech;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
 

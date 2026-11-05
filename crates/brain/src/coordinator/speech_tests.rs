@@ -243,6 +243,27 @@ fn a_shell_stop_while_draining_is_told_once_quiet_and_stored_in_either_order() {
 }
 
 #[test]
+fn a_scene_stop_while_draining_is_a_shell_stop_too() {
+    let mut core = draining();
+    let cuts = kumochi_protocol::message::SceneCuts::new(Vec::new()).expect("no cuts");
+    assert_eq!(
+        core.handle(Input::StopScenes { run: R, cuts }),
+        Ok(vec![
+            Effect::RevokeSpeech { run: R },
+            quiet_wait(),
+            Effect::CancelEngine { run: R },
+            Effect::Revoke { run: R },
+            end_run(
+                Some("Hello there. "),
+                None,
+                RunEnd::Interrupted(Interruption::Stop)
+            ),
+        ]),
+        "the shell is already stopping, so it isn't told to"
+    );
+}
+
+#[test]
 fn a_shell_that_never_goes_quiet_loses_its_connection() {
     let mut core = draining();
     core.handle(Input::Stop {

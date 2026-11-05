@@ -135,7 +135,7 @@ impl TtsHandle {
         Self::spawn_with(runtime, phonon::Phonon::load)
     }
 
-    pub(super) fn spawn_with<E: Engine>(
+    pub(crate) fn spawn_with<E: Engine>(
         runtime: Handle,
         load: impl FnMut(&Path) -> Result<E, TtsError> + Send + 'static,
     ) -> io::Result<Self> {

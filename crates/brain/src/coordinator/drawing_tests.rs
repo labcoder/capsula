@@ -83,7 +83,8 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
             args,
         }))
         .expect("fresh call");
-    let first = commit(&mut core, &mut store, &lookup);
+    let step_write = commit(&mut core, &mut store, &lookup);
+    let first = commit(&mut core, &mut store, &step_write);
     let at = first
         .iter()
         .position(|effect| {
@@ -98,7 +99,7 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
     };
     let segment = SegmentId(0);
     assert_eq!(
-        first[at + 1..],
+        first[at + 1..at + 4],
         [
             Effect::Data(DataToShell::SegmentQueued {
                 run: R,
