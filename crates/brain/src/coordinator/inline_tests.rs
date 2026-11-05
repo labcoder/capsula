@@ -125,6 +125,7 @@ fn rebuilt(attempt: u64) -> Effect {
 fn compacting() -> Coordinator {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -209,6 +210,7 @@ fn an_empty_summary_or_nothing_to_rewrite_fails_the_run_on_its_budget() {
     );
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -228,6 +230,7 @@ fn an_empty_summary_or_nothing_to_rewrite_fails_the_run_on_its_budget() {
 fn a_delete_between_the_compact_read_and_the_grant_rebuilds_and_never_compacts_twice() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -279,6 +282,7 @@ fn stop_or_a_replacement_leaves_a_held_summary_ack_stale() {
         );
         if replace {
             core.handle(Input::Turn {
+                turn: 1,
                 thread: Some(T),
                 text: "again".to_owned(),
             })

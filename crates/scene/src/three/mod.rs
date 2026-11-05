@@ -1,5 +1,6 @@
 //! Bounded solid sizing, transforms and shared three-dimensional numeric policy.
 
+pub mod mesh;
 pub mod size;
 
 use crate::geom::Vec3;

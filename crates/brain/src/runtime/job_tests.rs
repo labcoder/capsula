@@ -105,6 +105,8 @@ async fn a_long_tasks_done_run_titles_it_then_stores_a_summary_of_its_oldest_run
     let db = scratch.db();
     let client = async {
         let turn = kumochi_protocol::message::DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(task),
             text: "one more".to_owned(),
         };

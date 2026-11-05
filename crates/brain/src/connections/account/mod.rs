@@ -122,6 +122,8 @@ pub struct Received {
     pub identity: Result<VerifiedIdentity, IdentityError>,
     /// Wall time when it arrived, for its expiry.
     pub now: Option<u64>,
+    /// A name for this sign-in no earlier one used, which the set keeps through refreshes.
+    pub connection: u64,
 }
 
 /// What the runtime must do.
@@ -299,6 +301,13 @@ impl AccountState {
         let mut effects = Vec::new();
         state.dispatch(&mut effects);
         (state, effects)
+    }
+
+    /// The connection of the saved token set, if there is one.
+    #[must_use]
+    pub fn connection(&self) -> Option<u64> {
+        let account = self.loaded.account.as_ref()?.expose();
+        account.tokens.as_ref().map(|tokens| tokens.connection)
     }
 
     /// Where the account stands now.
@@ -557,6 +566,10 @@ impl AccountState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exchange, from its result through its verdict to what's saved"
+    )]
     fn exchanged(
         &mut self,
         attempt: u64,
@@ -604,6 +617,7 @@ impl AccountState {
             tokens,
             identity,
             now,
+            connection,
         } = received;
         let refresh_token = match tokens.refresh_token {
             Some(token) if entry_fits(client.expose(), token.expose()) => token,
@@ -641,6 +655,7 @@ impl AccountState {
                         expires_at,
                         pending_identity_validation: false,
                         refresh_sent: false,
+                        connection,
                     }),
                 };
                 if account.validate().is_ok() {

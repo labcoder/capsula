@@ -3,9 +3,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use kumochi_protocol::Secret;
+use ring::hmac;
+use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use rustls::SignatureScheme;
 use rustls::crypto::ring::sign::any_supported_type;
 use rustls::pki_types::PrivateKeyDer;
@@ -99,6 +100,21 @@ const OTHER: TestKey = TestKey {
     e: "AQAB",
 };
 
+/// A 2047-bit modulus: one bit under the minimum, in the same 256 bytes as a 2048-bit one. ring
+/// can't load its private key to sign, so the token, with the valid header and claims, was
+/// signed offline with openssl by that throwaway key.
+const SHORT_N: &str = "ZN1O4H9HXmc9p2VTEmTdF_pgtud6CbD55JVkQvqEETrVwhxm7jSI5TkCgOdzukuUsphhvrX_zb7vWBkFBjkXQG0P4Ux9\
+    FJgexPFfxOX96WCMNEgG-IfHuUiqXbpYpEvdb2lJ23hu8MBwI0pXdTaenvzQYhz0achlx215qARTx1OyXBexMF1p2uOp\
+    SpUzbPmQ24lr5zAbo6CkxZcd0h5GPJH107wz43HLW9DvjMvGP8_zGPtorUGBc3vAZ6_xu07KiAqFB2cNc83KM83FFVdG\
+    AgYl44-MFK5YxtutrCV4-fImBaJifC3uUWjU41ME5LepNkNIOWkYiNt_8dbgpyQSiQ";
+const SHORT_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJpc3MiOiJodHRwczovL2F1dGgub3Bl\
+    bmFpLmNvbSIsImF1ZCI6ImFwcF90ZXN0X2NsaWVudCIsInN1YiI6InVzZXItdGVzdC1zdWJqZWN0IiwiZXhwIjoxODAw\
+    MDAwNjAwLCJub25jZSI6InRlc3Qtbm9uY2UiLCJlbWFpbCI6InBlcnNvbkBleGFtcGxlLmludmFsaWQifQ.KtfEbXdJf\
+    cvMfwc-4s27RsdnOzSuTQsfV8OaOQPjyqwbCX2D8a623V3TlCZpmLWgovKuOEdHGmZpV1XYCHDh_2w1jhxxHFtbPhvOc\
+    93ywiY9sPFjJ63AxxeBPYRbfJRg1xhsCh7K4uQSP0EF8HT3b5aEetSXYeET3NZ2_fRfzZfLN5xRde9AyzrnHj7OCwfy7\
+    m4NjC7vSbX7Tlu_8EcolML7SmaddCh2wgxL9Hb62o90zJf42vpxUr2nD65e2s2AMnf8du6xC4E6UwAind5aGNJDgz2el\
+    NDkFWD4ZUseZ8oUeEILRRpTxzps3LKM9h0e1IlSdvEfs4-Gc2T-a6hB3g";
+
 fn claims() -> Value {
     json!({
         "iss": ISSUER, "aud": CLIENT, "sub": SUBJECT, "exp": NOW + 600, "nonce": NONCE,
@@ -119,22 +135,25 @@ fn with(changes: &[(&str, Option<Value>)]) -> Value {
     claims
 }
 
-fn header(alg: Algorithm, kid: Option<&str>) -> Header {
-    Header {
-        kid: kid.map(str::to_owned),
-        ..Header::new(alg)
+fn header(alg: &str, kid: Option<&str>) -> Value {
+    let mut header = json!({ "typ": "JWT", "alg": alg });
+    if let Some(kid) = kid {
+        header["kid"] = json!(kid);
     }
+    header
 }
 
-/// An RS256 or RS384 JWT signed by rustls's ring signer, since jsonwebtoken reads only PKCS#1.
-fn signed(header: &Header, claims: &Value, key: &TestKey) -> String {
-    let scheme = match header.alg {
-        Algorithm::RS256 => SignatureScheme::RSA_PKCS1_SHA256,
-        Algorithm::RS384 => SignatureScheme::RSA_PKCS1_SHA384,
-        other => panic!("no RSA scheme for {other:?}"),
+/// An RS256 or RS384 JWT signed by rustls's ring signer from the PKCS#8 fixture keys.
+fn signed(header: &Value, claims: &Value, key: &TestKey) -> String {
+    let scheme = match header["alg"].as_str() {
+        Some("RS384") => SignatureScheme::RSA_PKCS1_SHA384,
+        _ => SignatureScheme::RSA_PKCS1_SHA256,
     };
-    let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).expect("header JSON"));
-    let message = format!("{header}.{}", part(claims));
+    signed_raw(scheme, &format!("{}.{}", part(header), part(claims)), key)
+}
+
+/// A signing input with its signature appended, for parts that aren't JSON values.
+fn signed_raw(scheme: SignatureScheme, message: &str, key: &TestKey) -> String {
     let der = STANDARD.decode(key.pkcs8).expect("fixture key is base64");
     let signer = any_supported_type(&PrivateKeyDer::Pkcs8(der.into()))
         .expect("fixture key is RSA PKCS#8")
@@ -145,7 +164,7 @@ fn signed(header: &Header, claims: &Value, key: &TestKey) -> String {
 }
 
 fn token(claims: &Value) -> String {
-    signed(&header(Algorithm::RS256, Some(KID)), claims, &SIGNER)
+    signed(&header("RS256", Some(KID)), claims, &SIGNER)
 }
 
 fn jwk(kid: &str, key: &TestKey) -> Value {
@@ -248,8 +267,8 @@ fn accepted_claim_edges() {
 
 #[test]
 fn exact_token_and_client_byte_limits_are_accepted() {
-    let mut header = header(Algorithm::RS256, Some(KID));
-    header.cty = Some("application/json".to_owned());
+    let mut header = header("RS256", Some(KID));
+    header["cty"] = json!("application/json");
     let padded_token = signed(
         &header,
         &with(&[("padding", Some(json!("x".repeat(11_794))))]),
@@ -375,6 +394,44 @@ fn claim_rejections_have_exact_kinds() {
 }
 
 #[test]
+fn a_claim_with_the_wrong_json_type_is_refused_not_read_as_absent() {
+    for (name, value) in [
+        ("iss", json!(1)),
+        ("aud", json!(5)),
+        ("aud", json!([CLIENT, 5])),
+        ("sub", json!(7)),
+        ("azp", json!(3)),
+        ("email", json!(true)),
+        ("nonce", json!(4)),
+    ] {
+        let claims = with(&[(name, Some(value.clone()))]);
+        assert_eq!(
+            check(&token(&claims)).map(|_| ()),
+            Err(IdentityError::Token),
+            "{name}: {value}"
+        );
+    }
+}
+
+#[test]
+fn a_selected_key_that_isnt_rsa_is_refused() {
+    let valid = token(&claims());
+    let mut mislabelled = jwk(KID, &SIGNER);
+    mislabelled["kty"] = json!("EC");
+    assert_eq!(
+        verify_signed(
+            &valid,
+            &keys(json!({ "keys": [mislabelled] })),
+            CLIENT,
+            NONCE,
+            NOW
+        )
+        .map(|_| ()),
+        Err(IdentityError::Token)
+    );
+}
+
+#[test]
 fn token_and_key_rejections_have_exact_kinds() {
     use IdentityError::{Bounds, Token};
     let valid = token(&claims());
@@ -390,12 +447,17 @@ fn token_and_key_rejections_have_exact_kinds() {
         part(&json!({ "alg": "none", "kid": KID })),
         part(&claims())
     );
-    let hmac = encode(
-        &header(Algorithm::HS256, Some(KID)),
-        &claims(),
-        &EncodingKey::from_secret(b"test-only-hmac-key"),
-    )
-    .expect("sign an HMAC token");
+    let message = format!("{}.{}", part(&header("HS256", Some(KID))), part(&claims()));
+    let mac = hmac::sign(
+        &hmac::Key::new(hmac::HMAC_SHA256, b"test-only-hmac-key"),
+        message.as_bytes(),
+    );
+    let hmac = format!("{message}.{}", URL_SAFE_NO_PAD.encode(mac));
+    let mut critical = header("RS256", Some(KID));
+    critical["crit"] = json!(["exp"]);
+    let mut numbered = header("RS256", None);
+    numbered["kid"] = json!(7);
+    let padded = format!("{valid}==");
     let cases = [
         ("empty", String::new(), Token),
         ("not a JWT", "not-a-jwt".to_owned(), Token),
@@ -406,47 +468,51 @@ fn token_and_key_rejections_have_exact_kinds() {
         ("tampered payload", tampered, Token),
         ("alg none", unsigned, Token),
         ("HS256", hmac, Token),
+        ("crit header", signed(&critical, &claims(), &SIGNER), Token),
+        (
+            "kid not a string",
+            signed(&numbered, &claims(), &SIGNER),
+            Token,
+        ),
+        ("padded signature", padded, Token),
+        (
+            "alg not a string",
+            signed(&json!({ "alg": ["RS256"], "kid": KID }), &claims(), &SIGNER),
+            Token,
+        ),
         (
             "RS384",
-            signed(&header(Algorithm::RS384, Some(KID)), &claims(), &SIGNER),
+            signed(&header("RS384", Some(KID)), &claims(), &SIGNER),
             Token,
         ),
         (
             "another key",
-            signed(&header(Algorithm::RS256, Some(KID)), &claims(), &OTHER),
+            signed(&header("RS256", Some(KID)), &claims(), &OTHER),
             Token,
         ),
         (
             "no kid",
-            signed(&header(Algorithm::RS256, None), &claims(), &SIGNER),
+            signed(&header("RS256", None), &claims(), &SIGNER),
             Token,
         ),
         (
             "empty kid",
-            signed(&header(Algorithm::RS256, Some("")), &claims(), &SIGNER),
+            signed(&header("RS256", Some("")), &claims(), &SIGNER),
             Token,
         ),
         (
             "unknown kid",
-            signed(&header(Algorithm::RS256, Some("gone")), &claims(), &SIGNER),
+            signed(&header("RS256", Some("gone")), &claims(), &SIGNER),
             IdentityError::UnknownKey,
         ),
         (
             "kid of a secret key",
-            signed(
-                &header(Algorithm::RS256, Some("shared")),
-                &claims(),
-                &SIGNER,
-            ),
+            signed(&header("RS256", Some("shared")), &claims(), &SIGNER),
             Token,
         ),
         (
             "long kid",
-            signed(
-                &header(Algorithm::RS256, Some(&"k".repeat(257))),
-                &claims(),
-                &SIGNER,
-            ),
+            signed(&header("RS256", Some(&"k".repeat(257))), &claims(), &SIGNER),
             Bounds,
         ),
     ];
@@ -458,6 +524,88 @@ fn token_and_key_rejections_have_exact_kinds() {
         verify_signed(&valid, &crowded, CLIENT, NONCE, NOW).map(|_| ()),
         Err(Bounds)
     );
+}
+
+#[test]
+fn malformed_compact_parts_are_refused_one_at_a_time() {
+    let sign = |header: &str, payload: &str| {
+        signed_raw(
+            SignatureScheme::RSA_PKCS1_SHA256,
+            &format!("{header}.{payload}"),
+            &SIGNER,
+        )
+    };
+    let padded = |value: &Value| {
+        let mut text = value.to_string();
+        while text.len().is_multiple_of(3) {
+            text.push(' ');
+        }
+        (URL_SAFE.encode(&text), URL_SAFE_NO_PAD.encode(&text))
+    };
+    let header_part = part(&header("RS256", Some(KID)));
+    let payload_part = part(&claims());
+    let (padded_header, unpadded_header) = padded(&header("RS256", Some(KID)));
+    let (padded_payload, unpadded_payload) = padded(&claims());
+    for control in [
+        sign(&header_part, &payload_part),
+        sign(&unpadded_header, &payload_part),
+        sign(&header_part, &unpadded_payload),
+    ] {
+        assert!(check(&control).is_ok(), "an unbroken twin is accepted");
+    }
+    let cases = [
+        ("empty header", sign("", &payload_part)),
+        ("empty payload", sign(&header_part, "")),
+        ("empty signature", format!("{header_part}.{payload_part}.")),
+        (
+            "header not JSON",
+            sign(&URL_SAFE_NO_PAD.encode("not json"), &payload_part),
+        ),
+        (
+            "header not an object",
+            sign(&part(&json!(["RS256", KID])), &payload_part),
+        ),
+        ("padded header", sign(&padded_header, &payload_part)),
+        ("padded payload", sign(&header_part, &padded_payload)),
+    ];
+    for (name, token) in cases {
+        assert_eq!(
+            check(&token).map(|_| ()),
+            Err(IdentityError::Token),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_modulus_under_2048_bits_is_refused_though_ring_would_verify_it() {
+    let short = URL_SAFE_NO_PAD.decode(SHORT_N).expect("fixture modulus");
+    let full = URL_SAFE_NO_PAD.decode(SIGNER.n).expect("fixture modulus");
+    assert_eq!((short.len(), short[0].leading_zeros()), (256, 1));
+    assert_eq!((full.len(), full[0].leading_zeros()), (256, 0));
+    let (message, signature) = SHORT_TOKEN.rsplit_once('.').expect("a signed token");
+    assert_eq!(
+        message,
+        format!("{}.{}", part(&header("RS256", Some(KID))), part(&claims()))
+    );
+    let ring_alone = RsaPublicKeyComponents {
+        n: &short,
+        e: &URL_SAFE_NO_PAD.decode(SIGNER.e).expect("fixture exponent"),
+    }
+    .verify(
+        &RSA_PKCS1_2048_8192_SHA256,
+        message.as_bytes(),
+        &URL_SAFE_NO_PAD.decode(signature).expect("a signature"),
+    );
+    assert!(ring_alone.is_ok(), "ring's byte-rounded minimum admits it");
+    let mut short_key = jwk(KID, &SIGNER);
+    short_key["n"] = json!(SHORT_N);
+    let set = keys(json!({ "keys": [short_key] }));
+    assert_eq!(
+        verify_signed(SHORT_TOKEN, &set, CLIENT, NONCE, NOW).map(|_| ()),
+        Err(IdentityError::Token)
+    );
+    assert!(check(&token(&claims())).is_ok(), "2048 bits is accepted");
 }
 
 #[test]
@@ -842,11 +990,7 @@ async fn verify_accepts_missing_key_metadata() {
 
 #[tokio::test]
 async fn verify_selects_the_second_rsa_key() {
-    let valid = signed(
-        &header(Algorithm::RS256, Some("second-key")),
-        &claims(),
-        &OTHER,
-    );
+    let valid = signed(&header("RS256", Some("second-key")), &claims(), &OTHER);
     let http = Scripted::new([
         discovery(ISSUER, JWKS_URI),
         response(

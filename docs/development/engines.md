@@ -2,8 +2,8 @@
 
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
-Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Today the
-fixture engine answers every run and sends nothing.
+Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Until 13b-1b,
+every run is answered by a script that sends nothing (runs.md, "The fixture engine").
 
 ```mermaid
 flowchart LR
@@ -17,7 +17,7 @@ flowchart LR
 
 | Part | Where it comes from |
 |---|---|
-| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. It's empty until a catalog has been read; the fixture engine needs none, and a real engine refuses a request without one. |
+| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against the catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |
 | Instructions | `prompts/instructions.md` and the role file for the run's origin (`kumo.md` or `task.md`). The assistant's name and the user's name come from the run's snapshot, taken once when the run starts, so a rename applies from the next run. An unset user name leaves its line out. Names are filled in one pass, so a name is never read as a placeholder. |
 | Tools | The schemas the origin may use. None yet: slice 4's B10 adds the draw tool, 14a the history tools. |
 | Summary | The newest summary (PR 17), as `Summary of events 1–212:` and its text. Events it covers aren't sent raw. |
@@ -25,6 +25,7 @@ flowchart LR
 | Current turn | The user's text, plus their local time to the minute (SQLite's `localtime`, so the system's time zone on every platform). It's never dropped. |
 
 Reasoning items (PR 13b) are replayed only when they came from the connection the run uses now.
+That's the connection the run was bound to when its turn arrived, recorded in its snapshot.
 
 ## Origin and references
 
@@ -289,3 +290,34 @@ its call ready.
 A round keeps at most 64 calls and items and 1 MiB of ids, arguments and items [guesses], charged
 before each is kept. A stream whose bytes run out has no ending of its own, so the round's pump
 reports it as `Truncated`.
+
+## The Claude Code stream
+
+Claude Code is driven through its public CLI with `--output-format stream-json --verbose
+--include-partial-messages`. `engines/claude_code/stream.rs` reads its stdout in two steps, both
+sync and one line at a time, so the launch can audit `system:init` before it passes the next line
+on:
+
+- **`LineFramer`** charges every byte to a 16 MiB budget [guess] before framing, ignored lines
+  included, and yields complete lines of at most 1 MiB [guess], line feed excluded. A partial line
+  past the bound fails at once.
+- **`StreamMapper::line`** maps one line to `Event` (a text delta), `End` (the question's usage
+  and how it ended), `Control` (a `control_response`, for the audit before input), `Init` (the
+  facts for the audit after it) or `Ignored`. Unknown types are counted and ignored.
+
+| Line | Maps to |
+|---|---|
+| `stream_event` `content_block_delta` with `text_delta` | `TextDelta`; text comes only from here, so without `--include-partial-messages` an answer is empty |
+| `assistant`, `user`, `system:status`, `system:api_retry` | ignored; `assistant` repeats the streamed text |
+| `stream_event` `message_start` | one native request; the first one's usage is kept for the prompt-cache decision. A 9th fails the question with `TurnCap` and marks the version's turn cap broken |
+| `result` | `Usage { whole, first_request }`, then `Completed`, `Failed(TurnCap)` for `error_max_turns` (the cap working, not broken), or `Failed(Provider)`; anything after it is ignored |
+| EOF before a result | `Truncated` |
+
+Claude Code retries a cut request itself (`system:api_retry`, up to 10 times in 2.1.306) and
+streams only the attempt that finished, so a retry doesn't count as a second native request. No
+line's content is ever logged, and every type here prints only kinds, lengths and counts in `Debug`.
+
+`Init` keeps `analytics_disabled` as reported (`None` when it's missing or not a boolean) for the
+connection to show; it's never a reason to refuse the route. The recordings in
+`fixtures/claude-code/` are checked by a normal test: no decoded string may hold a drive, UNC or
+`/`-rooted path, `Users\`, or a UUID other than the all-zero placeholder.

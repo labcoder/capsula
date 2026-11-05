@@ -512,6 +512,7 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
             expires_at: 1,
             pending_identity_validation: false,
             refresh_sent: false,
+            connection: 0,
         }),
     };
     let attempt = SignIn::bind("urn:uuid:synthetic-host", Some(&saved), Intent::SignIn)

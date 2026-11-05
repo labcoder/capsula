@@ -33,6 +33,8 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
+#[cfg(debug_assertions)]
+use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
 };
@@ -119,6 +121,16 @@ pub(crate) enum Quit {
     Incomplete,
 }
 
+/// The engine runs use, picked once at start (docs/development/engines.md, "Selection").
+#[derive(Debug)]
+pub(crate) enum Selected {
+    /// The dev fixture answers every run, with no account; a release build can't pick it.
+    #[cfg(debug_assertions)]
+    Fixture(Box<dyn Engine>),
+    /// The account's engine answers, so runs need a usable account.
+    Account(Box<dyn Engine>),
+}
+
 /// The coordinator and the systems that outlive one shell connection.
 #[derive(Debug)]
 pub(crate) struct Brain {
@@ -126,6 +138,9 @@ pub(crate) struct Brain {
     coordinator: Coordinator,
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
+    /// The dev fixture was picked, so runs never wait on the account.
+    #[cfg(debug_assertions)]
+    fixture: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
@@ -212,10 +227,17 @@ impl Brain {
         main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
-        engine: Box<dyn Engine>,
+        engine: Selected,
         config: Config,
         account: Accounts,
     ) -> std::io::Result<Self> {
+        #[cfg(debug_assertions)]
+        let (engine, fixture) = match engine {
+            Selected::Fixture(engine) => (engine, true),
+            Selected::Account(engine) => (engine, false),
+        };
+        #[cfg(not(debug_assertions))]
+        let Selected::Account(engine) = engine;
         let (last_thread, last_run) = high_water;
         let (inputs_tx, inputs) = mpsc::unbounded_channel();
         #[cfg(test)]
@@ -239,6 +261,8 @@ impl Brain {
             coordinator,
             store: Some(store),
             engine,
+            #[cfg(debug_assertions)]
+            fixture,
             inputs_tx,
             inputs,
             engine_tx,
@@ -271,7 +295,28 @@ impl Brain {
         if let Some(generation) = brain.account.sendable() {
             brain.offline(Input::SignedIn { generation });
         }
+        brain
+            .availability_changed(None)
+            .expect("offline effects cannot fill a shell queue");
         Ok(brain)
+    }
+
+    /// Tells the coordinator whether runs can be answered now; the same answer again changes
+    /// nothing.
+    fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
+        #[cfg(debug_assertions)]
+        let now = if self.fixture {
+            Availability::Ready(Ready::fixture())
+        } else {
+            self.account.availability()
+        };
+        #[cfg(not(debug_assertions))]
+        let now = self.account.availability();
+        let effects = self
+            .coordinator
+            .handle(Input::Engines(now))
+            .expect("availability is never stale");
+        self.apply(effects, link)
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
@@ -669,7 +714,7 @@ impl Brain {
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
-                Some((thread, text)) = turns.recv(), if take_turns => Input::Turn { thread, text },
+                Some((turn, thread, text)) = turns.recv(), if take_turns => Input::Turn { turn, thread, text },
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
                 () = sleep_until(self.retry_at) => {
@@ -786,8 +831,12 @@ impl Brain {
     /// A run's first build takes the names and default model as they are now, so a rename
     /// applies from the next run.
     fn seed(&self, build: &mut BuildContext) {
-        let origin = build.origin;
-        build.snapshot.get_or_insert_with(|| self.snapshot(origin));
+        let (origin, run) = (build.origin, build.key.run);
+        build.snapshot.get_or_insert_with(|| RunSnapshot {
+            // A build for a run that already ended is stale, so its tag is never read.
+            connection: self.coordinator.bound(run).unwrap_or(ConnectionTag(0)),
+            ..self.snapshot(origin)
+        });
     }
 
     /// Seeds a build, or a job's read with the names and default model now and the compaction
@@ -824,7 +873,7 @@ impl Brain {
             assistant: view.assistant_name.clone(),
             user: view.user_name.clone(),
             choice: view.default_model.clone(),
-            // shortcut: no run records its connection yet; 13b tags each with the one it used.
+            // shortcut: a job records no connection yet; 13b tags it with the one it used.
             connection: ConnectionTag(0),
         }
     }
@@ -969,7 +1018,7 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
 }
 
 /// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (Option<ThreadId>, String);
+type Turn = (u32, Option<ThreadId>, String);
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
@@ -1005,9 +1054,9 @@ async fn read_data(
                 }
             }
             // Never waits for the core, so credit behind a turn is always read.
-            Ok(Some(DataToBrain::TextSubmit { thread, text })) => match turns
-                .try_send((thread, text))
-            {
+            Ok(Some(DataToBrain::TextSubmit {
+                turn, thread, text, ..
+            })) => match turns.try_send((turn, thread, text)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),
                 Err(TrySendError::Closed(_)) => return Ended::Lost,
