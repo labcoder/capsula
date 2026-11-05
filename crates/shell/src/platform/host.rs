@@ -169,6 +169,15 @@ pub(crate) mod tests {
         assert!(!text.as_bytes().windows(bytes.len()).any(|w| w == bytes));
         let written: Vec<u16> = text.encode_utf16().collect();
         assert!(!written.windows(units.len()).any(|w| w == units));
+        let list = |values: Vec<String>| values.join(", ");
+        assert!(
+            !text.contains(&list(units.iter().map(u16::to_string).collect())),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&list(SENTINEL.bytes().map(|b| b.to_string()).collect())),
+            "{text}"
+        );
     }
 
     #[test]
@@ -226,5 +235,8 @@ pub(crate) mod tests {
                 change: HostChange::Gone,
             }
         ));
+        let error = crate::platform::PresenceError::HostWatch;
+        assert_eq!(error.to_string(), "can't watch the host window");
+        assert_no_sentinel(&format!("{error} {error:?}"));
     }
 }

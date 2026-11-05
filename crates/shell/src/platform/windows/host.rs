@@ -3,6 +3,8 @@
 //! into another app's thread, so a hung app can't stall Kumochi, and neither logs anything.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use async_channel::Sender;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -291,6 +293,8 @@ thread_local! {
 #[derive(Debug)]
 pub(crate) struct HostWatch {
     slot: usize,
+    /// Drop reads this thread's `ROUTES`, so the watch can't move to or be shared with another.
+    _thread: PhantomData<Rc<()>>,
 }
 
 /// Arms a watch on `id`. Fails closed, with nothing left installed, when any hook can't be
@@ -333,7 +337,10 @@ pub(crate) fn watch_host(
             events,
         });
     });
-    Ok(HostWatch { slot })
+    Ok(HostWatch {
+        slot,
+        _thread: PhantomData,
+    })
 }
 
 impl Drop for HostWatch {
@@ -418,9 +425,10 @@ unsafe extern "system" fn on_event(
 mod tests {
     use std::cell::RefCell;
 
+    use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WINDOW_EX_STYLE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
-        WS_POPUP,
+        SM_CXPADDEDBORDER, SM_CXSIZE, SM_CYCAPTION, SM_CYSIZEFRAME, WINDOW_EX_STYLE, WS_BORDER,
+        WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
     };
 
     use super::{captioned, install, metrics, teardown};
@@ -434,15 +442,55 @@ mod tests {
         assert!(!captioned(WS_POPUP | WS_BORDER));
     }
 
+    /// Compiles only while `HostWatch` is neither `Send` nor `Sync`: either impl would make
+    /// the call ambiguous.
+    trait NotSend<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> NotSend<()> for T {}
+    impl<T: ?Sized + Send> NotSend<u8> for T {}
+    trait NotSync<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> NotSync<()> for T {}
+    impl<T: ?Sized + Sync> NotSync<u8> for T {}
+    const _: fn() = || {
+        <super::HostWatch as NotSend<_>>::check();
+        <super::HostWatch as NotSync<_>>::check();
+    };
+
+    /// A standard captioned frame from the system metrics it's made of, read apart from
+    /// `AdjustWindowRectExForDpi`: the top inset and the caption-button width.
+    fn standard(dpi: u32) -> (i32, i32) {
+        // SAFETY: plain metric reads.
+        let metric = |index| unsafe { GetSystemMetricsForDpi(index, dpi) };
+        (
+            metric(SM_CYCAPTION) + metric(SM_CYSIZEFRAME) + metric(SM_CXPADDEDBORDER),
+            metric(SM_CXSIZE),
+        )
+    }
+
     #[test]
     fn a_borderless_host_gets_the_standard_captioned_metrics() {
-        let standard = metrics(WS_OVERLAPPEDWINDOW, WINDOW_EX_STYLE::default(), 96);
-        assert_eq!(standard, Some((31, 36)));
-        assert_eq!(metrics(WS_POPUP, WINDOW_EX_STYLE::default(), 96), standard);
+        for dpi in [96, 144] {
+            let standard = Some(standard(dpi));
+            let none = WINDOW_EX_STYLE::default();
+            assert_eq!(metrics(WS_OVERLAPPEDWINDOW, none, dpi), standard, "{dpi}");
+            assert_eq!(metrics(WS_POPUP, none, dpi), standard, "{dpi}");
+            assert_eq!(
+                metrics(WS_POPUP | WS_BORDER, WS_EX_TOOLWINDOW, dpi),
+                standard,
+                "a tool window at {dpi}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Rez's default system metrics; run on Rez with --ignored"]
+    fn rez_borderless_metrics_at_96_dpi_are_the_design_notes() {
         assert_eq!(
-            metrics(WS_POPUP | WS_BORDER, WS_EX_TOOLWINDOW, 96),
-            standard,
-            "a tool window"
+            metrics(WS_POPUP, WINDOW_EX_STYLE::default(), 96),
+            Some((31, 36))
         );
     }
 

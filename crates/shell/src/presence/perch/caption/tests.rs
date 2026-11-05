@@ -233,5 +233,7 @@ fn a_target_never_prints_its_title() {
     };
     let target = super::target_of(&facts).expect("a fixed window has a caption");
     assert_eq!(target.label, facts.label);
-    crate::platform::host::tests::assert_no_sentinel(&format!("{target:?}"));
+    let text = format!("{target:?}");
+    assert!(text.contains("label: Label(19 units)"), "{text}");
+    crate::platform::host::tests::assert_no_sentinel(&text);
 }

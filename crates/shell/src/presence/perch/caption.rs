@@ -45,7 +45,7 @@ pub(crate) struct Geometry {
 }
 
 /// A window Kumo can perch on, in physical screen pixels. Its `label` prints only its length.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) struct WindowTarget {
     pub(crate) id: HostId,
     pub(crate) frame: PhysicalRect,
@@ -54,6 +54,20 @@ pub(crate) struct WindowTarget {
     pub(crate) caption: Caption,
     pub(crate) exclusions: Exclusions,
     pub(crate) label: Label,
+}
+
+impl std::fmt::Debug for WindowTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowTarget")
+            .field("id", &self.id)
+            .field("frame", &self.frame)
+            .field("work_area", &self.work_area)
+            .field("monitor_dpi", &self.monitor_dpi)
+            .field("caption", &self.caption)
+            .field("exclusions", &self.exclusions)
+            .field("label", &self.label)
+            .finish()
+    }
 }
 
 /// The perch target `facts` describe, or `None` when it has no caption to drop on.
