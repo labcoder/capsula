@@ -86,6 +86,10 @@ pub enum StoreError {
     #[error("can't store or recover the drawing")]
     Drawing,
 
+    /// A tool call's write failed; no database or call content is exposed.
+    #[error("can't store the tool call")]
+    Call,
+
     /// A swap's reopen failed, or the store's thread ended, so the file is closed to reads.
     #[error("the store's file isn't open")]
     Closed,

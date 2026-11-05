@@ -174,7 +174,9 @@ fn a_round_completed_behind_a_drawing_still_answers_its_calls() {
     let writes: Vec<_> = last
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Store(StoreOp::RoundItems(round)) => Some(round.calls.clone()),
+            Effect::Store(StoreOp::RoundItems(round)) => {
+                Some(round.calls.iter().map(|(call, _)| call.clone()).collect())
+            }
             Effect::Store(StoreOp::EndRun { .. }) => Some(Vec::new()),
             _ => None,
         })

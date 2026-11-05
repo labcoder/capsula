@@ -1,6 +1,6 @@
 //! An in-memory credential store for tests: it can refuse, or "crash" after, any mutation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -32,16 +32,22 @@ pub(crate) struct FakeState {
     pub(crate) sticky_deletes: usize,
     /// The next write moves this clock forward by these seconds, as a slow save does.
     pub(crate) slow_write: Option<(Arc<AtomicU64>, u64)>,
+    /// Fail the test on any second write of a name, even after a delete (OSC-233 write-once).
+    pub(crate) write_once: bool,
+    written: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FakeStore(pub(crate) Arc<Mutex<FakeState>>);
 
 impl FakeStore {
+    /// A copy of the values and the write-once history, with no faults armed.
     pub(crate) fn fork(&self) -> Self {
-        let values = self.0.lock().expect("fake lock").values.clone();
+        let state = self.0.lock().expect("fake lock");
         Self(Arc::new(Mutex::new(FakeState {
-            values,
+            values: state.values.clone(),
+            write_once: state.write_once,
+            written: state.written.clone(),
             ..FakeState::default()
         })))
     }
@@ -54,6 +60,23 @@ impl FakeStore {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Every name's value now, for a later [`Self::rollback`].
+    pub(crate) fn snapshot(&self) -> BTreeMap<String, SecretBytes> {
+        self.0.lock().expect("fake lock").values.clone()
+    }
+
+    /// Puts these names back as `snapshot` had them, as a store that serves a stale copy does:
+    /// a confirmed delete comes back, or a fresh write reads as absent. It isn't a mutation.
+    pub(crate) fn rollback(&self, snapshot: &BTreeMap<String, SecretBytes>, names: &[String]) {
+        let mut state = self.0.lock().expect("fake lock");
+        for name in names {
+            match snapshot.get(name) {
+                Some(value) => state.values.insert(name.clone(), value.clone()),
+                None => state.values.remove(name),
+            };
+        }
     }
 
     pub(crate) fn arm(&self, index: usize, fault: Fault) {
@@ -73,6 +96,10 @@ impl FakeStore {
     ) -> Result<(), CredentialStoreError> {
         let fault = {
             let mut state = self.0.lock().expect("fake lock");
+            if value.is_some() && state.write_once {
+                let fresh = state.written.insert(target.to_owned());
+                assert!(fresh, "a write-once credential name was written twice");
+            }
             let index = state.mutations.len();
             state.mutations.push(value.map_or_else(
                 || Mutation::Delete(target.to_owned()),
