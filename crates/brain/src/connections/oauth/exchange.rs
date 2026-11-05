@@ -220,7 +220,7 @@ pub async fn exchange(
     Ok(tokens)
 }
 
-pub(super) fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
+pub(crate) fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {
     let bytes = response.body.expose();
     if bytes.len() > MAX_BODY_BYTES {
         return Err(ExchangeError::Http(HttpError::BodyTooLarge));

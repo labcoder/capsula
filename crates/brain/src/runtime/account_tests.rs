@@ -22,6 +22,8 @@ use super::{Ended, PATIENCE, Shell, duplex};
 use crate::connections::account::{Denied, Input, Listened, Worker};
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
+use crate::connections::model::budget::Budget;
+use crate::connections::model::conn::{Connect, ModelClient};
 use crate::connections::oauth::id_token::IdentityError;
 use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launcher};
 use crate::connections::records::{Account, Tokens};
@@ -29,7 +31,7 @@ use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
-use crate::engines::responses::Bearer;
+use crate::engines::responses::{AccessHandle, Bearer, Responses};
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
@@ -560,6 +562,23 @@ fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u6
 
 /// [`seeded`], building each client with `http`.
 fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at: u64) -> Accounts {
+    seeded_at(
+        scratch,
+        store,
+        http,
+        expires_at,
+        Arc::new(FixedClock(1_800_000_000)),
+    )
+}
+
+/// [`seeded_on`], with the account system's wall clock `clock`.
+fn seeded_at(
+    scratch: &Scratch,
+    store: &FakeStore,
+    http: HttpFactory,
+    expires_at: u64,
+    clock: Arc<dyn Clock>,
+) -> Accounts {
     let seed = scratch.db().with_file_name("seed.lock");
     let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
         .expect("vault")
@@ -584,10 +603,11 @@ fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at
     let opening = store.clone();
     let worker = Worker::new(
         Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
-        Arc::new(FixedClock(1_800_000_000)),
+        Arc::clone(&clock),
     );
     let net = Net {
         http,
+        clock,
         ..test_support::net()
     };
     Accounts::spawn(worker, net).expect("accounts")
@@ -1283,4 +1303,138 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
+}
+
+/// Lists the catalog and answers the refresh-token grant with what `token` gives, inside the
+/// refresh's own task, so a panic there is that task's.
+struct Renewing(fn() -> Result<Response, HttpError>);
+
+impl Http for Renewing {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let token = self.0;
+        let models = matches!(request.endpoint, Endpoint::Models(_));
+        async move {
+            if !models {
+                return token();
+            }
+            let (status, body) = listing();
+            Ok(Response {
+                status,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(body.into_bytes())),
+            })
+        }
+    }
+}
+
+/// No model server: a round that gets its bearer never gets further.
+struct Unreachable;
+
+impl Connect for Unreachable {
+    type Io = tokio::io::DuplexStream;
+
+    fn connect(&self) -> impl std::future::Future<Output = std::io::Result<Self::Io>> + Send {
+        std::future::ready(Err(std::io::Error::other("no model server in tests")))
+    }
+}
+
+/// The error of the next `Failed` run state the shell hears, answering pings on the way.
+async fn failed_with<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) -> Option<UserError> {
+    loop {
+        match shell.frame().await {
+            ControlToShell::RunState {
+                phase: Phase::Failed,
+                error,
+                ..
+            } => return error,
+            ControlToShell::Ping => shell.send(&ControlToBrain::Pong).await,
+            _ => {}
+        }
+    }
+}
+
+/// P169-M1 (OSC-223 gap 8): a named run waiting on a renewal whose outcome is unknown fails
+/// saying so, on the frames the shell reads, and so does the next task's admission. The account's
+/// end reaches the run before its engine's own answer, so the reason has to travel with the
+/// account. An explicit `invalid_grant` still says the session ended.
+#[tokio::test]
+async fn a_run_waiting_on_an_unconfirmed_renewal_fails_saying_so() {
+    let refusal = || {
+        Ok(Response {
+            status: 400,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(br#"{"error":"invalid_grant"}"#.to_vec())),
+        })
+    };
+    let cases: [(&str, fn() -> Result<Response, HttpError>, ErrorKey); 3] = [
+        (
+            "timeout",
+            || Err(HttpError::Timeout),
+            ErrorKey::RenewalUnconfirmed,
+        ),
+        (
+            "panic",
+            || panic!("the transport panicked"),
+            ErrorKey::RenewalUnconfirmed,
+        ),
+        ("invalid-grant", refusal, ErrorKey::SessionEnded),
+    ];
+    for (name, token, key) in cases {
+        let scratch = Scratch::new(&format!("account-run-renewal-{name}"));
+        let store = FakeStore::default();
+        let now = Arc::new(AtomicU64::new(1_800_000_000));
+        let http = SharedHttp::new(Renewing(token));
+        let accounts = seeded_at(
+            &scratch,
+            &store,
+            Arc::new(move || Ok(http.clone())),
+            1_800_003_600,
+            Arc::new(Ticking(Arc::clone(&now))),
+        );
+        let (access, asks) = AccessHandle::new();
+        let engine = Responses::new(ModelClient::new(Unreachable), Budget::limited(None), access);
+        let selected = crate::runtime::Selected::Account {
+            engine: Box::new(engine),
+            asks,
+        };
+        let mut brain = test_support::brain_on(&scratch, selected, accounts);
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let expected =
+            UserError::new(key, Vec::new(), vec![Action::SignIn]).expect("within limits");
+        let client = async {
+            assert!(matches!(
+                timeout(PATIENCE, shell.data()).await.expect("in time"),
+                DataToShell::Models { .. }
+            ));
+            loop {
+                if let ControlToShell::Settings { view, .. } = shell.frame().await
+                    && view.default_model.is_some()
+                {
+                    break;
+                }
+            }
+            // The bearer is now due, so the run's round renews it, and waits.
+            now.store(1_800_003_600, Ordering::SeqCst);
+            shell.submit("first").await;
+            assert_eq!(
+                failed_with(&mut shell).await,
+                Some(expected.clone()),
+                "{name}: the run"
+            );
+            shell.submit("second").await;
+            assert_eq!(
+                failed_with(&mut shell).await,
+                Some(expected.clone()),
+                "{name}: the next task"
+            );
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost, "{name}");
+        brain.close().await;
+    }
 }
