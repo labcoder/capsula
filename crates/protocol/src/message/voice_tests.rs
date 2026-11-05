@@ -96,6 +96,12 @@ fn a_speech_chunk_holds_up_to_100_ms_and_a_segment_up_to_30_s() {
     ] {
         assert_eq!(speech(len, None).check(24_000), expected, "{len}");
     }
+    assert_eq!(speech(0, Some(0)).check(24_000), Ok(()));
+    assert_eq!(speech(0, Some(720_000)).check(24_000), Ok(()));
+    assert_eq!(
+        speech(2_401, Some(2_401)).check(24_000),
+        Err(VoiceBound::Samples)
+    );
     assert_eq!(speech(1, Some(720_000)).check(24_000), Ok(()));
     assert_eq!(
         speech(1, Some(720_001)).check(24_000),

@@ -411,8 +411,10 @@ records only their operation and length.
   when it holds 1 to `rate / 50`. `seq` counts from 0 below `MAX_HOLD_CHUNKS` (3,000, 60 s), and
   the hold's `KeyUp` says how many chunks it sent. Rates are 8,000 to 192,000 Hz.
 - **Speech.** A `SpeechPcm` holds 1 to `rate / 10` samples (100 ms) at the rate of the output
-  generation it names; PCM for an older generation is dropped. `last` is set on a segment's
-  final chunk and carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s) of them.
+  generation it names; PCM for an older generation is dropped. Every queued segment ends with
+  exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
+  of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
+  audio or was cut still ends.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as

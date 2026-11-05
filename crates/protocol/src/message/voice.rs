@@ -168,7 +168,8 @@ pub struct SpeechPcm {
     pub output_generation: OutputGeneration,
     /// Counted from 0 within the segment.
     pub seq: u32,
-    /// 1 to `rate / 10` samples.
+    /// 1 to `rate / 10` samples; none only on a final chunk, which ends a segment whose audio
+    /// already went or that has none.
     pub samples: Vec<i16>,
     /// On the segment's final chunk: the segment's total samples.
     pub last: Option<u32>,
@@ -182,7 +183,8 @@ impl SpeechPcm {
     pub fn check(&self, rate: u32) -> Result<(), VoiceBound> {
         check_rate(rate)?;
         let most = usize::try_from(rate / 10).map_err(|_| VoiceBound::Rate)?;
-        if !(1..=most).contains(&self.samples.len()) {
+        let least = usize::from(self.last.is_none());
+        if !(least..=most).contains(&self.samples.len()) {
             return Err(VoiceBound::Samples);
         }
         if self.last.is_some_and(|total| {
