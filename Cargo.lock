@@ -3757,6 +3757,7 @@ dependencies = [
  "unic-langid",
  "url",
  "webbrowser",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "xn",
  "zeroize",
