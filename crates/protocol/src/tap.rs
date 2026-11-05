@@ -121,6 +121,7 @@ impl Tapped for ControlToShell {
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
+            Self::ThreadModelSet { .. } => "ThreadModelSet",
         }
     }
 

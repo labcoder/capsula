@@ -128,14 +128,21 @@ flowchart LR
 |---|---|---|
 | `ThreadOp::Rename` | Control, shell to brain | `thread`, `title`: a `ThreadTitle`, trimmed, one line, 1–80 characters, checked on decode |
 | `ThreadOp::SetModel` | Control, shell to brain | `thread`, `choice`: a `ModelSlug` (1–64 bytes of `[a-z0-9._-]`) and an `Effort` (`Low` to `Max`, the documented vocabulary) |
+| `ThreadModelSet` | Control, brain to shell | `thread`, the unchanged requested `choice`, and `applied`: whether a live row matched and the write committed |
 
-- Nothing answers a thread op; each becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
+- Each thread op becomes one store write (see [store](store.md#the-main-thread-titles-and-model-choices)).
   A rename is stored as the user's title. A thread that's hidden or gone changes nothing.
   Every committed title, a rename or a model's (see [engines](engines.md#background-jobs)), sends
   `ThreadsChanged` on the control pipe. It carries nothing, so it's on the tap's content-free
   list, and the shell reads its list again.
   The shell confirms a task's displayed title by an authoritative page reread, not by sending
   the op or taking an older in-flight page. Kumo's name waits for `SettingsView` instead.
+- A model write receives `ThreadModelSet` only after the store finishes, including `applied: false`
+  for a missing or hidden thread, an unrepresentable id, a failed write, or rejected store admission.
+  A successful result means the row matched, even when it already held the same choice. The tap
+  records only the operation and length, never the choice. The shell currently accepts and drops
+  this result: the 18b picker will match its pending `(thread, choice)` and reconcile its saved
+  cache against older in-flight list replies. No optimistic cache or pending picker state exists yet.
 - **The main thread's name isn't a title.** Generic `Rename` of the main thread is gone: the
   brain refuses it with no write, and logs that it did, never the title. The shell renames Kumo
   with `SettingsOp::SetAssistantName`, under the 24-character name rule. `SettingsView` carries

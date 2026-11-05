@@ -444,6 +444,15 @@ pub enum ControlToShell {
     /// Both Claude connections: once per connection after `Settings` and `Account` and before
     /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
     Connections(ConnectionsView),
+    /// The committed result of one `ThreadOp::SetModel`, including a refused write.
+    ThreadModelSet {
+        /// The requested thread.
+        thread: ThreadId,
+        /// The requested choice, echoed unchanged.
+        choice: ModelChoice,
+        /// A live row matched and the write committed.
+        applied: bool,
+    },
 }
 
 /// Shell to brain, on the data pipe.

@@ -14,6 +14,49 @@ use crate::store::{Interruption, RunEnd, TitleSource};
 const MAIN: ThreadId = ThreadId(1);
 
 #[test]
+fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
+    let mut core = fresh();
+    let choice = ModelChoice {
+        model: ModelSlug::new("model-result-sentinel").expect("valid"),
+        effort: Effort::XHigh,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+    };
+    let op = StoreOp::SetModel {
+        thread: T,
+        choice: choice.clone(),
+    };
+    assert_eq!(
+        op.failed(),
+        Some(Input::ModelSet {
+            thread: T,
+            choice: choice.clone(),
+            applied: false,
+        })
+    );
+    for applied in [false, true] {
+        let input = Input::ModelSet {
+            thread: T,
+            choice: choice.clone(),
+            applied,
+        };
+        let expected = vec![Effect::Control(ControlToShell::ThreadModelSet {
+            thread: T,
+            choice: choice.clone(),
+            applied,
+        })];
+        for debug in [
+            format!("{input:?}"),
+            format!("{expected:?}"),
+            format!("{op:?}"),
+        ] {
+            assert!(!debug.contains("model-result-sentinel"));
+            assert!(!debug.contains(&format!("{:?}", b"model-result-sentinel")));
+        }
+        assert_eq!(core.handle(input), Ok(expected));
+    }
+}
+
+#[test]
 fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
     let mut core = fresh();
     core.handle(Input::Turn {

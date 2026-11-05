@@ -214,7 +214,11 @@ impl StoreOp {
                 outcome: Deleted::NotHidden,
                 last_run: None,
             },
-            Self::SetModel { .. } => return None,
+            Self::SetModel { thread, choice } => Input::ModelSet {
+                thread: *thread,
+                choice: choice.clone(),
+                applied: false,
+            },
         })
     }
 }

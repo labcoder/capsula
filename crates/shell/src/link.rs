@@ -769,6 +769,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ThreadsChanged
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
+            | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::Connections(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -899,6 +900,7 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::ThreadModelSet { .. })) => {}
             Ok(Some(ControlToShell::Error(error))) => {
                 if events
                     .send_blocking(LinkEvent::Error { generation, error })
