@@ -52,7 +52,8 @@ loopback TLS fixtures; the ignored `measure_download_head` requires explicit per
 
 ## Spoken replies
 
-`brain::voice::tts` turns text into 24 kHz mono PCM with Phonon 31M (Q8) and the Juniper voice.
+`brain::voice::tts` turns text into mono PCM with Phonon 31M (Q8) and the Juniper voice. Phonon makes
+24 kHz; each Speak names the output device's rate, and every frame is resampled to it.
 One thread, `voice-tts`, owns the model and every open stream. The handle never waits on it.
 
 ```mermaid
@@ -68,9 +69,12 @@ flowchart LR
   short warm-up. A failed load leaves voice output unloaded; nothing retries on its own.
 - **A Speak during a load** waits for it, as the one waiting request: it's spoken if the load
   succeeds and gets `NotLoaded` if the load fails. Unload rejects it, and a cancel makes it stale.
-- **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame gets a fixed +5.5 dB
-  gain, is clipped and converted to `i16`. A NaN or infinity fails the segment, and so does
-  passing 30 seconds. `Done` carries the total sample count.
+  A stale waiting Speak is replaced unanswered by the next one, so a cancel never leaves TTS busy;
+  only a waiting Speak of the current generation makes `try_speak` answer busy.
+- **Speak:** text is non-empty, NUL-free and at most 1,024 bytes. Each frame is resampled, gets a
+  fixed +5.5 dB gain, and is clipped and converted to `i16`. A NaN or infinity fails the segment,
+  and so does passing 30 seconds at the Speak's rate. `Done` carries the total sample count at
+  that rate.
 - **Cancel:** `cancel` moves a generation. The owner checks it before and after each frame, and
   while it waits for room in a full output channel, so it never blocks on a slow consumer.
   Returning drops Phonon's stream, which stops and joins its two workers on the owner thread.
@@ -125,6 +129,38 @@ stateDiagram-v2
 - **Refused reports.** A report that can't be true is refused: an unknown segment, one out of order, a total that isn't the samples sent, a quiet answer nobody asked for, or a quiet cursor that skips a segment whose audio hadn't all gone or falls behind what already played. A late report for a dropped segment is ignored.
 - **The stall timer.** Every move of a draining run re-arms it, under a new epoch, and only the latest epoch counts. A repeated or backward progress report, or a scene failure that drops nothing, doesn't re-arm it.
 - **Heard point.** It's the furthest played sample, with the answer's byte offset where heard speech ends. A text segment counts as heard to its end only when TTS finished it and all of it played, including by a quiet cursor at its total; one TTS failed counts only to its start. The quiet answer is the last word: later progress and played reports don't move the point.
+
+### The pump and the resampler
+
+**`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and reads
+it only while the run's reply has granted credit, so a full channel parks the TTS thread, never
+the core loop.
+
+```mermaid
+flowchart LR
+  R["Reply (credit)"] -->|"credit / cancel / revoke"| P["Pump"]
+  P -->|"try_speak (rate)"| T["voice-tts owner"]
+  T -->|"Pcm / Done / Failed, 4 deep"| P
+  P -->|"next() on credit"| L["core loop"]
+```
+
+- **One run at a time.** A call for another run stops the held Speak and starts over at zero credit.
+- **Credit** is samples granted minus samples read. A frame may overshoot it; at zero, `next` stays
+  pending. `next` is cancel-safe.
+- **Cancel** stops the current Speak and keeps the run's credit for its next one. **Revoke** stops
+  it and zeroes the credit, so nothing more is read for the run.
+- **A stream that closes without `Done`**, including a Speak TTS was too busy to take, comes back as
+  a `Synthesis` failure for its segment.
+
+**`voice::resample`** converts a stream between any two rates with a Blackman-windowed sinc:
+16 zero crossings a side, a 128-point-per-crossing table interpolated linearly, and a cutoff at
+19/20 of the lower rate's Nyquist.
+- Each output sits at its exact rational position in the input, so lengths and timing never
+  drift: n inputs make ceil(n * to / from) outputs, however the input is cut into frames.
+- It waits for the input it needs on both sides, so there's no delay to trim. `finish` pads with
+  silence and flushes the tail.
+- Equal rates pass the audio through untouched.
+- Per-frame cost on Rez is in the PR (the pump around it, 24 kHz to 48 kHz).
 
 ## Provenance
 
