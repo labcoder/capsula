@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
-use crate::coordinator::{Availability, JobKey, Ready, SendKey};
+use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Failure, RunEnd};
 
@@ -311,10 +311,32 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
     let mut core = typed(Some(ready(7, &["m"])));
     core.handle(Input::TurnStored { run: R }).expect("current");
     core.handle(built(Some("m"), Vec::new())).expect("current");
+    for event in [
+        draw_call(),
+        delta("head"),
+        TurnEvent::ToolCallReady {
+            call: super::call(),
+            args: "head\n".to_owned(),
+        },
+    ] {
+        assert_eq!(
+            core.handle(super::engine(R, event)),
+            Ok(Vec::new()),
+            "no draw state is kept, so no step follows"
+        );
+    }
     assert_eq!(
-        core.handle(super::engine(R, draw_call())),
-        Ok(failed(None)),
-        "no draw state is kept, so no step can follow"
+        core.handle(super::engine(R, TurnEvent::Finished(Finish::Completed))),
+        Ok(vec![Effect::Store(StoreOp::RoundItems(RoundItems {
+            thread: T,
+            run: R,
+            round: 1,
+            connection: ConnectionTag(7),
+            text: None,
+            items: Vec::new(),
+            calls: vec![super::call()],
+        }))]),
+        "it gets the one unknown-tool result"
     );
 
     let mut core = typed(Some(ready(7, &["m"])));
