@@ -79,6 +79,18 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
 }
 
 #[test]
+fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
+    use kumochi_protocol::message::{DraftId, GitHubOp, IssueOp};
+
+    for message in [
+        ControlToBrain::GitHub(GitHubOp::Connect),
+        ControlToBrain::Issue(IssueOp::Discard { draft: DraftId(9) }),
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
 fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_connection() {
     use kumochi_protocol::message::{Cursor, OutputGeneration, SegmentId};
     let (run, segment) = (RunId(1), SegmentId(2));
