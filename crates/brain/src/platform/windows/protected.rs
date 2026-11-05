@@ -584,6 +584,64 @@ pub(crate) fn dacl_sddl(path: &Path) -> String {
     sddl
 }
 
+/// One entry of a DACL, read without SDDL's account aliases.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DaclEntry {
+    /// An access-allowed entry; any other kind reads as false.
+    pub(crate) allow: bool,
+    /// Its flags, less `INHERITED_ACE`.
+    pub(crate) flags: u32,
+    /// Whether `INHERITED_ACE` is set: where it came from, not what it grants.
+    pub(crate) inherited: bool,
+    pub(crate) rights: u32,
+    /// Its SID as `S-1-...`.
+    pub(crate) sid: String,
+}
+
+/// The entries of the DACL on the folder or file at `path`, in order.
+#[cfg(test)]
+pub(crate) fn dacl_entries(path: &Path) -> Vec<DaclEntry> {
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::INHERITED_ACE;
+    let entry = open(path, Kind::Folder, 0).expect("the entry opens");
+    let security = Security::read(&entry).expect("its security reads");
+    assert!(!security.dacl.is_null(), "a DACL, not a null one");
+    let aces = aces(security.dacl).expect("its entries read");
+    aces.into_iter()
+        .map(|(header, ace)| {
+            let (rights, sid) = mask_and_sid(ace);
+            let mut text: *mut u16 = std::ptr::null_mut();
+            // SAFETY: `sid` lies inside the live descriptor and `text` is a writable local.
+            let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut text) };
+            assert_ne!(converted, 0, "the SID converts");
+            let mut len = 0;
+            loop {
+                // SAFETY: the string is NUL-terminated and `len` hasn't passed its NUL.
+                let unit = unsafe { text.add(len) };
+                // SAFETY: as above, `unit` points inside the string.
+                if unsafe { *unit } == 0 {
+                    break;
+                }
+                len += 1;
+            }
+            // SAFETY: `text` holds `len` units before its NUL.
+            let units = unsafe { std::slice::from_raw_parts(text, len) };
+            let sid = String::from_utf16_lossy(units);
+            // SAFETY: allocated by the conversion and freed once.
+            unsafe { LocalFree(text.cast()) };
+            let flags = u32::from(header.AceFlags);
+            DaclEntry {
+                allow: u32::from(header.AceType) == ACCESS_ALLOWED_ACE_TYPE,
+                flags: flags & !INHERITED_ACE,
+                inherited: flags & INHERITED_ACE != 0,
+                rights,
+                sid,
+            }
+        })
+        .collect()
+}
+
 /// Replaces the folder at `path`'s DACL with the protected one in `sddl`, which gets this user's
 /// SID, for tests to set up.
 #[cfg(test)]

@@ -18,6 +18,8 @@ use kumochi_protocol::constants::{
     CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, OBJECT_PREFIX,
 };
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
+use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
 use super::{
     DEADLINE, Done, Failure, Host, LANE_QUEUE, Lane, Outcome, Program, STATUS_CAP, STDERR_CAP,
@@ -28,8 +30,8 @@ use crate::engines::claude_code::install::FindError;
 use crate::platform::Stdio;
 use crate::platform::sherpa::tests::{icacls, set_junction};
 use crate::platform::{
-    FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, dacl_sddl, local_app_data,
-    pause_after_check, set_dacl, this_user,
+    DaclEntry, FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, dacl_entries, dacl_sddl,
+    local_app_data, pause_after_check, set_dacl, this_user,
 };
 
 /// The version every fake reports.
@@ -961,8 +963,38 @@ async fn a_sign_in_the_fake_writes_gets_only_this_users_access() {
     );
     assert_eq!(call(&mut lane, Work::Login).await, Ok(Outcome::LoginEnded));
     assert!(lane.close(soon()).await);
-    let token = base.owned().join("config").join("signed-in");
-    assert_eq!(dacl_sddl(&token), format!("D:(A;ID;FA;;;{})", this_user()));
+    let config = base.owned().join("config");
+    assert_eq!(
+        entries(&config),
+        [(
+            true,
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+            FILE_ALL_ACCESS,
+            this_user()
+        )],
+        "its folder passes down only this user's access"
+    );
+    assert_eq!(
+        entries(&config.join("signed-in")),
+        [(true, 0, FILE_ALL_ACCESS, this_user())]
+    );
+}
+
+/// `path`'s DACL as each entry's allow, flags, rights and SID. Whether Windows marks an entry
+/// inherited varies by account, so that's left out.
+fn entries(path: &Path) -> Vec<(bool, u32, u32, String)> {
+    dacl_entries(path)
+        .into_iter()
+        .map(
+            |DaclEntry {
+                 allow,
+                 flags,
+                 rights,
+                 sid,
+                 ..
+             }| (allow, flags, rights, sid),
+        )
+        .collect()
 }
 
 #[tokio::test]
