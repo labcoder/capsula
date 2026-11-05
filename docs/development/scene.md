@@ -701,9 +701,18 @@ with host font shaping, and installation separately and together, with unique te
 content-free count/timing output. It excludes queue delay and compositor presentation.
 
 The shell's `presence::paint_paths` builds bounded prim-space geometry, then transforms its
-finished triangles. It is an inert production seam until the overlay/frame integration layer:
-no drawing window or production paint callback calls it yet. Its numeric and fidelity tests
-exercise the same builder; the integration layer removes the temporary unused-entry expectation.
+finished triangles. `presence::overlay` paints every sampled scene in stable scene/item order,
+using native quads for upright complete rectangles and paths for rotated or revealed geometry.
+Labels use the preparation font and stay upright at their transformed anchors (OSC-217).
+Geometry builds before any of its item's primitives paint; a geometry or label failure clears
+the scene instead of silently skipping it. The overlay is transparent and click-through, covers
+only the primary display from logical origin, and holds Esc only while shown.
+
+Presenter samples outside paint into its four reserved frames. The paint callback borrows only
+those frames, records shown epoch/bound observations and defers any failure back to Presenter
+after releasing the borrow. Replacement invalidates old observations; removal/disconnect
+retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
+animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
 
 ### Motion and the host clock
 

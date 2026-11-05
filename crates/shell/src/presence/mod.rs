@@ -18,6 +18,9 @@ mod line;
 mod link;
 mod messages;
 pub(crate) mod observer;
+mod overlay;
+#[cfg(test)]
+mod overlay_fixture;
 mod overlay_input;
 mod paint;
 mod paint_paths;
@@ -131,6 +134,8 @@ struct Presence {
     pull_dock: pull_dock::PullDock,
     /// The one source of animation frames.
     frames: FrameLoop,
+    /// The drawing overlay, once a drawing first had something to paint.
+    overlay: Option<overlay::Overlay>,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -326,7 +331,8 @@ impl Presence {
         let text = self.text.as_ref().map(|text| text.window);
         let threads = self.thread_panel.as_ref().map(|panel| panel.window);
         let settings = self.settings_panel.as_ref().map(|panel| panel.window);
-        for window in [Some(self.panel_window), text, threads, settings]
+        let drawing = self.overlay.as_ref().map(|overlay| overlay.window);
+        for window in [Some(self.panel_window), text, threads, settings, drawing]
             .into_iter()
             .flatten()
         {
@@ -354,13 +360,12 @@ impl Presence {
     fn activity(
         runs: &Runs,
         panel: EscapePanel,
-        _presenter: &crate::presenter::Presenter,
+        presenter: &crate::presenter::Presenter,
     ) -> Activity {
-        // shortcut: B5 adds painted v1 scenes to global Esc activity; mirrored scenes aren't visible.
         Activity {
             working: runs.working(),
             speaking: false,
-            drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+            drawing: (runs.drawing() && matches!(panel, EscapePanel::Open)) || presenter.drawn(),
             pulling: false,
         }
     }
@@ -865,6 +870,7 @@ pub(crate) fn open(
             kumo: kumo.clone(),
             pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
+            overlay: None,
         }
     });
     owner.update(cx, |this, cx| {

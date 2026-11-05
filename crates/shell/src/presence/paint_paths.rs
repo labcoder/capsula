@@ -29,6 +29,9 @@ pub(super) enum BuildError {
     /// lyon refused a bounded stroke chunk.
     #[error("a drawing stroke couldn't be tessellated")]
     Stroke,
+    /// GPUI couldn't shape or paint a label.
+    #[error("a drawing label couldn't be shaped or painted")]
+    Label,
 }
 
 /// One primitive's paths in world logical pixels, each with its prepared paint, built in full
@@ -44,13 +47,6 @@ pub(super) enum BuildError {
 ///
 /// # Errors
 /// [`BuildError`] when the primitive is text, exceeds its charge, or fails to tessellate.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the next overlay/frame integration layer"
-    )
-)]
 pub(super) fn paths(
     prim: &Prim,
     transform: Affine,

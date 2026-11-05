@@ -63,7 +63,7 @@ use kumochi_scene::{
 
 use admit::Lane;
 pub(crate) use measure::Measure;
-pub(crate) use paint::Frames;
+pub(crate) use paint::{Frames, Sample};
 pub(crate) use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
