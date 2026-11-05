@@ -95,7 +95,11 @@ fn a_round_completed_behind_a_drawing_still_answers_its_calls() {
             _ => None,
         })
         .collect();
-    assert_eq!(writes, [vec![call]], "the round's write, and no outcome yet");
+    assert_eq!(
+        writes,
+        [vec![call]],
+        "the round's write, and no outcome yet"
+    );
 }
 
 #[test]
