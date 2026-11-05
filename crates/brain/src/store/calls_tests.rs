@@ -3,7 +3,7 @@
 use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, params};
 
-use super::Store;
+use super::{Store, StoreError};
 use crate::dispatch::{CommitCall, LedgerKey, LocalWrite, Route, ToolOutput};
 use crate::test_support::Scratch;
 
@@ -89,10 +89,15 @@ fn a_failed_record_rolls_back_the_calls_write() {
     let mut first = renaming(thread, run, "c1");
     first.write = LocalWrite::None;
     assert!(store.commit_call(&first).expect("recorded"));
-    assert!(
-        store.commit_call(&renaming(thread, run, "c1")).is_err(),
-        "the key is recorded already"
-    );
+    let error = store
+        .commit_call(&renaming(thread, run, "c1"))
+        .expect_err("the key is recorded already");
+    assert!(matches!(error, StoreError::Call), "{error:?}");
+    for shown in [error.to_string(), format!("{error:?}")] {
+        for sql in ["UNIQUE", "constraint", "tool_calls", "c1"] {
+            assert!(!shown.contains(sql), "{shown}");
+        }
+    }
     assert_eq!(title(&store.conn, thread), "Before");
     assert_eq!(rows(&store.conn).len(), 1);
 }
@@ -113,7 +118,12 @@ fn the_ledger_caps_a_result_in_bytes_and_rolls_its_write_back_when_over() {
     let mut over = renaming(thread, run, "over");
     over.output = ToolOutput::Text(format!("a{at}"));
     assert_eq!(over.output.stored().len(), 65_537);
-    assert!(store.commit_call(&over).is_err(), "over the cap");
+    let error = store.commit_call(&over).expect_err("over the cap");
+    assert!(matches!(error, StoreError::Call), "{error:?}");
+    for shown in [error.to_string(), format!("{error:?}")] {
+        assert!(!shown.contains("CHECK"), "{shown}");
+        assert!(!shown.contains("constraint"), "{shown}");
+    }
     assert_eq!(title(&store.conn, thread), "Before");
     assert_eq!(
         rows(&store.conn),

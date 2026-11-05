@@ -43,7 +43,6 @@ pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::{StoreOp, SummaryText};
-pub(crate) use tools::UNKNOWN_TOOL;
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -738,7 +737,7 @@ impl Coordinator {
             Input::CallCommitted {
                 key,
                 committed: true,
-            } => self.call_committed(&key)?,
+            } => self.call_committed(&key, &mut effects)?,
             Input::CallCommitted {
                 key,
                 committed: false,

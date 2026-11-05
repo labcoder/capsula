@@ -188,6 +188,11 @@ pub(crate) enum ToolOutput {
 impl ToolOutput {
     /// The tagged JSON the ledger and `tool_result` events store.
     pub(crate) fn stored(&self) -> String {
+        self.json().to_string()
+    }
+
+    /// [`ToolOutput::stored`]'s JSON as a value.
+    pub(crate) fn json(&self) -> Value {
         match self {
             Self::Text(text) => json!({ "text": text }),
             Self::History(refs) => json!({
@@ -198,7 +203,6 @@ impl ToolOutput {
             }),
             Self::Error(error) => json!({ "error": error.text() }),
         }
-        .to_string()
     }
 
     /// Reads [`ToolOutput::stored`]'s JSON back; `None` for anything else.
