@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::bound::{fixed_bytes, item_bytes};
 use super::{
     Body, BuildError, Built, HistoryRef, InputItem, Item, ModelRequest, Origin, RAW_RUNS, REMOVED,
-    REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, tools,
+    REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, summary_item, tools,
 };
 use crate::store::StoreError;
 use crate::store::context::{Snapshot, Speaker};
@@ -88,22 +88,19 @@ fn assemble(
     let instructions = instructions(run);
     let tools = tools(run.origin);
     let mut sources = BTreeSet::from([turn.thread]);
-    let summary = supplied.summary.map(|summary| InputItem::Message {
-        role: Role::Developer,
-        text: format!(
-            "Summary of events {}–{}:\n{}",
-            summary.first.0, summary.last.0, summary.text
-        ),
-    });
+    let summary = supplied
+        .summary
+        .map(|summary| summary_item(summary.first, summary.last, &summary.text));
     let current = render(snapshot, run, current, Some(turn.local_time), &mut sources)?;
-    let mut total = fixed_bytes(&instructions, &tools)
-        + summary
-            .iter()
-            .chain(&current)
-            .map(item_bytes)
-            .sum::<usize>();
+    let unsummarized =
+        fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();
+    let mut total = unsummarized + summary.iter().map(item_bytes).sum::<usize>();
     if total > bound {
-        return Err(BuildError::TooLarge);
+        let room = summary
+            .is_some()
+            .then(|| bound.checked_sub(unsummarized))
+            .flatten();
+        return Err(BuildError::TooLarge { room });
     }
     let mut kept = Vec::new();
     for older in older.iter().rev().take(RAW_RUNS - 1) {
@@ -183,7 +180,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 
 /// One run's input items. Its history results are re-read, adding each task they show text
 /// from to `sources`; `local_time` is added to the current run's turn.
-fn render(
+pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
     items: &[Item],
@@ -302,7 +299,7 @@ fn instructions(run: &RunSnapshot) -> String {
 }
 
 /// Replaces each `{key}` in `template` in one pass, so a value is never read as a key.
-fn fill(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('{') {

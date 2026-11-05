@@ -6,7 +6,7 @@ mod accounts_fixture;
 mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
-mod drag;
+pub(crate) mod drag;
 mod drawings;
 mod escape;
 mod frame_rate;
@@ -18,6 +18,7 @@ mod launch;
 mod line;
 mod link;
 pub(crate) mod observer;
+mod overlay_input;
 mod paint;
 mod panels;
 mod pulling;
@@ -50,6 +51,7 @@ use kumochi_protocol::constants;
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
+use crate::platform::input::{Input, input};
 use crate::platform::{
     self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
     PresenceNative, PresenceSurface,
@@ -82,6 +84,7 @@ struct PresenceApp {
 impl Global for PresenceApp {}
 
 struct Presence {
+    input_windows: platform::OverlayWindows,
     native: PresenceNative,
     dock_window: AnyWindowHandle,
     panel_window: AnyWindowHandle,
@@ -137,6 +140,10 @@ impl Presence {
     ) -> Result<(), OpenError> {
         // shortcut: work-area changes need another position choice; slice 10 adds live settings updates.
         let area = platform::work_area()?;
+        self.end_selection(
+            crate::presenter::overlay_input::ExitCause::DisplayChanged,
+            cx,
+        );
         let physical = |value: f32| scaled(value, self.scale);
         // Kumo and its gap sit beside the 300 px the details had before the peek; the peek is
         // only as tall as its content.
@@ -203,6 +210,7 @@ impl Presence {
             });
         }
         self.panel_visibility = visibility;
+        self.presenter.input.configure(&mut self.input_windows)?;
         Ok(())
     }
 
@@ -503,6 +511,10 @@ impl Presence {
             return;
         }
         self.end_pull(cx);
+        self.end_selection(
+            crate::presenter::overlay_input::ExitCause::WindowDestroyed,
+            cx,
+        );
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
@@ -764,6 +776,7 @@ fn presence_labels(cx: &App) -> PresenceLabels {
 fn status_window(
     events: &Sender<PresenceEvent>,
     kumo: Entity<KumoView>,
+    input_windows: &mut platform::OverlayWindows,
     cx: &mut App,
 ) -> Result<(AnyWindowHandle, Entity<Panel>), OpenError> {
     let panel_events = events.clone();
@@ -791,7 +804,8 @@ fn status_window(
     let status_events = events.clone();
     panel_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Panel, status_events, cx)
+            configure_surface(window, PresenceSurface::Panel, status_events, cx)?;
+            input_windows.bind(crate::presenter::overlay_input::Layer::Panels, window)
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     Ok((panel_window, panel))
@@ -814,8 +828,6 @@ pub(crate) fn open(
         cx.set_global(observer);
     }
     let (events, event_changes) = async_channel::unbounded();
-    let labels = presence_labels(cx);
-    let dock_events = events.clone();
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, |_, _| false);
@@ -828,15 +840,20 @@ pub(crate) fn open(
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
+    let mut input_windows = platform::OverlayWindows::default();
+    let input = crate::presenter::overlay_input::OverlayOwner::default();
     let scale = dock_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Overlay, dock_events, cx)?;
+            configure_surface(window, PresenceSurface::Overlay, events.clone(), cx)?;
+            input_windows.bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
+            input.configure(&mut input_windows)?;
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
-    let native = PresenceNative::new(labels, events.clone(), line::slot(scale))?;
+    let native = PresenceNative::new(presence_labels(cx), events.clone(), line::slot(scale))?;
+    input_windows.proxy(native.input_proxy());
     let kumo = cx.new(|_| KumoView::new());
-    let (panel_window, panel) = status_window(&events, kumo.clone(), cx)?;
+    let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
     let threads = cx.new(|_| Threads::default());
     let settings = cx.new(|_| Settings::default());
@@ -846,13 +863,15 @@ pub(crate) fn open(
         [display_size.width.into(), display_size.height.into()]
     });
     kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
-    let presenter = crate::presenter::Presenter::new(
+    let mut presenter = crate::presenter::Presenter::new(
         kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
     );
+    presenter.input = input;
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
+            input_windows,
             native,
             dock_window,
             panel_window,
@@ -973,7 +992,24 @@ fn listen(
                     PresenceEvent::Quit => this.quit(cx),
                     PresenceEvent::Repaint => this.dock.update(cx, |_, cx| cx.notify()),
                     event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
+                        let effects = match event {
+                            PresenceEvent::CaptureLost { seq, released } => this
+                                .presenter
+                                .input
+                                .selection_event(drag::Event::CaptureLost { seq, released }),
+                            _ => this.presenter.input.reconcile(),
+                        };
+                        let selection = this.selection_ending(effects, cx);
+                        if this.presenter.input.selection().is_some()
+                            && matches!(event, PresenceEvent::CaptureLost { .. })
+                            && input(Input::reconcile_after_release)
+                        {
+                            let events = this.events.clone();
+                            cx.defer(move |_| send(&events, PresenceEvent::Reconcile));
+                        }
+                        // Kumo's drag must hear every capture loss, even when restoring failed.
                         kumo_view::bridge(&this.kumo, event, cx);
+                        selection?;
                     }
                 }
                 Ok::<_, OpenError>(())

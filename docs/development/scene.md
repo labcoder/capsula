@@ -74,6 +74,13 @@ use three-component keys; existing tracks retain their existing key types.
 including rotations, targets, directions, outlines and paths, use the existing
 ±20,000 coordinate bound. Decode bounds apply in JSON and postcard, regardless of shape.
 
+`rot` uses degrees about x, then y, then z: `Rz·Ry·Rx` on column vectors,
+followed by uniform `scale`, then `pos`. An attached child's transform is applied
+before its parent's. This does not change the 2D `rotate` convention. Three-dimensional
+space is right-handed with y up. A lathe's `[radius,y]` profile runs from lower y
+towards higher y for outward winding; reversing the profile reverses the surface.
+Lathe ends are open, without caps; with back-face culling the inside is invisible.
+
 A decoded solid is not yet valid geometry. `Solid::geometry()` checks required
 fields first, then rejects unused shape fields (including `segments` on a box or an extrusion),
 then checks counts and radius relations:
@@ -92,9 +99,131 @@ then checks counts and radius relations:
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
 All lists decode at most 512 points; extrude counts above 128 are
-`OverBudget(PathPoints)`. Degeneracy checks belong to the future tessellator.
+`OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
+
+### 3D tessellation sizing
+
+`three::size::triangles` validates one decoded solid and returns its candidate
+triangle capacity without allocating. This count does not depend on world transforms.
+Triangle generation is a separate module; sizing alone does not establish world-space
+representability. Admission still refuses 3D until its later slice lands.
+
+Let n be `segments` (default 24), k the retained outline count, p the retained
+profile count and q the retained path count:
+
+| Shape | Candidate triangles | At n = 3 / n = 48 |
+|---|---|---|
+| box | 12 | 12 / 12 |
+| sphere | 20·4ᴸ | 20 / 1,280 |
+| cylinder | 4n − 4 | 8 / 188 |
+| cone, top zero | 2n − 2 | 4 / 94 |
+| cone, top positive | 4n − 4 | 8 / 188 |
+| torus | 2n² | 18 / 4,608 |
+| extrude | 4k − 4 | 508 at k = 128 |
+| lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
+| tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
+
+Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
+Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
+count at 49,148. Counts over the future per-view triangle budget remain legal here.
+Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
+
+The shared numeric policy is `three::REL = 1e-6` and
+`dist_eps(radius) = REL × max(radius, 0.001)`. The local radius is half the diagonal
+of the shape's AABB, not a distance from the origin. Tube bounds include the tube
+thickness; lathe bounds include the revolved radii. Calculations use f64; the shared
+source-area cutoff is `dist_eps²`. Transforms compose f64 affine matrices and check
+finiteness after narrowing points to f32. Sub-ulp distortion is accepted because the
+camera's near-plane precision floor bounds its screen size.
+Consecutive points strictly closer than `dist_eps` merge against the last retained
+point. Closing outline duplicates merge by the same rule. An origin offset in an
+outline or path does not alter the radius or tolerance.
+
+Sizing refuses a merged outline with fewer than three points, absolute twice-area
+below `dist_eps²`, self-intersections, nonadjacent touches or overlapping edges.
+A redundant collinear outline vertex is accepted. Profiles and paths need two
+retained points; a lathe needs a retained off-axis point. A tube turn with unit
+tangent dot product strictly below `−1 + REL` is refused. These failures are typed
+`MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
+original typed field and code. `ErrorCode::Degenerate` is appended for the later
+admission boundary, which alone will convert these errors into sanitized paths.
+
+### 3D tessellation
+
+`three::Transform` composes f64 affine transforms. Each canonical local vertex has
+one expression and one narrowing path to world-space f32. Periodic indices wrap
+before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
+endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
+extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
+frames, initially using the axis least aligned with the first tangent.
+
+Generation refuses non-finite world vertices, distinct local vertices that narrow
+to the same world point, and retained triangles whose narrowed points have zero
+area. It never rebases coordinates. Any source triangle with area below `dist_eps²`
+is refused too, except coincident-vertex candidates at lathe axis bands, which are
+dropped and counted. A successful result satisfies `written + dropped == triangles`.
+A thin solid can therefore be refused rather than rendered with missing caps.
+Representability does not guarantee analytic area accuracy: the world f32 lattice
+can change lengths substantially near large translations. Sub-ulp distortion is accepted
+because the camera's near-plane precision floor bounds its screen size.
+
+The caller owns the output and cancellation flag. `Full` means the candidate count
+does not fit beyond the existing prefix and appends nothing. `Cancelled` and
+`Degenerate` can leave appended triangles; callers save the original length and
+truncate back after failure. Cancellation is checked at entry, throughout vertex
+checks, during ear clipping, per emitted triangle and before success.
+
+Large scratch buffers belong to the caller's `MeshScratch`. `MeshScratch::new()` allocates
+collision keys (384 KiB), tube frames and tangents (36 KiB), and sphere vertices/faces
+(about 23 KiB) once. `build` borrows that scratch and never grows its private boxed buffers.
+Only small retained-index and ear-clipping arrays remain on the stack. No build allocates
+once the caller has constructed scratch and reserved its output.
+
+### 3D raster
+
+`three::raster` fills one view's straight-alpha BGRA texels and a u8 solid id per texel from
+convex screen polygons. It has no GPUI: the shell wraps the colour as an image.
+
+```mermaid
+flowchart LR
+  F["Fragment<br/>(snapped points, 1/z plane,<br/>colour, opacity, solid)"] -->|push: dedupe, CCW, convex| S["FrameScratch"]
+  S --> O["opaque pass<br/>input order, depth write"]
+  O --> T["translucent pass<br/>centroid back to front, no depth write"]
+  T --> R["resolve: box filter,<br/>majority id, straight alpha"]
+  R --> BL["bleed clear texels"]
+```
+
+- **Coverage.** Vertices are in 1/256 texel. `FrameScratch::push` removes duplicate and collinear
+  vertices, makes the loop counter-clockwise in y-down space and keeps it only if strictly convex;
+  a collapsed or reflex loop is discarded and counted. Edge functions are exact i64 with the
+  top-left rule, so polygons with identical shared endpoints cover each sample exactly once.
+  Coordinates stay within ±2^21 (4,096 texels plus a 4,096-texel guard band), keeping every
+  edge function under 2^45.
+- **Depth.** The plane gives 1/z over texel coordinates, evaluated in f64 and narrowed to f32; it
+  must be finite and positive at every vertex. Keys clear the 3 lowest mantissa bits and compare
+  strictly, so depths within about 1e-6 relative tie and the earlier input wins, coplanar faces
+  included.
+- **Translucency.** Polygons under opacity 1 are sorted farthest first by their centroid's camera
+  depth (ties by input order) with an in-place sort, depth-tested against opaque samples and
+  blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
+  write depth or split. One at authored opacity 0.5 or more writes its solid id, so the id is
+  the last qualifying layer in that order, not necessarily the nearest surface. Interpenetrating
+  translucent solids can blend in the wrong order (`shortcut:`, OSC-218).
+- **Samples.** Motion frames take one sample at the texel centre; rest frames take four on a
+  rotated grid at (−1/8, −3/8), (3/8, −1/8), (−3/8, 1/8) and (1/8, 3/8) from the centre and
+  box-resolve them. A texel's id is the most frequent sample id, background included, with ties
+  to the id whose first sample is lowest.
+- **Bands and work.** A frame renders in 32-row bands, so only a band's depth, colour and id
+  samples are resident: `BandScratch::new(width)` reserves 1,152 bytes per column once. A
+  `ScreenPoly` is 84 bytes, plus an 8-byte sort key. Cancellation is polled per polygon, every
+  65,536 sample tests and per resolved and bled row, because a band doesn't bound work.
+- **Bleed.** Each clear texel takes the colour of its first covered neighbour (left, right, up,
+  down), keeping alpha 0, so a scaled image doesn't fringe under straight-alpha filtering.
+
+Nothing allocates once the caller holds the scratch, band and target. Targets are 1 to 4,096
+texels per axis; anything else, or a band narrower than the target, is `RasterError::Size`.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
@@ -359,9 +488,8 @@ Prepared residency remains the preparation layer's separate limit.
 | Visible scenes | — | 4 |
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
-24,000 triangles per scene/globally, 48 curved segments, and BSP limits of
-4,000,000 classifications, depth 64 and twice the input triangle count in
-fragments. The 3D records exist (see Records), but admission refuses them as `Unsupported`
+24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
+the depth-buffered raster (3D raster below), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
 and no 3D geometry is built yet.
 
 ## Preparation
@@ -956,9 +1084,12 @@ semantic retirement, and returns the protected charged owner plus scheduler effe
 scenes, consumed indices, out-of-order requests, missing ready results and insufficient
 residency leave state unchanged. Freeing a window position immediately gives its next
 successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`. During an admission read, a valid consumption request returns Busy and
-records one pending request without changing semantic state, residency or window positions.
+and `StepShown`. While the scene's admission is in the lane, including its worker-slot wait,
+a valid consumption request returns Busy and records one pending request without changing
+semantic state, residency or window positions.
 Returning the read offers a wake/retry point before the next admission for that scene.
+Both fresh arrivals and already-held commits wait behind the pending request, even when
+the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must
 handle it explicitly, since a ready head has no watchdog or guaranteed owner-release wake.
 If that retry is refused for residency, its pending barrier remains until successful

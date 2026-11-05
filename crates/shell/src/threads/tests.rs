@@ -33,7 +33,7 @@ fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
         panic!("list")
     };
     state.apply(reply(request_id(&first), &[1], None));
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     assert_eq!(
         state.row(ThreadId(1)).expect("cached").title,
         "private title 1"
@@ -59,7 +59,7 @@ fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
     });
     assert_eq!(state.row(ThreadId(1)), Some(&renamed));
     assert_eq!(state.rows[2], renamed);
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let failed_write = state.requests().remove(0);
     state.apply(DataToShell::ThreadList {
         request: request_id(&failed_write),
@@ -78,7 +78,7 @@ fn a_rename_during_a_page_read_waits_then_rereads_after_the_op() {
     let mut state = loaded();
     state.refresh();
     let old = state.requests().remove(0);
-    state.renamed(ThreadId(3));
+    state.renamed(ThreadId(3), "confirmed new title");
     assert_eq!(state.requests(), []);
     state.apply(reply(request_id(&old), &[3, 2], Some(2)));
     assert_eq!(
@@ -95,7 +95,7 @@ fn a_rename_during_a_page_read_waits_then_rereads_after_the_op() {
 #[test]
 fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_deleted_row() {
     let mut state = with_second_page();
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let old = state.requests().remove(0);
     state.deleted(ThreadId(0));
     let mut renamed = row(1);
@@ -140,7 +140,7 @@ fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_d
 #[test]
 fn a_search_before_delete_does_not_requeue_an_old_rename_cursor() {
     let mut state = with_second_page();
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let old = state.requests().remove(0);
     state.search("new query");
     state.deleted(ThreadId(0));
@@ -165,7 +165,7 @@ fn a_search_before_delete_does_not_requeue_an_old_rename_cursor() {
 #[test]
 fn a_refresh_after_delete_discards_the_old_rename_cursor() {
     let mut state = with_second_page();
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let old = state.requests().remove(0);
     state.deleted(ThreadId(0));
     state.refresh();
@@ -180,7 +180,7 @@ fn a_refresh_after_delete_discards_the_old_rename_cursor() {
 #[test]
 fn hiding_after_delete_discards_the_old_rename_cursor() {
     let mut state = with_second_page();
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let old = state.requests().remove(0);
     state.deleted(ThreadId(0));
     state.hide();
@@ -198,7 +198,7 @@ fn hiding_after_delete_discards_the_old_rename_cursor() {
 #[test]
 fn a_delete_while_hidden_does_not_requeue_an_old_rename_cursor() {
     let mut state = with_second_page();
-    state.renamed(ThreadId(1));
+    state.renamed(ThreadId(1), "confirmed new title");
     let old = state.requests().remove(0);
     state.hide();
     state.deleted(ThreadId(0));
@@ -260,6 +260,7 @@ fn switch_uses_the_received_title_and_choice() {
     chosen.choice = Some(ModelChoice {
         model: ModelSlug::new("stored-model").expect("valid"),
         effort: Effort::High,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     });
     state.refresh();
     let request = state.requests().remove(0);
@@ -287,6 +288,7 @@ fn switch_uses_the_received_title_and_choice() {
         Some(ModelChoice {
             model: ModelSlug::new("stored-model").expect("valid"),
             effort: Effort::High,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         })
     );
     assert_eq!(runs.target(), Target::Task(ThreadId(9)));
@@ -923,4 +925,71 @@ fn a_replaced_search_that_fails_frees_its_slot_without_the_error() {
             },
         }]
     );
+}
+
+/// M135-1: the reread of a renamed task's page can beat the rename's commit across the two pipes.
+/// The committed-title notification then reads that page again, whether it arrives before the
+/// stale reply or after it.
+#[test]
+fn an_offpage_rename_shows_its_committed_title_whichever_side_of_the_stale_reply_its_notice_lands()
+{
+    let second_page = Some(ThreadCursor {
+        updated_ms: 2,
+        id: ThreadId(2),
+        rank_bits: 0,
+    });
+    for notice_first in [true, false] {
+        let mut state = with_second_page();
+        state.renamed(ThreadId(1), "committed title");
+        let old_page = state.requests().remove(0);
+        assert!(matches!(
+            &old_page,
+            DataToBrain::PageRequest { page: PageOf::Threads { after, .. }, .. } if *after == second_page
+        ));
+        if notice_first {
+            state.changed();
+        }
+        state.apply(reply(request_id(&old_page), &[1, 0], None));
+        assert_eq!(
+            state.rows[2].title, "private title 1",
+            "read before the commit"
+        );
+        if !notice_first {
+            state.changed();
+        }
+        let again = state.requests().remove(0);
+        assert!(
+            matches!(
+                &again,
+                DataToBrain::PageRequest { page: PageOf::Threads { after, .. }, .. } if *after == second_page
+            ),
+            "the renamed task's own page, not page one: {again:?}"
+        );
+        let mut committed = row(1);
+        committed.title = "committed title".to_owned();
+        state.apply(DataToShell::ThreadList {
+            request: request_id(&again),
+            threads: vec![committed.clone(), row(0)],
+            next: None,
+        });
+        assert_eq!(state.rows[2], committed);
+        assert_eq!(state.row(ThreadId(1)), Some(&committed));
+        while let Some(request) = state.requests().pop() {
+            state.apply(reply(request_id(&request), &[3, 2], Some(2)));
+        }
+        assert_eq!(state.rows[2], committed, "page one's repair keeps it");
+
+        state.changed();
+        let requests = state.requests();
+        assert!(
+            matches!(
+                requests.as_slice(),
+                [DataToBrain::PageRequest {
+                    page: PageOf::Threads { after: None, .. },
+                    ..
+                }]
+            ),
+            "a confirmed rename isn't read again: {requests:?}"
+        );
+    }
 }

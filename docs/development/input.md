@@ -1,5 +1,46 @@
 # Keyboard input and Esc
 
+## Overlay pointer ownership
+
+The presenter's `OverlayOwner` is the only overlay hit-test authority. Slice 5 registers
+physical screen rectangles by `RegionId` and binds its input windows through `OverlayWindows`;
+it never changes styles. Register/remove effects must be applied before the next input event.
+Kumo requests a `DragLease` through the presence presenter on press, then returns it through
+its terminal event. An orbit, a drag lease and a selection cannot own the pointer together.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PassThrough
+    PassThrough --> Regions: register rectangle
+    Regions --> PassThrough: remove last rectangle
+    PassThrough --> Selecting: select live GestureId
+    Regions --> Selecting: select live GestureId
+    Selecting --> PassThrough: ending / previous PassThrough or no regions remain
+    Selecting --> Regions: ending / previous Regions with current registrations
+```
+
+Selection entry is two-phase. Apply orbit cancellation and Kumo's `Preempted` ending first,
+then disable regions, raise the selection surface and take capture without activation.
+Only after those effects return does `selected` start its separate `DragOwner`, with an input
+stamp newer than the old capture loss. A failed raise/capture is fed back as `Err(())`:
+it restores the previous mode, emits `Failed`, and never emits `SelectionStarted`.
+
+Release, Esc, `GestureCancel`, brain loss, capture loss, window destruction, display change
+and `HoldEnded` each restore once. Restoration uses today's registry, not a saved copy;
+an empty registry restores PassThrough. A stale terminal event cannot end another gesture.
+`HoldEnded` covers key-up and the 120-second hold clock: a rectangle at least 4×4 physical
+pixels completes as a region; anything smaller cancels. B3a's low-level hook supplies Esc and
+swallows it only while Selecting is live. B3a/B3b will produce selection entry; B0 sends no hold.
+The pick stays on GPUI mouse events and the existing stamped capture-loss/reconcile bridge.
+
+Native configuration always restacks, because placing or showing a presence window lifts it to
+the top of the topmost band. It skips only the style changes when the mode and registry match the
+last successful apply. That cache records what was last applied, not the windows' real state.
+Binding changes invalidate it, and a failed partial apply invalidates it so restoration retries.
+Restore errors don't drop selection notifications or Kumo's capture-loss/reconcile bridge:
+all effects run, then the first error is reported. New bindings prune dead native handles and
+skip duplicates within their layer.
+
 The shell recognizes one shortcut, left Ctrl plus left Alt, with Raw Input and no low-level
 keyboard hook. It also decides locally what Esc does, before the brain hears of it. Voice arrives
 in slice 7 and screen capture in slice 6.
