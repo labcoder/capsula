@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
-    display::{DisplayList, Item, Prim, TextMeasure},
+    display::{DisplayList, Item, PaintWork, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
     record::{Anchor, Change, Enter, Track},
     state::{object, work},
@@ -288,6 +288,26 @@ pub fn prepare(
     }
     after.prune_extras();
     validate_bounds(&after)?;
+    for primitive in after
+        .objects
+        .values()
+        .flat_map(|object| &*object.item.primitives)
+    {
+        if let Prim::Fill { points, .. } = primitive
+            && points.len() > crate::limits::MAX_GLOBAL_FILL_VERTICES
+        {
+            return Err(PrepareError::OverResidency);
+        }
+    }
+    for (id, object) in &mut after.objects {
+        object.work = match before.objects.get(id) {
+            Some(old) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => old.work,
+            _ => PaintWork::of(&object.item.primitives),
+        };
+        if !object.work.fits_builds() {
+            return Err(PrepareError::OverResidency);
+        }
+    }
     if after.objects.is_empty() {
         // Removals leave an emptied B-tree's root leaf, which the index charge doesn't count.
         after.objects = BTreeMap::new();

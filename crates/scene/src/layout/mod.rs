@@ -193,7 +193,8 @@ pub enum PrepareError {
     /// Host text shaping failed.
     #[error("scene.TextMeasure")]
     TextMeasure,
-    /// Owned output exceeds the preparation residency limit.
+    /// Owned output exceeds the preparation residency limit, or one item's fill or rect
+    /// outline exceeds a single tessellation build.
     #[error("scene.OverResidency")]
     OverResidency,
     /// Semantic or measured geometry validation failed.

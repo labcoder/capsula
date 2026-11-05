@@ -54,6 +54,7 @@ use kumochi_scene::{
     DetachedCandidate, Frame, GlobalBudget, SceneBinding, SceneRead, SceneState, SceneView,
     StepError, StopCut, StopOutcome,
     deferred::{self, Deferred},
+    display::PaintWork,
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
     limits::MAX_RESIDENT_BYTES,
     text::Bounded,
@@ -140,6 +141,7 @@ pub(crate) struct Presenter {
     global: GlobalBudget,
     scenes: BTreeMap<SceneId, Scene>,
     /// Each scene's sampled frame, shared with the overlay that paints it.
+    /// Borrow only for paint; never call the presenter while that borrow is held.
     frames: Rc<RefCell<Frames>>,
     /// The one commit being admitted; later scene frames wait in `held` behind it.
     lane: Option<Lane>,
@@ -501,6 +503,12 @@ impl Presenter {
             .map(Scene::residency)
             .fold(self.returned.load(Ordering::Relaxed), usize::saturating_add)
     }
+
+    fn paint_work(&self) -> PaintWork {
+        self.scenes
+            .values()
+            .fold(PaintWork::default(), |sum, scene| sum + scene.paint)
+    }
 }
 
 impl std::fmt::Debug for Presenter {
@@ -567,7 +575,9 @@ impl Presenter {
                 let view = SceneView::new(&rest, state.activated());
                 let frame = Frame::new();
                 let picture = retained + view.resident_bytes() + Frames::reservation(&frame);
-                if self.residency().saturating_add(picture) > MAX_RESIDENT_BYTES {
+                if self.residency().saturating_add(picture) > MAX_RESIDENT_BYTES
+                    || !(self.paint_work() + rest.paint_work()).within_limits()
+                {
                     let bytes = state.attributed_bytes().saturating_add(picture);
                     drop(Deferred::new((state, rest, view, frame), bytes));
                     self.forget(*scene, out);
@@ -698,7 +708,8 @@ impl Presenter {
             drop(Deferred::new(old, scene.retained + scene.view_bytes));
             scene.retained = scene.rest.resident_bytes();
             scene.view_bytes = scene.view.resident_bytes();
-            if self.residency() > MAX_RESIDENT_BYTES {
+            scene.paint = scene.rest.paint_work();
+            if self.residency() > MAX_RESIDENT_BYTES || !self.paint_work().within_limits() {
                 self.release(id);
                 self.forget(id, out);
             }
@@ -809,6 +820,11 @@ impl Presenter {
     ) {
         let elapsed = now.saturating_duration_since(running.eligible_at);
         let total = self.residency();
+        let other_work = self
+            .scenes
+            .iter()
+            .filter(|(scene, _)| **scene != id)
+            .fold(PaintWork::default(), |sum, (_, scene)| sum + scene.paint);
         let Some(scene) = self.scenes.get_mut(&id) else {
             return;
         };
@@ -818,22 +834,26 @@ impl Presenter {
             result.transpose().map_err(|error| failure(&error))
         }
         .and_then(|prepared| {
+            let paint = scene.paint.max(prepared.after.paint_work());
             if prepared.index != running.index
                 || prepared.validate(scene.state.view(), scene.tip()).is_err()
             {
                 Err(SceneFailure::Validation)
-            } else if total.saturating_add(prepared.resident_bytes) > MAX_RESIDENT_BYTES {
+            } else if total.saturating_add(prepared.resident_bytes) > MAX_RESIDENT_BYTES
+                || !(other_work + paint).within_limits()
+            {
                 Err(SceneFailure::Residency)
             } else {
-                Ok(prepared)
+                Ok((prepared, paint))
             }
         });
         match accepted {
-            Ok(prepared) => {
+            Ok((prepared, paint)) => {
                 if elapsed > TARGET {
                     let elapsed_ms = elapsed.as_millis();
                     tracing::warn!(elapsed_ms, "a scene step's preparation missed its target");
                 }
+                scene.paint = paint;
                 scene.ready.push_back(Ready {
                     step: prepared,
                     full_after,

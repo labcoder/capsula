@@ -20,6 +20,10 @@ mod messages;
 pub(crate) mod observer;
 mod overlay_input;
 mod paint;
+#[cfg(test)]
+mod paint_paths;
+#[cfg(test)]
+mod paint_work_fixture;
 mod panels;
 mod perch;
 mod position;

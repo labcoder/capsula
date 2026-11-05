@@ -2835,3 +2835,123 @@ fn a_stale_join_hands_the_ticket_back_for_its_predecessor() {
         .expect("current picture");
     assert_eq!(prepared.after.items().len(), 2);
 }
+
+/// The regular star polygon {n/k} as path data: n points, each edge crossing 2(k − 1) others.
+fn star_path(n: u32, k: u32) -> String {
+    use std::fmt::Write as _;
+    let mut d = String::new();
+    for i in 0..n {
+        let angle = std::f64::consts::TAU * f64::from(i * k % n) / f64::from(n);
+        let command = if i == 0 { 'M' } else { 'L' };
+        write!(
+            d,
+            "{command}{:.2} {:.2} ",
+            1000.0 * angle.cos(),
+            1000.0 * angle.sin()
+        )
+        .expect("a String accepts formatted text");
+    }
+    d.push('Z');
+    d
+}
+
+#[test]
+fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"work","put":[
+            {"path":{"id":"dash","d":"M0 0 L100 0","dash":true}},
+            {"shape":{"id":"rect","kind":"rect","box":[0,0,100,60],"radius":10,"fill":"blue"}},
+            {"path":{"id":"star","at":[1000,1000],"d":star_path(257, 85),"fill":"blue"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("buildable paint work");
+    // The dash: floor(100 / 10) + 2. The rect: radius 10 at scale 64 needs 29 pieces per
+    // corner, so 4 · 30 + 1 points, filled and bordered. The star: 257 points + 257 · 84
+    // crossings, exactly one build.
+    assert_eq!(
+        first.after.paint_work(),
+        kumochi_scene::display::PaintWork {
+            dash_pieces: 12,
+            fill_vertices: 121 + 21_845,
+            largest_fill: 21_845,
+            outline_points: 121,
+            largest_outline: 121,
+        }
+    );
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"over","put":[{"path":{"id":"over","at":[1000,1000],"d":star_path(331, 66),"fill":"blue"}}]}),
+    );
+    // 331 points + 331 · 65 crossings is one vertex past a single build.
+    assert!(matches!(
+        picture(&scene, next, &first.after, &mut measure),
+        Err(PrepareError::OverResidency)
+    ));
+}
+
+#[test]
+fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
+    for curves in [63, 64] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let d = format!("M0 0 {}Z", "q5 20 10 0 ".repeat(curves));
+        let commit = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"curves","put":[{"path":{"id":"fill","d":d,"fill":"blue"}}]}),
+        );
+        let prepared = picture(&scene, commit, &before, &mut Measure::default());
+        if curves == 63 {
+            let prepared = prepared.expect("505 generated points fit the counting bound");
+            let Prim::Fill { points, .. } = &prepared.display.items[0].primitives[0] else {
+                panic!("prepared fill");
+            };
+            assert_eq!(points.len(), 505);
+        } else {
+            assert!(matches!(prepared, Err(PrepareError::OverResidency)));
+        }
+    }
+}
+
+#[test]
+fn a_replaced_item_is_recounted_and_an_unchanged_one_keeps_its_count() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"three","put":[
+            {"path":{"id":"kept","d":"M0 0 L100 0","dash":true}},
+            {"chart":{"id":"c","kind":"scatter","box":[0,0,400,300]}},
+            {"series":{"id":"s","in":"c","data":[1,2,3]}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("three markers");
+    let three = first.after.paint_work();
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"two","set":[{"target":"s","data":[3,1]}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("two markers");
+    let two = next.after.paint_work();
+    // A scatter marker is a filled 8-unit rect of radius 4: 18 pieces per corner at scale 64,
+    // so 4 · 19 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
+    assert_eq!(three.fill_vertices - two.fill_vertices, 77);
+    assert_eq!((three.dash_pieces, two.dash_pieces), (12, 12));
+    assert_eq!(
+        first.after.paint_work(),
+        three,
+        "the earlier layout keeps its own counts"
+    );
+}

@@ -6,6 +6,8 @@ use crate::{
     ErrorCode, FieldPath, Finite, Step, StepError, WireId,
     budget::Usage,
     deferred::Deferred,
+    display::{Contour, polyline_length},
+    geom::Vec2,
     layout::heap,
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
@@ -71,6 +73,8 @@ pub(crate) struct Work {
     pub inherited_rotation: bool,
     pub enter: Option<Enter>,
     pub motion: BTreeMap<&'static str, Motion>,
+    /// Prim-unit length bound of a dashed stroke whose geometry the record fixes.
+    pub dash: Option<f64>,
     pub solid: Option<SolidWork>,
 }
 
@@ -125,7 +129,7 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         ..Work::default()
     };
     let name = super::object::model(op)
-        .expect("only model operations get work metadata")
+        .expect("only model operations have work")
         .name;
     let fail = |field, code| StepError::in_step(&step.id, op_path(index, name).field(field), code);
     match op {
@@ -153,6 +157,7 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             let metrics =
                 path::walk(r.d.as_str(), |_, _| Ok(())).map_err(|code| fail("d", code))?;
             work.scale = r.scale.map_or(1.0, Finite::get);
+            work.dash = r.dash.then(|| metrics.length * f64::from(work.scale.abs()));
             work.extent = metrics.extent;
             work.path = Some(metrics);
         }
@@ -276,6 +281,7 @@ fn anchor_offset(anchor: &Anchor) -> f32 {
 }
 
 fn line_geometry(work: &mut Work, r: &crate::record::Line, head: crate::record::Head) {
+    work.dash = line_length(r).filter(|_| r.dash);
     work.offset = anchor_offset(&r.from).max(anchor_offset(&r.to));
     work.extent = work.offset;
     work.offset = 0.0;
@@ -299,7 +305,53 @@ fn line_geometry(work: &mut Work, r: &crate::record::Line, head: crate::record::
     }
 }
 
+/// From, vias or the bend control, and to: a bound on the stroke's length; `None` when an end
+/// is a reference, whose placement needs layout.
+fn line_length(r: &crate::record::Line) -> Option<f64> {
+    let (Anchor::At(a), Anchor::At(b)) = (&r.from, &r.to) else {
+        return None;
+    };
+    let point = |p: &[Finite; 2]| Vec2::new(p[0].get(), p[1].get());
+    let (a, b) = (point(a), point(b));
+    let mut points = vec![a];
+    let bend = r.bend.map(Finite::get);
+    if let Some(bend) = bend.filter(|bend| r.via.is_empty() && bend.abs() > 0.001) {
+        let bend = bend * 0.5;
+        points.push(Vec2::new(
+            a.x.midpoint(b.x) - (b.y - a.y) * bend,
+            a.y.midpoint(b.y) + (b.x - a.x) * bend,
+        ));
+    }
+    points.extend(r.via.iter().map(point));
+    points.push(b);
+    Some(polyline_length(&points, Contour::Open))
+}
+
+/// A dashed shape's outline length bound: rects and ellipses lie inside their box, so its
+/// perimeter bounds them; a polygon's own closed point sequence bounds itself.
+fn shape_length(r: &crate::record::Shape) -> f64 {
+    if r.kind == crate::record::ShapeKind::Polygon {
+        let points: Vec<_> = r
+            .points
+            .iter()
+            .map(|p| Vec2::new(p[0].get(), p[1].get()))
+            .collect();
+        return polyline_length(&points, Contour::Closed);
+    }
+    let [w, h] = r.bounds.map_or_else(
+        || {
+            r.size.map_or_else(
+                || [r.r.map_or(40.0, Finite::get) * 2.0; 2],
+                |size| [size[0].get(), size[1].get()],
+            )
+        },
+        |b| [b[2].get(), b[3].get()],
+    );
+    2.0 * (f64::from(w.abs()) + f64::from(h.abs()))
+}
+
 fn shape_geometry(work: &mut Work, r: &crate::record::Shape) -> Result<(), ErrorCode> {
+    work.dash = r.dash.then(|| shape_length(r));
     if let Some(b) = r.bounds {
         work.extent = work.extent.max(rect_extent(b)?);
     } else {

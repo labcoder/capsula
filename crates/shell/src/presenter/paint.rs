@@ -18,6 +18,10 @@ impl Frames {
     }
 
     pub(super) fn adopt(&mut self, scene: SceneId, frame: Frame) -> usize {
+        debug_assert!(
+            self.slots.iter().flatten().all(|(id, _)| *id != scene),
+            "each scene owns exactly one frame slot"
+        );
         let bytes = Self::reservation(&frame);
         let place = self
             .slots
@@ -46,5 +50,60 @@ impl Frames {
 
     pub(super) fn take_all(&mut self) -> [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES] {
         std::mem::take(&mut self.slots)
+    }
+
+    #[cfg(test)]
+    pub(super) fn ids(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
+        self.slots
+            .each_ref()
+            .map(|slot| slot.as_ref().map(|(id, _)| *id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_slots_reuse_a_middle_release_and_take_all_once() {
+        let mut frames = Frames::default();
+        let expected =
+            Frame::new().resident_bytes() + size_of::<RefCell<Frames>>() + 2 * size_of::<usize>();
+        for id in 1..=4 {
+            assert_eq!(frames.adopt(SceneId(id), Frame::new()), expected);
+        }
+        assert_eq!(
+            frames.ids(),
+            [
+                Some(SceneId(1)),
+                Some(SceneId(2)),
+                Some(SceneId(3)),
+                Some(SceneId(4))
+            ]
+        );
+        assert!(frames.take(SceneId(2)).is_some());
+        assert!(frames.take(SceneId(2)).is_none());
+        assert_eq!(frames.adopt(SceneId(5), Frame::new()), expected);
+        assert_eq!(
+            frames.ids(),
+            [
+                Some(SceneId(1)),
+                Some(SceneId(3)),
+                Some(SceneId(4)),
+                Some(SceneId(5))
+            ]
+        );
+        let all = frames.take_all();
+        assert_eq!(
+            all.each_ref().map(|slot| slot.as_ref().map(|(id, _)| *id)),
+            [
+                Some(SceneId(1)),
+                Some(SceneId(3)),
+                Some(SceneId(4)),
+                Some(SceneId(5))
+            ]
+        );
+        assert_eq!(frames.ids(), [None; 4]);
+        assert!(frames.take_all().iter().all(Option::is_none));
     }
 }

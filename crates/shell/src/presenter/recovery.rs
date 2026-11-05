@@ -10,7 +10,7 @@ use std::{
 use kumochi_protocol::message::SceneId;
 use kumochi_scene::{
     Frame, GlobalBudget, SceneBinding, SceneEvent, SceneView, deferred::Deferred,
-    layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
+    display::PaintWork, layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
 };
 
 use super::{
@@ -184,15 +184,18 @@ impl Presenter {
             }
         }
         let mut total = self.returned.load(Ordering::Relaxed);
+        let mut paint = PaintWork::default();
         let over: Vec<_> = self
             .scenes
             .iter()
             .filter_map(|(id, scene)| {
                 let next = total.saturating_add(scene.residency());
-                if next > MAX_RESIDENT_BYTES {
+                let work = paint + scene.paint;
+                if next > MAX_RESIDENT_BYTES || !work.within_limits() {
                     return Some(*id);
                 }
                 total = next;
+                paint = work;
                 None
             })
             .collect();
