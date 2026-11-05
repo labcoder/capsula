@@ -208,7 +208,9 @@ async fn each_ledger_code_maps_to_its_recovery() {
             403,
             Recovery::FixRequest,
         ),
-        ("rate_limit_error", 400, Recovery::FixRequest),
+        // OSC-223 gap 9: an unlisted refusal offers a new sign-in, never a dead end.
+        ("rate_limit_error", 400, Recovery::SignInAgain),
+        ("unlisted_code", 401, Recovery::SignInAgain),
         ("server_error", 429, Recovery::RetryLater),
     ];
     for (code, status, expected) in cases {
