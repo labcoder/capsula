@@ -21,6 +21,62 @@ use super::{
 const OTHER: SceneId = SceneId(21);
 
 #[test]
+fn a_fresh_commit_after_the_wake_waits_for_the_pending_consumption_retry() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    assert!(
+        presenter
+            .completed(first.run(&mut Shaper), ms(now, 1))
+            .expect("prepared")
+            .is_empty()
+    );
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 1, rect("b")), ms(now, 2))
+            .expect("the next admission"),
+    );
+    assert_eq!(
+        presenter
+            .consume_ready(LIVE, 0, ms(now, 3))
+            .expect_err("busy"),
+        ConsumeError::Busy
+    );
+    let effects = presenter
+        .completed(admission.run(), ms(now, 4))
+        .expect("admitted");
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::ConsumptionReady {
+            scene: LIVE,
+            index: 0
+        }
+    )));
+    assert!(presenter.lane.is_none());
+    assert!(presenter.held.is_empty());
+    let usage = presenter.global.usage();
+    let effects = arrive(&mut presenter, commit_frame(LIVE, 2, rect("c")), ms(now, 5))
+        .expect("a fresh commit before retry");
+    assert!(
+        effects.is_empty(),
+        "the pending retry must precede admission"
+    );
+    assert!(presenter.lane.is_none());
+    assert_eq!(presenter.held.len(), 1);
+    assert_eq!(presenter.held_bytes, FRAME);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
+    assert_eq!(presenter.scenes[&LIVE].state.view().revision(), 2);
+    assert_eq!(presenter.global.usage(), usage);
+    let consumed = presenter.consume_ready(LIVE, 0, ms(now, 6)).expect("retry");
+    assert_eq!(consumed.step.step().index, 0);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+    drop(only_admission(
+        consumed.effects.expect("the held admission"),
+    ));
+    assert!(presenter.held.is_empty());
+    assert_eq!(presenter.held_bytes, 0);
+}
+
+#[test]
 fn a_consumption_during_admission_is_busy_then_served_before_the_scene_admits_again() {
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);

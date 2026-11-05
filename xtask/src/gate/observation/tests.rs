@@ -2,7 +2,6 @@ use super::*;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const STARTUP: &str = "startup version=2 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n";
 pub(super) const GEOMETRY: &str =
@@ -11,17 +10,7 @@ pub(super) const COMMIT: &str =
     "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-1,4,2\n";
 
 pub(super) fn directory() -> std::path::PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "{}-observer-test-{}-{stamp}",
-        kumochi_protocol::constants::OBJECT_PREFIX,
-        std::process::id()
-    ));
-    fs::create_dir(&path).unwrap();
-    path
+    crate::scratch::dir("observer-test")
 }
 
 pub(super) fn finish(mut text: String, frames: usize, unposted: usize) -> String {

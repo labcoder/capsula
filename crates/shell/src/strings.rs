@@ -119,11 +119,20 @@ pub(crate) enum Text {
     AccountRevocationPending,
     AccountRevocationUnconfirmed,
     AccountSendFailed,
+    AccountLocal,
+    AccountRemote,
+    AccountSignOutNeedsRetry,
+    AccountCleanupRefusedHelp,
+    AccountNotDurableHelp,
+    AccountBacklogLead,
+    AccountBacklogRetry,
+    AccountBacklogExpiry,
+    AccountBacklogRecovery,
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 109] = [
+    const ALL: [Self; 118] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -233,6 +242,15 @@ impl Text {
         Self::AccountRevocationPending,
         Self::AccountRevocationUnconfirmed,
         Self::AccountSendFailed,
+        Self::AccountLocal,
+        Self::AccountRemote,
+        Self::AccountSignOutNeedsRetry,
+        Self::AccountCleanupRefusedHelp,
+        Self::AccountNotDurableHelp,
+        Self::AccountBacklogLead,
+        Self::AccountBacklogRetry,
+        Self::AccountBacklogExpiry,
+        Self::AccountBacklogRecovery,
     ];
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -289,6 +307,15 @@ impl Text {
             Self::AccountRevocationPending => "accounts-revocation-pending",
             Self::AccountRevocationUnconfirmed => "accounts-revocation-unconfirmed",
             Self::AccountSendFailed => "accounts-send-failed",
+            Self::AccountLocal => "accounts-local",
+            Self::AccountRemote => "accounts-remote",
+            Self::AccountSignOutNeedsRetry => "accounts-sign-out-needs-retry",
+            Self::AccountCleanupRefusedHelp => "accounts-cleanup-refused-help",
+            Self::AccountNotDurableHelp => "accounts-not-durable-help",
+            Self::AccountBacklogLead => "accounts-backlog-lead",
+            Self::AccountBacklogRetry => "accounts-backlog-retry",
+            Self::AccountBacklogExpiry => "accounts-backlog-expiry",
+            Self::AccountBacklogRecovery => "accounts-backlog-recovery",
             Self::Connecting => "status-connecting",
             Self::Connected => "status-connected",
             Self::Reconnecting => "status-reconnecting",
@@ -463,7 +490,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::BrowserUnavailable => "error-browser-unavailable",
         ErrorKey::AccountOffline => "error-account-offline",
         ErrorKey::CredentialsUnavailable => "error-credentials-unavailable",
-        ErrorKey::RevocationBacklog => "error-revocation-backlog",
+        ErrorKey::RevocationBacklog => Text::AccountBacklogLead.id(),
         ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
         ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
         ErrorKey::AccountMisconfigured => "error-account-misconfigured",
@@ -474,6 +501,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::AccountRefused => "error-account-refused",
         ErrorKey::RequestRefused => "error-request-refused",
         ErrorKey::ResponseUnreadable => "error-response-unreadable",
+        ErrorKey::SignInNeeded => "error-sign-in-needed",
+        ErrorKey::ModelUnavailable => "error-model-unavailable",
     }
 }
 
@@ -515,6 +544,14 @@ mod tests {
         assert_eq!(
             strings.error(&UserError::from(ErrorKey::SettingsRefused)),
             "Couldn't save that setting. Try again."
+        );
+    }
+
+    #[test]
+    fn backlog_notices_use_the_short_recovery_lead() {
+        assert_eq!(
+            Strings::english().error(&UserError::from(ErrorKey::RevocationBacklog)),
+            "Still ending earlier ChatGPT sessions. A new sign-in can't start yet."
         );
     }
 

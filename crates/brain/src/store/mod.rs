@@ -13,6 +13,7 @@ mod purge;
 mod scenes;
 mod schema;
 mod side;
+mod summaries;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
@@ -606,6 +607,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
+        tx.execute("DELETE FROM summaries WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;
         tx.execute("INSERT OR IGNORE INTO purge_pending (id) VALUES (1)", [])?;
         tx.commit()?;

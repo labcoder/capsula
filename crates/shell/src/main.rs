@@ -24,6 +24,7 @@ mod presenter;
 mod runs;
 mod settings;
 mod strings;
+mod theme;
 mod threads;
 
 use std::process::ExitCode;
@@ -96,6 +97,7 @@ fn main() -> ExitCode {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            crate::theme::init(cx);
             cx.set_global(Strings::english());
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
             let started =

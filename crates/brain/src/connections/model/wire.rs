@@ -267,6 +267,9 @@ impl Body {
                 let Some(line) = line(bytes, cap)? else {
                     return more;
                 };
+                if line > 0 {
+                    field_line(&bytes[..line])?;
+                }
                 self.0 = if line == 0 {
                     State::Done
                 } else {
@@ -289,14 +292,78 @@ fn line(bytes: &[u8], cap: usize) -> Result<Option<usize>, Failure> {
     }
 }
 
-/// A chunk-size line's size; its extensions are ignored.
+/// A chunk-size line's size. Its extensions are checked against RFC 9112's grammar, then ignored.
 fn chunk_size(line: &[u8]) -> Result<u64, Failure> {
-    let digits = line.split(|&byte| byte == b';').next().unwrap_or_default();
-    if digits.is_empty() || digits.len() > 16 || !digits.iter().all(u8::is_ascii_hexdigit) {
+    let end = line
+        .iter()
+        .position(|byte| !byte.is_ascii_hexdigit())
+        .unwrap_or(line.len());
+    let (digits, mut extensions) = line.split_at(end);
+    if digits.is_empty() || digits.len() > 16 {
         return Err(Failure::Protocol);
+    }
+    while !extensions.is_empty() {
+        let rest = blank(extensions)
+            .strip_prefix(b";")
+            .ok_or(Failure::Protocol)?;
+        let (_, rest) = token(blank(rest))?;
+        extensions = match blank(rest).strip_prefix(b"=") {
+            Some(value) => extension_value(blank(value))?,
+            None => rest,
+        };
     }
     std::str::from_utf8(digits)
         .ok()
         .and_then(|digits| u64::from_str_radix(digits, 16).ok())
         .ok_or(Failure::Protocol)
+}
+
+/// What's left after a chunk extension's value: a token or a quoted string.
+fn extension_value(bytes: &[u8]) -> Result<&[u8], Failure> {
+    let Some(mut rest) = bytes.strip_prefix(b"\"") else {
+        return token(bytes).map(|(_, rest)| rest);
+    };
+    loop {
+        match rest {
+            [b'"', rest @ ..] => return Ok(rest),
+            [b'\\', escaped, rest_after @ ..] if text(*escaped) => rest = rest_after,
+            [byte, rest_after @ ..] if text(*byte) && *byte != b'\\' => rest = rest_after,
+            _ => return Err(Failure::Protocol),
+        }
+    }
+}
+
+/// A trailer line must be a field line: a token name, a colon and a visible or blank value.
+fn field_line(line: &[u8]) -> Result<(), Failure> {
+    let (_, rest) = token(line)?;
+    let value = rest.strip_prefix(b":").ok_or(Failure::Protocol)?;
+    if !value.iter().all(|&byte| text(byte)) {
+        return Err(Failure::Protocol);
+    }
+    Ok(())
+}
+
+/// The non-empty token at the front of `bytes`, and what follows it.
+fn token(bytes: &[u8]) -> Result<(&[u8], &[u8]), Failure> {
+    let end = bytes
+        .iter()
+        .position(|&byte| !(byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)))
+        .unwrap_or(bytes.len());
+    if end == 0 {
+        return Err(Failure::Protocol);
+    }
+    Ok(bytes.split_at(end))
+}
+
+/// A space, tab, visible ASCII or obs-text byte: what a field value or quoted text may hold.
+fn text(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | 0x21..=0x7e | 0x80..=0xff)
+}
+
+fn blank(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte != b' ' && byte != b'\t')
+        .unwrap_or(bytes.len());
+    &bytes[end..]
 }

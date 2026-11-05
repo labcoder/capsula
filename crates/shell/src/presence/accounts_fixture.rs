@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Styled as _, WeakEntity, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Pixels, Size, Styled as _, WeakEntity,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use kumochi_protocol::message::{
     AccountEmail, AccountRecovery, AccountView, Action, AssistantName, Cleanup, ErrorKey,
@@ -13,7 +13,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{OpenError, settings_view::SettingsView};
-use crate::settings::{Settings, Update};
+use crate::settings::{Field, Settings, Update};
 use crate::strings::{Strings, Text};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,10 +21,12 @@ pub(crate) enum Appearance {
     Light,
     Dark,
     Large,
+    Constrained,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum State {
+    GeneralError,
     Waiting,
     Offline,
     SignedOut,
@@ -49,6 +51,7 @@ pub(crate) enum State {
 impl State {
     pub(super) fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "general-error" => Self::GeneralError,
             "waiting" => Self::Waiting,
             "offline" => Self::Offline,
             "signed-out" => Self::SignedOut,
@@ -95,6 +98,16 @@ impl State {
             None,
             "the fixture installs an unsolicited settings snapshot"
         );
+        if self == Self::GeneralError {
+            model.change(Field::Assistant, "");
+            assert!(
+                !model.save(Field::Assistant, |_| panic!(
+                    "the invalid fixture draft must not send"
+                )),
+                "the empty fixture draft is rejected locally"
+            );
+            return model;
+        }
         let view = match self {
             Self::Waiting | Self::Offline => return model,
             Self::SignedOut | Self::Unconfirmed | Self::Backlog => AccountView::SignedOut {
@@ -156,6 +169,7 @@ pub(crate) fn run(state: State, appearance: Option<Appearance>, delay: Duration)
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            crate::theme::init(cx);
             cx.set_global(Strings::english());
             if open(state, appearance, delay, cx).is_err() {
                 cx.quit();
@@ -179,18 +193,17 @@ fn open(
             None,
             cx,
         );
-        if appearance == Appearance::Large {
+        if matches!(appearance, Appearance::Large | Appearance::Constrained) {
             Theme::update(cx, |theme| theme.font_size = px(24.));
         }
     }
     let model = cx.new(|_| state.model());
     let (events, _receiver) = async_channel::unbounded();
     let rem = f32::from(Theme::global(cx).font_size);
-    let [width, height] = super::threads::PANEL_REMS.map(|value| px(value * rem));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
             point(px(100.), px(100.)),
-            size(width, height),
+            window_size(appearance, rem),
         ))),
         titlebar: None,
         kind: WindowKind::PopUp,
@@ -206,7 +219,11 @@ fn open(
         });
         cx.new(|cx| {
             let mut view = SettingsView::new(model, WeakEntity::new_invalid(), events, window, cx);
-            view.fixture_accounts();
+            if state == State::GeneralError {
+                view.fixture_general();
+            } else {
+                view.fixture_accounts();
+            }
             view
         })
     })
@@ -234,13 +251,36 @@ fn open(
     Ok(())
 }
 
+fn window_size(appearance: Option<Appearance>, rem: f32) -> Size<Pixels> {
+    if appearance == Some(Appearance::Constrained) {
+        return size(px(768.), px(544.));
+    }
+    let [width, height] = super::threads::PANEL_REMS.map(|value| px(value * rem));
+    size(width, height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn constrained_window_does_not_grow_with_larger_text() {
+        for rem in [16., 24.] {
+            assert_eq!(
+                window_size(Some(Appearance::Constrained), rem),
+                size(px(768.), px(544.))
+            );
+        }
+        assert_eq!(
+            window_size(Some(Appearance::Large), 24.),
+            size(px(1152.), px(816.))
+        );
+    }
+
+    #[test]
     fn fixed_states_parse_exactly() {
         for (name, state) in [
+            ("general-error", State::GeneralError),
             ("waiting", State::Waiting),
             ("offline", State::Offline),
             ("signed-out", State::SignedOut),
@@ -262,6 +302,21 @@ mod tests {
             ("backlog", State::Backlog),
         ] {
             assert_eq!(State::parse(name), Some(state));
+        }
+    }
+
+    #[test]
+    fn general_error_uses_the_real_field_validation_without_an_account() {
+        let model = State::GeneralError.model();
+        assert_eq!(
+            model.field(Field::Assistant).error,
+            Some(crate::settings::Error::Validation(
+                kumochi_protocol::message::NameError::Empty
+            ))
+        );
+        assert_eq!(model.accounts.view, None);
+        for value in ["General-error", "general-erro", "general-error "] {
+            assert_eq!(State::parse(value), None);
         }
     }
 

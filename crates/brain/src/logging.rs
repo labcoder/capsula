@@ -62,6 +62,12 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
         .with(tracing_subscriber::fmt::layer().with_writer(appender))
         .with(filter(level));
     tracing::subscriber::set_global_default(subscriber)?;
+    install_panic_hook();
+    Ok(())
+}
+
+/// Replaces the default panic output, which prints the payload, with the location alone.
+pub fn install_panic_hook() {
     // The payload can hold any value an assertion printed, so only the location is logged.
     std::panic::set_hook(Box::new(|info| {
         let at = info
@@ -69,5 +75,4 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
             .map(|l| format!("{}:{}", l.file(), l.line()));
         tracing::error!(location = at.as_deref().unwrap_or("unknown"), "panic");
     }));
-    Ok(())
 }

@@ -52,6 +52,8 @@ pub(crate) struct Applied {
     pub(crate) stop: Option<ControlToBrain>,
     /// Credit for held data frames this state classified.
     pub(crate) credit: u32,
+    /// The run isn't fenced off, by Esc or a delete, so its feedback may show.
+    pub(crate) visible: bool,
 }
 
 /// The newest named run, until both its terminal `RunState` and its `RunEnd` have been applied.
@@ -74,6 +76,7 @@ pub(crate) enum Target {
 #[derive(Debug, Default)]
 pub(crate) struct Runs {
     connected: bool,
+    turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
@@ -168,6 +171,8 @@ impl Runs {
         }
         Ok((
             DataToBrain::TextSubmit {
+                turn: self.turns_sent.checked_add(1).ok_or(Refused::Busy)?,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: self.thread(),
                 text: text.to_owned(),
             },
@@ -259,6 +264,7 @@ impl Runs {
             return Err(Refused::Offline);
         }
         self.submitted.push_back(revision);
+        self.turns_sent += 1;
         Ok(())
     }
 
@@ -385,6 +391,7 @@ impl Runs {
     /// The link connected, as connection `generation`.
     pub(crate) fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.turns_sent = 0;
         self.drawing.connected(generation);
     }
 
@@ -448,6 +455,7 @@ impl Runs {
             self.end(run, |live| live.state_ended = true);
         }
         applied.credit = self.release();
+        applied.visible = run > self.fence;
         applied
     }
 

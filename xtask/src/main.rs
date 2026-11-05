@@ -19,6 +19,8 @@ mod gate;
 mod live;
 #[cfg(windows)]
 mod platform;
+#[cfg(test)]
+mod scratch;
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]

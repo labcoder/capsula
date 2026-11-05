@@ -21,11 +21,12 @@ use crate::store::{Pages, Side, StoreError};
 const FIRST_RETRY: Duration = Duration::from_millis(50);
 const LAST_RETRY: Duration = Duration::from_secs(1);
 
-/// A page read or a context build, stamped with how many other ops were accepted before it.
+/// A page read, a context build or a title job's read, stamped with how many other ops were
+/// accepted before it.
 #[derive(Debug)]
 pub(super) struct Read {
     pub(super) stamp: u64,
-    /// [`StoreOp::ReadPage`] or [`StoreOp::BuildContext`].
+    /// [`StoreOp::ReadPage`], [`StoreOp::BuildContext`] or [`StoreOp::ReadJob`].
     pub(super) op: StoreOp,
 }
 
@@ -196,6 +197,18 @@ pub(super) fn spawn_reader(
                     StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
                         open.then_some(&*side),
                         build,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
+                    StoreOp::CompactContext(read) => Input::CompactBuilt(context::read_compact(
+                        open.then_some(&*side),
+                        read,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
+                    StoreOp::ReadJob(read) => Input::JobBuilt(context::read_job(
+                        open.then_some(&*side),
+                        read,
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),

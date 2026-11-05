@@ -254,10 +254,7 @@ fn retry_errors_supplement_valid_states_without_unlocking_forbidden_operations()
     let mut sent = Vec::new();
     receive(&mut accounts, signed_out());
     accounts.error(&retry);
-    assert_eq!(
-        allowed(&accounts),
-        vec![AccountOp::SignIn, AccountOp::Retry]
-    );
+    assert_eq!(allowed(&accounts), vec![AccountOp::Retry]);
     receive(&mut accounts, signed_out());
     assert_eq!(accounts.error, Some(retry.clone()));
     press(&mut accounts, AccountOp::Retry, &mut sent);
@@ -386,10 +383,7 @@ fn failed_send_keeps_error_and_view_and_allows_retry_accepted_send_clears_error(
     assert_eq!(accounts.error, Some(failure.clone()));
     assert!(accounts.send_failed);
     assert_eq!(accounts.waiting, None);
-    assert_eq!(
-        allowed(&accounts),
-        vec![AccountOp::SignIn, AccountOp::Retry]
-    );
+    assert_eq!(allowed(&accounts), vec![AccountOp::Retry]);
     assert!(!accounts.send(AccountOp::SignOut, |_| panic!("invalid operation")));
     assert!(accounts.send_failed);
     assert!(!accounts.receive(Some(7), 6, AccountView::Busy));
@@ -403,6 +397,27 @@ fn failed_send_keeps_error_and_view_and_allows_retry_accepted_send_clears_error(
     assert_eq!(sent, vec![AccountOp::Retry, AccountOp::Retry]);
     receive(&mut accounts, signed_out());
     assert_eq!(accounts.error, None);
+}
+
+#[test]
+fn backlog_blocks_new_sign_in_until_retry_is_accepted() {
+    for view in [
+        signed_out(),
+        signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain)),
+    ] {
+        let mut accounts = Accounts::default();
+        receive(&mut accounts, view.clone());
+        accounts.error(&error(ErrorKey::RevocationBacklog, vec![Action::Retry]));
+        assert!(!accounts.allows(AccountOp::SignIn));
+        assert!(!accounts.send(AccountOp::SignIn, |_| panic!(
+            "backlog must not open a browser"
+        )));
+        let mut sent = Vec::new();
+        press(&mut accounts, AccountOp::Retry, &mut sent);
+        receive(&mut accounts, view);
+        assert!(accounts.allows(AccountOp::SignIn));
+        assert_eq!(sent, vec![AccountOp::Retry]);
+    }
 }
 
 #[test]
