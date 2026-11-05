@@ -11,17 +11,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
-use super::{Access, AccessAsk, AccessHandle, Responses};
+use super::{Access, AccessAsk, AccessHandle, Bearer, Responses};
 use crate::connections::account::Denied;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{Connect, ModelClient};
-use crate::connections::model::error::Failure;
+use crate::connections::model::error::{Failure, ProviderError};
 use crate::coordinator::{Input, LeaseId, SendKey};
 use crate::engines::{
     Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
 
 const TEXT: &[u8] = include_bytes!("../../../fixtures/responses/text.sse");
+const DETAIL: &[u8] = include_bytes!("../../../fixtures/responses/detail.json");
 const BEARER: &str = "PLANTED-BEARER";
 
 /// Hands the server end of each connection to the test.
@@ -60,8 +61,14 @@ fn key() -> SendKey {
     request(None).key
 }
 
-fn bearer() -> Secret<Zeroizing<String>> {
-    Secret::new(Zeroizing::new(BEARER.to_owned()))
+/// The generation [`bearer`] comes from.
+const GENERATION: u64 = 7;
+
+fn bearer() -> Bearer {
+    Bearer {
+        generation: GENERATION,
+        token: Secret::new(Zeroizing::new(BEARER.to_owned())),
+    }
 }
 
 fn start(request: RunRequest) -> Round {
@@ -95,8 +102,11 @@ impl Round {
             .recv()
             .await
             .expect("the round asks for its bearer");
-        assert_eq!(ask.key, key());
-        ask.answer.send(access).ok();
+        let AccessAsk::Bearer { key: asked, answer } = ask else {
+            panic!("a bearer ask first, not {ask:?}");
+        };
+        assert_eq!(asked, key());
+        answer.send(access).ok();
     }
 
     fn lease(&self) -> Answer {
@@ -261,4 +271,41 @@ async fn a_gone_pump_stops_the_stream_and_closes_its_connection() {
         0,
         "the client closed its end with the stream unread"
     );
+}
+
+/// OSC-223: a 401 tells the account its bearer's generation was refused, so the next access
+/// refreshes it; another refusal, here a 403, tells it nothing.
+#[tokio::test]
+async fn a_refused_bearer_is_reported_with_its_generation() {
+    for (status, refused) in [(401, Some(GENERATION)), (403, None)] {
+        let mut round = start(request(Some("gpt-fixture")));
+        round.bearer(Ok(bearer())).await;
+        let lease = round.lease();
+        round.answer(lease).await;
+        let mut server = round.servers.recv().await.expect("a connection");
+        read_request(&mut server).await;
+        let head = format!(
+            "HTTP/1.1 {status} Refused\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            DETAIL.len()
+        );
+        server.write_all(head.as_bytes()).await.expect("head");
+        server.write_all(DETAIL).await.expect("body");
+        let failure = Failure::Provider(ProviderError {
+            status,
+            code: None,
+            param: None,
+        });
+        assert_eq!(
+            round.ended().await,
+            [TurnEvent::Finished(Finish::Failed(EngineFailure::Stream(
+                failure
+            )))],
+            "{status}"
+        );
+        let told = round.access.try_recv().ok().map(|ask| match ask {
+            AccessAsk::Refused(generation) => generation,
+            AccessAsk::Bearer { .. } => panic!("no second bearer ask"),
+        });
+        assert_eq!(told, refused, "{status}");
+    }
 }

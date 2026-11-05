@@ -248,7 +248,8 @@ isn't needed:
    when that connection is the ready one, refreshing first when it's due. Any other answer, or a
    brain that's gone, fails the round as `Failed(Access)` with nothing sent, and the shell hears
    the account's reason for the run's connection, else `SignInNeeded`. The bearer stays a
-   `Secret` and is dropped when the stream ends.
+   `Secret` and is dropped when the stream ends. A stream that ends in `AccountRefused` tells
+   the account which generation was refused, so the next access renews it (accounts.md).
 3. **The ask.** The transport asks the `SendGate` right before the body goes out (see
    [The send lease](#the-send-lease)), which checks the round's build key and its sources. A
    `Rebuild` drops the round with nothing more said, since the coordinator already dropped it.

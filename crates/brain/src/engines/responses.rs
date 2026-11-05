@@ -9,7 +9,7 @@ mod engine_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use engine::{Access, AccessAsk, AccessHandle, Responses};
+pub(crate) use engine::{Access, AccessAsk, AccessHandle, Bearer, Responses};
 
 use std::fmt;
 

@@ -7,6 +7,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use kumochi_protocol::Secret;
+use kumochi_protocol::message::ErrorKey;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
 
@@ -22,20 +23,36 @@ use crate::engines::{
     self, Answer, Engine, EngineFailure, Finish, RunRequest, SendGate, TurnEvent,
 };
 
-/// The bearer, or why the account gave none.
-pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
+/// A bearer, and the generation of the token set it came from.
+#[derive(Debug)]
+pub(crate) struct Bearer {
+    pub(crate) generation: u64,
+    pub(crate) token: Secret<Zeroizing<String>>,
+}
 
-/// A round's ask for the bearer: which build or job sends, and where the answer goes.
-pub(crate) struct AccessAsk {
-    pub(crate) key: SendKey,
-    pub(crate) answer: oneshot::Sender<Access>,
+/// The bearer, or why the account gave none.
+pub(crate) type Access = Result<Bearer, Denied>;
+
+/// What a round tells the brain about the account.
+pub(crate) enum AccessAsk {
+    /// The bearer for a build or job's send, and where the answer goes.
+    Bearer {
+        key: SendKey,
+        answer: oneshot::Sender<Access>,
+    },
+    /// The provider refused the bearer of this generation.
+    Refused(u64),
 }
 
 impl fmt::Debug for AccessAsk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AccessAsk")
-            .field("key", &self.key)
-            .finish_non_exhaustive()
+        match self {
+            Self::Bearer { key, .. } => f
+                .debug_struct("Bearer")
+                .field("key", key)
+                .finish_non_exhaustive(),
+            Self::Refused(generation) => f.debug_tuple("Refused").field(generation).finish(),
+        }
     }
 }
 
@@ -53,10 +70,16 @@ impl AccessHandle {
     /// The bearer for `key`'s send; a brain that's gone gives none.
     async fn access(&self, key: SendKey) -> Access {
         let (answer, answered) = oneshot::channel();
-        if self.0.send(AccessAsk { key, answer }).is_err() {
+        if self.0.send(AccessAsk::Bearer { key, answer }).is_err() {
             return Err(Denied::Unusable);
         }
         answered.await.unwrap_or(Err(Denied::Unusable))
+    }
+
+    /// Tells the account the provider refused the bearer of `generation`, so its next access
+    /// refreshes it.
+    fn refused(&self, generation: u64) {
+        self.0.send(AccessAsk::Refused(generation)).ok();
     }
 }
 
@@ -134,7 +157,12 @@ impl<C: Connect> Shared<C> {
             round: &mut round,
             events,
         };
-        let read = stream(&self.client, &body, &bearer, ask, &self.budget, out).await;
+        let read = stream(&self.client, &body, &bearer.token, ask, &self.budget, out).await;
+        if let Err(failure) = read
+            && failure.user_error().key() == ErrorKey::AccountRefused
+        {
+            self.access.refused(bearer.generation);
+        }
         drop(bearer);
         if read == Err(Failure::Rebuild) {
             return None;
