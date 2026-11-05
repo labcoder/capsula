@@ -5,6 +5,7 @@
 pub mod budget;
 pub mod conn;
 pub mod error;
+pub(in crate::connections) mod framer;
 pub mod sse;
 pub mod wire;
 
