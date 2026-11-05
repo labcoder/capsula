@@ -137,6 +137,45 @@ fn refusal_and_exhaustion_fail_before_a_valid_terminal_can_rescue_them() {
 }
 
 #[test]
+fn nonterminal_message_deltas_preserve_the_recorded_stop_reason() {
+    for update in [
+        json!({"type":"message_delta","usage":{"output_tokens":2}}),
+        json!({"type":"message_delta","delta":{},"usage":{"output_tokens":3}}),
+        json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":4}}),
+    ] {
+        let reason = json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}});
+        let stop = json!({"type":"message_stop"});
+        let expected = vec![update.clone(), reason, update.clone(), stop];
+        let bytes: Vec<_> = expected.iter().flat_map(event).collect();
+        for size in [bytes.len(), 1, 7] {
+            let (seen, result) = read(&bytes, size);
+            assert_eq!(seen, expected);
+            assert_eq!(result.unwrap(), StopReason::ToolUse);
+        }
+
+        let mut reader = Reader::default();
+        let mut seen = Vec::new();
+        assert_eq!(
+            reader
+                .feed(&event(&update), &mut |e| seen.push(e.value().clone()))
+                .unwrap(),
+            Progress::More
+        );
+        assert_eq!(seen, [update]);
+        assert!(matches!(
+            reader.feed(&event(&json!({"type":"message_stop"})), &mut |_| {
+                panic!("a stop without a recorded reason is not forwarded");
+            }),
+            Err(Failure::Protocol)
+        ));
+        assert!(matches!(
+            reader.feed(&ending("end_turn"), &mut |_| panic!("failure is sticky")),
+            Err(Failure::Protocol)
+        ));
+    }
+}
+
+#[test]
 fn malformed_events_and_missing_mistyped_or_unsupported_stop_reasons_fail_closed() {
     for value in [
         json!(null),
@@ -144,8 +183,9 @@ fn malformed_events_and_missing_mistyped_or_unsupported_stop_reasons_fail_closed
         json!({"type":7}),
         json!({"type":"content_block_delta","delta":{}}),
         json!({"type":"content_block_delta","delta":{"type":"text_delta","text":7}}),
-        json!({"type":"message_delta"}),
-        json!({"type":"message_delta","delta":{"stop_reason":null}}),
+        json!({"type":"message_delta","delta":null}),
+        json!({"type":"message_delta","delta":7}),
+        json!({"type":"message_delta","delta":"mistyped"}),
         json!({"type":"message_delta","delta":{"stop_reason":7}}),
         json!({"type":"message_delta","delta":{"stop_reason":"future_reason"}}),
         json!({"type":"message_stop"}),

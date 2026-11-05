@@ -30,10 +30,13 @@ The shared provider-neutral SSE framer enforces 1 MiB line and joined-event boun
 JSON or recognize terminal events. The Responses reader keeps its own existing semantics.
 The Anthropic reader forwards known events in order, ignores bounded pings/future types and
 counts only `text_delta` toward its 1 MiB visible-text cap. It completes only on `message_stop`
-after `end_turn`, `tool_use` or `stop_sequence`. Token/context exhaustion is truncation,
-explicit refusal is closed, and EOF before completion fails. Malformed or failed streams stay
-failed on every later feed; a later valid stop cannot rescue them. Completed readers emit no
-more events. A3 validates the block/tool and usage payloads it assembles.
+after `end_turn`, `tool_use` or `stop_sequence`.
+Nonterminal `message_delta` events with an absent or null stop reason are forwarded without
+changing the last recorded reason; `message_stop` still requires a recorded supported reason.
+Token/context exhaustion is truncation, explicit refusal is closed, and EOF before completion
+fails. Malformed or failed streams stay failed on every later feed; a later valid stop cannot
+rescue them. Completed readers emit no more events. A3 validates the block/tool and usage
+payloads it assembles.
 
 ## One attempt
 
@@ -58,5 +61,5 @@ cancels all its owned I/O without a producer task. Refusal bodies are bounded to
 Request/error fixtures are explicitly synthetic public-reference shapes, not provider
 recordings. Bounds, redaction, invalid envelopes and narrow credit recognition are tested
 offline. No owner credential, live API behavior or macOS behavior has been verified. The
-interleaved synthetic parsing measurement is recorded separately; it is not provider latency
-or end-to-end throughput.
+interleaved synthetic parsing measurement is recorded in the pull request body; it is not
+provider latency or end-to-end throughput.

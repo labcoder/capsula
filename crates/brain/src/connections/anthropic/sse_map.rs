@@ -87,16 +87,26 @@ impl Reader {
                     }
                 }
                 "message_delta" => {
-                    self.reason = Some(match event.value()["delta"]["stop_reason"].as_str() {
-                        Some("end_turn") => StopReason::EndTurn,
-                        Some("tool_use") => StopReason::ToolUse,
-                        Some("stop_sequence") => StopReason::StopSequence,
-                        Some("max_tokens" | "model_context_window_exceeded") => {
-                            return Err(Failure::Truncated);
-                        }
-                        Some("refusal") => return Err(Failure::Refused),
-                        _ => return Err(Failure::Protocol),
-                    });
+                    if event
+                        .value()
+                        .get("delta")
+                        .is_some_and(|delta| !delta.is_object())
+                    {
+                        return Err(Failure::Protocol);
+                    }
+                    let reason = &event.value()["delta"]["stop_reason"];
+                    if !reason.is_null() {
+                        self.reason = Some(match reason.as_str() {
+                            Some("end_turn") => StopReason::EndTurn,
+                            Some("tool_use") => StopReason::ToolUse,
+                            Some("stop_sequence") => StopReason::StopSequence,
+                            Some("max_tokens" | "model_context_window_exceeded") => {
+                                return Err(Failure::Truncated);
+                            }
+                            Some("refusal") => return Err(Failure::Refused),
+                            _ => return Err(Failure::Protocol),
+                        });
+                    }
                 }
                 "message_stop" => {
                     self.reason.ok_or(Failure::Protocol)?;
