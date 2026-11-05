@@ -2,6 +2,8 @@
 
 mod folders;
 mod hit_mask;
+#[expect(dead_code, reason = "C2b-2's carry is the first caller")]
+mod host;
 mod keyboard;
 mod observer;
 mod overlay_input;

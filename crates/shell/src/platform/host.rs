@@ -153,7 +153,7 @@ impl fmt::Debug for Label {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Facts, HostFacts, HostId, LABEL_UNITS, Label, PhysicalRect};
+    use super::{Facts, HostChange, HostFacts, HostId, LABEL_UNITS, Label, PhysicalRect, WatchGen};
 
     pub(crate) const SENTINEL: &str = "SENTINEL-TITLE-7f3a";
 
@@ -219,5 +219,12 @@ pub(crate) mod tests {
         let text = format!("{facts:?} {:?}", facts.label);
         assert!(text.contains("Label(19 units)"), "{text}");
         assert_no_sentinel(&text);
+        assert_no_sentinel(&format!(
+            "{:?}",
+            crate::platform::PresenceEvent::HostChanged {
+                w: WatchGen(1),
+                change: HostChange::Gone,
+            }
+        ));
     }
 }

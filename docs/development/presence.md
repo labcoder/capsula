@@ -296,13 +296,26 @@ it the steps it lets through.
 
 ## Perch hosts
 
-The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the data and the geometry,
+The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry,
 and nothing calls them yet.
 
 - `platform::host` holds the plain data: `PhysicalRect`, `HostId`, `WatchGen`, `HostChange`,
   the raw caption `Facts` and `Label`. A `Label` is another app's window title, so it's screen
   text. It sits in an inline buffer of 64 UTF-16 units, cut at a unit boundary without half of a
   surrogate pair, and its `Debug` prints only its length. Nothing logs it or sends it to the brain.
+- `platform::windows::host::host_at` walks the z-order under a point, skipping Kumochi's own
+  windows and any hidden, minimized, cloaked or click-through ones. The desktop and the
+  taskbars end the walk with no host. It reads the window rectangle, the DWM frame, the
+  monitor's work area and effective DPI, the host's own DPI, the title bar, DWM's caption-button
+  bounds, and the standard top inset and button width. A host without `WS_CAPTION` gets a
+  standard resizable window's metrics at its DPI instead of its own zero inset. The title comes
+  from `GetWindowTextW`, which for another process's window reads the copy the system keeps
+  and sends no message into that app's thread.
+- `watch_host` installs five out-of-context `SetWinEventHook`s (location change, minimize,
+  hide, cloak and destroy), filtered to the host's process and thread. They deliver
+  `PresenceEvent::HostChanged { w, change }` on the UI thread's message loop. If any hook fails,
+  the ones before it are removed in reverse order. Dropping the watch unhooks every hook before
+  its route is cleared.
 - `presence::perch::caption` applies §10.4's caption rules. When the reported title bar and
   buttons agree, the caption is the bar left of the leftmost exclusion. Otherwise it's the
   standard band, scaled from host units by `monitor_dpi / layout_dpi` and rounded up, cut to the
