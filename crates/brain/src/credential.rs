@@ -1,7 +1,7 @@
 //! The instance capability in Windows Credential Manager, the only place it's stored.
 
 use keyring::Entry;
-use kumochi_protocol::constants::{INSTANCE_ACCOUNT, INSTANCE_SERVICE};
+use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
 use kumochi_protocol::message::Capability;
 
 /// Credential Manager refused an operation.
@@ -30,5 +30,5 @@ pub fn delete(session: u32) -> Result<(), CredentialError> {
 
 /// One entry per session, because each session runs its own brain.
 fn entry(session: u32) -> keyring::Result<Entry> {
-    Entry::new(INSTANCE_SERVICE, &format!("{INSTANCE_ACCOUNT}-{session}"))
+    Entry::new(INSTANCE_SERVICE, &instance_entry(session))
 }
