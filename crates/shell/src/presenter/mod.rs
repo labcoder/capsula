@@ -27,6 +27,7 @@
 
 mod admit;
 mod measure;
+mod paint;
 mod prepare;
 mod recovery;
 mod scene;
@@ -34,7 +35,9 @@ mod snapshot;
 mod window;
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -47,8 +50,8 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    DetachedCandidate, GlobalBudget, SceneBinding, SceneRead, SceneState, StepError, StopCut,
-    StopOutcome,
+    DetachedCandidate, Frame, GlobalBudget, SceneBinding, SceneRead, SceneState, SceneView,
+    StepError, StopCut, StopOutcome,
     deferred::{self, Deferred},
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
     limits::MAX_RESIDENT_BYTES,
@@ -58,6 +61,7 @@ use kumochi_scene::{
 
 use admit::Lane;
 pub(crate) use measure::Measure;
+pub(crate) use paint::Frames;
 pub(crate) use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
@@ -133,6 +137,8 @@ pub(crate) struct Presenter {
     /// The one budget every mirrored scene is bound to.
     global: GlobalBudget,
     scenes: BTreeMap<SceneId, Scene>,
+    /// Each scene's sampled frame, shared with the overlay that paints it.
+    frames: Rc<RefCell<Frames>>,
     /// The one commit being admitted; later scene frames wait in `held` behind it.
     lane: Option<Lane>,
     /// Live frames waiting for recovery or the admission lane, with their withheld credit.
@@ -167,6 +173,7 @@ impl Presenter {
             assembler: Assembler::default(),
             global: GlobalBudget::default(),
             scenes: BTreeMap::new(),
+            frames: Rc::default(),
             lane: None,
             held: VecDeque::new(),
             held_bytes: 0,
@@ -202,7 +209,11 @@ impl Presenter {
             scene.halt();
         }
         let bytes = self.scenes.values().map(Scene::attributed).sum();
-        drop(Deferred::new(std::mem::take(&mut self.scenes), bytes));
+        let frames = self.frames.borrow_mut().take_all();
+        drop(Deferred::new(
+            (std::mem::take(&mut self.scenes), frames),
+            bytes,
+        ));
         self.global = GlobalBudget::default();
         drop(Deferred::new(
             std::mem::take(&mut self.held),
@@ -479,8 +490,8 @@ impl Presenter {
             || self.assembler.described() && self.assembler.pending()
     }
 
-    /// Prepared geometry charged against [`MAX_RESIDENT_BYTES`]: what each scene retains, its
-    /// prepared steps, and every consumed step still held.
+    /// Prepared geometry charged against [`MAX_RESIDENT_BYTES`]: what each scene retains with
+    /// its view and frame, its prepared steps, and every consumed step still held.
     pub(crate) fn residency(&self) -> usize {
         self.scenes
             .values()
@@ -550,17 +561,19 @@ impl Presenter {
                 let state = SceneState::begin(header.begin.clone()).map_err(|_| Broken::Header)?;
                 let rest = LayoutState::new(&state);
                 let retained = rest.resident_bytes();
-                if self.residency().saturating_add(retained) > MAX_RESIDENT_BYTES {
-                    let bytes = state.attributed_bytes().saturating_add(retained);
-                    drop(Deferred::new((state, rest), bytes));
+                let view = SceneView::new(&rest, state.activated());
+                let frame = Frame::new();
+                let picture = retained + view.resident_bytes() + Frames::reservation(&frame);
+                if self.residency().saturating_add(picture) > MAX_RESIDENT_BYTES {
+                    let bytes = state.attributed_bytes().saturating_add(picture);
+                    drop(Deferred::new((state, rest, view, frame), bytes));
                     self.forget(*scene, out);
                     return Ok(());
                 }
                 let bytes = state.attributed_bytes();
                 let state = SceneBinding::bind(Deferred::new(state, bytes), &mut self.global)
                     .map_err(|_| Broken::Scenes)?;
-                self.scenes
-                    .insert(*scene, Scene::new(state, rest, retained));
+                self.install(*scene, state, rest, retained, view, frame);
                 Ok(())
             }
             DataToShell::SceneCutApplied {
@@ -673,9 +686,19 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
-            let old = std::mem::replace(&mut scene.rest, rest);
-            drop(Deferred::new(old, scene.retained));
+            let view = SceneView::new(&rest, scene.state.view().activated());
+            let old = (
+                std::mem::replace(&mut scene.rest, rest),
+                std::mem::replace(&mut scene.view, view),
+            );
+            self.frames.borrow_mut().replaced(id);
+            drop(Deferred::new(old, scene.retained + scene.view_bytes));
             scene.retained = scene.rest.resident_bytes();
+            scene.view_bytes = scene.view.resident_bytes();
+            if self.residency() > MAX_RESIDENT_BYTES {
+                self.release(id);
+                self.forget(id, out);
+            }
         } else {
             self.release(id);
             if outcome == StopOutcome::Kept {
@@ -844,10 +867,28 @@ impl Presenter {
         if let Some(mut scene) = self.scenes.remove(&id) {
             scene.halt();
             let bytes = scene.attributed();
-            let Scene { state, rest, .. } = scene;
+            let Scene {
+                state, rest, view, ..
+            } = scene;
             state.release(&mut self.global).expect(BOUND);
-            drop(Deferred::new(rest, bytes));
+            let frame = self.frames.borrow_mut().take(id);
+            drop(Deferred::new((rest, view, frame), bytes));
         }
+    }
+
+    /// Adopts a bound scene and reserves its frame.
+    fn install(
+        &mut self,
+        id: SceneId,
+        state: SceneBinding,
+        rest: LayoutState,
+        retained: usize,
+        view: SceneView,
+        frame: Frame,
+    ) {
+        let frame = self.frames.borrow_mut().adopt(id, frame);
+        self.scenes
+            .insert(id, Scene::new(state, rest, retained, view, frame));
     }
 
     /// A scene the shell clears: the brain is told unless it is already known as gone.

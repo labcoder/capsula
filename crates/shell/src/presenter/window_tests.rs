@@ -11,7 +11,8 @@ use kumochi_scene::{DetachedCandidate, deferred::Deferred, limits::MAX_RESIDENT_
 use super::super::{scene::WINDOW, window::ConsumeError};
 use super::{
     Completion, Effect, LIVE, PrepareJob, Presenter, RUN, Shaper, acknowledge, begin, commit,
-    commit_as, controls, drained, exhausted, failed, jobs, live, ms, only_job, rect, settle,
+    commit_as, controls, drained, exhausted, failed, jobs, live, ms, only_job, recovering, rect,
+    settle,
 };
 
 fn answer(presenter: &mut Presenter, job: PrepareJob, at: Instant) -> Vec<Effect> {
@@ -210,7 +211,7 @@ fn a_scene_longer_than_the_window_is_consumed_through_its_end() {
         );
         assert_eq!(
             presenter.residency(),
-            scene.rest.resident_bytes(),
+            scene.rest.resident_bytes() + scene.view_bytes + scene.frame_bytes,
             "{count} steps"
         );
     }
@@ -418,10 +419,14 @@ fn a_result_adopts_at_exactly_the_cap_and_fails_one_byte_over() {
 fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
     for over in [0, 1] {
         let (mut presenter, now) = live();
-        let empty = kumochi_scene::layout::LayoutState::new(
+        let rest = kumochi_scene::layout::LayoutState::new(
             &kumochi_scene::SceneState::begin(super::header().begin).expect("the header"),
-        )
-        .resident_bytes();
+        );
+        let empty = rest.resident_bytes()
+            + kumochi_scene::SceneView::new(&rest, 0).resident_bytes()
+            + kumochi_scene::Frame::new().resident_bytes()
+            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
+            + 2 * size_of::<usize>();
         presenter
             .returned
             .store(MAX_RESIDENT_BYTES - empty + over, Ordering::Relaxed);
@@ -446,6 +451,88 @@ fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
             assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES - empty + 1);
         }
         presenter.returned.store(0, Ordering::Relaxed);
+        if over == 1 {
+            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert_eq!(presenter.residency(), 0);
+        }
+    }
+}
+
+#[test]
+fn recovery_checks_its_view_and_frame_at_the_cap() {
+    for over in [0, 1] {
+        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+        let done = job.run(&mut Shaper);
+        let Completion::Recovered { scenes, .. } = &done else {
+            panic!("a recovery answer");
+        };
+        let (state, rest) = scenes[0].1.as_ref().expect("the recovered scene");
+        let picture = scenes[0].2
+            + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
+            + kumochi_scene::Frame::new().resident_bytes()
+            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
+            + 2 * size_of::<usize>();
+        let returned = MAX_RESIDENT_BYTES - picture + over;
+        presenter.returned.store(returned, Ordering::Relaxed);
+        let effects = presenter.completed(done, now).expect("recovery adoption");
+        if over == 0 {
+            assert!(controls(&effects).is_empty());
+            assert_eq!(presenter.scenes.len(), 1);
+            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+        } else {
+            assert_eq!(
+                controls(&effects),
+                [&ControlToBrain::ClearDrawing {
+                    scene_ids: vec![LIVE],
+                }]
+            );
+            assert!(presenter.scenes.is_empty());
+            assert_eq!(presenter.residency(), returned);
+        }
+        presenter.returned.store(0, Ordering::Relaxed);
+        if over == 1 {
+            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert_eq!(presenter.residency(), 0);
+        }
+    }
+}
+
+#[test]
+fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
+    for over in [0, 1] {
+        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("recovered rest");
+        let picture = presenter.residency();
+        presenter.stop(RUN, now).expect("a stop at rest");
+        let cut = presenter.scenes[&LIVE].cut_now();
+        let revision = presenter.scenes[&LIVE].state.view().revision();
+        let returned = MAX_RESIDENT_BYTES - picture + over;
+        presenter.returned.store(returned, Ordering::Relaxed);
+        let effects = acknowledge(&mut presenter, LIVE, revision, cut, now).expect("the cut");
+        if over == 0 {
+            assert!(controls(&effects).is_empty());
+            assert_eq!(presenter.scenes.len(), 1);
+            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+        } else {
+            assert_eq!(
+                controls(&effects),
+                [&ControlToBrain::ClearDrawing {
+                    scene_ids: vec![LIVE],
+                }]
+            );
+            assert!(presenter.scenes.is_empty());
+            assert_eq!(presenter.residency(), returned);
+        }
+        presenter.returned.store(0, Ordering::Relaxed);
+        if over == 1 {
+            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert_eq!(presenter.residency(), 0);
+        }
     }
 }
 

@@ -1001,9 +1001,20 @@ At most eight jobs or undelivered answers retain worker slots; dropping an unspa
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
 waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
-ownership but cannot release a result still held by its caller. Cancelled workers keep
-their slots until their answer is applied or dropped. Cancellation never claims to kill
-a thread.
+ownership but cannot release a result still held by its caller. Each mirrored scene also
+reserves a resting view and a frame inside this allowance: the view's cloned layout index,
+node/paint/track storage and generation, plus both frame buffers. Fixed four-slot cache
+metadata is conservatively charged in full to each scene, rather than adding an unmetered
+index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
+Replacement clears a frame only while its old view still owns the geometry; release and
+disconnect defer the frame with its rest and view. This storage layer adds no painting or
+activation. Cancelled workers keep their slots until their answer is applied or dropped.
+Cancellation never claims to kill a thread.
+
+The ignored native eight-window residency fixture replaces each consumed rest with a fresh
+resting view and includes the reserved frames. It retains the previous consumption owner
+until the next handoff, with four scenes and eight prepared positions each. This exercises
+the storage allowance on native shaping, not production activation, paint latency or RSS.
 
 Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
 semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown
