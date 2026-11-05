@@ -6,6 +6,17 @@ use serde_json::Value;
 
 use super::wire::CallKey;
 
+/// One Claude Code launch, drawn when the launch starts; its hex names the launch's pipe.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LaunchId(pub(crate) u128);
+
+/// Only that it is one: a launch id names a pipe.
+impl fmt::Debug for LaunchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LaunchId")
+    }
+}
+
 /// The longest string id, in bytes: `m:s:` and two hex digits a byte fit `CallId`'s 64 bytes.
 pub(crate) const MAX_STRING_ID: usize = 29;
 

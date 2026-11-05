@@ -595,6 +595,24 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::SummaryStored { owner, applied });
             purger.op_arrived(store);
         }
+        StoreOp::CommitCall(call) => {
+            purger.op_arriving();
+            let committed = match store.reconnect().and_then(|()| store.commit_call(&call)) {
+                Ok(committed) => committed,
+                Err(error) => {
+                    tracing::warn!(%error, "a tool call wasn't stored");
+                    false
+                }
+            };
+            answer(
+                acks,
+                Input::CallCommitted {
+                    key: call.key,
+                    committed,
+                },
+            );
+            purger.op_arrived(store);
+        }
         StoreOp::SetModel { thread, choice } => {
             unanswered(store, purger, thread, "model choice", |store| {
                 store.set_model(thread, &choice)

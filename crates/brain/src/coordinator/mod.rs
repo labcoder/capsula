@@ -11,6 +11,7 @@
 
 mod admission;
 mod availability;
+mod calls;
 mod delete;
 mod drawing;
 mod inline;
@@ -247,6 +248,13 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs can be answered changed.
     Engines(Availability),
+    /// A `CommitCall` finished.
+    CallCommitted {
+        /// The call.
+        key: crate::dispatch::LedgerKey,
+        /// Its write and ledger row committed.
+        committed: bool,
+    },
 }
 
 /// Something for the systems around the coordinator to do, in order.
@@ -367,6 +375,12 @@ struct Run {
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
+    /// The run's tool calls, one entry per key.
+    ledger: crate::dispatch::Ledger,
+    /// The Claude Code launch authorized to call tools for this run; C4b-2 sets it.
+    mcp: Option<crate::bridge::LaunchId>,
+    /// Calls answered on their write's acknowledgement, for the tool loop to take.
+    answered: Vec<(crate::dispatch::Caller, crate::dispatch::ToolOutput)>,
     /// The engine's round completed while steps were pending; the run ends with the last one.
     finishing: bool,
     ending: Option<Ending>,
@@ -686,6 +700,9 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
+            Input::CallCommitted { key, committed } => {
+                self.call_committed(&key, committed, &mut effects)?;
+            }
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
@@ -786,6 +803,9 @@ impl Coordinator {
             compacted: None,
             draw: None,
             error: None,
+            ledger: crate::dispatch::Ledger::default(),
+            mcp: None,
+            answered: Vec::new(),
             finishing: false,
             ending: None,
         });

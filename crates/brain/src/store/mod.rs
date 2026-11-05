@@ -6,6 +6,9 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
+mod calls;
+#[cfg(test)]
+mod calls_tests;
 pub(crate) mod context;
 mod drawing;
 mod pages;
@@ -606,6 +609,7 @@ impl Store {
     fn remove(&mut self, thread: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE thread = ?1", params![thread])?;
+        tx.execute("DELETE FROM tool_calls WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM summaries WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;

@@ -8,6 +8,7 @@ mod config;
 pub mod connections;
 mod context;
 pub mod coordinator;
+pub mod dispatch;
 pub mod credential;
 pub mod drawing;
 pub mod engines;
