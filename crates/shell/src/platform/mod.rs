@@ -1,6 +1,8 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
 pub(crate) mod credential;
+#[expect(dead_code, reason = "C2b-2's carry is the first caller")]
+pub(crate) mod host;
 pub(crate) mod input;
 
 #[cfg(windows)]

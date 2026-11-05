@@ -83,6 +83,11 @@ impl Connections {
         }
     }
 
+    /// The key's half of the view; the runtime puts it together with Claude Code's.
+    pub(super) fn anthropic(&self) -> KeyView {
+        self.view.anthropic
+    }
+
     pub(super) fn connected(&mut self) -> ControlToShell {
         self.unsent |= self.view.anthropic == KeyView::Ready;
         ControlToShell::Connections(self.view)
@@ -223,6 +228,16 @@ impl Brain {
         op: ConnectionOp,
         link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        self.account_input(Event::Connection(ConnectionEvent::Op(op)), link)
+        match op {
+            ConnectionOp::ConnectClaudeCode
+            | ConnectionOp::CancelClaudeSignIn
+            | ConnectionOp::DisconnectClaudeCode
+            | ConnectionOp::FindClaudeCode => self.claude_op(op, link),
+            ConnectionOp::AnthropicKeyStaged
+            | ConnectionOp::CheckAnthropicKey
+            | ConnectionOp::RemoveAnthropicKey => {
+                self.account_input(Event::Connection(ConnectionEvent::Op(op)), link)
+            }
+        }
     }
 }

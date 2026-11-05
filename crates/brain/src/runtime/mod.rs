@@ -6,6 +6,7 @@
 //! writer is blocked on a shell that stopped reading.
 
 pub(crate) mod account;
+pub(crate) mod claude;
 mod connections;
 mod controls;
 mod data;
@@ -189,6 +190,8 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    /// Claude Code's connection; its calls run on its own lane.
+    claude: claude::Claude,
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
@@ -304,6 +307,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
             #[cfg(test)]
@@ -323,6 +327,11 @@ impl Brain {
             .availability_changed(None)
             .expect("offline effects cannot fill a shell queue");
         Ok(brain)
+    }
+
+    /// Gives Claude Code's connection its lane, or its off switch.
+    pub(crate) fn attach_claude(&mut self, claude: claude::Claude) {
+        self.claude = claude;
     }
 
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
@@ -438,6 +447,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -479,6 +492,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -502,6 +519,11 @@ impl Brain {
                 }
                 input = self.account.next() => {
                     let applied = self.account_input(input, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    continue;
+                }
+                done = self.claude.next() => {
+                    let applied = self.claude_done(done, None);
                     debug_assert!(applied.is_ok(), "applying without a shell can't fail");
                     continue;
                 }
@@ -744,6 +766,12 @@ impl Brain {
                     }
                     continue;
                 }
+                done = self.claude.next() => {
+                    if self.claude_done(done, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 Some(ask) = self.access.recv() => {
                     if self.access_asked(ask, Some(&mut link)).is_err() {
                         return Ended::Lost;
@@ -815,7 +843,8 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
-        link.control(&self.account.connections.connected())
+        let connected = self.account.connections.connected();
+        link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
