@@ -20,6 +20,7 @@ const USER_NAME: &str = "user_name";
 const ONBOARDED: &str = "onboarded";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
+const CLAUDE_CODE: &str = "claude_code";
 const DOCK_POSITION: &str = "dock_position";
 const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 
@@ -129,6 +130,23 @@ impl Config {
     /// The settings now.
     pub(crate) fn view(&self) -> &SettingsView {
         &self.view
+    }
+
+    /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
+    /// couldn't be read, turns it off, because it may have said so.
+    pub(crate) fn claude_code_enabled(&self) -> bool {
+        let Ok(table) = &self.table else {
+            return false;
+        };
+        match table.get(CLAUDE_CODE) {
+            None => true,
+            Some(Value::Table(section)) => match section.get("enabled") {
+                None => true,
+                Some(Value::Boolean(enabled)) => *enabled,
+                Some(_) => false,
+            },
+            Some(_) => false,
+        }
     }
 
     /// Stages `op` on top of the current table, changing nothing yet.

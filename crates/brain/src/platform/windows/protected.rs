@@ -45,7 +45,9 @@ use windows_sys::Win32::System::SystemServices::{
     ACCESS_DENIED_CALLBACK_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID,
     SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
-use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_LocalAppData, FOLDERID_Profile, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+};
 
 use super::pipe::user_sid;
 
@@ -77,7 +79,15 @@ const CHANGES: u32 =
 
 /// The local application data folder as the shell knows it, not as the environment says.
 pub(crate) fn local_app_data() -> io::Result<PathBuf> {
-    let folder = FOLDERID_LocalAppData;
+    known_folder(FOLDERID_LocalAppData)
+}
+
+/// The user's profile folder as the shell knows it, not as `USERPROFILE` says.
+pub(crate) fn profile_dir() -> io::Result<PathBuf> {
+    known_folder(FOLDERID_Profile)
+}
+
+fn known_folder(folder: windows_sys::core::GUID) -> io::Result<PathBuf> {
     let mut path: *mut u16 = std::ptr::null_mut();
     // SAFETY: on success `path` holds a CoTaskMemAlloc'd, NUL-terminated string freed below.
     let status = unsafe {

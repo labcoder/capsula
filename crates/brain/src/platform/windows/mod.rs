@@ -2,6 +2,8 @@
 
 mod capture;
 mod credential;
+#[cfg(test)]
+pub(crate) mod fake_claude;
 mod fault;
 mod folders;
 mod fs;
@@ -35,7 +37,9 @@ pub use pipe::{
 pub(crate) use pipe::{PipeClient, test_pair};
 pub use policy::{managed_presence, system_env};
 pub use process::launch_detached;
-pub(super) use protected::{Untrusted, hold_chain, hold_file, local_app_data, owner_only_dir};
+pub(crate) use protected::{
+    Untrusted, hold_chain, hold_file, local_app_data, owner_only_dir, profile_dir,
+};
 #[cfg(test)]
 pub(super) use protected::{dacl_sddl, final_path_matches};
 pub use root_store::trust_roots;
