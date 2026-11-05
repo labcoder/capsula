@@ -26,7 +26,9 @@ task, and a task's run reaches only itself. It never comes from the arguments.
 flowchart TD
     A[call arrives] --> B{its run is the current, admitted run,<br/>and its thread isn't being deleted?}
     B -- no --> E1[Ended]
-    B -- yes --> C{MCP: its launch is the one<br/>authorized for the run now?}
+    B -- yes --> V{a delete reached a thread<br/>its build rendered?}
+    V -- yes --> E7[Ended; the engine is cancelled<br/>and the round built again]
+    V -- no --> C{MCP: its launch is the one<br/>authorized for the run now?}
     C -- no --> E2[NotHere, key not used]
     C -- yes --> D{the key has an entry?}
     D -- refused --> E3[the same refusal]
@@ -34,7 +36,7 @@ flowchart TD
     D -- running/done, other or bad args --> E4[Reused]
     D -- none --> F{known, offered on this route,<br/>allowed for this reach?}
     F -- no --> E5[Unknown / NotHere, recorded]
-    F -- yes --> G{arguments within 16 KiB,<br/>parse with no unknown fields,<br/>output within 64 KiB?}
+    F -- yes --> G{arguments within 16 KiB,<br/>an object that parses with no unknown fields,<br/>output within 64 KiB?}
     G -- no --> E6[TooLarge / Invalid, recorded]
     G -- yes --> H[CommitCall: the write and the ledger row,<br/>one transaction]
     H --> I[CallCommitted: answer every waiting caller]
@@ -42,6 +44,11 @@ flowchart TD
 
 - **The run.** The coordinator resolves the caller's run first. A call queued by a run that was
   stopped or replaced, even in the same thread, gets `Ended` and touches nothing.
+- **Its sources.** A call comes from a response to a build, and that build rendered threads. If a
+  delete has reached any of them since, pending or answered, the call gets `Ended`, the engine is
+  cancelled and the round is built again once the delete is answered, as for a send the lease
+  voids. So a deleted task's text can't reach a write through a call's arguments, even when they
+  name no id of it.
 - **MCP authority.** `Run::mcp` is the launch the coordinator authorizes for the run right now,
   set at bind and cleared at revoke (C4b-2). The check and the `CommitCall` it allows happen in one
   core-loop step, so a revocation either comes first, and the call is refused, or after the write
@@ -84,10 +91,10 @@ against deletion and revocation at the reply-write boundary.
 
 Each tool's JSON Schema comes from `schemars` on the same `deny_unknown_fields` struct that parses
 its arguments, so the two can't drift, and the schema is closed with `additionalProperties: false`.
-`dispatch::schemas(reach, mcp)` lists what a run is offered on a route.
+`dispatch::schemas(reach, route)` lists what a run is offered on a route.
 
 ## Diagnostics
 
-`Caller`, `LedgerKey`, `CommitCall`, `ToolOutput`, `LocalWrite`, `Ledger` and `LaunchId` print
-kinds, runs, lengths and counts only: never arguments, outputs, call ids, keys or launches. A failed
-write logs a fixed line.
+`Caller`, `LedgerKey`, `CommitCall`, `ToolOutput`, `LocalWrite` and `Ledger` print kinds, runs,
+lengths and counts only: never arguments, outputs, call ids, keys or launches. A failed write logs a
+fixed line.
