@@ -38,23 +38,28 @@ impl Presence {
     }
 
     pub(super) fn request_pages(&mut self, cx: &mut Context<'_, Self>) {
-        let requests = self.threads.update(cx, |state, cx| {
-            let requests = state.requests();
-            if !requests.is_empty() {
-                cx.notify();
-            }
-            requests
-        });
+        let mut requests = Vec::new();
+        for model in [&self.threads, &self.chat] {
+            requests.extend(model.update(cx, |state, cx| {
+                let requests = state.requests();
+                if !requests.is_empty() {
+                    cx.notify();
+                }
+                requests
+            }));
+        }
         for request in requests {
             if !self
                 .session
                 .as_ref()
                 .is_some_and(|session| self.link.send_data(session, request))
             {
-                self.threads.update(cx, |state, cx| {
-                    state.disconnected();
-                    cx.notify();
-                });
+                for model in [&self.threads, &self.chat] {
+                    model.update(cx, |state, cx| {
+                        state.disconnected();
+                        cx.notify();
+                    });
+                }
                 tracing::debug!("a page request couldn't reach its connection");
                 break;
             }

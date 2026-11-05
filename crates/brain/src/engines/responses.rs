@@ -1,10 +1,15 @@
-//! The Responses engine's two halves that need no network: the request body, serialised from
-//! the context builder's [`ModelRequest`], and the mapping from one round's stream events to
-//! [`TurnEvent`]s. PR 11b's transport sends the body and feeds the events. See
+//! The Responses engine: the request body, serialised from the context builder's
+//! [`ModelRequest`], the mapping from one round's stream events to [`TurnEvent`]s, and the
+//! engine that sends one through the transport and feeds the other. See
 //! docs/development/engines.md.
 
+mod engine;
+#[cfg(test)]
+mod engine_tests;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use engine::{Access, AccessAsk, AccessHandle, Bearer, Responses};
 
 use std::fmt;
 

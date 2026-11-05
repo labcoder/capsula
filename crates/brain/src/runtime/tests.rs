@@ -59,14 +59,67 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
             }),
             thread: Some(ThreadId(1)),
             lease,
+            t_qpc: u64::MAX,
         },
-        ControlToBrain::KeyUp { gesture },
+        ControlToBrain::KeyDown { gesture, t_qpc: 1 },
+        ControlToBrain::KeyUp {
+            gesture,
+            t_qpc: 2,
+            chunks: 3,
+        },
         ControlToBrain::GestureCancel { gesture },
         ControlToBrain::FocusHint {
             gesture,
             hint: FocusHint::Window(WindowRef(17)),
         },
         ControlToBrain::ExclusionLapsed { lease },
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
+#[test]
+fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_connection() {
+    use kumochi_protocol::message::{Cursor, OutputGeneration, SegmentId};
+    let (run, segment) = (RunId(1), SegmentId(2));
+    for (rate, ok) in [
+        (7_999, false),
+        (8_000, true),
+        (192_000, true),
+        (192_001, false),
+    ] {
+        let output = ControlToBrain::AudioOutput {
+            rate,
+            generation: OutputGeneration(1),
+        };
+        let expected = if ok {
+            Ok(None)
+        } else {
+            Err(super::Ended::Broken("an output rate out of bounds"))
+        };
+        assert_eq!(
+            super::controls::control_input(output),
+            expected,
+            "{rate} Hz"
+        );
+    }
+    for message in [
+        ControlToBrain::SpeechProgress {
+            run,
+            segment,
+            sample: 3,
+            t_qpc: 4,
+        },
+        ControlToBrain::SpeechStopped { run, cursor: None },
+        ControlToBrain::SpeechStopped {
+            run,
+            cursor: Some(Cursor { segment, sample: 5 }),
+        },
+        ControlToBrain::SegmentPlayed {
+            run,
+            segment,
+            samples: 6,
+        },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));
     }
@@ -182,7 +235,7 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
-            text: text.to_owned(),
+            text: text.into(),
         };
         let frame = frame::encode(&message, Pipe::Data).expect("encodes");
         self.data_out.write_all(&frame).await.expect("sent");
@@ -446,7 +499,7 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
                 turn,
                 screen: ScreenChoice::None,
                 thread: None,
-                text: text.to_owned(),
+                text: text.into(),
             };
             shell
                 .data_out
@@ -563,7 +616,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             shell.data().await,
             DataToShell::AssistantText {
                 run,
-                delta: "a".to_owned()
+                delta: "a".into()
             }
         );
         assert_eq!(
@@ -592,7 +645,7 @@ async fn a_step_finished_after_stop_never_reaches_the_shell_or_the_store() {
             shell.data().await,
             DataToShell::AssistantText {
                 run: next,
-                delta: "a".to_owned()
+                delta: "a".into()
             }
         );
         drop(shell);
@@ -642,7 +695,7 @@ async fn a_runs_data_is_complete_at_its_run_end_not_at_its_done() {
         }
         let text = |delta: &str| DataToShell::AssistantText {
             run,
-            delta: delta.to_owned(),
+            delta: delta.into(),
         };
         assert_eq!(
             frames,
@@ -737,7 +790,7 @@ async fn a_full_control_queue_still_applies_store_effects() {
         Input::Turn {
             turn: 1,
             thread: None,
-            text: "go".to_owned(),
+            text: "go".into(),
         },
     );
     let stored = brain.inputs.recv().await.expect("a reply");

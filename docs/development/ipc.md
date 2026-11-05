@@ -147,6 +147,9 @@ flowchart LR
   task's title if it alone overflows the frame. A search ranks the main thread like any other.
 - `ThreadOp` isn't on the tap's content-free list, since a rename carries the user's title.
   Titles and model slugs also print only their lengths in `Debug`, including inside rows and ops.
+- Typed text and the assistant's answer travel as `Content`, a plain string on the wire whose
+  `Debug` prints only its length, so `TextSubmit`, `AssistantText` and the brain's inputs, effects
+  and store writes that carry them never print it.
 
 ## Account
 
@@ -362,8 +365,10 @@ or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or C
 
 | Direction | Control message | Fields |
 | --- | --- | --- |
-| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease` |
-| Shell to brain | `KeyUp`, `GestureCancel` | `gesture` |
+| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease`, `t_qpc` |
+| Shell to brain | `KeyDown` | `gesture`, `t_qpc`; it only warms speech input, never starts a run |
+| Shell to brain | `KeyUp` | `gesture`, `t_qpc`, `chunks`: the `MicPcm` chunks the hold sent |
+| Shell to brain | `GestureCancel` | `gesture` |
 | Shell to brain | `FocusHint` | `gesture`, `hint`: `Region(PhysicalRect)` or `Window(WindowRef)` |
 | Shell to brain | `ExclusionLapsed` | `lease` |
 | Brain to shell | `CaptureDone` | `capture_for`: `Gesture(GestureId)` or `Turn(u32)` |
@@ -373,7 +378,8 @@ These controls are staged: the brain ignores hold controls and logs only their o
 names until B2a supplies admission and capture tickets; the shell ignores capture results
 until it owns exclusion leases. The tap records only these controls' operation and payload
 length, never coordinates or native window references, even when dumping a forged payload.
-The largest hold control is 42 payload bytes, below the 64 KiB control cap.
+The largest hold control is 52 payload bytes, below the 64 KiB control cap. `t_qpc` is the
+shell's performance-counter reading when the key moved, for latency checks only.
 
 Each `TextSubmit` now carries `turn: u32`, counted from one per connection, and
 `screen: ScreenChoice`. The shell advances the count only after a successful enqueue and
@@ -382,8 +388,41 @@ preserves FIFO admission and copies that submit's `turn` into `TurnRefused` or t
 run's first `RunState.origin: Some(RunOrigin::Typed { turn })`. Later states have `origin: None`.
 `RunOrigin::Hold { gesture }` and `Phase::Listening` are reserved for hold admission. The shell
 still settles pending turns in FIFO order; B2a replaces that with keyed correlation.
-Slice 7 will append `t_qpc` to `HoldRecognized` and `KeyUp`, append `chunks` to `KeyUp`, and
-add `KeyDown`, `MicPcm` and `Transcribing` without renaming these types or allocating another run.
+Slice 7 appended `t_qpc`, `chunks`, `KeyDown`, `MicPcm` and `Transcribing` without renaming these
+types or allocating another run.
+
+## Voice wire contract
+
+Voice is appended at the end of each enum, so earlier tags keep their bytes. The bounds live
+once, in `crates/protocol/src/message/voice.rs`, and every one is a guess until slice 7's
+gate measures it. Audio and transcripts print only their lengths in `Debug`, and the tap
+records only their operation and length.
+
+| Direction | Pipe | Message | Fields |
+| --- | --- | --- | --- |
+| Shell to brain | data | `MicPcm` | `gesture`, `seq`, `rate`, `last`, `samples` (i16) |
+| Brain to shell | data | `Transcript` | `run`, `text` |
+| Brain to shell | data | `SegmentQueued` | `run`, `segment`, optional `step` (`StepRef { scene, index }`) |
+| Brain to shell | data | `SpeechPcm` | `run`, `segment`, `output_generation`, `seq`, `samples`, `last` |
+| Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
+| Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
+| Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
+| Shell to brain | control | `AudioOutput` | `rate`, `generation` |
+| Brain to shell | control | `SpeechRevoked` | `run` |
+
+- **Microphone.** A `MicPcm` holds exactly `rate / 50` samples (20 ms) unless `last` is set,
+  when it holds 1 to `rate / 50`. `seq` counts from 0 below `MAX_HOLD_CHUNKS` (3,000, 60 s), and
+  the hold's `KeyUp` says how many chunks it sent. Rates are 8,000 to 192,000 Hz.
+- **Speech.** A `SpeechPcm` holds 1 to `rate / 10` samples (100 ms) at the rate of the output
+  generation it names; PCM for an older generation is dropped. Every queued segment ends with
+  exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
+  of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
+  audio or was cut still ends.
+- **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
+  output for the run is quiet; `cursor` is `None` when nothing of it played.
+- **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
+  broken. Until slice 7's later PRs consume them, the brain ignores in-bound microphone audio
+  and the speech controls, and the shell credits and drops the speech frames.
 
 ## Scene v1 wire contract
 

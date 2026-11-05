@@ -1,7 +1,7 @@
 //! Helpers shared by the brain's tests.
 
 use std::io::{ErrorKind, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -38,6 +38,11 @@ impl Scratch {
             std::fs::remove_dir_all(&dir).expect("old scratch folder removable");
         }
         Self(dir)
+    }
+
+    /// The folder, which nothing creates until a test does.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.0
     }
 
     pub(crate) fn db(&self) -> PathBuf {

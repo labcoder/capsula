@@ -1,5 +1,24 @@
 # Accounts
 
+## Stored namespaces and credential names
+
+`protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
+caller's build profile. The app's existing constants select `ACTIVE` (Dev for debug,
+release otherwise). Release tooling must select `RELEASE` explicitly, even when xtask
+itself is built in debug. Stored spellings are unchanged; there is no migration.
+
+The raw account vault uses `account_target(service, entry)` and the bounded
+`account_targets(service)` inventory: host, sign-out marker, chatgpt/revoke manifests,
+and each record's two slots of 64 chunks. These are 260 exact targets, not a service-prefix
+match. A new credential producer must extend this inventory with its actual stored names.
+
+Instance capabilities use keyring instead: `instance_entry(session)` is the account
+`capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
+On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
+`capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
+target is not an account and must not be fed directly to the account parser. Existing
+callers retain keyring's default mapping; they do not switch to custom targets.
+
 ## Sign-in callback
 
 `connections::oauth::SignIn::bind` binds `127.0.0.1` on port 0 before the browser
@@ -378,7 +397,11 @@ sequenceDiagram
   `access` checks again without a second refresh, and joins a check already out. A refresh that
   leaves out the identity token or the refresh token keeps the saved one and isn't pending.
 - Once a verified or held set is saved, its expiry is checked again against the wall time the save
-  ended. A bearer that's due is renewed first, once per flight. A renewal that is already expired
+  ended. A bearer that's due is renewed first, once per flight. So is one a provider refused:
+  a model round or catalog read that gets a 401 sends `Refused { generation }` with the
+  generation its bearer came from, and while that's still the account's set, the next `access`
+  renews it however long it has left. A good renewal lets the user's Retry through; a refused one
+  takes the usual Sign in again path. A renewal that is already expired
   (a zero lifetime, say) is neither handed out nor renewed again: callers get `SignInFailed` with
   Retry, and the newest refresh token stays saved for the next `access`.
 - `verify_refreshed` binds the token to the subject this account already verified, with no
@@ -512,7 +535,7 @@ generation, which moves on every rotation and would clear the list hourly.
 | other codes | as the refresh table above maps them |
 
 `Unavailable` lasts in memory until the account moves, and that account's sign-out erases the
-registration. shortcut: a 401 only offers Retry; PR 11's request path refreshes on it.
+registration. A 401 offers Retry and marks the bearer's set as due, so the Retry renews it first.
 
 A read that leaves `default_model` unset or no longer listed sets it, as the brain's own settings
 change: `gpt-6-luna` at `Low` when listed, otherwise the first model at `Low`. A listed choice is

@@ -16,11 +16,49 @@ pub const SHELL_EXE: &str = "kumochi.exe";
 pub const BRAIN_EXE: &str = "kumochid.exe";
 
 /// The folder under `%LOCALAPPDATA%` (logs, store, models) and `%APPDATA%` (config).
-pub const DATA_DIR: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev"
-} else {
-    "Kumochi"
-};
+pub const DATA_DIR: &str = ProductIdentity::ACTIVE.data_dir;
+
+/// Stored namespaces, selectable independently of the caller's build profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProductIdentity {
+    /// The data and configuration folder.
+    pub data_dir: &'static str,
+    /// The account credential service.
+    pub credential_service: &'static str,
+    /// The instance capability service.
+    pub instance_service: &'static str,
+    /// The per-session kernel object prefix.
+    pub object_prefix: &'static str,
+    /// The shell's single-instance lock prefix.
+    pub shell_lock: &'static str,
+}
+
+impl ProductIdentity {
+    /// Installed product namespaces, even when selected by debug-built tooling.
+    pub const RELEASE: Self = Self {
+        data_dir: "Kumochi",
+        credential_service: "Kumochi",
+        instance_service: "Kumochi instance",
+        object_prefix: "kumochi",
+        shell_lock: "kumochi-shell",
+    };
+
+    /// Isolated development namespaces.
+    pub const DEV: Self = Self {
+        data_dir: "Kumochi Dev",
+        credential_service: "Kumochi Dev",
+        instance_service: "Kumochi Dev instance",
+        object_prefix: "kumochi-dev",
+        shell_lock: "kumochi-dev-shell",
+    };
+
+    /// Names used by the running app, unchanged from the profile-dependent aliases.
+    pub const ACTIVE: Self = if cfg!(debug_assertions) {
+        Self::DEV
+    } else {
+        Self::RELEASE
+    };
+}
 
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
@@ -36,6 +74,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const BRAIN_LOG: &str = "kumochi-brain";
 /// See [`BRAIN_LOG`]; the screen worker's own file.
 pub const SCREEN_LOG: &str = "kumochi-screen";
+/// See [`BRAIN_LOG`]; the speech worker's own file.
+pub const SPEECH_LOG: &str = "kumochi-speech";
 /// See [`BRAIN_LOG`]; Claude Code's MCP bridge, in the launch's own folder.
 pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
@@ -46,37 +86,73 @@ pub const SHELL_LOG: &str = "kumochi-shell";
 pub const BRIDGE_PIPE: &str = "claude-bridge";
 
 /// Prefix of every per-session kernel object name: pipes and mutexes.
-pub const OBJECT_PREFIX: &str = if cfg!(debug_assertions) {
-    "kumochi-dev"
-} else {
-    "kumochi"
-};
+pub const OBJECT_PREFIX: &str = ProductIdentity::ACTIVE.object_prefix;
 
 /// Credential Manager service for the user's credentials (accounts and keys, from slice 3).
-pub const CREDENTIAL_SERVICE: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev"
-} else {
-    "Kumochi"
-};
+pub const CREDENTIAL_SERVICE: &str = ProductIdentity::ACTIVE.credential_service;
 
 /// Credential Manager service for the rotating instance capability.
-pub const INSTANCE_SERVICE: &str = if cfg!(debug_assertions) {
-    "Kumochi Dev instance"
-} else {
-    "Kumochi instance"
-};
+pub const INSTANCE_SERVICE: &str = ProductIdentity::ACTIVE.instance_service;
 
 /// The shell's single-instance lock file, `<SHELL_LOCK>-<session id>.lock` in the [`DATA_DIR`]
 /// folder under `%LOCALAPPDATA%`: one shell per Windows session.
-pub const SHELL_LOCK: &str = if cfg!(debug_assertions) {
-    "kumochi-dev-shell"
-} else {
-    "kumochi-shell"
-};
+pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
 /// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
+
+/// The vault's maximum number of chunks in one record slot.
+pub const ACCOUNT_MAX_CHUNKS: usize = 64;
+
+/// The vault's chunked records, account first, revocations second.
+pub const ACCOUNT_CHUNKED_RECORDS: [&str; 2] = ["chatgpt", "revoke"];
+
+/// An exact raw-store target; unlike keyring entries, the vault uses slash joining.
+#[must_use]
+pub fn account_target(service: &str, entry: &str) -> String {
+    format!("{service}/{entry}")
+}
+
+/// Every target the account vault can write or delete, including both record slots.
+pub fn account_targets(service: &str) -> impl Iterator<Item = String> + '_ {
+    ["host", "signout"]
+        .into_iter()
+        .map(move |entry| account_target(service, entry))
+        .chain(ACCOUNT_CHUNKED_RECORDS.into_iter().flat_map(move |record| {
+            std::iter::once(account_target(service, record)).chain((0..2).flat_map(move |slot| {
+                (0..ACCOUNT_MAX_CHUNKS)
+                    .map(move |index| account_target(service, &format!("{record}/{slot}/{index}")))
+            }))
+        }))
+}
+
+/// The keyring account for a Windows session's capability.
+#[must_use]
+pub fn instance_entry(session: u32) -> String {
+    format!("{INSTANCE_ACCOUNT}-{session}")
+}
+
+/// Parses only canonical account names emitted by [`instance_entry`], not stored targets.
+#[must_use]
+pub fn parse_instance_entry(account: &str) -> Option<u32> {
+    let digits = account.strip_prefix(INSTANCE_ACCOUNT)?.strip_prefix('-')?;
+    if digits.is_empty()
+        || digits.len() > 10
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The Windows Credential Manager target used by keyring for an instance capability.
+#[must_use]
+pub fn instance_target(service: &str, session: u32) -> String {
+    // keyring's Windows backend joins the account and service with a dot, not a slash.
+    format!("{}.{service}", instance_entry(session))
+}
 
 /// The `dwExtraInfo` the approved input-session harness puts on every input it injects, so the
 /// shell's gate observer and the harness's own fixture tell it from the user's input.
@@ -122,18 +198,22 @@ pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";
 
 #[cfg(test)]
+mod identity_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SHELL_LOG};
+    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG};
 
     #[test]
     fn log_prefixes_dont_overlap() {
-        assert!(
-            !BRAIN_LOG.starts_with(SHELL_LOG),
-            "{BRAIN_LOG} starts with {SHELL_LOG}"
-        );
-        assert!(
-            !SHELL_LOG.starts_with(BRAIN_LOG),
-            "{SHELL_LOG} starts with {BRAIN_LOG}"
-        );
+        let logs = [BRAIN_LOG, SCREEN_LOG, SHELL_LOG];
+        for one in logs {
+            for other in logs {
+                assert!(
+                    one == other || !one.starts_with(other),
+                    "{one} starts with {other}"
+                );
+            }
+        }
     }
 }

@@ -322,7 +322,7 @@ impl Harness {
                     subject.expose().to_string(),
                     id_token.expose().to_string(),
                 )),
-                Effect::Access { ticket, result } => self
+                Effect::Access { ticket, result, .. } => self
                     .answers
                     .push((ticket, result.map(|bearer| bearer.expose().to_string()))),
             }

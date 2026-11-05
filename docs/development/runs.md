@@ -123,6 +123,9 @@ sequenceDiagram
   once while it waits.
 - **Text goes out in pieces of at most 64 KiB**, split on character boundaries, so every frame
   fits the data pipe.
+- **A voice run** will show `Listening` while the key is held and `Transcribing` while speech
+  becomes text; both phases are reserved until hold admission lands. Its `Transcript`, `SegmentQueued` and `SpeechPcm` frames belong to the run, so
+  the shell fences them like `AssistantText`.
 - **Streamed text is stored with each step and with the outcome**, in the same transaction.
   shortcut: text after the last step is lost if the brain dies mid-run; store it on a timer once
   real engines stream long answers (slice 3).
@@ -284,10 +287,9 @@ keyed by id (OSC-56) need no rework.
 
 The runtime picks the engine once at start (`runtime::Selected`). A dev build with
 `KUMOCHI_FIXTURE` set plays that script for every run, ready with no account; a release build
-can't pick it. Otherwise the account's engine answers once the account is ready. shortcut: until
-13b-1b sends to the Responses engine, the account's engine is the built-in script
-(`crates/brain/fixtures/default.txt`), and its draws aren't trusted, so they fail the run. Both
-play through `engines/fixture.rs`. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
+can't pick it. Otherwise the Responses engine answers once the account is ready (engines.md, "The
+Responses engine"). A script plays through `engines/fixture.rs`; `crates/brain/fixtures/default.txt`
+is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
 and the store would refuse it too.

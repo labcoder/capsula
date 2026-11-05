@@ -194,7 +194,7 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(9)),
-            text: "home".to_owned()
+            text: "home".into()
         })
     );
     drop(link.control);
@@ -216,7 +216,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         Some(request)
     );
     let list = DataToShell::ThreadList {
-        request: 1,
+        request: 2,
         threads: vec![ThreadRow {
             id: ThreadId(3),
             title: "a private title".to_owned(),
@@ -590,7 +590,7 @@ fn connected(event: LinkEvent) -> Session {
 fn text(run: u64, delta: &str) -> DataToShell {
     DataToShell::AssistantText {
         run: RunId(run),
-        delta: delta.to_owned(),
+        delta: delta.into(),
     }
 }
 
@@ -656,7 +656,7 @@ fn the_ui_s_messages_go_out_on_their_pipes_and_credit_adds_up() {
         turn: 1,
         screen: kumochi_protocol::message::ScreenChoice::None,
         thread: None,
-        text: "typed".to_owned(),
+        text: "typed".into(),
     };
     assert!(link.handle.send_data(&session, submit.clone()));
     session.grant(100);
@@ -882,7 +882,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(1)),
-            text: "typed".to_owned(),
+            text: "typed".into(),
         })
     );
     assert_eq!(
@@ -946,7 +946,7 @@ fn submit_message(turn: u32, thread: ThreadId, text: &str) -> DataToBrain {
         turn,
         screen: kumochi_protocol::message::ScreenChoice::None,
         thread: Some(thread),
-        text: text.to_owned(),
+        text: text.into(),
     }
 }
 
@@ -1130,7 +1130,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(1)),
-            text: "next".to_owned(),
+            text: "next".into(),
         })
     );
     frame::write(
@@ -1198,7 +1198,7 @@ fn stream_text(server: &Arc<PipeClient>, chunk: usize) {
         sent += delta.len();
         let text = DataToShell::AssistantText {
             run: RunId(1),
-            delta,
+            delta: delta.into(),
         };
         if frame::write(&mut &**server, &text, Pipe::Data).is_err() {
             break;

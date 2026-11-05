@@ -51,7 +51,7 @@ fn turn(thread: Option<ThreadId>) -> Input {
     Input::Turn {
         turn: 1,
         thread,
-        text: "more".to_owned(),
+        text: "more".into(),
     }
 }
 
@@ -113,7 +113,7 @@ fn a_blank_turn_is_refused_without_a_run() {
     let blank = Input::Turn {
         turn: 1,
         thread: None,
-        text: " \n\t ".to_owned(),
+        text: " \n\t ".into(),
     };
     assert_eq!(core.handle(blank), Ok(refused(None)));
     assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));

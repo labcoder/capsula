@@ -23,6 +23,7 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
     for (test, fault) in [
         ("panic_fixture", "panic"),
         ("environment_crash_fixture", "crash"),
+        ("exit_at_launch_fixture", "exit"),
     ] {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", test, "--ignored", "--nocapture"])
@@ -96,6 +97,29 @@ async fn environment_crash_fixture() {
             .await
             .expect_err("manual clock task cancelled")
             .is_cancelled()
+    );
+    drop(screen);
+    tokio::task::yield_now().await;
+    job.terminate().expect("end job");
+}
+
+#[tokio::test]
+#[ignore = "subprocess fixture with isolated environment"]
+async fn exit_at_launch_fixture() {
+    let job = Arc::new(Job::new().expect("job"));
+    let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
+        .expect("supervisor");
+    let mut losses = screen.lost();
+    for _ in 0..3 {
+        let loss = tokio::time::timeout(PATIENCE, losses.recv()).await;
+        assert_eq!(
+            loss.expect("lost with nothing pending").expect("loss"),
+            WorkerLost
+        );
+    }
+    assert_eq!(
+        screen.request(RequestBody::Ping).await,
+        Err(ScreenError::WorkerLost)
     );
     drop(screen);
     tokio::task::yield_now().await;

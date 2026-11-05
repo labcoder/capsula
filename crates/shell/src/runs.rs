@@ -13,6 +13,7 @@ use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, Deleted, Incarnation, MAX_PENDING_DELETES,
     MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow,
+    UserError,
 };
 
 use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
@@ -154,7 +155,7 @@ impl Runs {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    fn thread(&self) -> Option<ThreadId> {
+    pub(crate) fn thread(&self) -> Option<ThreadId> {
         match self.target {
             Target::Kumo => self.main,
             Target::Task(thread) => Some(thread),
@@ -174,7 +175,7 @@ impl Runs {
                 turn: self.turns_sent.checked_add(1).ok_or(Refused::Busy)?,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: self.thread(),
-                text: text.to_owned(),
+                text: text.into(),
             },
             self.revision,
         ))
@@ -412,6 +413,20 @@ impl Runs {
     /// A `RunState`. A run newer than any before answers the oldest pending turn exactly once,
     /// fenced or not, and is fenced before any of its output is applied if Esc cancelled that
     /// turn. Only a pending turn at the current revision can adopt a New target's thread.
+    /// A `RunState` with the brain's reason: what applying it asks, and the notice to show, which
+    /// is withheld once Esc or a delete has fenced the run off.
+    pub(crate) fn apply_run_state(
+        &mut self,
+        run: RunId,
+        thread: ThreadId,
+        phase: Phase,
+        error: Option<UserError>,
+    ) -> (Applied, Option<UserError>) {
+        let applied = self.apply_state(run, thread, phase);
+        let notice = error.filter(|_| applied.visible);
+        (applied, notice)
+    }
+
     pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) -> Applied {
         let mut applied = Applied::default();
         if run > self.answered {
@@ -516,9 +531,13 @@ impl Runs {
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. } => {
+            | DataToShell::Models { .. }
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_) => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
                 // shortcut: the catalog is credited and dropped until PR 18b's picker shows it.
+                // shortcut: voice frames are credited and dropped until slice 7's PR 6 plays them.
             }
         }
     }
@@ -569,7 +588,10 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
     match message {
         DataToShell::AssistantText { run, .. }
         | DataToShell::StepCommit { run, .. }
-        | DataToShell::RunEnd { run } => Some(*run),
+        | DataToShell::RunEnd { run }
+        | DataToShell::SegmentQueued { run, .. } => Some(*run),
+        DataToShell::Transcript(transcript) => Some(transcript.run),
+        DataToShell::SpeechPcm(pcm) => Some(pcm.run),
         DataToShell::ThreadList { .. }
         | DataToShell::Page { .. }
         | DataToShell::PageFailed { .. }

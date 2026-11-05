@@ -1,4 +1,4 @@
-//! Applying session-fenced link events to the two independent page lists and runs.
+//! Applying session-fenced link events to browsed and focused histories and runs.
 
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::drawing::{Broken, Chunk, Effect};
@@ -49,7 +49,7 @@ impl Presence {
                     thread,
                     phase,
                     error,
-                } => self.run_state(run, thread, phase, error.as_ref(), cx),
+                } => self.run_state(run, thread, phase, error, cx),
                 LinkEvent::Data {
                     generation,
                     message,
@@ -117,34 +117,36 @@ impl Presence {
         run: RunId,
         thread: ThreadId,
         phase: Phase,
-        error: Option<&UserError>,
+        error: Option<UserError>,
         cx: &mut Context<'_, Self>,
     ) {
-        let applied = self.runs.apply_state(run, thread, phase);
+        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
-        if applied.visible
-            && let Some(error) = error
-        {
-            self.show_error(error, cx);
+        if let Some(error) = notice {
+            self.show_error(&error, cx);
         }
         if let Some(stop) = applied.stop {
             self.stop_run(stop, cx);
         }
         self.grant(applied.credit);
-        self.threads.update(cx, |state, cx| {
-            state.run_state(thread);
-            cx.notify();
-        });
+        for model in [&self.threads, &self.chat] {
+            model.update(cx, |state, cx| {
+                state.run_state(thread);
+                cx.notify();
+            });
+        }
         self.sync_deletes(cx);
         self.request_pages(cx);
     }
 
     /// The brain changed a listed thread: the list is read again.
     fn threads_changed(&mut self, cx: &mut Context<'_, Self>) {
-        self.threads.update(cx, |state, cx| {
-            state.changed();
-            cx.notify();
-        });
+        for model in [&self.threads, &self.chat] {
+            model.update(cx, |state, cx| {
+                state.changed();
+                cx.notify();
+            });
+        }
         self.request_pages(cx);
     }
 
@@ -196,7 +198,18 @@ impl Presence {
                 message @ (DataToShell::ThreadList { .. }
                 | DataToShell::Page { .. }
                 | DataToShell::PageFailed { .. }) => {
-                    let credit = self.threads.update(cx, |state, cx| {
+                    let request = match &message {
+                        DataToShell::ThreadList { request, .. }
+                        | DataToShell::Page { request, .. }
+                        | DataToShell::PageFailed { request } => *request,
+                        _ => unreachable!("the match above selects page replies"),
+                    };
+                    let model = if self.chat.read(cx).owns_request(request) {
+                        &self.chat
+                    } else {
+                        &self.threads
+                    };
+                    let credit = model.update(cx, |state, cx| {
                         cx.notify();
                         state.receive(message, bytes)
                     });
@@ -252,6 +265,10 @@ impl Presence {
         self.clear_refusal(cx);
         self.sync_settings_notice(cx);
         self.threads.update(cx, |state, cx| {
+            state.set_settings(view.clone());
+            cx.notify();
+        });
+        self.chat.update(cx, |state, cx| {
             state.set_settings(view);
             cx.notify();
         });
@@ -319,10 +336,12 @@ impl Presence {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
-            self.threads.update(cx, |state, cx| {
-                state.connected();
-                cx.notify();
-            });
+            for model in [&self.threads, &self.chat] {
+                model.update(cx, |state, cx| {
+                    state.connected();
+                    cx.notify();
+                });
+            }
             self.request_pages(cx);
         } else {
             self.presenter.disconnected();
@@ -336,10 +355,12 @@ impl Presence {
             self.sync_settings_notice(cx);
             self.runs.disconnected();
             self.sync_deletes(cx);
-            self.threads.update(cx, |state, cx| {
-                state.disconnected();
-                cx.notify();
-            });
+            for model in [&self.threads, &self.chat] {
+                model.update(cx, |state, cx| {
+                    state.disconnected();
+                    cx.notify();
+                });
+            }
         }
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;

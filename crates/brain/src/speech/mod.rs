@@ -1,0 +1,16 @@
+//! Speech input's worker process. sherpa-onnx and Parakeet run only in `kumochid --speech`, under
+//! the shared supervisor, so a native exception, abort, crash or hang costs that worker and never
+//! the brain. See `docs/development/voice.md`, "The speech worker".
+
+mod supervisor;
+mod wire;
+mod worker;
+
+pub use supervisor::{DEADLINES, Deadlines, SpeechHandle, SpeechSupervisor};
+#[cfg(debug_assertions)]
+pub use wire::SpeechFault;
+pub use wire::{MAX_PCM_BYTES, MAX_RATE, MAX_SECONDS, MIN_RATE, SpeechError};
+pub use worker::serve;
+
+pub use crate::platform::sherpa::NativeError;
+pub use crate::supervise::WorkerLost;

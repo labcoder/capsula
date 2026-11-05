@@ -492,7 +492,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(T),
-        text: "continue".to_owned(),
+        text: "continue".into(),
     })
     .expect("next turn");
     store

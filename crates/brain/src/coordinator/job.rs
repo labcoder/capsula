@@ -164,8 +164,8 @@ impl Coordinator {
         })));
     }
 
-    /// The job in the slot ended on its own: a title job hands over to its thread's compaction,
-    /// unless a delete reached that thread.
+    /// The job in the slot wrote its output or found nothing to do: a title job hands over to its
+    /// thread's compaction, unless a delete reached that thread.
     fn job_ended(&mut self, effects: &mut Vec<Effect>) {
         let Some(job) = self.job.take() else {
             return;
@@ -311,7 +311,9 @@ impl Coordinator {
             _ => None,
         };
         let Some(write) = write else {
-            self.job_ended(effects);
+            // A request went out and wrote nothing, so nothing follows it (OSC-213): after a
+            // usage-limit answer, no compaction request goes out until the next `Done`.
+            self.job = None;
             return Ok(());
         };
         job.stage = Stage::Writing;
