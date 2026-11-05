@@ -999,7 +999,7 @@ fn listen(
                                 .selection_event(drag::Event::CaptureLost { seq, released }),
                             _ => this.presenter.input.reconcile(),
                         };
-                        this.selection_ending(effects, cx)?;
+                        let selection = this.selection_ending(effects, cx);
                         if this.presenter.input.selection().is_some()
                             && matches!(event, PresenceEvent::CaptureLost { .. })
                             && input(Input::reconcile_after_release)
@@ -1008,6 +1008,7 @@ fn listen(
                             cx.defer(move |_| send(&events, PresenceEvent::Reconcile));
                         }
                         kumo_view::bridge(&this.kumo, event, cx);
+                        selection?;
                     }
                 }
                 Ok::<_, OpenError>(())

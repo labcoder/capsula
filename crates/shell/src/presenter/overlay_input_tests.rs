@@ -443,3 +443,63 @@ fn removing_an_orbit_cancels_it_and_normal_end_returns_the_pointer() {
     assert_eq!(owner.mode(), OverlayInput::PassThrough);
     assert_eq!(owner.lease_drag(), Some(super::DragLease(2)));
 }
+
+#[test]
+fn release_escape_shrinking_and_stale_rectangles_keep_the_current_gesture_authoritative() {
+    for (update, event, cause, end) in [
+        (
+            None,
+            Event::Up {
+                button: MouseButton::Left,
+                at: point(px(1.0), px(2.0)),
+            },
+            ExitCause::Release,
+            SelectionEnd::Region([1, 2, 4, 4]),
+        ),
+        (
+            Some((HOLD, [1, 2, 5, 4])),
+            Event::Up {
+                button: MouseButton::Left,
+                at: point(px(1.0), px(2.0)),
+            },
+            ExitCause::Release,
+            SelectionEnd::Region([1, 2, 5, 4]),
+        ),
+        (
+            None,
+            Event::Escape,
+            ExitCause::Escape,
+            SelectionEnd::Cancelled,
+        ),
+        (
+            Some((HOLD, [1, 2, 3, 4])),
+            Event::Up {
+                button: MouseButton::Left,
+                at: point(px(1.0), px(2.0)),
+            },
+            ExitCause::Release,
+            SelectionEnd::Released,
+        ),
+        (
+            Some((GestureId(2), [8, 9, 20, 30])),
+            Event::Up {
+                button: MouseButton::Left,
+                at: point(px(1.0), px(2.0)),
+            },
+            ExitCause::Release,
+            SelectionEnd::Region([1, 2, 4, 4]),
+        ),
+    ] {
+        let mut owner = registered();
+        let mut platform = Platform::default();
+        platform.enter(&mut owner, HOLD);
+        owner.rectangle(HOLD, [1, 2, 4, 4]);
+        if let Some((gesture, rect)) = update {
+            owner.rectangle(gesture, rect);
+        }
+        let effects = owner.selection_event(event);
+        assert_eq!(platform.apply(&owner, effects), Ok(()));
+        assert_eq!(platform.endings, vec![(HOLD, cause, end)]);
+        assert_eq!(owner.selection(), None);
+    }
+}

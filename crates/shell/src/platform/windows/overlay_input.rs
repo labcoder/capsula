@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use gpui_kit::Window;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
+    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsWindow, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
@@ -18,6 +18,7 @@ use crate::presenter::overlay_input::{InputPlatform, Layer, OverlayInput, Region
 pub(crate) struct OverlayWindows {
     layers: BTreeMap<Layer, Vec<HWND>>,
     regions: BTreeMap<RegionId, HWND>,
+    applied: Option<(OverlayInput, Regions)>,
 }
 
 // shortcut: B5 and B3b bind scene/selection surfaces; slice 5 binds its regional windows.
@@ -25,20 +26,28 @@ pub(crate) struct OverlayWindows {
 impl OverlayWindows {
     pub(crate) fn proxy(&mut self, proxy: super::observer::ProxyHandle) {
         self.layers.entry(Layer::Dock).or_default().push(proxy.0);
+        self.applied = None;
     }
 
     pub(crate) fn bind(&mut self, layer: Layer, window: &Window) -> Result<(), PresenceError> {
-        self.layers.entry(layer).or_default().push(hwnd_of(window)?);
+        let hwnd = hwnd_of(window)?;
+        for windows in self.layers.values_mut() {
+            windows.retain(|hwnd| live(*hwnd));
+        }
+        bind_live(self.layers.entry(layer).or_default(), hwnd, live);
+        self.applied = None;
         Ok(())
     }
 
     pub(crate) fn region(&mut self, id: RegionId, window: &Window) -> Result<(), PresenceError> {
         self.regions.insert(id, hwnd_of(window)?);
+        self.applied = None;
         Ok(())
     }
 
     pub(crate) fn remove_region(&mut self, id: RegionId) {
         self.regions.remove(&id);
+        self.applied = None;
     }
 }
 
@@ -46,40 +55,84 @@ impl InputPlatform for OverlayWindows {
     type Error = PresenceError;
 
     fn configure(&mut self, mode: OverlayInput, regions: &Regions) -> Result<(), PresenceError> {
-        if mode == OverlayInput::Selecting
-            && self
-                .layers
-                .get(&Layer::Selection)
-                .is_none_or(|windows| !windows.iter().copied().any(owned))
-        {
-            return Err(PresenceError::SelectionSurface);
-        }
-        for layer in mode.order().into_iter().rev() {
-            if layer == Layer::Regions {
-                for (id, hwnd) in &self.regions {
-                    if !owned(*hwnd) {
-                        continue;
-                    }
-                    let rect = regions.get(id).copied();
-                    interactive(*hwnd, mode == OverlayInput::Regions && rect.is_some())?;
-                    restack(*hwnd, rect)?;
-                }
-            }
-            for hwnd in self.layers.get(&layer).into_iter().flatten() {
+        configure_if_changed(&mut self.applied, mode, regions, || {
+            configure(&self.layers, &self.regions, mode, regions)
+        })
+    }
+}
+
+fn configure_if_changed<E>(
+    applied: &mut Option<(OverlayInput, Regions)>,
+    mode: OverlayInput,
+    regions: &Regions,
+    configure: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    if applied
+        .as_ref()
+        .is_some_and(|(old_mode, old_regions)| *old_mode == mode && old_regions == regions)
+    {
+        return Ok(());
+    }
+    *applied = None;
+    configure()?;
+    *applied = Some((mode, regions.clone()));
+    Ok(())
+}
+
+fn bind_live<T: Copy + PartialEq>(
+    windows: &mut Vec<T>,
+    window: T,
+    mut live: impl FnMut(T) -> bool,
+) {
+    windows.retain(|hwnd| live(*hwnd));
+    if !windows.contains(&window) && live(window) {
+        windows.push(window);
+    }
+}
+
+fn live(hwnd: HWND) -> bool {
+    // SAFETY: IsWindow only checks the handle; it never dereferences or changes the window.
+    unsafe { IsWindow(Some(hwnd)).as_bool() }
+}
+
+fn configure(
+    layers: &BTreeMap<Layer, Vec<HWND>>,
+    bindings: &BTreeMap<RegionId, HWND>,
+    mode: OverlayInput,
+    regions: &Regions,
+) -> Result<(), PresenceError> {
+    if mode == OverlayInput::Selecting
+        && layers
+            .get(&Layer::Selection)
+            .is_none_or(|windows| !windows.iter().copied().any(owned))
+    {
+        return Err(PresenceError::SelectionSurface);
+    }
+    for layer in mode.order().into_iter().rev() {
+        if layer == Layer::Regions {
+            for (id, hwnd) in bindings {
                 if !owned(*hwnd) {
                     continue;
                 }
-                if matches!(layer, Layer::Overlay | Layer::Selection) {
-                    interactive(
-                        *hwnd,
-                        layer == Layer::Selection && mode == OverlayInput::Selecting,
-                    )?;
-                }
-                restack(*hwnd, None)?;
+                let rect = regions.get(id).copied();
+                interactive(*hwnd, mode == OverlayInput::Regions && rect.is_some())?;
+                restack(*hwnd, rect)?;
             }
         }
-        Ok(())
+        for hwnd in layers.get(&layer).into_iter().flatten() {
+            if !owned(*hwnd) {
+                continue;
+            }
+            if matches!(layer, Layer::Overlay | Layer::Selection) {
+                interactive(
+                    *hwnd,
+                    layer == Layer::Selection && mode == OverlayInput::Selecting,
+                )?;
+            }
+            restack(*hwnd, None)?;
+        }
     }
+    Ok(())
 }
 
 #[expect(
@@ -129,4 +182,78 @@ fn restack(hwnd: HWND, rect: Option<[i32; 4]>) -> Result<(), PresenceError> {
     // SAFETY: restacks only a bound UI-thread surface, without showing or activating it.
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, flags) }?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_configuration_skips_native_work_and_failed_changes_retry() {
+        let mut applied = None;
+        let mut calls = 0;
+        let empty = Regions::new();
+        let registered = Regions::from([(RegionId(1), [10, 20, 4, 5])]);
+        let mut apply = |applied: &mut _, mode, regions: &_| {
+            configure_if_changed(applied, mode, regions, || {
+                calls += 1;
+                Ok::<_, &str>(())
+            })
+        };
+        assert_eq!(
+            apply(&mut applied, OverlayInput::PassThrough, &empty),
+            Ok(())
+        );
+        assert_eq!(
+            apply(&mut applied, OverlayInput::PassThrough, &empty),
+            Ok(())
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            configure_if_changed(&mut applied, OverlayInput::Regions, &registered, || {
+                calls += 1;
+                Ok::<_, &str>(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(
+            configure_if_changed(&mut applied, OverlayInput::Regions, &empty, || {
+                calls += 1;
+                Ok::<_, &str>(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 3);
+        assert_eq!(
+            configure_if_changed(&mut applied, OverlayInput::Selecting, &empty, || {
+                calls += 1;
+                Err("partial setup")
+            }),
+            Err("partial setup")
+        );
+        assert_eq!(applied, None);
+        assert_eq!(
+            configure_if_changed(&mut applied, OverlayInput::Regions, &empty, || {
+                calls += 1;
+                Ok::<_, &str>(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 5);
+        assert_eq!(applied, Some((OverlayInput::Regions, empty)));
+    }
+
+    #[test]
+    fn binding_prunes_dead_handles_and_does_not_duplicate_live_handles() {
+        let mut windows = vec![10, 20];
+        bind_live(&mut windows, 20, |handle| [20, 30].contains(&handle));
+        assert_eq!(windows, vec![20]);
+        bind_live(&mut windows, 30, |handle| [20, 30].contains(&handle));
+        assert_eq!(windows, vec![20, 30]);
+        bind_live(&mut windows, 40, |handle| [20, 30].contains(&handle));
+        assert_eq!(windows, vec![20, 30]);
+        bind_live(&mut windows, 10, |handle| [10, 30].contains(&handle));
+        assert_eq!(windows, vec![30, 10]);
+    }
 }
