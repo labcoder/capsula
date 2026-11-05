@@ -14,19 +14,37 @@ type Frame = Result<Vec<f32>, TtsError>;
 
 type Streams = Arc<Mutex<VecDeque<std_mpsc::Receiver<Frame>>>>;
 
-/// Each stream yields what the test sends it, and ends when the test drops its sender. Opening
-/// one tells the test, so it knows which Speak the owner took.
+/// Each stream yields what the test sends it, and ends when the test drops its sender. Its first
+/// read tells the test, so the test knows the owner is inside that stream, waiting for a frame.
 struct Fake {
     streams: Streams,
     entered: std_mpsc::Sender<()>,
 }
 
+struct FakeStream {
+    frames: std_mpsc::IntoIter<Frame>,
+    entered: Option<std_mpsc::Sender<()>>,
+}
+
+impl Iterator for FakeStream {
+    type Item = Frame;
+    fn next(&mut self) -> Option<Frame> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).expect("the test is alive");
+        }
+        self.frames.next()
+    }
+}
+
 impl Engine for Fake {
-    type Stream = std_mpsc::IntoIter<Frame>;
+    type Stream = FakeStream;
     fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
         let next = self.streams.lock().expect("unpoisoned").pop_front();
-        self.entered.send(()).expect("the test is alive");
-        next.map(IntoIterator::into_iter).ok_or(TtsError::Synthesis)
+        next.map(|frames| FakeStream {
+            frames: frames.into_iter(),
+            entered: Some(self.entered.clone()),
+        })
+        .ok_or(TtsError::Synthesis)
     }
 }
 
@@ -62,7 +80,7 @@ impl Harness {
         }
     }
 
-    /// Waits until the owner has opened the next stream.
+    /// Waits until the owner is reading the next stream.
     fn wait_entered(&self) {
         self.entered
             .recv_timeout(WAIT)
