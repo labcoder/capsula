@@ -29,6 +29,15 @@ impl PullSpace {
         self.physical([x, y])
     }
 
+    /// `p`, in pull space, in physical screen pixels.
+    pub(crate) fn screen(self, p: Vec2) -> [f64; 2] {
+        let scale = f64::from(self.scale);
+        [
+            f64::from(self.area[0]) + f64::from(p.x) * scale,
+            f64::from(self.area[1]) + f64::from(p.y) * scale,
+        ]
+    }
+
     /// A physical screen rectangle in pull space.
     fn rect(self, [x, y, width, height]: [i32; 4]) -> Rect {
         let origin = self.physical([f64::from(x - self.area[0]), f64::from(y - self.area[1])]);
@@ -56,6 +65,8 @@ pub(crate) struct Grab {
     pub(crate) dock: Vec2,
     /// The body's centre in the peek.
     pub(crate) home: Vec2,
+    /// Where the body starts: against the line on the peek's side, so the neck starts short.
+    pub(crate) start: Vec2,
     /// The overlay the free body stays inside.
     pub(crate) bounds: Rect,
     pub(crate) motion: Motion,
@@ -85,10 +96,13 @@ impl Grab {
             (slot.origin.x + slot.size.x + reach).min(area.origin.x + area.size.x),
             (slot.origin.y + slot.size.y + reach).min(area.origin.y + area.size.y),
         );
+        let dock = line.origin + v2(line.size.x * 0.5, line.size.y * 0.5);
+        let side = if home.y < dock.y { -1.0 } else { 1.0 };
         Self {
             space,
-            dock: line.origin + v2(line.size.x * 0.5, line.size.y * 0.5),
+            dock,
             home,
+            start: dock + v2(0.0, side * CARRY_WIDTH * 0.5),
             bounds: Rect {
                 origin: lo,
                 size: hi - lo,
@@ -141,7 +155,14 @@ impl Pulling {
         }
         let generation = self.owner.press(button, seq)?;
         let press = grab.space.point(window, at);
-        let pull = Pull::grab(grab.dock, grab.home, press, grab.bounds, grab.motion);
+        let pull = Pull::grab(
+            grab.dock,
+            grab.home,
+            grab.start,
+            press,
+            grab.bounds,
+            grab.motion,
+        );
         self.pull = Some((pull, grab.space));
         Some(generation)
     }
@@ -176,6 +197,11 @@ impl Pulling {
         let (pull, _) = self.pull.as_mut()?;
         pull.update(dt);
         Some(pull)
+    }
+
+    /// The pull, with the space it was grabbed in, from the press until it has rested.
+    pub(crate) fn pull(&self) -> Option<(&Pull, PullSpace)> {
+        self.pull.as_ref().map(|(pull, space)| (pull, *space))
     }
 
     /// The picture just accepted shows the body at rest at home: the pull is over. Physics
@@ -228,6 +254,7 @@ mod tests {
             space: SPACE,
             dock: home - v2(0.0, 34.0),
             home,
+            start: home,
             bounds: Rect {
                 origin: v2(0.0, 0.0),
                 size: v2(1024.0, 1152.0),
@@ -419,19 +446,63 @@ mod tests {
             Motion::Full,
         );
         // The slot is (384, 0) 128 by 32 in pull space, grown by 144 + 84 on every side and
-        // cut at the work area's top, 0, and its right edge, 1024.
+        // cut at the work area's top, 0. Its right edge, 740, stays inside the area's 1024.
         assert_eq!(
             grab,
             Grab {
                 space: SPACE,
                 dock: v2(448.0, 16.0),
                 home,
+                start: v2(448.0, 58.0),
                 bounds: Rect {
                     origin: v2(156.0, 0.0),
                     size: v2(584.0, 260.0),
                 },
                 motion: Motion::Full,
             }
+        );
+    }
+
+    #[test]
+    fn a_grab_from_the_default_peek_holds_its_neck_until_the_pointer_moves() {
+        use crate::presence::geometry::Position;
+        use crate::presence::kumo::SNAP_LEN;
+        use crate::presence::kumo_view::SIZE;
+        use crate::presence::line;
+
+        // The default dock at 100% on a 2560 by 1400 work area, under it the 380 by 124 peek
+        // with Kumo inside its 12 px padding, as Presence lays them out.
+        let space = PullSpace {
+            area: [0, 0, 2560, 1400],
+            scale: 1.0,
+        };
+        let layout = Position::default().layout(space.area, line::slot(1.0), [380, 124], 0);
+        let paint = line::LineFrame::in_slot(layout.dock, 1.0).paint;
+        let pad = 12.0 + SIZE * 0.5;
+        let home = space.point([layout.panel[0], layout.panel[1]], point(px(pad), px(pad)));
+        let grab = Grab::new(space, paint, layout.dock, home, Motion::Full);
+        assert!(
+            (home - grab.dock).len() > SNAP_LEN,
+            "home alone would start past the snap"
+        );
+        let mut pulling = Pulling::default();
+        pulling
+            .press(
+                LEFT,
+                1,
+                [layout.panel[0], layout.panel[1]],
+                point(px(pad), px(pad)),
+                grab,
+            )
+            .expect("nothing pulled yet");
+        let pull = pulling.step(FRAME).expect("the pull exists");
+        assert!(
+            !pull.neck().broken(),
+            "the neck holds with the pointer still"
+        );
+        assert!(
+            (pull.body() - grab.start).len() < 1e-3,
+            "the body waits against the line"
         );
     }
 }

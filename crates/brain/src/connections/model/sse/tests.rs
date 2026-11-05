@@ -15,6 +15,23 @@ const ERROR: &[u8] = include_bytes!("../../../../fixtures/responses/error_event.
 const INCOMPLETE: &[u8] = include_bytes!("../../../../fixtures/responses/incomplete.sse");
 const COMPLETED: &[u8] = b"data: {\"type\":\"response.completed\"}\n\n";
 
+#[test]
+fn anthropic_stop_does_not_complete_a_responses_stream() {
+    let mut reader = Reader::default();
+    let mut seen = Vec::new();
+    assert_eq!(
+        reader.feed(b"data: {\"type\":\"message_stop\"}\n\n", &mut |event| seen
+            .push(event.kind().to_owned())),
+        Ok(Progress::More)
+    );
+    assert_eq!(seen, ["message_stop"]);
+    assert_eq!(
+        reader.feed(COMPLETED, &mut |event| seen.push(event.kind().to_owned())),
+        Ok(Progress::Completed)
+    );
+    assert_eq!(seen, ["message_stop", "response.completed"]);
+}
+
 /// The event kinds handed out, the streamed text, and how the stream ended.
 type Read = (Vec<String>, String, Result<(), Failure>);
 

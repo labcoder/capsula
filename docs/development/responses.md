@@ -105,9 +105,12 @@ inside its framing is `Truncated`.
 
 ## Reading the stream
 
-`sse::Reader` takes the response body's bytes in whatever chunks they arrive and hands out each
-event's JSON. Lines end in LF or CRLF. Comments, `event:`, `id:` and `retry:` are ignored, because the
-JSON's own `type` names the event. A `data: [DONE]` event is skipped.
+`framer::Framer` takes the response body's bytes in whatever chunks they arrive and hands out each
+event's data. Lines end in LF or CRLF. Comments, `event:`, `id:` and `retry:` are ignored, because
+the data's own `type` names the event, and an event's `data` lines are joined by line feeds. The
+framer knows no JSON and no terminal event, so other providers' readers share it and its byte
+bounds. `sse::Reader` reads each event's data as Responses JSON and hands it out; a `data: [DONE]`
+event is skipped.
 
 ```mermaid
 stateDiagram-v2
@@ -127,8 +130,9 @@ stateDiagram-v2
 | The stream, up to its terminal event | 16 MiB |
 | Visible text (`response.output_text.delta`) | 1 MiB |
 
-Only `response.completed` succeeds. The run-wide caps and the 120-second run deadline belong to
-the coordinator, across all of a run's rounds.
+The framer enforces the first three, and counts bytes only up to the event that stops the
+stream; the reader counts visible text. Only `response.completed` succeeds. The run-wide caps
+and the 120-second run deadline belong to the coordinator, across all of a run's rounds.
 
 ## What a failure means
 
