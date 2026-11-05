@@ -22,7 +22,8 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
+    Transcript,
 };
 use kumochi_protocol::tap::Direction;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -1033,6 +1034,11 @@ async fn read_data(
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some(DataToBrain::MicPcm(chunk))) if chunk.check().is_err() => {
+                return Ended::Broken("a microphone chunk out of bounds");
+            }
+            // shortcut: slice 7's PR 5 buffers a hold's audio.
+            Ok(Some(DataToBrain::MicPcm(_))) => {}
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
@@ -1158,7 +1164,10 @@ impl<'a, 't> Link<'a, 't> {
         let owner = match message {
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
-            | DataToShell::RunEnd { run } => Owner::Run(*run),
+            | DataToShell::RunEnd { run }
+            | DataToShell::SegmentQueued { run, .. }
+            | DataToShell::Transcript(Transcript { run, .. })
+            | DataToShell::SpeechPcm(SpeechPcm { run, .. }) => Owner::Run(*run),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. } => Owner::Page,

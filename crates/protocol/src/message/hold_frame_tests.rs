@@ -74,11 +74,28 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 pointer_display: DisplayRef(RECT),
                 thread: Some(ThreadId(u64::MAX)),
                 lease: LEASE,
+                t_qpc: u64::MAX,
             },
             "HoldRecognized",
-            42,
+            52,
         ),
-        (ControlToBrain::KeyUp { gesture: GESTURE }, "KeyUp", 6),
+        (
+            ControlToBrain::KeyDown {
+                gesture: GESTURE,
+                t_qpc: u64::MAX,
+            },
+            "KeyDown",
+            16,
+        ),
+        (
+            ControlToBrain::KeyUp {
+                gesture: GESTURE,
+                t_qpc: u64::MAX,
+                chunks: u32::MAX,
+            },
+            "KeyUp",
+            21,
+        ),
         (
             ControlToBrain::GestureCancel { gesture: GESTURE },
             "GestureCancel",
@@ -118,9 +135,10 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
             }),
             thread: None,
             lease: LeaseGeneration(0),
+            t_qpc: 0,
         },
         Pipe::Control,
-        8,
+        9,
     );
 }
 

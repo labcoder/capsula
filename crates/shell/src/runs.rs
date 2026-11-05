@@ -516,9 +516,13 @@ impl Runs {
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. } => {
+            | DataToShell::Models { .. }
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_) => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
                 // shortcut: the catalog is credited and dropped until PR 18b's picker shows it.
+                // shortcut: voice frames are credited and dropped until slice 7's PR 6 plays them.
             }
         }
     }
@@ -569,7 +573,10 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
     match message {
         DataToShell::AssistantText { run, .. }
         | DataToShell::StepCommit { run, .. }
-        | DataToShell::RunEnd { run } => Some(*run),
+        | DataToShell::RunEnd { run }
+        | DataToShell::SegmentQueued { run, .. } => Some(*run),
+        DataToShell::Transcript(transcript) => Some(transcript.run),
+        DataToShell::SpeechPcm(pcm) => Some(pcm.run),
         DataToShell::ThreadList { .. }
         | DataToShell::Page { .. }
         | DataToShell::PageFailed { .. }
