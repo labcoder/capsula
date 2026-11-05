@@ -727,3 +727,60 @@ The real Windows persistence tests run on every `cargo test`, under isolated ran
 but a terminated process can leave persistent test-only entries containing fixture strings.
 The owner can remove stray entries matching those exact test patterns in Windows Credential
 Manager; there is no automatic enumeration or cleanup of other test runs.
+
+## Credential authority
+
+`connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
+processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed
+delete 11.5 ms later, so the store alone can't say what is current. The authority is a SQLite
+file, `credentials.db` in the data folder, apart from the history store so no purge touches it.
+It holds no secret bytes. Those stay in Credential Manager under write-once names
+`<CREDENTIAL_SERVICE>/gen/<kind>/<generation>/<index>`, where the generation is a random
+128-bit id in hex. No legacy name starts with that prefix; a test checks all 262 of them.
+
+Per kind (`host`, `chatgpt`, `revoke`, `anthropic`) it owns a head revision that every change
+bumps, the one Active generation, at most one Pending candidate (unique indexes enforce both),
+and each generation's layout: its chunk count (1 to 64) and byte length (at most 48 KiB). It
+also owns the sign-out marker, which fails closed when malformed. `Authority::open` takes the
+`SessionLock`, so only the session owner opens it. It runs in WAL mode with
+`synchronous = FULL` and refuses a file from a newer build.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: begin, head revision matches
+    Pending --> Active: write read back, activate, head unchanged
+    Pending --> Removed: newer begin, remove, or the next open
+    Active --> Removed: a successor activates, or remove
+    Removed --> Removed: sweep finds a name, or first clean sweep
+    Removed --> Swept: clean sweep in a later open than its last delete
+```
+
+- **Save.** `begin` checks the head revision the caller expects and commits a Pending row for a
+  fresh generation. Then `io::write` writes each name once and reads each back. It waits out
+  absence for up to 2 s (`SETTLE`, a guess at about 16 times the 120 ms miss). Waiting is safe
+  because a write-once name can only hold those bytes or nothing. Different bytes fail at once
+  as `Unsettled`. Only a full read-back yields `Verified`. `activate` takes that, checks that
+  the candidate is still Pending and that the head hasn't moved, and then, in one transaction,
+  makes it Active, retires its predecessor, bumps the revision and, optionally, sets the marker.
+- **Read.** `io::read` reads the Active generation's names once, each at its exact length. A
+  missing chunk is `Unsettled`. There's no retry and no fallback to another generation, and
+  nothing the store returns changes the authority. A stale or resurrected name can hide a
+  credential, but it can never make one current.
+- **Remove.** `remove` retires every Active and Pending generation of the given kinds and bumps
+  their heads, with the marker in the same transaction. It reads nothing from the store first,
+  so an unsettled store can't block sign-out.
+- **Sweep.** `retired(limit)` lists the oldest Removed generations, so each pass is bounded.
+  `io::sweep` deletes each name and reads it once, and `observed` records the result. A
+  generation becomes Swept, and loses its layout, only after a clean sweep in a later open than
+  its last delete. That way, a delete that comes back is caught by the next open's sweep.
+
+Crash recovery rests on SQLite commits alone. `begin` commits its row before the first store
+write, so no generation name exists without a row. A crash before `activate` leaves a Pending
+row. The next `open` retires every Pending row, so a candidate from an earlier process is never
+activated, and its names are swept like any other. `activate` and `remove` each commit
+everything in one transaction or nothing. The test fake store can be write-once, and it can roll
+back or resurrect names, so those cases run offline.
+
+Nothing calls the authority yet. The vault above still reads and writes the legacy names.
+Moving the vault onto it, together with the startup sweep and its bound, is the next change.
+Removing the legacy names follows after that.
