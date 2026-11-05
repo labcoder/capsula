@@ -119,7 +119,7 @@ impl Coordinator {
             let (piece, tail) = rest.split_at(cut);
             let frame = || DataToShell::AssistantText {
                 run,
-                delta: piece.to_owned(),
+                delta: piece.into(),
             };
             // Held text joins the frame before it, so small deltas don't each cost an entry.
             match current.held.back_mut() {

@@ -87,7 +87,7 @@ fn sending(sources: &[ThreadId]) -> Coordinator {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     assert_eq!(
@@ -116,7 +116,7 @@ fn replace(core: &mut Coordinator) {
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(T),
-        text: "again".to_owned(),
+        text: "again".into(),
     })
     .expect("a turn is never stale");
     assert_eq!(
@@ -160,7 +160,7 @@ fn a_delete_while_waiting_goes_out_and_the_body_is_rebuilt_unsent() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
@@ -186,7 +186,7 @@ fn the_run_deadline_does_not_reset_on_rebuild_or_retry() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
@@ -326,7 +326,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
     core.handle(Input::Turn {
         turn: 1,
         thread: Some(T),
-        text: "again".to_owned(),
+        text: "again".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R2 }).expect("current");

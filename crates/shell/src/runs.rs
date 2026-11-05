@@ -175,7 +175,7 @@ impl Runs {
                 turn: self.turns_sent.checked_add(1).ok_or(Refused::Busy)?,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: self.thread(),
-                text: text.to_owned(),
+                text: text.into(),
             },
             self.revision,
         ))

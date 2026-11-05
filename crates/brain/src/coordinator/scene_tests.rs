@@ -37,7 +37,7 @@ fn started_over(scenes: &[u64]) -> Coordinator {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     super::admit(&mut core, R);
@@ -123,7 +123,7 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
         .handle(Input::Turn {
             turn: 1,
             thread: None,
-            text: "hi".to_owned(),
+            text: "hi".into(),
         })
         .expect("turn");
     assert!(
@@ -250,7 +250,7 @@ fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
     let turn = Input::Turn {
         turn: 1,
         thread: Some(T),
-        text: "next".to_owned(),
+        text: "next".into(),
     };
     effects.extend(core.handle(turn).expect("a turn is never stale"));
     effects.extend(super::admit(core, next));
@@ -297,7 +297,7 @@ fn a_replacement_drops_steps_waiting_for_the_scene_and_the_run_settles() {
         .handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "next".to_owned(),
+            text: "next".into(),
         })
         .expect("turn");
     assert_eq!(written(&next), Vec::<&str>::new());

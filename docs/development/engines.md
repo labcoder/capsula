@@ -283,8 +283,9 @@ isn't needed:
    coordinator names the connection the send may use (`Coordinator::sending`): a round's run's
    own, only while that run is current, and the ready one for a job. The account answers only
    when that connection is the ready one, refreshing first when it's due. Any other answer, or a
-   brain that's gone, fails the round as `Failed(Access)` with nothing sent, and the shell hears
-   the account's reason for the run's connection, else `SignInNeeded`. The bearer stays a
+   brain that's gone, fails the round as `Failed(Access)` with nothing sent. The shell hears the
+   account's own reason when it gave one (a refresh that couldn't connect keeps `AccountOffline`
+   with Retry), else why the run's connection can't send, else `SignInNeeded`. The bearer stays a
    `Secret` and is dropped when the stream ends. A stream that ends in `AccountRefused` tells
    the account which generation was refused, so the next access renews it (accounts.md).
 3. **The ask.** The transport asks the `SendGate` right before the body goes out (see

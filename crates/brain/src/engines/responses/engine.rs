@@ -143,8 +143,12 @@ impl<C: Connect> Shared<C> {
             Ok(body) => body,
             Err(failure) => return failed(failure),
         };
-        let Ok(bearer) = self.access.access(request.key).await else {
-            return Some(Finish::Failed(EngineFailure::Access));
+        let bearer = match self.access.access(request.key).await {
+            Ok(bearer) => bearer,
+            Err(Denied::Failed(error)) => {
+                return Some(Finish::Failed(EngineFailure::Access(Some(error))));
+            }
+            Err(Denied::Unusable) => return Some(Finish::Failed(EngineFailure::Access(None))),
         };
         let ask = async {
             match gate.ask().await {

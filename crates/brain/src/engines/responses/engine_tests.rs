@@ -5,7 +5,9 @@ use std::io;
 use std::sync::Arc;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
+use kumochi_protocol::message::{
+    Action, Effort, ErrorKey, ModelChoice, ModelSlug, RunId, ThreadId, UserError,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -186,16 +188,33 @@ async fn a_refused_body_asks_for_no_bearer() {
     assert!(round.inputs.try_recv().is_err(), "no send was asked for");
 }
 
+/// M159-1: no bearer fails the round before its ask, carrying the account's own reason when it
+/// gave one, such as a refresh that couldn't connect or a save the store refused.
 #[tokio::test]
 async fn no_bearer_fails_the_round_before_its_ask() {
-    let mut round = start(request(Some("gpt-fixture")));
-    round.bearer(Err(Denied::Unusable)).await;
-    assert_eq!(
-        round.ended().await,
-        [TurnEvent::Finished(Finish::Failed(EngineFailure::Access))]
-    );
-    assert!(round.inputs.try_recv().is_err(), "no send was asked for");
-    assert!(round.servers.try_recv().is_err(), "nothing connected");
+    let reason = |key| UserError::new(key, Vec::new(), vec![Action::Retry]).expect("one action");
+    for (denied, carried) in [
+        (Denied::Unusable, None),
+        (
+            Denied::Failed(reason(ErrorKey::AccountOffline)),
+            Some(reason(ErrorKey::AccountOffline)),
+        ),
+        (
+            Denied::Failed(reason(ErrorKey::CredentialsUnavailable)),
+            Some(reason(ErrorKey::CredentialsUnavailable)),
+        ),
+    ] {
+        let mut round = start(request(Some("gpt-fixture")));
+        round.bearer(Err(denied)).await;
+        assert_eq!(
+            round.ended().await,
+            [TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
+                carried.clone()
+            )))]
+        );
+        assert!(round.inputs.try_recv().is_err(), "no send was asked for");
+        assert!(round.servers.try_recv().is_err(), "nothing connected");
+    }
 }
 
 #[tokio::test]
@@ -264,7 +283,11 @@ async fn a_gone_pump_stops_the_stream_and_closes_its_connection() {
         .await
         .expect("head");
     server.write_all(&TEXT[..second]).await.expect("text");
-    (&mut round.done).await.expect("the round ends");
+    // The idle timeout is 60 s, so ending within 5 s is the gone pump's doing.
+    tokio::time::timeout(std::time::Duration::from_secs(5), &mut round.done)
+        .await
+        .expect("closed well before the idle timeout")
+        .expect("the round ends");
     let mut rest = [0; 16];
     assert_eq!(
         server.read(&mut rest).await.expect("read"),
@@ -307,5 +330,19 @@ async fn a_refused_bearer_is_reported_with_its_generation() {
             AccessAsk::Bearer { .. } => panic!("no second bearer ask"),
         });
         assert_eq!(told, refused, "{status}");
+    }
+}
+
+/// The bearer never prints through the access answer or the ask that carries it.
+#[test]
+fn formatting_an_access_answer_or_ask_never_prints_the_bearer() {
+    let (answer, _answered) = tokio::sync::oneshot::channel();
+    let access: Access = Ok(bearer());
+    let ask = AccessAsk::Bearer { key: key(), answer };
+    let byte_list = format!("{:?}", BEARER.as_bytes());
+    let byte_list = byte_list.trim_matches(['[', ']']);
+    for shown in [format!("{access:?}"), format!("{ask:?}")] {
+        assert!(!shown.contains(BEARER), "the bearer leaked: {shown}");
+        assert!(!shown.contains(byte_list), "the bearer's bytes leaked");
     }
 }

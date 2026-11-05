@@ -44,7 +44,7 @@ fn switching_a_cached_main_row_before_settings_keeps_kumo_symbolic() {
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(99)),
-            text: "home".to_owned()
+            text: "home".into()
         }
     );
 }
@@ -64,7 +64,7 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(7)),
-            text: "first".to_owned()
+            text: "first".into()
         }
     );
     runs.disconnected();
@@ -79,7 +79,7 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(99)),
-            text: "next".to_owned()
+            text: "next".into()
         }
     );
 }
@@ -111,7 +111,7 @@ fn a_non_durable_task_and_a_deleted_focus_fall_back_to_kumo() {
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(2)),
-            text: "home".to_owned()
+            text: "home".into()
         }
     );
 }
@@ -211,13 +211,13 @@ fn selecting_and_starting_a_new_thread_only_change_the_next_turn() {
                 turn: 1,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(9)),
-                text: "continue".to_owned()
+                text: "continue".into()
             },
             DataToBrain::TextSubmit {
                 turn: 2,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "new".to_owned()
+                text: "new".into()
             },
         ]
     );
@@ -366,7 +366,7 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(1)),
-            text: "again".to_owned()
+            text: "again".into()
         }
     );
     let effects = brain.handle(turn).expect("turn");
@@ -444,13 +444,13 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
                 turn: 2,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "new thread turn".to_owned()
+                text: "new thread turn".into()
             },
             DataToBrain::TextSubmit {
                 turn: 3,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
-                text: "continue new thread".to_owned()
+                text: "continue new thread".into()
             },
         ]
     );
@@ -459,7 +459,7 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
 fn text(run: u64, delta: &str) -> DataToShell {
     DataToShell::AssistantText {
         run: RunId(run),
-        delta: delta.to_owned(),
+        delta: delta.into(),
     }
 }
 
@@ -875,7 +875,7 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
-            text: "one".to_owned(),
+            text: "one".into(),
         }]
     );
     assert_eq!(runs.submitted.len(), 1);
@@ -898,13 +898,13 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
                 turn: 1,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "one".to_owned(),
+                text: "one".into(),
             },
             DataToBrain::TextSubmit {
                 turn: 2,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(11)),
-                text: "two".to_owned(),
+                text: "two".into(),
             },
         ]
     );
@@ -939,19 +939,19 @@ fn only_a_newer_run_sets_the_next_turn_s_thread() {
                 turn: 1,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "one".to_owned(),
+                text: "one".into(),
             },
             DataToBrain::TextSubmit {
                 turn: 2,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "two".to_owned(),
+                text: "two".into(),
             },
             DataToBrain::TextSubmit {
                 turn: 3,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
-                text: "third".to_owned(),
+                text: "third".into(),
             },
         ]
     );
@@ -982,7 +982,7 @@ fn a_fenced_older_run_s_late_failure_keeps_the_thread() {
             turn: 3,
             screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(22)),
-            text: "third".to_owned(),
+            text: "third".into(),
         })
     );
 }
@@ -1030,13 +1030,13 @@ fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapp
                 turn: 1,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(1)),
-                text: "first".to_owned()
+                text: "first".into()
             },
             DataToBrain::TextSubmit {
                 turn: 2,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(1)),
-                text: "second".to_owned()
+                text: "second".into()
             },
         ]
     );
@@ -1049,7 +1049,7 @@ fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapp
                     turn: u32::MAX,
                     screen: kumochi_protocol::message::ScreenChoice::None,
                     thread: Some(ThreadId(1)),
-                    text: "last".to_owned()
+                    text: "last".into()
                 }
             );
             true
@@ -1068,7 +1068,7 @@ fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapp
         Input::Turn {
             turn: 1,
             thread: Some(ThreadId(1)),
-            text: "reset".to_owned()
+            text: "reset".into()
         }
     );
 }

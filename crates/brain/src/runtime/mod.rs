@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, ThreadId,
 };
 use kumochi_protocol::tap::Direction;
@@ -1041,7 +1041,7 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
 }
 
 /// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (u32, Option<ThreadId>, String);
+type Turn = (u32, Option<ThreadId>, Content);
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.

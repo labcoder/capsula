@@ -10,6 +10,7 @@ use crate::Secret;
 use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
 
 mod account;
+mod content;
 mod error;
 mod pages;
 mod scenes;
@@ -20,6 +21,7 @@ pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
     MAX_EMAIL_BYTES, PlanState,
 };
+pub use content::Content;
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
 };
@@ -442,7 +444,7 @@ pub enum DataToBrain {
         /// The thread to continue.
         thread: Option<ThreadId>,
         /// What the user typed.
-        text: String,
+        text: Content,
     },
     /// The shell has taken `bytes` more of the brain's data frames, header included, and the
     /// brain may send that many more.
@@ -467,7 +469,7 @@ pub enum DataToShell {
         /// The run it belongs to.
         run: RunId,
         /// The new text.
-        delta: String,
+        delta: Content,
     },
     /// One step, sent only once the brain has committed it.
     StepCommit {
@@ -584,6 +586,10 @@ mod scene_frame_tests;
 #[cfg(test)]
 #[path = "message/hold_frame_tests.rs"]
 mod hold_frame_tests;
+
+#[cfg(test)]
+#[path = "message/content_tests.rs"]
+mod content_tests;
 
 #[cfg(test)]
 mod tests {

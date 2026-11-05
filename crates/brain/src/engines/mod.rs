@@ -22,7 +22,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::{RunId, ThreadId, UserError};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -260,7 +260,7 @@ impl fmt::Debug for TurnEvent {
 }
 
 /// How a round ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Finish {
     /// The provider finished the round.
     Completed,
@@ -274,14 +274,15 @@ pub enum Finish {
 }
 
 /// Why a round failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineFailure {
     /// The engine's provider reported the round failed.
     Provider,
     /// The Responses stream failed, was refused, or broke its rules.
     Stream(crate::connections::model::error::Failure),
-    /// The account gave no bearer for the run's connection; nothing was sent.
-    Access,
+    /// The account gave no bearer for the run's connection; nothing was sent. It carries the
+    /// account's own reason when it gave one.
+    Access(Option<UserError>),
     /// The question hit the native turn cap.
     TurnCap,
     /// Claude Code's stdout broke its rules.

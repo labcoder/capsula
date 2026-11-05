@@ -141,8 +141,8 @@ impl Coordinator {
         matches!(&self.availability, Availability::Ready(ready) if ready.trusted())
     }
 
-    /// What the shell hears when a round fails: the stream's own meaning, or the account's when
-    /// it gave no bearer. The fixture's provider failure and an engine's interruption say nothing.
+    /// What the shell hears when a round fails: the stream's own meaning, or, when it got no
+    /// bearer, the account's own reason, else why the run's connection can't send. The fixture's provider failure and an engine's interruption say nothing.
     pub(super) fn engine_reason(
         &self,
         connection: Option<ConnectionTag>,
@@ -151,7 +151,8 @@ impl Coordinator {
         match finish {
             Finish::Truncated => Some(Stream::Truncated.user_error()),
             Finish::Failed(EngineFailure::Stream(failure)) => Some(failure.user_error()),
-            Finish::Failed(EngineFailure::Access) => Some(
+            Finish::Failed(EngineFailure::Access(Some(error))) => Some(error),
+            Finish::Failed(EngineFailure::Access(None)) => Some(
                 connection
                     .and_then(|connection| self.refusal(connection))
                     .unwrap_or_else(sign_in_needed),

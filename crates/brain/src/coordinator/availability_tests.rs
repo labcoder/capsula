@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
 use crate::coordinator::{Availability, JobKey, Ready, SendKey};
+use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Failure, RunEnd};
 
 fn info(slug: &str) -> ModelInfo {
@@ -41,7 +42,7 @@ fn typed_with(availability: Option<Input>) -> (Coordinator, Vec<Effect>) {
         .handle(Input::Turn {
             turn: 1,
             thread: None,
-            text: "hi".to_owned(),
+            text: "hi".into(),
         })
         .expect("a turn is never stale");
     let after = effects.split_off(3);
@@ -366,4 +367,27 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
 
     let core = typed(None);
     assert_eq!(core.sending(job), None);
+}
+
+/// M159-1: a round the account gave no bearer fails with the account's own reason while the
+/// account stays ready, so a refresh that couldn't connect keeps its Retry rather than asking
+/// for a sign-in.
+#[test]
+fn an_access_failure_keeps_the_accounts_own_reason() {
+    for key in [ErrorKey::AccountOffline, ErrorKey::CredentialsUnavailable] {
+        let mut core = typed(Some(ready(7, &["m"])));
+        core.handle(Input::TurnStored { run: R }).expect("current");
+        assert!(started(
+            &core.handle(built(Some("m"), Vec::new())).expect("current")
+        ));
+        let finish = Finish::Failed(EngineFailure::Access(Some(reason(key, Action::Retry))));
+        assert_eq!(
+            core.handle(Input::Engine {
+                run: R,
+                event: TurnEvent::Finished(finish),
+            }),
+            Ok(failed(Some(reason(key, Action::Retry)))),
+            "{key:?}"
+        );
+    }
 }

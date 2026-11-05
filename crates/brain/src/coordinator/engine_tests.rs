@@ -69,7 +69,7 @@ fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
             Some(failed(ErrorKey::ResponseUnreadable, Action::Retry)),
         ),
         (
-            Finish::Failed(EngineFailure::Access),
+            Finish::Failed(EngineFailure::Access(None)),
             Some(failed(ErrorKey::SignInNeeded, Action::SignIn)),
         ),
         (Finish::Failed(EngineFailure::Provider), None),
@@ -81,7 +81,7 @@ fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
             ends[1] = reason;
         }
         assert_eq!(
-            core.handle(engine(R, TurnEvent::Finished(finish))),
+            core.handle(engine(R, TurnEvent::Finished(finish.clone()))),
             Ok(ends),
             "{finish:?}"
         );

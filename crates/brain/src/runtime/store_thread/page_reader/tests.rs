@@ -109,9 +109,9 @@ fn is_read(op: &StoreOp) -> bool {
 fn turn(id: u64) -> StoreOp {
     StoreOp::BeginTurn {
         thread: ThreadId(id),
-        title: Some("t".to_owned()),
+        title: Some("t".into()),
         run: RunId(id),
-        text: "words".to_owned(),
+        text: "words".into(),
     }
 }
 
@@ -487,9 +487,9 @@ fn the_helper_keeps_a_raise_made_while_it_ran_and_retries_what_a_reader_held() {
     let on_disk = || std::fs::metadata(scratch.db()).expect("file").len();
     let big = |id| StoreOp::BeginTurn {
         thread: ThreadId(id),
-        title: Some("t".to_owned()),
+        title: Some("t".into()),
         run: RunId(id),
-        text: "x".repeat(64 * 1024),
+        text: "x".repeat(64 * 1024).into(),
     };
     assert!(running.thread.send(big(1)));
     assert_eq!(running.ack(), Input::TurnStored { run: RunId(1) });

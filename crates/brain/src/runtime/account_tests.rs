@@ -29,6 +29,7 @@ use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready, StoreOp};
+use crate::engines::responses::Bearer;
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
@@ -935,8 +936,9 @@ async fn a_rounds_ask_gets_the_bearer_only_of_the_connection_it_names() {
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
-/// Answers the model list with a 401 and the refresh-token grant with a rotated set.
-struct RefusingModels;
+/// Answers the model list with a 401 and the refresh-token grant with a rotated set, counting
+/// the grants.
+struct RefusingModels(Arc<AtomicU64>);
 
 impl Http for RefusingModels {
     fn execute(
@@ -944,6 +946,9 @@ impl Http for RefusingModels {
         request: Request,
     ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
         let refused = matches!(request.endpoint, Endpoint::Models(_));
+        if matches!(request.endpoint, Endpoint::Token) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
         let rotated = Rotating.execute(request);
         async move {
             if !refused {
@@ -958,13 +963,31 @@ impl Http for RefusingModels {
     }
 }
 
+/// Runs the account system until `wait` is answered with a bearer.
+async fn granted(accounts: &mut Accounts, mut wait: oneshot::Receiver<Access>) -> Bearer {
+    timeout(PATIENCE, async {
+        loop {
+            if let Ok(answer) = wait.try_recv() {
+                return answer.expect("a bearer");
+            }
+            let input = accounts.next().await;
+            accounts.handle(input);
+        }
+    })
+    .await
+    .expect("answered in time")
+}
+
 /// OSC-223: a bearer the provider refused marks its set as due, so the next access refreshes it
-/// once, though it isn't near its expiry. A refusal naming another generation marks nothing.
+/// once, though it isn't near its expiry. A late refusal of the set it replaced, or one naming
+/// a generation that never was, marks nothing.
 #[tokio::test]
 async fn a_refused_bearer_is_refreshed_on_the_next_access() {
     let scratch = Scratch::new("account-refused");
     let store = FakeStore::default();
-    let mut accounts = seeded(&scratch, &store, SharedHttp::new(RefusingModels), LATER);
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let http = SharedHttp::new(RefusingModels(Arc::clone(&refreshes)));
+    let mut accounts = seeded(&scratch, &store, http, LATER);
     let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]);
     assert_eq!(
         read_ended(&mut accounts).await,
@@ -972,28 +995,28 @@ async fn a_refused_bearer_is_refreshed_on_the_next_access() {
         "the catalog's 401"
     );
     let (wait, _) = accounts.access();
+    let rotated = granted(&mut accounts, wait).await;
+    assert_eq!(rotated.token.expose().as_str(), "access-new");
+    accounts.handle(Input::Refused {
+        generation: rotated
+            .generation
+            .checked_sub(1)
+            .expect("a rotation moved it"),
+    });
+    let (wait, _) = accounts.access();
     assert_eq!(
         answered(&mut accounts, wait).await,
         Ok("access-new".to_owned())
     );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "one refresh in all");
     accounts.close(Instant::now(), Instant::now()).await;
 
     let scratch = Scratch::new("account-refused-stale");
     let store = FakeStore::default();
     let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     assert_eq!(read_ended(&mut accounts).await, []);
-    let (mut wait, _) = accounts.access();
-    let generation = timeout(PATIENCE, async {
-        loop {
-            if let Ok(answer) = wait.try_recv() {
-                return answer.expect("a bearer").generation;
-            }
-            let input = accounts.next().await;
-            accounts.handle(input);
-        }
-    })
-    .await
-    .expect("in time");
+    let (wait, _) = accounts.access();
+    let generation = granted(&mut accounts, wait).await.generation;
     accounts.handle(Input::Refused {
         generation: generation + 1,
     });

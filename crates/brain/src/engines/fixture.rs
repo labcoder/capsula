@@ -303,7 +303,7 @@ mod tests {
         core.handle(Input::Turn {
             turn: 1,
             thread: Some(ThreadId(1)),
-            text: "go".to_owned(),
+            text: "go".into(),
         })
         .expect("a turn is never stale");
         core.handle(Input::TurnStored { run: RunId(3) })
