@@ -433,6 +433,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn provider_sign_in_errors_render_recovery_while_account_details_are_still_signed_in(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::{AccountView, Action, ErrorKey, PlanState, UserError};
+        let (window, view) = open(cx);
+        for key in [ErrorKey::AccountRefused, ErrorKey::SignInNeeded] {
+            view.update(cx, |view, cx| {
+                view.tab = 1;
+                view.model.update(cx, |model, cx| {
+                    assert!(model.accounts.receive(
+                        Some(1),
+                        1,
+                        AccountView::SignedIn {
+                            email: None,
+                            plan: PlanState::Enabled,
+                            recovery: None,
+                        }
+                    ));
+                    model.accounts.error(
+                        &UserError::new(key, Vec::new(), vec![Action::SignIn])
+                            .expect("bounded error"),
+                    );
+                    cx.notify();
+                });
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert!(
+                frame.debug_bounds("account-sign-in-recovery").is_some(),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn account_confirmation_closes_on_disconnect_state_loss_or_new_session(
         cx: &mut TestAppContext,
     ) {
