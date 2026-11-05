@@ -1,13 +1,14 @@
 //! The background job slot: a task's title job after a run ends `Done`, fenced by new runs,
 //! deletes and sign-out, and keyed so an old job's answers never touch a new one.
 
-use kumochi_protocol::message::{ControlToShell, Phase, RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{ControlToShell, EventId, Phase, RunId, ThreadId, ThreadTitle};
 
 use super::{R, T, admit, engine, fresh, request, run_end, state};
+use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin};
 use crate::coordinator::{
-    Coordinator, Effect, Input, JobBuilt, JobKey, LeaseId, ReadTitle, SEND_DEADLINE, SendKey,
-    Stale, StoreOp, TitleAsk, Unbuilt,
+    Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey, JobKind, JobOutput, LeaseId, ReadJob,
+    SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Generation, TitleSource};
@@ -32,6 +33,7 @@ fn signed_in() -> Coordinator {
 /// stored outcome did.
 fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec<Effect> {
     core.handle(Input::Turn {
+        turn: 1,
         thread,
         text: "Plan a trip".to_owned(),
     })
@@ -49,10 +51,7 @@ fn key(serial: u64) -> JobKey {
 /// What a stored `Done` of `run` in task 4 does when it starts job `serial`.
 fn done_starting(run: RunId, serial: u64) -> Vec<Effect> {
     vec![
-        Effect::Store(StoreOp::ReadTitle(ReadTitle {
-            key: key(serial),
-            snapshot: None,
-        })),
+        read_job(key(serial), JobKind::Title),
         state(run, T, Phase::Done),
         run_end(run),
     ]
@@ -65,15 +64,35 @@ fn reading() -> Coordinator {
     core
 }
 
+fn read_job(key: JobKey, kind: JobKind) -> Effect {
+    Effect::Store(StoreOp::ReadJob(ReadJob {
+        key,
+        kind,
+        origin: if key.thread == MAIN {
+            Origin::Kumo
+        } else {
+            Origin::Task(key.thread)
+        },
+        snapshot: None,
+        compact_at: COMPACT_AT,
+    }))
+}
+
+/// Task 4's compaction read, as job `serial`.
+fn compacts(serial: u64) -> Effect {
+    read_job(key(serial), JobKind::Compact)
+}
+
 fn job_built(key: JobKey, sources: &[ThreadId]) -> Input {
     Input::JobBuilt(JobBuilt {
         key,
-        result: Ok(Some(TitleAsk {
+        result: Ok(Some(JobAsk {
             generation: G,
             built: Built {
                 request: request(),
                 sources: sources.to_vec(),
             },
+            covers: None,
         })),
     })
 }
@@ -81,6 +100,7 @@ fn job_built(key: JobKey, sources: &[ThreadId]) -> Input {
 fn start_job(key: JobKey, run: RunId) -> Effect {
     Effect::StartJob {
         job: key,
+        kind: JobKind::Title,
         request: RunRequest {
             key: SendKey::Job(key),
             run,
@@ -123,7 +143,10 @@ fn titled(text: &str) -> ThreadTitle {
 }
 
 fn job_done(key: JobKey, title: Option<ThreadTitle>) -> Input {
-    Input::JobDone { key, title }
+    Input::JobDone {
+        key,
+        output: title.map(JobOutput::Title),
+    }
 }
 
 fn set_title(key: JobKey, text: &str) -> Effect {
@@ -175,8 +198,8 @@ fn a_words_task_takes_the_models_title_after_its_first_done_run() {
             job: Some(key(2)),
             applied: true
         }),
-        Ok(vec![nudge()]),
-        "the shell reads its list again"
+        Ok(vec![nudge(), compacts(3)]),
+        "the shell reads its list again, and compaction follows"
     );
     assert_eq!(
         core.handle(job_done(key(2), Some(titled("Again")))),
@@ -186,7 +209,7 @@ fn a_words_task_takes_the_models_title_after_its_first_done_run() {
 }
 
 #[test]
-fn kumo_and_a_signed_out_brain_start_no_job() {
+fn kumo_is_compacted_never_titled_and_a_signed_out_brain_starts_no_job() {
     let mut core = fresh();
     assert_eq!(
         run_done(&mut core, None, R),
@@ -196,8 +219,18 @@ fn kumo_and_a_signed_out_brain_start_no_job() {
     let mut core = signed_in();
     assert_eq!(
         run_done(&mut core, Some(MAIN), R),
-        vec![state(R, MAIN, Phase::Done), run_end(R)],
-        "Kumo is never titled"
+        vec![
+            read_job(
+                JobKey {
+                    thread: MAIN,
+                    serial: 2
+                },
+                JobKind::Compact
+            ),
+            state(R, MAIN, Phase::Done),
+            run_end(R)
+        ],
+        "Kumo is never titled, only compacted"
     );
 }
 
@@ -209,7 +242,7 @@ fn a_read_that_finds_no_first_words_or_fails_ends_the_job_unsent() {
             key: key(2),
             result,
         });
-        assert_eq!(core.handle(read), Ok(Vec::new()));
+        assert_eq!(core.handle(read), Ok(vec![compacts(3)]));
         assert_eq!(core.handle(ready(key(2))), Ok(rebuild(key(2))));
     }
 }
@@ -223,8 +256,8 @@ fn a_user_rename_during_the_job_wins_without_a_nudge() {
             job: Some(key(2)),
             applied: false
         }),
-        Ok(Vec::new()),
-        "the rename landed first, so nothing changed"
+        Ok(vec![compacts(3)]),
+        "the rename landed first, so nothing changed; compaction follows"
     );
     assert_eq!(
         core.handle(Input::TitleSet {
@@ -302,6 +335,7 @@ fn a_new_run_cancels_the_job_and_its_late_answers_are_stale() {
     );
     let effects = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "More".to_owned(),
         })
@@ -322,10 +356,10 @@ fn a_failed_job_keeps_the_first_words_and_the_next_done_retries() {
         core.handle(job_built(key(2), &[T])),
         Ok(vec![start_job(key(2), R)])
     );
-    assert_eq!(core.handle(job_done(key(2), None)), Ok(Vec::new()));
+    assert_eq!(core.handle(job_done(key(2), None)), Ok(vec![compacts(3)]));
     assert_eq!(
         run_done(&mut core, Some(T), R2),
-        done_starting(R2, 4),
+        done_starting(R2, 5),
         "the next Done tries again, with a new key"
     );
 }
@@ -387,6 +421,7 @@ fn an_older_sign_out_leaves_a_newer_accounts_job_running() {
 fn a_done_whose_write_failed_starts_no_job() {
     let mut core = signed_in();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "Plan a trip".to_owned(),
     })
@@ -399,7 +434,7 @@ fn a_done_whose_write_failed_starts_no_job() {
     assert!(
         !stored
             .iter()
-            .any(|effect| matches!(effect, Effect::Store(StoreOp::ReadTitle(_)))),
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::ReadJob(_)))),
         "{stored:?}"
     );
 }
@@ -449,4 +484,237 @@ fn a_job_lease_past_its_deadline_cancels_the_job_and_fails_closed() {
         vec![state(R2, T, Phase::Done), run_end(R2)],
         "no job starts once sends failed closed"
     );
+}
+
+/// The events every test compaction covers.
+const COVERS: (EventId, EventId) = (EventId(20), EventId(31));
+
+fn compact_built(key: JobKey, sources: &[ThreadId]) -> Input {
+    Input::JobBuilt(JobBuilt {
+        key,
+        result: Ok(Some(JobAsk {
+            generation: G,
+            built: Built {
+                request: request(),
+                sources: sources.to_vec(),
+            },
+            covers: Some(COVERS),
+        })),
+    })
+}
+
+fn start_compact(key: JobKey, run: RunId) -> Effect {
+    Effect::StartJob {
+        job: key,
+        kind: JobKind::Compact,
+        request: RunRequest {
+            key: SendKey::Job(key),
+            run,
+            thread: T,
+            origin: Origin::Task(T),
+            request: request(),
+        },
+    }
+}
+
+fn summarized(key: JobKey) -> Input {
+    Input::JobDone {
+        key,
+        output: Some(JobOutput::Summary("Earlier".to_owned())),
+    }
+}
+
+fn store_summary(key: JobKey) -> Effect {
+    Effect::Store(StoreOp::StoreSummary {
+        owner: SendKey::Job(key),
+        thread: T,
+        generation: G,
+        covers: COVERS,
+        text: SummaryText("Earlier".to_owned()),
+        model: None,
+    })
+}
+
+/// A coordinator from [`reading`] whose title job found nothing to do, so compaction job 3
+/// read task 4 and its request was granted.
+fn compacting() -> Coordinator {
+    let mut core = reading();
+    assert_eq!(
+        core.handle(Input::JobBuilt(JobBuilt {
+            key: key(2),
+            result: Ok(None),
+        })),
+        Ok(vec![compacts(3)])
+    );
+    assert_eq!(
+        core.handle(compact_built(key(3), &[T])),
+        Ok(vec![start_compact(key(3), R)])
+    );
+    assert_eq!(core.handle(ready(key(3))), Ok(granted(lease(key(3), 1))));
+    core
+}
+
+#[test]
+fn formatting_the_summary_write_shows_its_length_never_its_text() {
+    const SENTINEL: &str = "sentinel: the private summary of task four";
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(Input::SendSettled {
+            lease: lease(key(3), 1)
+        }),
+        Ok(Vec::new())
+    );
+    let effects = core
+        .handle(Input::JobDone {
+            key: key(3),
+            output: Some(JobOutput::Summary(SENTINEL.to_owned())),
+        })
+        .expect("the slot's own job is current");
+    let [effect @ Effect::Store(op @ StoreOp::StoreSummary { .. })] = effects.as_slice() else {
+        panic!("the job's only effect is its summary write");
+    };
+    let length = format!("SummaryText({})", SENTINEL.len());
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    let byte_list = byte_list.trim_matches(['[', ']']);
+    for shown in [
+        format!("{op:?}"),
+        format!("{effect:?}"),
+        format!("{effects:?}"),
+    ] {
+        assert!(!shown.contains("sentinel"), "the summary text leaked");
+        assert!(!shown.contains(byte_list), "the summary bytes leaked");
+        assert!(shown.contains(&length), "the length is missing");
+        assert!(
+            shown.contains("covers: (EventId(20), EventId(31))"),
+            "the range is missing"
+        );
+    }
+}
+
+#[test]
+fn compaction_follows_the_title_job_and_writes_its_summary_once() {
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(Input::SendSettled {
+            lease: lease(key(3), 1)
+        }),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        core.handle(summarized(key(3))),
+        Ok(vec![store_summary(key(3))])
+    );
+    assert_eq!(
+        core.handle(Input::SummaryStored {
+            owner: SendKey::Job(key(3)),
+            applied: true
+        }),
+        Ok(Vec::new()),
+        "compaction hands over to nothing"
+    );
+    assert_eq!(
+        core.handle(summarized(key(3))),
+        Err(Stale),
+        "the slot is empty"
+    );
+}
+
+#[test]
+fn a_new_run_cancels_compaction_and_its_old_summary_ack_touches_nothing() {
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(summarized(key(3))),
+        Ok(vec![store_summary(key(3))])
+    );
+    assert_eq!(
+        run_done(&mut core, Some(T), R2),
+        done_starting(R2, 5),
+        "the new run cancelled job 3 and its Done started job 5"
+    );
+    for applied in [true, false] {
+        assert_eq!(
+            core.handle(Input::SummaryStored {
+                owner: SendKey::Job(key(3)),
+                applied
+            }),
+            Ok(Vec::new())
+        );
+    }
+    assert_eq!(
+        core.handle(job_built(key(5), &[T])),
+        Ok(vec![start_job(key(5), R2)]),
+        "job 5 is still in the slot"
+    );
+}
+
+#[test]
+fn a_delete_during_compaction_stores_nothing() {
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(delete(T, 1)),
+        Ok(Vec::new()),
+        "the lease holds it"
+    );
+    assert_eq!(
+        core.handle(Input::SendSettled {
+            lease: lease(key(3), 1)
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: T })])
+    );
+    assert_eq!(core.handle(summarized(key(3))), Ok(Vec::new()));
+}
+
+#[test]
+fn a_delete_of_a_quoted_task_voids_kumos_compaction() {
+    let mut core = signed_in();
+    let kumo = JobKey {
+        thread: MAIN,
+        serial: 2,
+    };
+    run_done(&mut core, Some(MAIN), R);
+    assert_eq!(
+        core.handle(delete(T, 0)),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: T })])
+    );
+    assert_eq!(
+        core.handle(Input::JobBuilt(JobBuilt {
+            key: kumo,
+            result: Ok(Some(JobAsk {
+                generation: G,
+                built: Built {
+                    request: request(),
+                    sources: vec![MAIN, T],
+                },
+                covers: Some(COVERS),
+            })),
+        })),
+        Ok(Vec::new()),
+        "the summary would have carried the deleted task's text"
+    );
+}
+
+#[test]
+fn sign_out_while_a_summary_request_is_held_stores_nothing() {
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(Input::SignedOut { generation: 1 }),
+        Ok(vec![Effect::CancelJob(key(3))])
+    );
+    assert_eq!(core.handle(summarized(key(3))), Err(Stale));
+    assert_eq!(core.handle(ready(key(3))), Ok(rebuild(key(3))));
+}
+
+#[test]
+fn a_title_output_never_becomes_a_summary_or_the_reverse() {
+    let mut core = compacting();
+    assert_eq!(
+        core.handle(job_done(key(3), Some(titled("Not a summary")))),
+        Ok(Vec::new())
+    );
+    let mut core = reading();
+    assert_eq!(
+        core.handle(job_built(key(2), &[T])),
+        Ok(vec![start_job(key(2), R)])
+    );
+    assert_eq!(core.handle(summarized(key(2))), Ok(vec![compacts(3)]));
 }

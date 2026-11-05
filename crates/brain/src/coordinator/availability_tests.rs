@@ -39,6 +39,7 @@ fn typed_with(availability: Option<Input>) -> (Coordinator, Vec<Effect>) {
     }
     let mut effects = core
         .handle(Input::Turn {
+            turn: 1,
             thread: None,
             text: "hi".to_owned(),
         })
@@ -56,6 +57,7 @@ fn typed_with(availability: Option<Input>) -> (Coordinator, Vec<Effect>) {
                 thread: T,
                 phase: Phase::Thinking,
                 error: None,
+                origin: Some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
             }),
             Effect::ArmDeadline {
                 run: R,
@@ -124,6 +126,7 @@ fn told(reason: Option<UserError>) -> Vec<Effect> {
             thread: T,
             phase: Phase::Failed,
             error: reason,
+            origin: None,
         }),
         Effect::Data(kumochi_protocol::message::DataToShell::RunEnd { run: R }),
     ]

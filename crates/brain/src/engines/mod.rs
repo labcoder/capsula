@@ -26,8 +26,9 @@ use kumochi_protocol::message::{RunId, ThreadId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+use crate::context::compact::clean_summary;
 use crate::context::{ModelRequest, Origin};
-use crate::coordinator::{Input, JobKey, LeaseId, SendKey};
+use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
 const ROUND_QUEUE: usize = 1;
@@ -437,27 +438,32 @@ pub fn start(
 pub(crate) fn start_job(
     engine: &dyn Engine,
     request: RunRequest,
-    key: JobKey,
+    (key, kind): (JobKey, JobKind),
     inputs: mpsc::UnboundedSender<Input>,
     gate: SendGate,
 ) -> Cancel {
     let (events_tx, events) = mpsc::channel(ROUND_QUEUE);
     let round = engine.start(request, events_tx, gate);
-    Cancel(tokio::spawn(collect(key, round, events, inputs)).abort_handle())
+    Cancel(tokio::spawn(collect(key, kind, round, events, inputs)).abort_handle())
 }
 
-/// Takes a title job's text until its round completes. Anything but text and native items,
-/// more than [`crate::jobs::MAX_OUTPUT`] bytes, or a round that ends any other way fails it.
-/// It logs the outcome, never the text.
+/// Takes a job's text until its round completes, and cleans it into a title or summary as its
+/// key's kind says. Anything but text and native items, more than the kind's limit, or a round
+/// that ends any other way fails it. It logs the outcome, never the text.
 async fn collect(
     key: JobKey,
+    kind: JobKind,
     mut round: Round,
     mut events: mpsc::Receiver<TurnEvent>,
     inputs: mpsc::UnboundedSender<Input>,
 ) {
+    let limit = match kind {
+        JobKind::Title => crate::jobs::MAX_OUTPUT,
+        JobKind::Compact => crate::jobs::MAX_SUMMARY_OUTPUT,
+    };
     let mut text = String::new();
     let mut playing = true;
-    let title = loop {
+    let output = loop {
         let event = tokio::select! {
             biased;
             event = events.recv() => event.unwrap_or(TurnEvent::Finished(Finish::Truncated)),
@@ -468,22 +474,28 @@ async fn collect(
             }
         };
         match event {
-            TurnEvent::TextDelta(delta) if text.len() + delta.len() <= crate::jobs::MAX_OUTPUT => {
+            TurnEvent::TextDelta(delta) if text.len() + delta.len() <= limit => {
                 text.push_str(&delta);
             }
             TurnEvent::OutputItem { .. } => {}
-            TurnEvent::Finished(Finish::Completed) => break crate::jobs::clean_title(&text),
+            TurnEvent::Finished(Finish::Completed) => {
+                break match kind {
+                    JobKind::Title => crate::jobs::clean_title(&text).map(JobOutput::Title),
+                    JobKind::Compact => clean_summary(&text).map(JobOutput::Summary),
+                };
+            }
             _ => break None,
         }
     };
     tracing::info!(
         thread = key.thread.0,
         serial = key.serial,
-        titled = title.is_some(),
-        "a title job ended"
+        ?kind,
+        produced = output.is_some(),
+        "a job ended"
     );
-    if inputs.send(Input::JobDone { key, title }).is_err() {
-        tracing::debug!("a title job ended after the brain");
+    if inputs.send(Input::JobDone { key, output }).is_err() {
+        tracing::debug!("a job ended after the brain");
     }
 }
 
@@ -524,7 +536,7 @@ mod tests {
         Answer, Asks, CallId, Cancel, Engine, Finish, Opaque, Refused, Round, RunRequest, SendGate,
         SendLease, ToolName, TurnEvent, answer, start,
     };
-    use crate::coordinator::{Input, JobKey, LeaseId};
+    use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId};
 
     /// What a test round does once its events are sent.
     #[derive(Clone, Copy, Debug)]
@@ -645,6 +657,16 @@ mod tests {
 
     /// What a title job's round of `events` reports.
     async fn job_title(events: Vec<TurnEvent>, then: Then) -> Option<String> {
+        job_output(events, then, JobKind::Title)
+            .await
+            .map(|output| match output {
+                JobOutput::Title(title) => title.as_str().to_owned(),
+                JobOutput::Summary(_) => panic!("a title job reports a title"),
+            })
+    }
+
+    /// What a job of `kind` reports for a round of `events`.
+    async fn job_output(events: Vec<TurnEvent>, then: Then, kind: JobKind) -> Option<JobOutput> {
         let (alive, _gone) = mpsc::channel(1);
         let engine = Sends {
             events,
@@ -657,12 +679,48 @@ mod tests {
         };
         let (inputs, mut received) = mpsc::unbounded_channel();
         let gate = SendGate::closed(request().key);
-        let _cancel = super::start_job(&engine, request(), key, inputs, gate);
-        let Some(Input::JobDone { key: done, title }) = received.recv().await else {
+        let _cancel = super::start_job(&engine, request(), (key, kind), inputs, gate);
+        let Some(Input::JobDone { key: done, output }) = received.recv().await else {
             panic!("a job reports JobDone");
         };
         assert_eq!(done, key, "it reports its own key");
-        title.map(|title| title.as_str().to_owned())
+        output
+    }
+
+    #[tokio::test]
+    async fn a_compaction_job_takes_up_to_16_kib_and_cuts_it_to_the_summary_bound() {
+        let completed = TurnEvent::Finished(Finish::Completed);
+        let limit = crate::jobs::MAX_SUMMARY_OUTPUT;
+        assert_eq!(limit, 16 * 1024);
+        assert_eq!(
+            job_output(
+                vec![text("  Earlier: "), text("Lisbon\n"), completed.clone()],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            Some(JobOutput::Summary("Earlier: Lisbon".to_owned()))
+        );
+        assert_eq!(
+            job_output(
+                vec![text(&"x".repeat(limit)), completed.clone()],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            Some(JobOutput::Summary("x".repeat(8 * 1024))),
+            "exactly 16 KiB is taken"
+        );
+        assert_eq!(
+            job_output(
+                vec![text(&"x".repeat(limit - 1)), text("yy"), completed],
+                Then::End,
+                JobKind::Compact
+            )
+            .await,
+            None,
+            "one byte over across deltas fails"
+        );
     }
 
     #[tokio::test]
@@ -685,6 +743,11 @@ mod tests {
             .await,
             Some("Lisbon trip".to_owned())
         );
+        assert_eq!(
+            job_title(vec![text(&"x".repeat(4096)), completed.clone()], Then::End).await,
+            Some("x".repeat(80)),
+            "exactly 4 KiB is taken"
+        );
         let over = "x".repeat(crate::jobs::MAX_OUTPUT + 1);
         let call = TurnEvent::ToolCallStarted {
             call: CallId::new("call-1").expect("ascii"),
@@ -694,6 +757,7 @@ mod tests {
             vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
             vec![text("Lisbon")],
             vec![text(&over), completed.clone()],
+            vec![text(&"x".repeat(4095)), text("yy"), completed.clone()],
             vec![call, completed.clone()],
             vec![text("\u{7}"), completed],
         ] {

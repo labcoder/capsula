@@ -14,6 +14,9 @@ needs a new browser sign-in. If another Windows session owns the account, close 
 the app, then use **Try again**. If the background process disconnects, account controls
 wait until it reconnects and reports the current state.
 
+If earlier sessions still need to end, new sign-in stays unavailable. Choose **Retry**;
+the panel separates the immediate recovery from the expiry and ChatGPT settings help.
+
 ## Sign out
 
 **Sign out…** asks first. **Cancel** or Escape leaves the account alone. Confirming stops
@@ -30,6 +33,8 @@ in again. Don't treat that warning as a completed sign-out.
 Local cleanup and OpenAI's confirmation are separate. If OpenAI hasn't confirmed yet, the
 panel says so. After local sign-out finishes, it may still say OpenAI didn't confirm that
 the session ended. You can also disconnect the app in ChatGPT settings.
+The panel labels the local risk **On this computer** and an unconfirmed remote outcome
+**At OpenAI**. A cleanup waiting for Retry says **Sign-out needs attention**.
 
 Your sign-in is held in the system credential store, never in the settings file. Development
 builds use their own account storage, separate from an installed copy.

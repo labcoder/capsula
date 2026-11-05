@@ -46,6 +46,8 @@ fn state(run: RunId, thread: ThreadId, phase: Phase) -> Effect {
         thread,
         phase,
         error: None,
+        origin: (phase == Phase::Thinking)
+            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
     })
 }
 
@@ -239,6 +241,7 @@ fn failed_store() -> Effect {
 fn started() -> Coordinator {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -252,6 +255,7 @@ fn a_turn_is_stored_before_the_engine_starts() {
     let mut core = fresh();
     let turn = core
         .handle(Input::Turn {
+            turn: 1,
             thread: None,
             text: "  \n  Draw a cat\nplease".to_owned(),
         })
@@ -433,6 +437,7 @@ fn stop_tells_the_shell_at_once_and_refuses_everything_late() {
 fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_starts() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(ThreadId(2)),
         text: "hi".to_owned(),
     })
@@ -468,6 +473,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
     let mut core = started();
     let next = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "again".to_owned(),
         })
@@ -582,6 +588,7 @@ fn a_repeated_step_ack_changes_nothing() {
 
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -649,6 +656,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
     let mut core = started();
     draw_step(&mut core, R, "a").expect("current");
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(T),
         text: "again".to_owned(),
     })
@@ -767,6 +775,7 @@ fn a_stalled_view_or_a_refused_turn_ends_the_run() {
 
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(ThreadId(99)),
         text: "hi".to_owned(),
     })
@@ -875,6 +884,7 @@ fn a_lost_shell_isnt_told_about_runs_still_ending() {
 fn the_engine_is_heard_only_once_its_turn_is_stored() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
         text: "hi".to_owned(),
     })
@@ -929,6 +939,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         .expect("current");
     assert_eq!(
         core.handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "b".to_owned(),
         })
@@ -961,6 +972,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
     assert_eq!(core.handle(Input::TurnStored { run: b }), Err(Stale));
     assert_eq!(
         core.handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
             text: "c".to_owned(),
         })

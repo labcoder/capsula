@@ -51,6 +51,7 @@ fn failed(key: ErrorKey, action: Action) -> Effect {
         thread: T,
         phase: Phase::Failed,
         error: Some(UserError::new(key, Vec::new(), vec![action]).expect("one action")),
+        origin: None,
     })
 }
 

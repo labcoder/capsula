@@ -77,6 +77,7 @@ pub(crate) enum Target {
 #[derive(Debug, Default)]
 pub(crate) struct Runs {
     connected: bool,
+    turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
@@ -171,6 +172,8 @@ impl Runs {
         }
         Ok((
             DataToBrain::TextSubmit {
+                turn: self.turns_sent.checked_add(1).ok_or(Refused::Busy)?,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: self.thread(),
                 text: text.to_owned(),
             },
@@ -262,6 +265,7 @@ impl Runs {
             return Err(Refused::Offline);
         }
         self.submitted.push_back(revision);
+        self.turns_sent += 1;
         Ok(())
     }
 
@@ -388,6 +392,7 @@ impl Runs {
     /// The link connected, as connection `generation`.
     pub(crate) fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.turns_sent = 0;
         self.drawing.connected(generation);
     }
 

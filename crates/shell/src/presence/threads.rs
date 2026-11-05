@@ -151,7 +151,7 @@ impl Presence {
         Ok(())
     }
 
-    fn create_threads(&self, cx: &mut Context<'_, Self>) -> Result<ThreadsPanel, OpenError> {
+    fn create_threads(&mut self, cx: &mut Context<'_, Self>) -> Result<ThreadsPanel, OpenError> {
         let model = self.threads.clone();
         let owner = cx.weak_entity();
         let error = self.error.clone();
@@ -175,6 +175,8 @@ impl Presence {
         window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, events, cx)?;
+                self.input_windows
+                    .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
                 platform::set_capture(window, capture)
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;

@@ -766,7 +766,9 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
-            | ControlToShell::ThreadsChanged,
+            | ControlToShell::ThreadsChanged
+            | ControlToShell::CaptureDone { .. }
+            | ControlToShell::CaptureFailed { .. },
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -845,6 +847,7 @@ fn watch(
                 thread,
                 phase,
                 error,
+                ..
             })) => {
                 if events
                     .send_blocking(LinkEvent::RunState {
@@ -910,6 +913,9 @@ fn watch(
                 {
                     return;
                 }
+            }
+            // shortcut: B3a releases the exclusion lease on these; nothing holds one yet.
+            Ok(Some(ControlToShell::CaptureDone { .. } | ControlToShell::CaptureFailed { .. })) => {
             }
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {

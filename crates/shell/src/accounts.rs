@@ -72,6 +72,14 @@ impl Accounts {
         if self.waiting.is_some() {
             return false;
         }
+        if op == AccountOp::SignIn
+            && self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.key() == ErrorKey::RevocationBacklog)
+        {
+            return false;
+        }
         match (&self.view, op) {
             (Some(AccountView::SignedOut { .. } | AccountView::SigningIn), AccountOp::SignIn)
             | (Some(AccountView::SigningIn), AccountOp::CancelSignIn)

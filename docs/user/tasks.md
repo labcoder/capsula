@@ -25,7 +25,9 @@ in the typing box with a busy notice. Retry once the task is ready to continue i
 Choose **Rename** on the task you're viewing to edit its name inline. Enter sends the edit; invalid
 text shows an error beside the field. Task titles must be one line, 1–80 characters after
 trimming, with no control characters. The displayed title changes only after the saved title
-is read back; it can lag until the next refresh or until you reopen the panel. Renaming Kumo
+is read back. A new task starts with the first words of its first message as its title. After
+one of its runs finishes, Kumochi may ask the task's model for a short title to replace those
+words; if that fails, the first words stay, and a name you set yourself is never replaced. Renaming Kumo
 changes the assistant's name instead: it has the same rules with a 1–24-character limit, and
 the displayed name waits for confirmation from the background
 process. A name update keeps your draft and doesn't switch tasks or move keyboard focus.
