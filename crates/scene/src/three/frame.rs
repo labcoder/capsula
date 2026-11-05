@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 type Point = [f64; 3];
 
 /// A source face's stable plane anchors and its outward-wound tessellation.
-/// All triangles must be coplanar with the anchors; preparation retains the same anchors when
-/// changing triangulation. Indices name vertices within the owning solid, including shared edges.
+/// Triangles tessellate one source plane, allowing f32 vertex rounding off it; preparation retains
+/// the same anchors across triangulations. Indices name vertices within the solid, including edges.
 #[derive(Debug, Clone, Copy)]
 pub struct Face<'a> {
     /// Three noncollinear original vertices defining the source face, independent of triangulation.
@@ -91,6 +91,10 @@ fn finite(p: Point) -> Result<Point, FrameError> {
     }
 }
 fn poll(cancel: &AtomicBool) -> Result<(), FrameError> {
+    #[cfg(test)]
+    if tests::skip_poll() {
+        return Ok(());
+    }
     if cancel.load(Ordering::Relaxed) {
         Err(FrameError::Cancelled)
     } else {
@@ -327,6 +331,7 @@ fn build(
                 let mut len = 3;
                 for (plane, offset) in planes {
                     if poly[..len].iter().any(|v| dot(plane, v.p) + offset < 0.0) {
+                        // shortcut: clip overflow rejects the frame; drop slivers once a reachable fixture establishes them.
                         len = clip(&mut poly, len, plane, offset)?;
                     }
                     if len < 3 {
@@ -377,6 +382,131 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! { static SKIP_POLLS: Cell<usize> = const { Cell::new(0) }; }
+
+    pub(super) fn skip_poll() -> bool {
+        SKIP_POLLS.with(|remaining| {
+            let count = remaining.get();
+            remaining.set(count.saturating_sub(1));
+            count > 0
+        })
+    }
+
+    #[test]
+    fn triangle_loop_stops_at_exactly_1024_and_frame_clears_partial_output() {
+        let vertices = [
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let triangles = vec![[0, 1, 2]; 2049];
+        let faces = [Face {
+            anchors: [0, 1, 2],
+            triangles: &triangles,
+        }];
+        let solids = [Solid {
+            vertices: &vertices,
+            faces: &faces,
+            pose: Transform::local([0.0; 3], [0.0; 3], 1.0),
+            rgb: [255; 3],
+            opacity: 1.0,
+        }];
+        let camera = Camera::new(0.0, 0.0, 2.0, 90.0, [0.0; 3]).unwrap();
+        let light = Light::new([0.0, 0.0, -1.0], 0.0).unwrap();
+        let mut out = FrameScratch::with_capacity(2049);
+        let cancel = AtomicBool::new(true);
+        SKIP_POLLS.with(|n| n.set(12));
+        assert_eq!(
+            build(&solids, &camera, &light, [8, 8], &mut out, &cancel),
+            Err(FrameError::Cancelled)
+        );
+        assert_eq!(
+            out.len(),
+            1024,
+            "entry, preparation and the first triangle poll are bypassed, not the 1024 poll"
+        );
+        SKIP_POLLS.with(|n| n.set(12));
+        assert_eq!(
+            frame(&solids, &camera, &light, [8, 8], &mut out, &cancel),
+            Err(FrameError::Cancelled)
+        );
+        assert_eq!(
+            out.len(),
+            0,
+            "a cancelled candidate cannot retain the first quantum"
+        );
+        SKIP_POLLS.with(|n| n.set(0));
+    }
+
+    #[test]
+    fn clip_removes_consecutive_and_closing_input_duplicates() {
+        for source in [
+            vec![
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [2.0, 0.0, 1.0],
+                [0.0, 2.0, 1.0],
+            ],
+            vec![
+                [0.0, 0.0, 1.0],
+                [2.0, 0.0, 1.0],
+                [0.0, 2.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+        ] {
+            let mut poly = polygon(&source);
+            assert_eq!(clip(&mut poly, source.len(), [0.0, 0.0, 1.0], 0.0), Ok(3));
+            assert_eq!(
+                poly[..3]
+                    .iter()
+                    .map(|v| v.p.map(f64::to_bits))
+                    .collect::<Vec<_>>(),
+                [[0.0_f64, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]]
+                    .map(|p| p.map(f64::to_bits))
+            );
+        }
+    }
+
+    #[test]
+    fn reversed_shared_edges_remain_bit_identical_after_near_and_guard_clipping() {
+        for endpoints in [
+            [[-22.345, -12.23, 0.3], [0.1, 0.2, 1.2]],
+            [[-22.345, 12.23, 0.3], [0.1, -0.2, 1.2]],
+        ] {
+            let mut forward = polygon(&endpoints);
+            forward[1].index = 2;
+            let mut reverse = forward;
+            reverse[..2].reverse();
+            let mut counts = [2, 2];
+            for (plane, offset) in [
+                ([0.0, 0.0, 1.0], -0.5),
+                ([2048.0, 0.0, 6144.0], 0.0),
+                ([-2048.0, 0.0, 6144.0], 0.0),
+                ([0.0, -2048.0, 5632.0], 0.0),
+                ([0.0, 2048.0, 5632.0], 0.0),
+            ] {
+                counts[0] = clip(&mut forward, counts[0], plane, offset).unwrap();
+                counts[1] = clip(&mut reverse, counts[1], plane, offset).unwrap();
+            }
+            assert_eq!(counts, [2, 2]);
+            let mut a = forward[..2]
+                .iter()
+                .map(|v| v.p.map(f64::to_bits))
+                .collect::<Vec<_>>();
+            let mut b = reverse[..2]
+                .iter()
+                .map(|v| v.p.map(f64::to_bits))
+                .collect::<Vec<_>>();
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(
+                a, b,
+                "a one-ulp clipped endpoint mismatch must not be hidden by texel snapping"
+            );
+        }
+    }
 
     fn polygon(points: &[Point]) -> [Vertex; 8] {
         let mut out = [Vertex::default(); 8];

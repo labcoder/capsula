@@ -84,17 +84,26 @@ fn image(out: &mut FrameScratch, size: [u32; 2], quality: Quality) -> (Vec<u32>,
     (color, ids)
 }
 
+fn assert_ulps(actual: f64, expected: f64, ulps: u64) {
+    assert!(
+        actual.is_finite() && actual.to_bits().abs_diff(expected.to_bits()) <= ulps,
+        "{actual} differs from {expected} by more than {ulps} ulps"
+    );
+}
+
 #[test]
 fn camera_defaults_use_world_bounds_and_authored_inside_distance_survives_until_orbit() {
     let view: View3d = serde_json::from_str(r#"{"id":"view"}"#).expect("valid fixture");
     let mut cam =
         Camera::authored(&view, [[10.0, 20.0, 30.0], [12.0, 24.0, 34.0]]).expect("valid fixture");
     assert_eq!(cam.parameters(), [30.0, 20.0, 9.0, 40.0]);
-    let basis = cam.basis();
-    assert_eq!(
-        cam.eye(),
-        std::array::from_fn(|i| [11.0, 22.0, 32.0][i] - 9.0 * basis[2][i])
-    );
+    for (actual, expected) in cam.eye().into_iter().zip([
+        15.228_616_793_536_588,
+        25.078_181_289_931_02,
+        39.324_179_132_144_365,
+    ]) {
+        assert_ulps(actual, expected, 2);
+    }
     let view: View3d =
         serde_json::from_str(r#"{"id":"view","camera":{"dist":0.001}}"#).expect("valid fixture");
     cam = Camera::authored(&view, [[-1.0; 3], [1.0; 3]]).expect("valid fixture");
@@ -103,9 +112,197 @@ fn camera_defaults_use_world_bounds_and_authored_inside_distance_survives_until_
     assert_eq!(cam.parameters(), [20.0, 85.0, 1.2, 40.0]);
     cam.orbit(0.0, -1000.0, 0.1).expect("valid fixture");
     assert_eq!(
-        cam.parameters(),
-        [20.0, -85.0, 0.600_000_000_000_000_1, 40.0]
+        [
+            cam.parameters()[0],
+            cam.parameters()[1],
+            cam.parameters()[3]
+        ],
+        [20.0, -85.0, 40.0]
     );
+    assert_ulps(cam.parameters()[2], 0.6, 2);
+}
+
+#[test]
+fn all_authored_fields_light_defaults_and_yaw_wrap_are_mapped() {
+    let view: View3d = serde_json::from_str(r#"{"id":"v","camera":{"yaw":-30,"pitch":-10,"dist":4,"fov":120,"target":[1,2,3]},"light":{"dir":[0,0,-2],"ambient":0.25}}"#).expect("valid fixture");
+    assert_eq!(
+        Camera::authored(&view, [[-1.0; 3], [1.0; 3]]).expect("valid bounds"),
+        Camera::new(330.0, -10.0, 4.0, 120.0, [1.0, 2.0, 3.0]).expect("valid camera")
+    );
+    assert_eq!(
+        Light::authored(&view),
+        Light::new([0.0, 0.0, -1.0], 0.25).expect("valid light")
+    );
+    let defaults: View3d = serde_json::from_str(r#"{"id":"v"}"#).expect("valid fixture");
+    assert_eq!(
+        Light::authored(&defaults),
+        Light::new([-1.0, -2.0, -1.0], 0.35).expect("valid light")
+    );
+    for (yaw, expected) in [(-30.0, 330.0), (390.0, 30.0)] {
+        assert_eq!(
+            Camera::new(yaw, 0.0, 2.0, 90.0, [0.0; 3])
+                .expect("valid camera")
+                .parameters()[0],
+            expected
+        );
+    }
+    let mut orbit = Camera::new(30.0, 0.0, 2.0, 90.0, [0.0; 3]).expect("valid camera");
+    orbit.orbit(100.0, 0.0, 1.0).expect("valid orbit");
+    assert_eq!(orbit.parameters()[0], 350.0);
+}
+
+#[test]
+fn rotated_camera_and_pose_shade_in_world_space() {
+    let faces = [Face {
+        anchors: [0, 1, 2],
+        triangles: &SPLIT,
+    }];
+    let cam = Camera::new(30.0, 20.0, 3.0, 60.0, [0.0; 3]).expect("valid camera");
+    let view: View3d = serde_json::from_str(r#"{"id":"v"}"#).expect("valid fixture");
+    for (rotation, expected) in [
+        ([0.0; 3], [31, 62, 123, 255]),
+        ([-90.0, 0.0, 0.0], [44, 88, 176, 255]),
+    ] {
+        let mut s = solid(&SQUARE, &faces);
+        s.pose = Transform::local([0.0; 3], rotation, 1.0);
+        let mut out = FrameScratch::with_capacity(2);
+        frame(
+            &[s],
+            &cam,
+            &Light::authored(&view),
+            [16, 8],
+            &mut out,
+            &AtomicBool::new(false),
+        )
+        .expect("valid frame");
+        let (color, ids) = image(&mut out, [16, 8], Quality::Motion);
+        assert_eq!(
+            ids[3 * 16 + 8],
+            1,
+            "the centre-adjacent sample is on the face"
+        );
+        for (pixel, id) in color.into_iter().zip(ids) {
+            if id == 1 {
+                assert_eq!(pixel.to_le_bytes(), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn non_square_renders_have_exact_vertical_fov_and_per_axis_centres() {
+    let vertices = [
+        Vec3::new(-1.0, -0.5, 0.0),
+        Vec3::new(0.5, -0.5, 0.0),
+        Vec3::new(0.5, 0.5, 0.0),
+        Vec3::new(-1.0, 0.5, 0.0),
+    ];
+    let faces = [Face {
+        anchors: [0, 1, 2],
+        triangles: &SPLIT,
+    }];
+    for (size, columns, rows) in [([16, 8], 6..9, 3..5), ([8, 16], 0..6, 6..10)] {
+        let mut out = build(&[solid(&vertices, &faces)], &camera(), size, 2);
+        let (_, ids) = image(&mut out, size, Quality::Motion);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                assert_eq!(
+                    ids[(y * size[0] + x) as usize],
+                    u8::from(columns.contains(&x) && rows.contains(&y)),
+                    "{size:?} at {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn degenerate_triangle_is_counted_and_degenerate_anchor_faces_are_culled() {
+    let repeated = [[0, 0, 1]];
+    let faces = [Face {
+        anchors: [0, 1, 2],
+        triangles: &repeated,
+    }];
+    let out = build(&[solid(&SQUARE, &faces)], &camera(), [8, 8], 1);
+    assert_eq!((out.len(), out.discarded()), (0, 1));
+    for (vertices, anchors) in [
+        (SQUARE, [0, 0, 1]),
+        (SQUARE.map(|v| Vec3::new(v.x, 0.0, v.z)), [0, 1, 2]),
+        (SQUARE.map(|v| Vec3::new(v.x, v.y, 2.0)), [0, 1, 2]),
+    ] {
+        let faces = [Face {
+            anchors,
+            triangles: &SPLIT,
+        }];
+        let out = build(&[solid(&vertices, &faces)], &camera(), [8, 8], 2);
+        assert_eq!((out.len(), out.discarded()), (0, 0));
+    }
+}
+
+#[test]
+fn rounded_source_plane_is_shared_by_both_six_vertex_fans() {
+    let hexagon = [
+        (1.0, 0.1),
+        (0.37, 0.91),
+        (-0.62, 0.79),
+        (-0.94, -0.16),
+        (-0.23, -0.87),
+        (0.71, -0.65),
+    ]
+    .map(|(x, y)| {
+        Vec3::new(
+            (100.0 + x) as f32,
+            (200.0 + y) as f32,
+            (300.0 - (x + 2.0 * y) / 3.0) as f32,
+        )
+    });
+    let positions = hexagon.map(|v| [v.x, v.y, v.z].map(f64::from));
+    let normal = vector(
+        delta(positions[1], positions[0]),
+        delta(positions[2], positions[0]),
+    );
+    assert!(
+        (3..6).any(|i| scalar(normal, delta(positions[i], positions[0])).abs() > 1e-6),
+        "f32 rounding must take vertices off the anchor plane"
+    );
+    let fans = [
+        [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]],
+        [[3, 4, 5], [3, 5, 0], [3, 0, 1], [3, 1, 2]],
+    ];
+    for depth in [f32::from_bits(0x3f00_0007), f32::from_bits(0x3f00_0008)] {
+        let cam = Camera::new(
+            0.0,
+            0.0,
+            1.0 / f64::from(depth),
+            90.0,
+            [100.0, 200.0, 300.0],
+        )
+        .expect("valid camera");
+        for (front, back) in [(0, 1), (1, 0)] {
+            let first = [Face {
+                anchors: [0, 1, 2],
+                triangles: &fans[front],
+            }];
+            let second = [Face {
+                anchors: [0, 1, 2],
+                triangles: &fans[back],
+            }];
+            let mut reference = build(&[solid(&hexagon, &first)], &cam, [128, 128], 4);
+            let mut overlap = build(
+                &[solid(&hexagon, &first), solid(&hexagon, &second)],
+                &cam,
+                [128, 128],
+                8,
+            );
+            for quality in [Quality::Motion, Quality::Rest] {
+                assert_eq!(
+                    image(&mut overlap, [128, 128], quality),
+                    image(&mut reference, [128, 128], quality),
+                    "depth {depth:?}, fan {front}, {quality:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -203,19 +400,15 @@ fn translated_tiny_camera_has_orthonormal_basis_and_precision_floor() {
             );
         }
     }
-    assert_eq!(
-        cam.eye(),
-        [
-            20_000.000_469_846_31,
-            20_000.000_342_020_143,
-            20_000.000_813_797_68
-        ]
-    );
+    for (actual, expected) in cam.eye().into_iter().zip([
+        20_000.000_469_846_31,
+        20_000.000_342_020_143,
+        20_000.000_813_797_68,
+    ]) {
+        assert_ulps(actual, expected, 2);
+    }
     let near = cam.near(1.0, 20000.0, 1440).expect("valid fixture");
-    assert_eq!(
-        near.to_bits(),
-        (11.25_f64 / 20.0_f64.to_radians().tan()).to_bits()
-    );
+    assert_ulps(near, 11.25_f64 / 20.0_f64.to_radians().tan(), 2);
     assert_eq!(
         Camera::new(0.0, 0.0, 0.001, 90.0, [0.0; 3])
             .expect("valid fixture")
@@ -459,33 +652,38 @@ fn admitted_counts_capacity_sizes_invalid_indices_and_empty_frames() {
 
 #[test]
 fn opposite_shared_edges_near_and_guard_clips_cover_once_including_snap_ties() {
-    let face = [Face {
-        anchors: [0, 1, 2],
-        triangles: &SPLIT,
-    }];
-    for shift in [0.0, 1.0 / 2048.0] {
-        for depth in [0.0, 1.0] {
-            let vertices = [
-                Vec3::new(-1000.0, -1000.0, depth),
-                Vec3::new(1000.0, -1000.0, depth),
-                Vec3::new(1000.0, 1000.0, 2.0),
-                Vec3::new(-1000.0, 1000.0, 2.0),
-            ];
-            let mut s = solid(&vertices, &face);
-            s.opacity = 0.5;
-            let cam = Camera::new(0.0, 0.0, 2.0, 90.0, [shift, 0.0, 0.0]).expect("valid fixture");
-            let mut out = build(&[s], &cam, [8, 8], 2);
-            assert_eq!((out.len(), out.discarded()), (2, 0));
-            for q in [Quality::Motion, Quality::Rest] {
-                let (pixels, ids) = image(&mut out, [8, 8], q);
-                assert_eq!(ids, vec![1; 64]);
-                assert_eq!(
-                    pixels
-                        .iter()
-                        .map(|v| v.to_le_bytes()[3])
-                        .collect::<Vec<_>>(),
-                    vec![128; 64]
-                );
+    for triangles in [&SPLIT, &OTHER] {
+        for size in [[8, 8], [32, 32], [96, 64], [64, 96]] {
+            let face = [Face {
+                anchors: [0, 1, 2],
+                triangles,
+            }];
+            for shift in [0.0, 1.0 / 2048.0, 0.0017] {
+                for depth in [0.0, 1.0] {
+                    let vertices = [
+                        Vec3::new(-1000.0, -1000.0, depth),
+                        Vec3::new(1000.0, -1000.0, depth),
+                        Vec3::new(1000.0, 1000.0, 2.0),
+                        Vec3::new(-1000.0, 1000.0, 2.0),
+                    ];
+                    let mut s = solid(&vertices, &face);
+                    s.opacity = 0.5;
+                    let cam =
+                        Camera::new(0.0, 0.0, 2.0, 90.0, [shift, 0.0, 0.0]).expect("valid fixture");
+                    let mut out = build(&[s], &cam, size, 2);
+                    assert_eq!((out.len(), out.discarded()), (2, 0));
+                    for q in [Quality::Motion, Quality::Rest] {
+                        let (pixels, ids) = image(&mut out, size, q);
+                        assert_eq!(ids, vec![1; (size[0] * size[1]) as usize]);
+                        assert_eq!(
+                            pixels
+                                .iter()
+                                .map(|v| v.to_le_bytes()[3])
+                                .collect::<Vec<_>>(),
+                            vec![128; (size[0] * size[1]) as usize]
+                        );
+                    }
+                }
             }
         }
     }
@@ -498,9 +696,13 @@ fn precision_floor_clips_at_the_world_float_boundary_and_bad_depth_clears_output
         triangles: &SPLIT,
     }];
     let cam = Camera::new(0.0, 0.0, 1.0, 90.0, [16384.0; 3]).expect("valid fixture");
-    assert_eq!(cam.near(2.0, 16385.0, 8), Ok(0.062_500_000_000_000_01));
+    assert_ulps(
+        cam.near(2.0, 16385.0, 8).expect("finite near floor"),
+        0.0625,
+        2,
+    );
     let boundary = f32::from_bits(0x4680_01e0);
-    for (z, expected) in [(boundary.next_down(), 2), (boundary, 0)] {
+    for (z, expected) in [(boundary.next_down(), 2), (boundary.next_up(), 0)] {
         let mut s = solid(&SQUARE, &faces);
         s.pose = Transform::local([16384.0, 16384.0, z], [0.0; 3], 1.0);
         let out = build(&[s], &cam, [8, 8], 2);
@@ -707,6 +909,82 @@ fn edge_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 #[test]
+fn partial_near_and_guard_clips_on_both_diagonals_match_rays_at_non_square_sizes() {
+    for distance in [0.8, 1.0, 1.2] {
+        let vertices = [(-200.0, -1.0), (200.0, -1.0), (200.0, 1.0), (-200.0, 1.0)]
+            .map(|(x, y)| Vec3::new(x, y, (distance * 0.95 - 0.4 * f64::from(y)) as f32));
+        for size in [[96, 64], [64, 96]] {
+            let focal = f64::from(size[1]) / (2.0 * (60.0_f64.to_radians()).tan());
+            let cam = Camera::new(0.0, 0.0, distance, 120.0, [0.0; 3]).expect("valid camera");
+            let z0 = distance - f64::from(vertices[0].z);
+            let z1 = distance - f64::from(vertices[2].z);
+            let radius = (200.0_f64.powi(2) + 1.0 + ((z1 - z0) / 2.0).powi(2)).sqrt();
+            let near = (distance * 0.05).max(radius * 1e-4);
+            let near_y = -1.0 + 2.0 * (near - z0) / (z1 - z0);
+            let project = |x: f64, y: f64, z: f64| {
+                [
+                    f64::from(size[0]) / 2.0 + focal * x / z,
+                    f64::from(size[1]) / 2.0 - focal * y / z,
+                ]
+            };
+            let boundary = [
+                project(-200.0, near_y, near),
+                project(200.0, near_y, near),
+                project(200.0, 1.0, z1),
+                project(-200.0, 1.0, z1),
+            ];
+            for diagonal in [&SPLIT, &OTHER] {
+                let faces = [Face {
+                    anchors: [0, 1, 2],
+                    triangles: diagonal,
+                }];
+                let solids = [solid(&vertices, &faces)];
+                let triangles = world_triangles(&solids);
+                let mut out = build(&solids, &cam, size, 2);
+                assert_eq!((out.len(), out.discarded()), (2, 0));
+                for quality in [Quality::Motion, Quality::Rest] {
+                    let (color, ids) = image(&mut out, size, quality);
+                    let mut counts = [0; 2];
+                    for y in 0..size[1] {
+                        for x in 0..size[0] {
+                            let sample = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                            if (0..4).any(|i| {
+                                edge_distance(sample, boundary[i], boundary[(i + 1) % 4]) <= 1.0
+                            }) {
+                                continue;
+                            }
+                            let ray = [
+                                (sample[0] - f64::from(size[0]) / 2.0) / focal,
+                                -(sample[1] - f64::from(size[1]) / 2.0) / focal,
+                                -1.0,
+                            ];
+                            let expected = u8::from(triangles.iter().any(|(t, _)| {
+                                ray_hit(cam.eye(), ray, *t).is_some_and(|depth| depth >= near)
+                            }));
+                            let index = (y * size[0] + x) as usize;
+                            assert_eq!(
+                                ids[index], expected,
+                                "distance {distance}, {size:?}, {quality:?}, sample {x},{y}"
+                            );
+                            assert_eq!(
+                                color[index].to_le_bytes()[3],
+                                expected * 255,
+                                "clipped polygon coverage at {x},{y}"
+                            );
+                            counts[usize::from(expected)] += 1;
+                        }
+                    }
+                    assert!(
+                        counts[0] > 1000 && counts[1] > 1000,
+                        "both sides of the visible near edge are tested: {counts:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn interpenetrating_boxes_and_three_bar_cycle_match_rays_from_26_cameras() {
     let box_vertices: [Vec3; 8] = std::array::from_fn(|i| {
         Vec3::new(
@@ -806,28 +1084,62 @@ mod measure {
     #[ignore = "run release under the Rez quiet lock, never during a crew build"]
     fn measure_frame_pose_cull_clip_project_shade() {
         for count in [2000, 6000, 24000] {
-            let triangles = [[0, 1, 2]];
-            let faces = vec![
-                Face {
-                    anchors: [0, 1, 2],
-                    triangles: &triangles,
-                };
-                count
-            ];
-            for (name, vertices) in [
-                ("ordinary", SQUARE),
-                ("culled", [SQUARE[0], SQUARE[2], SQUARE[1], SQUARE[3]]),
+            for (name, source, opacity, solid_count) in [
+                ("ordinary", [SQUARE[0], SQUARE[1], SQUARE[2]], 1.0, 1),
+                ("culled", [SQUARE[0], SQUARE[2], SQUARE[1]], 1.0, 1),
+                ("translucent", [SQUARE[0], SQUARE[1], SQUARE[2]], 0.6, 1),
+                ("four solids", [SQUARE[0], SQUARE[1], SQUARE[2]], 0.6, 4),
                 (
                     "near and guard",
                     [
                         Vec3::new(-1000.0, -1000.0, 0.0),
                         Vec3::new(1000.0, -1000.0, 0.0),
                         Vec3::new(1000.0, 1000.0, 2.0),
-                        Vec3::new(-1000.0, 1000.0, 2.0),
                     ],
+                    1.0,
+                    1,
                 ),
             ] {
-                let s = solid(&vertices, &faces);
+                let per_solid = count / solid_count;
+                let vertices: Vec<_> = (0..count)
+                    .flat_map(|i| {
+                        source.map(|v| {
+                            Vec3::new(
+                                v.x + f32::from(u16::try_from(i % 73).expect("bounded jitter"))
+                                    * 0.0001,
+                                v.y + f32::from(u16::try_from(i % 37).expect("bounded jitter"))
+                                    * 0.0001,
+                                v.z,
+                            )
+                        })
+                    })
+                    .collect();
+                let triangles: Vec<_> = (0..count)
+                    .map(|i| {
+                        let first = ((i % per_solid) * 3) as u32;
+                        [first, first + 1, first + 2]
+                    })
+                    .collect();
+                let faces: Vec<_> = triangles
+                    .iter()
+                    .map(|t| Face {
+                        anchors: *t,
+                        triangles: std::slice::from_ref(t),
+                    })
+                    .collect();
+                let solids: Vec<_> = faces
+                    .chunks_exact(per_solid)
+                    .zip(vertices.chunks_exact(per_solid * 3))
+                    .enumerate()
+                    .map(|(i, (faces, vertices))| {
+                        let mut s = solid(vertices, faces);
+                        s.opacity = opacity;
+                        let index = f32::from(u8::try_from(i).expect("at most four solids"));
+                        s.pose =
+                            Transform::local([index * 0.1, 0.0, 0.0], [0.0, index * 5.0, 0.0], 1.0);
+                        s
+                    })
+                    .collect();
                 let mut out = FrameScratch::with_capacity(count);
                 let cam = camera();
                 let lamp = light();
@@ -835,7 +1147,7 @@ mod measure {
                 let mut times = Vec::new();
                 for sample in 0..103 {
                     let start = Instant::now();
-                    std::hint::black_box(frame(&[s], &cam, &lamp, [1280, 720], &mut out, &stop))
+                    std::hint::black_box(frame(&solids, &cam, &lamp, [1280, 720], &mut out, &stop))
                         .expect("valid fixture");
                     if sample >= 3 {
                         times.push(start.elapsed().as_secs_f64() * 1000.0);

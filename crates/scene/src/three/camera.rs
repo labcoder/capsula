@@ -115,7 +115,7 @@ impl Camera {
         f64::from(height) / (2.0 * (self.fov.to_radians() / 2.0).tan())
     }
 
-    /// Near distance including the f32 world-coordinate precision floor, in internal texels.
+    /// Near world distance, with a precision floor chosen using the internal raster's focal length.
     /// # Errors
     /// Returns `Invalid` for invalid radius, coordinate magnitude or height, `Numeric` on overflow.
     #[expect(

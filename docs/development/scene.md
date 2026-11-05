@@ -239,9 +239,9 @@ distance at a translated target never relies on subtracting a rounded f32 eye.
 `three::frame::frame` takes borrowed indexed `Solid`s, each with shared local vertices, source
 `Face`s, a theme-resolved colour/opacity and a composed sampled f64 `Transform`. Preparation must
 preserve original vertex indices and one stable three-vertex plane anchor per source face across
-its tessellations; triangle soup alone cannot satisfy those contracts. A face's triangles are
-required to be coplanar with that anchor. The caller composes attachments before the call; the
-frame transforms vertices at the sampled pose rather than rebuilding geometry. This input is
+its tessellations; triangle soup alone cannot satisfy those contracts. A face's triangles tessellate
+one source plane before f32 vertex rounding. The caller composes attachments before the call;
+the frame transforms vertices at the sampled pose rather than rebuilding geometry. This input is
 the seam for later preparation, not a live shell host or a new admission path.
 
 ```mermaid
@@ -253,7 +253,7 @@ flowchart LR
 ```
 
 The near distance is `max(0.05·distance, 1e-4·radius, 8·ulp(largest world coordinate)·focal_px)`.
-Focal length uses the exact internal raster height, so the floor is in internal texels. The floor
+Focal length uses the exact internal raster height; the floor itself is a world-space distance. It
 keeps one f32 world-coordinate ulp below 1/8 texel at the nearest drawn depth. It also prevents
 approaching translated content arbitrarily closely: at coordinate 20,000 and height 1,440 with
 40° fov, it is about 30.9 world units. Nothing closer is drawn or writes an id.
