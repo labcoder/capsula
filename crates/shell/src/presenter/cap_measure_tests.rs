@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::ActiveTheme as _;
-
 use kumochi_scene::{
     Step,
     display::{MeasureError, TextMeasure, TextStyle},
@@ -117,11 +115,8 @@ fn measure_native_full_preparation_at_paint_caps() {
         std::process::exit(124);
     });
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
-    let family = app.update(|cx| {
-        gpui_kit::init(cx);
-        cx.theme().font_family.clone()
-    });
+    let app = gpui_kit::application();
+    let family = gpui_kit::component::Theme::default().font_family;
     let text = app.text_system();
     app.background_executor()
         .spawn(async move {
