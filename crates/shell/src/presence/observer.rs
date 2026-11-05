@@ -344,6 +344,25 @@ impl Shared {
         }
     }
 
+    /// Sends a geometry record. A refused one is counted like any other, and its table goes back
+    /// to `returns`, so a full queue never empties the spares.
+    fn send_rows(&self, id: u64, geometry: Geometry, returns: &Sender<Geometry>) {
+        let refused = if self.active.get() {
+            match self.sender.try_send(Record::Geometry { id, geometry }) {
+                Ok(()) => return,
+                Err(error) => {
+                    self.count_drop();
+                    error.into_inner()
+                }
+            }
+        } else {
+            Record::Geometry { id, geometry }
+        };
+        if let Record::Geometry { geometry, .. } = refused {
+            returns.try_send(geometry).ok();
+        }
+    }
+
     fn count_drop(&self) {
         self.dropped.set(self.dropped.get() + 1);
     }
@@ -360,6 +379,8 @@ pub(crate) struct Observer {
     scratch: Geometry,
     /// Tables the writer has handed back, for the next geometry record.
     spares: Receiver<Geometry>,
+    /// Where a refused record's table goes back to the spares.
+    returns: Sender<Geometry>,
     totals: Totals,
     /// The latest hover show or hide; the panel's paints name it.
     hover: u64,
@@ -389,7 +410,10 @@ impl Observer {
         }
         let writer = std::thread::Builder::new()
             .name("gate-observer".to_owned())
-            .spawn(move || write(&receiver, &returns, file))?;
+            .spawn({
+                let returns = returns.clone();
+                move || write(&receiver, &returns, file)
+            })?;
         Ok(Some(Self {
             shared: Rc::new(Shared::new(sender)),
             writer: Some(writer),
@@ -397,6 +421,7 @@ impl Observer {
             ledger: Ledger::new(),
             scratch: Geometry::empty(),
             spares,
+            returns,
             totals: Totals::default(),
             hover: 0,
             pending: [None; PENDING],
@@ -478,7 +503,7 @@ pub(super) fn commit(
         match observer.spares.try_recv() {
             Ok(spare) => {
                 let geometry = std::mem::replace(&mut observer.scratch, spare);
-                observer.shared.send(Record::Geometry { id, geometry });
+                observer.shared.send_rows(id, geometry, &observer.returns);
             }
             Err(_) => observer.shared.count_drop(),
         }
@@ -821,8 +846,8 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Commit, Drawn, Geometry, Ledger, Observer, ROW_CAP, Record, Row, Shared, Surface, Totals,
-        line, write,
+        Commit, Drawn, Geometry, Ledger, Observer, QUEUE, ROW_CAP, Record, Row, Shared, Surface,
+        Totals, line, write,
     };
     use crate::presence::line::LineFrame;
 
@@ -1110,6 +1135,47 @@ mod tests {
         let spare = spares.try_recv().unwrap();
         assert_eq!(spare.spans.len(), ROW_CAP, "the whole table comes back");
         assert!(spares.is_empty());
+    }
+
+    #[test]
+    fn a_full_queue_hands_every_refused_table_back() {
+        let (sender, receiver) = async_channel::bounded(QUEUE);
+        let (returns, spares) = async_channel::bounded(QUEUE);
+        for _ in 0..QUEUE {
+            returns.try_send(Geometry::empty()).unwrap();
+        }
+        let shared = Shared::new(sender);
+        for qpc in 0..QUEUE {
+            shared.send(Record::Repaint {
+                qpc: i64::try_from(qpc).unwrap(),
+            });
+        }
+        for id in 0..2 * QUEUE {
+            let spare = spares.try_recv().expect("a refused table came back");
+            shared.send_rows(u64::try_from(id).unwrap(), spare, &returns);
+        }
+        assert_eq!(shared.dropped.get(), 2 * u64::try_from(QUEUE).unwrap());
+        assert_eq!(
+            spares.len(),
+            QUEUE,
+            "every table is back while the queue is full"
+        );
+        while receiver.try_recv().is_ok() {}
+        let spare = spares.try_recv().unwrap();
+        shared.send_rows(1, spare, &returns);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Record::Geometry { id: 1, .. })
+        ));
+        assert_eq!(spares.len(), QUEUE - 1, "the sent one waits for the writer");
+        shared.active.set(false);
+        let spare = spares.try_recv().unwrap();
+        shared.send_rows(2, spare, &returns);
+        assert_eq!(
+            spares.len(),
+            QUEUE - 1,
+            "a frozen observer keeps its tables too"
+        );
     }
 
     #[test]
