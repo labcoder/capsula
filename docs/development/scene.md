@@ -203,8 +203,9 @@ flowchart LR
   edge function under 2^45.
 - **Depth.** The plane gives 1/z over texel coordinates, evaluated in f64 and narrowed to f32; it
   must be finite and positive at every vertex. Keys clear the 3 lowest mantissa bits and compare
-  strictly, so depths within about 1e-6 relative tie and the earlier input wins, coplanar faces
-  included.
+  strictly, so depths in one 8-ulp bin (about 1e-6 wide) tie and the earlier input wins. That is
+  a bin, not a tolerance: depths one ulp apart across a bin boundary don't tie, so coplanar
+  stability rests on PR 4 building shared planes identically.
 - **Translucency.** Polygons under opacity 1 are sorted farthest first by their centroid's camera
   depth (ties by input order) with an in-place sort, depth-tested against opaque samples and
   blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
