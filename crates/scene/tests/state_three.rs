@@ -836,14 +836,19 @@ fn set_info_keeps_its_utf8_text_through_a_stored_replay() {
         .recovery_log()
         .iter()
         .filter_map(|event| match event {
-            SceneEvent::Step { step, .. } => step.set.first()?.info.as_ref().map(|t| t.as_str()),
+            SceneEvent::Step { step, .. } => step
+                .set
+                .first()?
+                .info
+                .as_ref()
+                .map(kumochi_scene::Text::as_str),
             SceneEvent::Stop(_) => None,
         })
         .collect();
     assert_eq!(infos, ["é½中"]);
 }
 
-/// tests/mesh_size.rs's maximum outline: 64 retained perimeter points, 252 triangles.
+/// `tests/mesh_size.rs`'s maximum outline: 64 retained perimeter points, 252 triangles.
 fn compact(name: &str) -> String {
     let points: Vec<String> = (0..16)
         .map(|i| format!("[{i},0]"))
