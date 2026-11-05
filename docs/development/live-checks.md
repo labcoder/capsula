@@ -3,7 +3,7 @@
 `cargo xtask live <check>` runs the real dev brain on the developer's own dev account and drives it
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
-approved. The only check so far is `signin`.
+approved. The checks are `signin` and `claude-signin`.
 
 ## How it runs
 
@@ -14,7 +14,8 @@ flowchart LR
   X -->|runs, 8 min bound| C["kumochi.exe (a copy of xtask)"]
   C -->|starts in its kill-on-close job, KUMOCHI_LIVE_BUDGET=0, no console output| D[kumochid.exe]
   C <-->|control and data pipes| D
-  D -->|opens| W[browser]
+  D -->|signin: opens| W[browser]
+  D -->|claude-signin: starts, in a console| K[claude auth login]
 ```
 
 - The brain serves only the `kumochi.exe` beside it, so an outer xtask builds the brain and copies
@@ -33,8 +34,8 @@ flowchart LR
   Manager read is the per-session instance capability the dev brain has just written, which
   authenticates the pipe exactly as the shell does. It never reads another service: no spike's,
   and nothing Claude Code, Codex, gh or a browser holds.
-- `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. `signin` sets it to 0, since it
-  dispatches no model request. shortcut: the brain ignores it until slice 3 PR 11 enforces it.
+- `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. Both checks set it to 0, since
+  neither dispatches a model request. shortcut: the brain ignores it until slice 3 PR 11 enforces it.
 
 ## `signin`
 
@@ -62,6 +63,54 @@ reaches stdout or stderr, and the brain's own stdout and stderr are discarded. T
 in the account views, names and titles in the frames around them, and a token in the client's
 failures, and check the exact output of every path.
 
+## `claude-signin`
+
+`cargo xtask live claude-signin` is the early Claude Code sign-in (OSC-122). The dev brain runs
+Claude Code's own login in a console the owner answers, and its sign-in file lands in Kumochi's
+Claude Code folder, under the one exception in `AGENTS.md`. `--disconnect` undoes it: the brain
+signs Claude Code out and deletes that folder.
+
+It reads the first Connections view and waits for the brain's own discovery to replace the
+placeholder `NotFound`; still `NotFound` at the deadline, that's the answer. It sends no
+`FindClaudeCode`: discovery already runs as the brain starts, and a Find that lands meanwhile
+queues a second round, during which the brain drops a Connect.
+
+- **Ready:** it stops there, so a rerun never opens a console.
+- **Signed out:** it sends `ConnectClaudeCode` and waits for the view to leave `SigningIn`. It
+  succeeds only on `Ready`.
+- **Anything else** (unsupported, turned off, in use, unavailable, a failed audit or policy, a
+  cleanup pending) is printed and refused at once, with no op sent. A main that ships
+  `SIGN_IN = Undecided` ends discovery at `unsupported: sign-in store`, so it stops there.
+- **`--disconnect`** sends `DisconnectClaudeCode` after discovery, so the logout has an install to
+  run, and waits for the view to leave `CleanupPending`. It succeeds on signed out or not found. A
+  deletion that fails also stays `CleanupPending`, so it shows as the deadline, and the brain
+  retries it as it next starts.
+
+It never sends `CancelClaudeSignIn`: at the deadline it sends `Quitting`, and the brain's quit ends
+its lane, and the login with it. Every path sends `Quitting`.
+
+```
+live claude-signin: building the dev brain (at most 1200s)
+live claude-signin: running in <repo>\target\live\<time>
+claude code: signed out
+signing in: finish in Claude Code's console; waiting at most 330s
+claude code: ready
+```
+
+**What it prints.** As for `signin`: state words built from the view's enums, never a version, a
+path, a frame or a client error. Whatever `claude` prints stays in its own console or in the
+brain's discarded output. Tests plant an email, a path and a token in the frames around the views
+and in the client's failures, and a version in the views, and check the exact output of every
+path.
+
+**The owner session it serves.** After the flip (OSC-122) merges, with the owner at the desk:
+
+1. Close every `kumochi.exe` and `kumochid.exe`.
+2. Run `cargo xtask live claude-signin` from a debug xtask on Rez.
+3. Answer Claude Code's sign-in in the console it opens. The run ends at `claude code: ready`.
+4. To undo it, run `cargo xtask live claude-signin --disconnect`, which ends at
+   `claude code: signed out`.
+
 ## Bounds
 
 | Wait | Bound | Then |
@@ -71,6 +120,9 @@ failures, and check the exact output of every path.
 | The client connecting | the gate client's own retries and per-operation pipe timeouts | fails |
 | The first view, and each op's answer | 10 s | fails |
 | The sign-in settling | 330 s from the answer, one deadline however many views arrive: the brain ends its attempt at 5 min | sends `CancelSignIn`, waits 10 s for its answer, fails |
+| Claude Code's discovery | 30 s from the first view: `--version` and the status call, 10 s each in the lane | `NotFound` is the answer |
+| Claude Code's sign-in settling | 330 s from the answer, one deadline: the lane ends the login at 5 min, then reads the status | sends `Quitting`, which ends the login, and fails |
+| Disconnect's cleanup | 45 s from the answer: the logout, the deletion, then discovery again | fails; the brain retries the deletion as it starts |
 | The brain exiting after `Quitting` | 15 s | it's ended |
 | Each `taskkill /T /F` | 10 s, then 10 s for the process to go | names every process that may still run |
 
