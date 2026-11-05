@@ -1399,7 +1399,11 @@ fn a_run_cut_by_a_crash_after_its_round_replays_what_was_stored() {
 
 #[test]
 fn a_bad_stored_round_record_fails_the_build() {
-    let long = format!(r#"{{"call":"c1","output":"{}"}}"#, "x".repeat(64 * 1024));
+    let frame = r#"{"call":"c1","output":""}"#;
+    let long = format!(
+        r#"{{"call":"c1","output":"{}"}}"#,
+        "x".repeat(65 * 1024 + 1 - frame.len())
+    );
     for (kind, body) in [
         (EventKind::OutputItem, "not json"),
         (EventKind::OutputItem, r#"{"connection":7,"item":[1]}"#),
@@ -1436,7 +1440,67 @@ fn a_bad_stored_round_record_fails_the_build() {
 }
 
 #[test]
-fn a_result_of_exactly_64_kib_is_read() {
+fn a_full_text_output_replays_as_its_text_and_an_untagged_one_as_it_was() {
+    let mut world = world("ctx-rounds-text");
+    let main = world.main;
+    let (_, high) = world.store.high_water().expect("ids");
+    let at = (main, RunId(high.0 + 1));
+    world
+        .store
+        .begin_turn(main, None, at.1, "ask")
+        .expect("turn");
+    let full = "x".repeat(crate::dispatch::MAX_OUTPUT - r#"{"text":""}"#.len());
+    let output = crate::dispatch::ToolOutput::Text(full.clone());
+    assert_eq!(output.stored().len(), crate::dispatch::MAX_OUTPUT);
+    let items: Vec<Opaque> = [call_item("c1"), call_item("c2")]
+        .iter()
+        .map(|item| Opaque::new(serde_json::to_vec(item).expect("json")).expect("small"))
+        .collect();
+    world
+        .store
+        .append_round(
+            at,
+            ConnectionTag(7),
+            None,
+            &items,
+            &[(CallId::new("c1").expect("short"), output)],
+        )
+        .expect("round");
+    let older = NewEvent {
+        kind: EventKind::ToolResult,
+        text: None,
+        body: Some(r#"{"call":"c2","output":"older text"}"#),
+    };
+    world.store.append(main, at.1, &[older]).expect("appended");
+    round(
+        &mut world,
+        at,
+        "Found it.",
+        &[said("assistant", "Found it.")],
+        &[],
+    );
+    world
+        .store
+        .end_run(at.0, at.1, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let output = |call: &str, text: &str| json!({ "type": "function_call_output", "call_id": call, "output": text });
+    assert_eq!(
+        next_input(&world, next, 7),
+        [
+            said("user", "ask"),
+            call_item("c1"),
+            call_item("c2"),
+            output("c1", &full),
+            output("c2", "older text"),
+            said("assistant", "Found it."),
+            next_ask(),
+        ]
+    );
+}
+
+#[test]
+fn a_result_of_exactly_65_kib_is_read() {
     let mut world = world("ctx-rounds-cap");
     let main = world.main;
     let (_, high) = world.store.high_water().expect("ids");
@@ -1448,9 +1512,9 @@ fn a_result_of_exactly_64_kib_is_read() {
     let frame = r#"{"call":"c1","output":""}"#;
     let body = format!(
         r#"{{"call":"c1","output":"{}"}}"#,
-        "x".repeat(64 * 1024 - frame.len())
+        "x".repeat(65 * 1024 - frame.len())
     );
-    assert_eq!(body.len(), 64 * 1024);
+    assert_eq!(body.len(), 65 * 1024);
     let event = NewEvent {
         kind: EventKind::ToolResult,
         text: None,

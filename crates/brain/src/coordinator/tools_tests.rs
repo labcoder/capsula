@@ -2,18 +2,18 @@
 //! the next round is built from the store, and the run's call and round budgets are charged
 //! before anything over them is kept or sent (D13-M2).
 
-use kumochi_protocol::message::Phase;
+use kumochi_protocol::message::{Deleted, Phase, ThreadId};
 
 use super::{
-    R, T, ack, committed, draw_call, end_run, ends_failed, engine, request, run_end, started,
-    state, text,
+    R, T, ack, committed, draw_call, end_run, ends_failed, engine, fresh, request, run_end,
+    started, state, text,
 };
-use crate::context::{Built, ConnectionTag};
+use crate::context::{Built, ConnectionTag, ModelRequest, Origin};
 use crate::coordinator::{
     BuildKey, ContextBuilt, Coordinator, Effect, Input, MAX_CALLS, MAX_ROUNDS, RoundItems, Stale,
     StoreOp,
 };
-use crate::dispatch::{ToolError, ToolOutput};
+use crate::dispatch::{Route, ToolError, ToolOutput, schemas};
 use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd};
 
@@ -59,6 +59,87 @@ fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<Ca
             .map(|call| (call, ToolOutput::Error(ToolError::Unknown)))
             .collect(),
     }))
+}
+
+fn answered(round: u32, text: Option<&str>, calls: Vec<(CallId, ToolOutput)>) -> Effect {
+    Effect::Store(StoreOp::RoundItems(RoundItems {
+        thread: T,
+        run: R,
+        round,
+        connection: ConnectionTag(0),
+        text: text.map(Into::into),
+        items: Vec::new(),
+        calls,
+    }))
+}
+
+const B: ThreadId = ThreadId(2);
+
+/// `key`'s build in task 4, rendered from `sources` and offering the test tools.
+fn offering(key: BuildKey, sources: &[ThreadId]) -> Input {
+    Input::ContextBuilt(ContextBuilt {
+        key,
+        snapshot: None,
+        result: Ok(Built {
+            request: ModelRequest {
+                tools: schemas(Origin::Task(T), Route::Model),
+                ..request()
+            },
+            sources: sources.to_vec(),
+        }),
+    })
+}
+
+fn attempt(round: u32, attempt: u64) -> BuildKey {
+    BuildKey {
+        run: R,
+        round,
+        attempt,
+    }
+}
+
+/// Run 10 in task 4, its first build rendered from `sources` and admitted.
+fn probing(sources: &[ThreadId]) -> Coordinator {
+    let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(offering(attempt(1, 1), sources))
+        .expect("admitted");
+    core
+}
+
+fn probe(n: u32, args: &str) -> [TurnEvent; 2] {
+    [
+        TurnEvent::ToolCallStarted {
+            call: id(n),
+            name: ToolName::Probe,
+        },
+        TurnEvent::ToolCallReady {
+            call: id(n),
+            args: args.to_owned(),
+        },
+    ]
+}
+
+fn probed(word: &str) -> ToolOutput {
+    ToolOutput::Text(format!("probed {word}"))
+}
+
+/// The round's completion, which must send exactly one call's write; its acknowledgement.
+fn commits(core: &mut Coordinator) -> Input {
+    let effects = core.handle(completed()).expect("current");
+    let [Effect::Store(StoreOp::CommitCall(call))] = effects.as_slice() else {
+        panic!("one write, not {effects:?}");
+    };
+    Input::CallCommitted {
+        key: call.key.clone(),
+        committed: true,
+    }
 }
 
 /// Plays each event of the current round, none of which may say anything.
@@ -246,6 +327,124 @@ fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
         )),
         Ok(ends_failed(Failure::Budget)),
         "the count is the run's, not the round's"
+    );
+}
+
+#[test]
+fn a_round_waits_for_its_calls_write_and_stores_one_answer_per_call() {
+    let mut core = probing(&[T]);
+    play(&mut core, probe(1, r#"{"word":"hi"}"#));
+    play(&mut core, called(2));
+    let ack = commits(&mut core);
+    assert_eq!(
+        core.handle(ack.clone()),
+        Ok(vec![answered(
+            1,
+            None,
+            vec![
+                (id(1), probed("hi")),
+                (id(2), ToolOutput::Error(ToolError::Unknown))
+            ]
+        )])
+    );
+    assert_eq!(
+        core.handle(ack),
+        Ok(Vec::new()),
+        "a repeated ack stores nothing"
+    );
+}
+
+#[test]
+fn a_later_round_replays_a_finished_id_from_the_ledger_and_refuses_other_arguments() {
+    let mut core = probing(&[T]);
+    play(&mut core, probe(1, r#"{"word":"hi"}"#));
+    let ack = commits(&mut core);
+    core.handle(ack).expect("stored");
+    assert!(starts_round(&next(&mut core, 1), 2));
+    play(&mut core, probe(1, r#"{ "word" : "hi" }"#));
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![answered(2, None, vec![(id(1), probed("hi"))])]),
+        "the stored answer, with no second write"
+    );
+    assert!(starts_round(&next(&mut core, 2), 3));
+    play(&mut core, probe(1, r#"{"word":"other"}"#));
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![answered(
+            3,
+            None,
+            vec![(id(1), ToolOutput::Error(ToolError::Reused))]
+        )])
+    );
+}
+
+#[test]
+fn a_stop_while_a_calls_write_is_pending_stores_no_round() {
+    let mut core = probing(&[T]);
+    play(&mut core, probe(1, r#"{"word":"hi"}"#));
+    let ack = commits(&mut core);
+    let stopped = core
+        .handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .expect("current");
+    assert!(
+        !stopped
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::RoundItems(_)))),
+        "{stopped:?}"
+    );
+    assert_eq!(core.handle(ack), Err(Stale));
+}
+
+#[test]
+fn a_response_from_a_build_a_delete_voided_is_dropped_and_its_round_built_again() {
+    let mut core = probing(&[T, B]);
+    core.handle(engine(R, TurnEvent::TextDelta("from b".to_owned())))
+        .expect("current");
+    play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
+    play(&mut core, probe(2, r#"{"word":"hi"}"#));
+    assert_eq!(
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false,
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
+    );
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![Effect::CancelEngine { run: R }]),
+        "no write, no round, and the rebuild waits for B"
+    );
+    let effects = core
+        .handle(Input::Deleted {
+            thread: B,
+            outcome: Deleted::Hidden,
+            last_run: None,
+        })
+        .expect("answered");
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::Store(StoreOp::BuildContext(build))) if build.key == attempt(1, 2)
+        ),
+        "{effects:?}"
+    );
+    assert!(starts_round(
+        &core
+            .handle(offering(attempt(1, 2), &[T]))
+            .expect("admitted"),
+        1
+    ));
+    play(&mut core, probe(1, r#"{"word":"hi"}"#));
+    let ack = commits(&mut core);
+    assert_eq!(
+        core.handle(ack),
+        Ok(vec![answered(1, None, vec![(id(1), probed("hi"))])]),
+        "only the rebuilt round, its text and its call, and the same id runs fresh"
     );
 }
 

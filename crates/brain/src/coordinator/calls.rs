@@ -75,6 +75,8 @@ impl Coordinator {
             Caller::Model { .. } => true,
             Caller::Mcp { launch, .. } => run.mcp == Some(*launch),
         };
+        // A model call answers its round's call once, so the round stores one result per call;
+        // any other answer waits in `answered`, which no round reads.
         for (caller, output) in answers.into_iter().filter(|(caller, _)| authorized(caller)) {
             let taken = match &caller {
                 Caller::Model { call, .. } => run.tools.answer(call, output.clone()),

@@ -10,8 +10,9 @@ use crate::context::{Body, ConnectionTag};
 use crate::dispatch::ToolOutput;
 use crate::engines::{CallId, Opaque};
 
-/// The longest stored result read back [guess].
-const MAX_RESULT: usize = 64 * 1024;
+/// The longest stored result read back: a full tool output, plus its call id, escaped, and the
+/// framing around them.
+const MAX_RESULT: usize = crate::dispatch::MAX_OUTPUT + 1024;
 
 impl Store {
     /// Appends one round to an active run in one transaction: the text streamed since the last

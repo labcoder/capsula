@@ -114,6 +114,14 @@ impl Loop {
         self.dispatched
     }
 
+    /// Forgets the round a voided build produced: its calls, answered or not, and its items.
+    fn drop_round(&mut self) {
+        self.open.clear();
+        self.dispatched = false;
+        self.items.clear();
+        self.item_bytes = 0;
+    }
+
     /// Answers a dispatched call still waiting; false when none is.
     pub(super) fn answer(&mut self, call: &CallId, output: ToolOutput) -> bool {
         let waiting = self
@@ -173,6 +181,8 @@ impl Coordinator {
         }
         if calling && !current.tools.dispatched {
             current.tools.dispatched = true;
+            // The engine is done with the round, so its calls run; a call never sees it finishing.
+            current.finishing = false;
             let calls: Vec<_> = current
                 .tools
                 .open
@@ -185,10 +195,23 @@ impl Coordinator {
                     call: call.clone(),
                 };
                 let args = args.unwrap_or_default();
-                if let Dispatch::Answered(output) =
-                    self.tool_call(caller, name, args.as_bytes(), effects)
+                let dispatch = self.tool_call(caller, name, args.as_bytes(), effects);
+                let current = self.current(run)?;
+                // A delete reached what the build rendered: the round is built again, so the
+                // response's calls, items and text are dropped, not stored.
+                // shortcut: steps a voided response drew stay, and its text stays on screen, until
+                // B10 offers draw to a model and the shell can retract a round.
+                if !current
+                    .build
+                    .as_ref()
+                    .is_some_and(super::admission::Build::admitted)
                 {
-                    self.current(run)?.tools.answer(&call, output);
+                    current.tools.drop_round();
+                    current.unstored.clear();
+                    return Ok(());
+                }
+                if let Dispatch::Answered(output) = dispatch {
+                    current.tools.answer(&call, output);
                 }
             }
         }
