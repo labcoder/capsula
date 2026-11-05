@@ -1,7 +1,10 @@
 //! The user's own Anthropic key, staged and kept only in Credential Manager.
 
+pub mod error;
 pub mod key;
 pub mod models;
+pub mod request;
+pub mod tls;
 
 use kumochi_protocol::message::KeyRejection;
 
