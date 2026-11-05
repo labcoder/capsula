@@ -102,6 +102,42 @@ sequenceDiagram
   W-->>B: Captured(FrameMeta) or Refused
 ```
 
+## Masking and encoding
+
+The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every
+`MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
+`SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
+Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
+generation; sanitizing again applies all masks idempotently before another encode.
+
+Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
+frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
+`Partial`, or `Unknown` with an availability reason); an empty set never implies a completed
+walk. Both publishing a mask and finishing the walk bump the generation. Encoded images also
+carry their capture id and generation: A6 must never stage a superseded generation.
+
+The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
+fills it, but invalidates the image before lending its buffer. Read access to a committed image
+is restricted to `screen/` through `image_mut` and `sanitize`; sanitized fields are private.
+
+The overview uses exact area weights (a box filter), rounding channel averages to the nearest
+byte with halves upward. It fits within 1280×720, preserves the aspect ratio to integer-pixel
+rounding, and never enlarges. The focus crop clips to the display, then centres a native-pixel
+window within that intersection, capped at 1024×576; it never scales. Empty intersections are
+refused. Both encode RGB JPEG at quality 85 through `image`, with no platform encoder.
+
+`CaptureTransform` carries the display origin, DPI, overview size and optional crop rectangle.
+Overview coordinates scale per axis to physical desktop pixels; logical coordinates subtract
+the display origin and multiply by 96/DPI. Inverse overview mapping rounds to the nearest pixel
+(halves away from zero). Crop coordinates add the crop origin. Coordinate spaces have distinct
+protocol types; physical-to-overview mapping refuses points outside the display. External
+floating-point coordinates must be validated as finite by their first parser. Image Debug
+output contains only dimensions, byte counts and mask generations,
+and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
+
+These entry points have no production caller yet: A6 owns scheduling, staged replies and
+generation checks. Nothing here exports images or captures another frame.
+
 ## Deadline evidence on Rez
 
 CI uses the injected-clock deadline fixture, not a scheduler-speed assertion. Build the integration
