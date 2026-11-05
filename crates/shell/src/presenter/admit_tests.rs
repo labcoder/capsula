@@ -426,16 +426,6 @@ fn held_frames_and_the_lane_share_the_data_window() {
 #[test]
 fn a_discarded_admission_or_lost_answer_keeps_its_payload_and_one_lease_off_the_caller() {
     let text = "x".repeat(400);
-    let control = text.clone().into_boxed_str();
-    let unrelated = vec![0_u8; 1000].into_boxed_slice();
-    let ((), freed) = crate::allocation::releases_of_size(text.len(), || {
-        drop(control);
-        drop(unrelated);
-    });
-    assert_eq!(
-        freed, 1,
-        "calibration: only the text-sized caller drop counts"
-    );
     for answered in [false, true] {
         let case = format!("answered {answered}");
         let (mut presenter, now) = live();

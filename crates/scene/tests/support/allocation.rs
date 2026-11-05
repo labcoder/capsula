@@ -100,3 +100,17 @@ pub(super) fn releases_of_size<T>(size: usize, run: impl FnOnce() -> T) -> (T, u
         MATCHING_RELEASES.with(|count| count.replace(None).expect("release scope is active"));
     (value, releases)
 }
+
+#[test]
+fn release_count_only_matches_the_requested_size() {
+    let control = "x".repeat(400).into_boxed_str();
+    let unrelated = vec![0_u8; 1000].into_boxed_slice();
+    let ((), freed) = releases_of_size(control.len(), || {
+        drop(control);
+        drop(unrelated);
+    });
+    assert_eq!(
+        freed, 1,
+        "calibration: only the text-sized caller drop counts"
+    );
+}
