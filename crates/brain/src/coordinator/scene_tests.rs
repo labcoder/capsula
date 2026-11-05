@@ -32,10 +32,12 @@ fn ids(core: &Coordinator) -> Vec<u64> {
 
 /// Run 10 started in a new thread 4, over `scenes`.
 fn started_over(scenes: &[u64]) -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(scenes));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(scenes));
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     super::admit(&mut core, R);
@@ -89,7 +91,8 @@ fn a_fifth_scene_evicts_the_oldest_in_its_first_steps_write() {
 
 #[test]
 fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     assert!(core.settled());
     let clear = |scenes: &[u64]| Input::Clear {
         scenes: scenes.iter().copied().map(SceneId).collect(),
@@ -118,8 +121,9 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
     assert!(!core.clears_in_flight());
     let turn = core
         .handle(Input::Turn {
+            turn: 1,
             thread: None,
-            text: "hi".to_owned(),
+            text: "hi".into(),
         })
         .expect("turn");
     assert!(
@@ -139,7 +143,8 @@ fn a_clear_leaves_the_set_at_once_and_counts_only_once_durable() {
 
 #[test]
 fn a_failed_clear_is_retried_at_the_barrier_and_quit_clears_it_with_the_visible_set() {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
     core.handle(Input::Clear {
         scenes: vec![SceneId(3)],
     })
@@ -243,8 +248,9 @@ fn waiting() -> (Coordinator, Vec<Effect>) {
 fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
     let next = RunId(11);
     let turn = Input::Turn {
+        turn: 1,
         thread: Some(T),
-        text: "next".to_owned(),
+        text: "next".into(),
     };
     effects.extend(core.handle(turn).expect("a turn is never stale"));
     effects.extend(super::admit(core, next));
@@ -289,8 +295,9 @@ fn a_replacement_drops_steps_waiting_for_the_scene_and_the_run_settles() {
     let (mut core, mut effects) = waiting();
     let next = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(T),
-            text: "next".to_owned(),
+            text: "next".into(),
         })
         .expect("turn");
     assert_eq!(written(&next), Vec::<&str>::new());
@@ -369,7 +376,8 @@ fn a_scene_state_s_debug_leaves_its_labels_out() {
 
 #[test]
 fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     let failed = |id: u64| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok: false,
@@ -410,7 +418,8 @@ fn a_failed_owed_write_is_retried_on_a_timer_that_backs_off_and_resets() {
 
 #[test]
 fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay() {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2, 3]));
     let failed = |id: u64| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok: false,
@@ -456,7 +465,8 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
 
 #[test]
 fn a_partial_commit_resets_the_wait_and_replaces_a_longer_deadline() {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1, 2]));
     let cleared = |id: u64, ok: bool| Input::ScenesCleared {
         scenes: vec![SceneId(id)],
         ok,

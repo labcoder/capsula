@@ -332,9 +332,9 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
     );
     let turn = |run, text: &str| StoreOp::BeginTurn {
         thread: ThreadId(3),
-        title: Some("new".to_owned()),
+        title: Some("new".into()),
         run,
-        text: text.to_owned(),
+        text: text.into(),
     };
     assert!(thread.send(turn(RunId(3), "refused words")));
     assert_eq!(
@@ -468,9 +468,9 @@ fn every_operation_gets_one_reply_in_order() {
     for op in [
         StoreOp::BeginTurn {
             thread,
-            title: Some("t".to_owned()),
+            title: Some("t".into()),
             run,
-            text: "hi".to_owned(),
+            text: "hi".into(),
         },
         StoreOp::CommitStep {
             thread: ThreadId(2),
@@ -632,7 +632,7 @@ fn measure_page_reads() {
                 thread: writes,
                 title: None,
                 run: RunId(2_000_001 + at),
-                text: "a measured turn".to_owned(),
+                text: "a measured turn".into(),
             }));
         };
         let settle = |thread: &StoreThread, replies: &mut mpsc::UnboundedReceiver<Input>, at| {
@@ -1048,9 +1048,9 @@ fn measure_delete_during_a_purge() {
             let turn = (ThreadId(100_000 + sample), RunId(100_000 + sample));
             assert!(thread.send(StoreOp::BeginTurn {
                 thread: turn.0,
-                title: Some("t".to_owned()),
+                title: Some("t".into()),
                 run: turn.1,
-                text: "a measured turn".to_owned(),
+                text: "a measured turn".into(),
             }));
             let released = Instant::now();
             releasing.send(()).expect("the copy waits");

@@ -18,10 +18,10 @@ kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
 getrandom.workspace = true
 httparse = "1.10"
-jsonwebtoken = { version = "9", default-features = false }
 keyring.workspace = true
 # Spoken replies. Pinned exactly: the voice owner relies on xn 0.2.13's own pool API.
 ptts = { version = "=0.6.0", default-features = false, features = ["hf"] }
+ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # hooks: the progress handler that stops a purge's copy.
@@ -51,10 +51,20 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }
 
 [lints]

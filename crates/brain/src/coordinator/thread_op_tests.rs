@@ -17,8 +17,9 @@ const MAIN: ThreadId = ThreadId(1);
 fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(MAIN),
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("turn");
     core.handle(Input::TurnStored { run: R }).expect("stored");
@@ -40,8 +41,9 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
     // No fence: the turn the shell sent before the delete still reaches the thread.
     let next = core
         .handle(Input::Turn {
+            turn: 1,
             thread: Some(MAIN),
-            text: "again".to_owned(),
+            text: "again".into(),
         })
         .expect("turn");
     assert_eq!(
@@ -63,7 +65,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
                 thread: MAIN,
                 title: None,
                 run: RunId(11),
-                text: "again".to_owned(),
+                text: "again".into(),
             }),
             state(RunId(11), MAIN, Phase::Thinking),
             Effect::ArmDeadline {
@@ -97,6 +99,7 @@ fn a_rename_of_the_main_thread_goes_nowhere_and_a_tasks_is_a_user_title() {
     let choice = ModelChoice {
         model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
         effort: Effort::Medium,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
     assert_eq!(
         core.handle(Input::ThreadOp(ThreadOp::SetModel {

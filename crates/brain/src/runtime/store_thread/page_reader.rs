@@ -26,7 +26,7 @@ const LAST_RETRY: Duration = Duration::from_secs(1);
 #[derive(Debug)]
 pub(super) struct Read {
     pub(super) stamp: u64,
-    /// [`StoreOp::ReadPage`], [`StoreOp::BuildContext`] or [`StoreOp::ReadTitle`].
+    /// [`StoreOp::ReadPage`], [`StoreOp::BuildContext`] or [`StoreOp::ReadJob`].
     pub(super) op: StoreOp,
 }
 
@@ -200,7 +200,13 @@ pub(super) fn spawn_reader(
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
-                    StoreOp::ReadTitle(read) => Input::JobBuilt(context::read_title(
+                    StoreOp::CompactContext(read) => Input::CompactBuilt(context::read_compact(
+                        open.then_some(&*side),
+                        read,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
+                    StoreOp::ReadJob(read) => Input::JobBuilt(context::read_job(
                         open.then_some(&*side),
                         read,
                         #[cfg(test)]

@@ -49,13 +49,17 @@ fn told(thread: ThreadId, outcome: Deleted, last_run: Option<RunId>) -> Effect {
 
 fn turn(thread: Option<ThreadId>) -> Input {
     Input::Turn {
+        turn: 1,
         thread,
-        text: "more".to_owned(),
+        text: "more".into(),
     }
 }
 
 fn refused(thread: Option<ThreadId>) -> Vec<Effect> {
-    vec![Effect::Control(ControlToShell::TurnRefused { thread })]
+    vec![Effect::Control(ControlToShell::TurnRefused {
+        turn: 1,
+        thread,
+    })]
 }
 
 fn store_delete(thread: ThreadId) -> Effect {
@@ -107,8 +111,9 @@ fn a_delete_ends_the_threads_run_and_its_turns_get_no_run_until_answered() {
 fn a_blank_turn_is_refused_without_a_run() {
     let mut core = fresh();
     let blank = Input::Turn {
+        turn: 1,
         thread: None,
-        text: " \n\t ".to_owned(),
+        text: " \n\t ".into(),
     };
     assert_eq!(core.handle(blank), Ok(refused(None)));
     assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
@@ -276,7 +281,7 @@ fn the_answer_retires_the_threads_scenes_and_tells_the_data_pipe() {
         kept: vec![step("kept")],
         stopped: false,
     };
-    let mut core = Coordinator::new(
+    let mut core = Coordinator::ready_for_tests(
         ThreadId(1),
         ThreadId(9),
         RunId(9),
@@ -347,7 +352,8 @@ fn visible_ids(core: &Coordinator) -> Vec<u64> {
 
 /// Run 10 in a new thread T over `ids`, with its first step's write queued.
 fn first_step_queued(ids: &[u64]) -> Coordinator {
-    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
+    let mut core =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible_before(ids));
     core.handle(turn(None)).expect("a turn is never stale");
     admit(&mut core, R);
     draw_step(&mut core, R, "a").expect("current");

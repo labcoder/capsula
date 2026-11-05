@@ -77,8 +77,9 @@ fn answered(thread: ThreadId) -> Effect {
 fn kumo_building() -> Coordinator {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(MAIN),
-        text: "what happened?".to_owned(),
+        text: "what happened?".into(),
     })
     .expect("a turn is never stale");
     assert_eq!(
@@ -126,8 +127,9 @@ fn a_delete_answered_before_the_old_result_arrives_still_voids_it() {
 fn a_delete_pending_when_the_build_began_voids_it_even_once_answered() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: Some(MAIN),
-        text: "first".to_owned(),
+        text: "first".into(),
     })
     .expect("a turn is never stale");
     core.handle(delete(B)).expect("accepted");
@@ -214,13 +216,14 @@ fn a_rebuild_reuses_the_snapshot_the_first_build_read() {
 #[test]
 fn a_build_too_large_fails_the_run_on_its_budget_and_a_failed_one_on_the_store() {
     for (unbuilt, failure) in [
-        (Unbuilt::TooLarge, Failure::Budget),
+        (Unbuilt::TooLarge { room: None }, Failure::Budget),
         (Unbuilt::Failed, Failure::Store),
     ] {
         let mut core = fresh();
         core.handle(Input::Turn {
+            turn: 1,
             thread: None,
-            text: "hi".to_owned(),
+            text: "hi".into(),
         })
         .expect("a turn is never stale");
         assert_eq!(
@@ -240,8 +243,9 @@ fn a_build_too_large_fails_the_run_on_its_budget_and_a_failed_one_on_the_store()
 fn a_stopped_run_takes_no_build_result() {
     let mut core = fresh();
     core.handle(Input::Turn {
+        turn: 1,
         thread: None,
-        text: "hi".to_owned(),
+        text: "hi".into(),
     })
     .expect("a turn is never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");

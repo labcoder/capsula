@@ -5,7 +5,7 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, DataToShell, SettingsView, UserError,
+    AccountView, ControlToBrain, DataToShell, Phase, RunId, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -44,20 +44,12 @@ impl Presence {
                         cx,
                     );
                 }
-                LinkEvent::RunState { run, thread, phase } => {
-                    let applied = self.runs.apply_state(run, thread, phase);
-                    diagnostics::record(cx, format_args!("run phase={phase:?}"));
-                    if let Some(stop) = applied.stop {
-                        self.stop_run(stop, cx);
-                    }
-                    self.grant(applied.credit);
-                    self.threads.update(cx, |state, cx| {
-                        state.run_state(thread);
-                        cx.notify();
-                    });
-                    self.sync_deletes(cx);
-                    self.request_pages(cx);
-                }
+                LinkEvent::RunState {
+                    run,
+                    thread,
+                    phase,
+                    error,
+                } => self.run_state(run, thread, phase, error, cx),
                 LinkEvent::Data {
                     generation,
                     message,
@@ -116,6 +108,33 @@ impl Presence {
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.runs_changed(cx)
+    }
+
+    /// A run's phase changed; a failure the brain explained shows its reason, unless Esc or a
+    /// delete fenced the run off first.
+    fn run_state(
+        &mut self,
+        run: RunId,
+        thread: ThreadId,
+        phase: Phase,
+        error: Option<UserError>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error);
+        diagnostics::record(cx, format_args!("run phase={phase:?}"));
+        if let Some(error) = notice {
+            self.show_error(&error, cx);
+        }
+        if let Some(stop) = applied.stop {
+            self.stop_run(stop, cx);
+        }
+        self.grant(applied.credit);
+        self.threads.update(cx, |state, cx| {
+            state.run_state(thread);
+            cx.notify();
+        });
+        self.sync_deletes(cx);
+        self.request_pages(cx);
     }
 
     /// The brain changed a listed thread: the list is read again.
@@ -281,6 +300,7 @@ impl Presence {
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        self.end_selection(crate::presenter::overlay_input::ExitCause::BrainLost, cx);
         if state == LinkState::Connected {
             self.clear_refusal(cx);
         }

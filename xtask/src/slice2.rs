@@ -218,14 +218,17 @@ fn percentile(samples: &[Duration], percent: usize) -> f64 {
 /// Sends a turn and waits for its run to be named.
 fn turn(client: &mut Client, thread: Option<ThreadId>, text: &str) -> Result<(RunId, ThreadId)> {
     client.data(&DataToBrain::TextSubmit {
+        turn: 1,
+        screen: kumochi_protocol::message::ScreenChoice::None,
         thread,
-        text: text.to_owned(),
+        text: text.into(),
     })?;
     client.until(PATIENCE, |seen| match seen.frame {
         Frame::Control(ControlToShell::RunState {
             run,
             thread,
             phase: Phase::Thinking,
+            ..
         }) => Some((run, thread)),
         _ => None,
     })

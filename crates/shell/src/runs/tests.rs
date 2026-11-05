@@ -1,7 +1,7 @@
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    ControlToBrain, DataToBrain, DataToShell, Incarnation, MAX_PENDING_TURNS, Phase, RunId,
-    SceneDescriptor, SceneId, Step, ThreadId,
+    ControlToBrain, DataToBrain, DataToShell, ErrorKey, Incarnation, MAX_PENDING_TURNS, Phase,
+    RunId, SceneDescriptor, SceneId, Step, ThreadId, UserError,
 };
 
 use kumochi_brain::coordinator::{
@@ -42,8 +42,9 @@ fn switching_a_cached_main_row_before_settings_keeps_kumo_symbolic() {
     assert_eq!(
         typed(&mut runs, "home"),
         Input::Turn {
+            turn: 1,
             thread: Some(ThreadId(99)),
-            text: "home".to_owned()
+            text: "home".into()
         }
     );
 }
@@ -61,8 +62,9 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
     assert_eq!(
         typed(&mut runs, "first"),
         Input::Turn {
+            turn: 1,
             thread: Some(ThreadId(7)),
-            text: "first".to_owned()
+            text: "first".into()
         }
     );
     runs.disconnected();
@@ -75,8 +77,9 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
     assert_eq!(
         typed(&mut runs, "next"),
         Input::Turn {
+            turn: 1,
             thread: Some(ThreadId(99)),
-            text: "next".to_owned()
+            text: "next".into()
         }
     );
 }
@@ -106,8 +109,9 @@ fn a_non_durable_task_and_a_deleted_focus_fall_back_to_kumo() {
     assert_eq!(
         typed(&mut runs, "home"),
         Input::Turn {
+            turn: 1,
             thread: Some(ThreadId(2)),
-            text: "home".to_owned()
+            text: "home".into()
         }
     );
 }
@@ -157,6 +161,7 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
             Applied {
                 stop: Some(stop(run)),
                 credit: 0,
+                visible: false,
             }
         );
         assert_eq!(runs.target(), Target::New);
@@ -203,12 +208,16 @@ fn selecting_and_starting_a_new_thread_only_change_the_next_turn() {
         sent,
         [
             DataToBrain::TextSubmit {
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(9)),
-                text: "continue".to_owned()
+                text: "continue".into()
             },
             DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "new".to_owned()
+                text: "new".into()
             },
         ]
     );
@@ -284,7 +293,9 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                         .expect("the turn is stored");
                 }
             }
-            BrainEffect::Control(ControlToShell::RunState { run, thread, phase }) => {
+            BrainEffect::Control(ControlToShell::RunState {
+                run, thread, phase, ..
+            }) => {
                 runs.apply_state(run, thread, phase);
             }
             BrainEffect::Data(message) => {
@@ -303,17 +314,23 @@ fn typed(runs: &mut Runs, typed: &str) -> Input {
         true
     })
     .expect("sent");
-    let Some(DataToBrain::TextSubmit { thread, text }) = sent else {
+    let Some(DataToBrain::TextSubmit {
+        turn,
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        thread,
+        text,
+    }) = sent
+    else {
         panic!("a turn was sent")
     };
-    Input::Turn { thread, text }
+    Input::Turn { turn, thread, text }
 }
 
 /// A brain started on `store`, as after a restart.
 fn restarted(store: &Store) -> Coordinator {
     let (thread, run) = store.high_water().expect("ids");
     let main = store.main_thread().expect("recovered");
-    Coordinator::new(main, thread, run, store.scenes().expect("scenes"))
+    Coordinator::ready_for_tests(main, thread, run, store.scenes().expect("scenes"))
 }
 
 #[test]
@@ -347,8 +364,9 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     assert_eq!(
         turn,
         Input::Turn {
+            turn: 1,
             thread: Some(ThreadId(1)),
-            text: "again".to_owned()
+            text: "again".into()
         }
     );
     let effects = brain.handle(turn).expect("turn");
@@ -423,12 +441,16 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
         sent,
         [
             DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "new thread turn".to_owned()
+                text: "new thread turn".into()
             },
             DataToBrain::TextSubmit {
+                turn: 3,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
-                text: "continue new thread".to_owned()
+                text: "continue new thread".into()
             },
         ]
     );
@@ -437,7 +459,7 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
 fn text(run: u64, delta: &str) -> DataToShell {
     DataToShell::AssistantText {
         run: RunId(run),
-        delta: delta.to_owned(),
+        delta: delta.into(),
     }
 }
 
@@ -469,6 +491,40 @@ fn state(runs: &mut Runs, run: u64, phase: Phase) -> Applied {
 
 fn data(runs: &mut Runs, message: DataToShell) -> u32 {
     runs.apply_data(message, BYTES)
+}
+
+/// M143-2: a failure queued before Esc but applied after it shows no notice, whether Esc
+/// stopped a named run or cancelled a turn not yet named; an unfenced failure still shows.
+#[test]
+fn a_failure_applied_after_esc_is_not_shown() {
+    let signed_out = || Some(UserError::from(ErrorKey::SignInNeeded));
+    let failed =
+        |runs: &mut Runs| runs.apply_run_state(RunId(1), ThreadId(1), Phase::Failed, signed_out());
+    let mut runs = answering(1);
+    assert_eq!(runs.stop(), Some(stop(1)));
+    assert_eq!(failed(&mut runs).1, None, "Esc stopped the named run");
+
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    runs.apply_scenes(&[]).expect("valid");
+    submit(&mut runs, "unnamed");
+    assert_eq!(runs.stop(), None);
+    assert_eq!(
+        failed(&mut runs),
+        (
+            Applied {
+                stop: Some(stop(1)),
+                credit: 0,
+                visible: false,
+            },
+            None
+        ),
+        "Esc cancelled the turn before its run was named"
+    );
+
+    let mut runs = answering(1);
+    assert_eq!(failed(&mut runs).1, signed_out(), "nothing fenced it off");
 }
 
 fn submit(runs: &mut Runs, typed: &str) {
@@ -589,7 +645,8 @@ fn data_before_its_run_state_is_held_until_the_state_names_it() {
         applied,
         Applied {
             stop: None,
-            credit: BYTES
+            credit: BYTES,
+            visible: true,
         }
     );
     assert_eq!(shown_text(&runs), Some((RunId(3), "early")));
@@ -613,7 +670,8 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
         applied,
         Applied {
             stop: Some(stop(1)),
-            credit: BYTES
+            credit: BYTES,
+            visible: false,
         }
     );
     assert!(runs.shown().is_none(), "nothing of a shows");
@@ -622,7 +680,14 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
     data(&mut runs, step(1, 0));
     assert_eq!(state(&mut runs, 1, Phase::Interrupted), Applied::default());
     assert!(runs.shown().is_none());
-    assert_eq!(state(&mut runs, 2, Phase::Thinking), Applied::default());
+    assert_eq!(
+        state(&mut runs, 2, Phase::Thinking),
+        Applied {
+            stop: None,
+            credit: 0,
+            visible: true,
+        }
+    );
     data(&mut runs, text(2, "b runs"));
     assert_eq!(shown_text(&runs), Some((RunId(2), "b runs")));
     assert!(runs.working());
@@ -645,7 +710,8 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
         state(&mut runs, 5, Phase::Thinking),
         Applied {
             stop: Some(stop(5)),
-            credit: BYTES
+            credit: BYTES,
+            visible: false,
         },
         "exactly one Stop names a's run"
     );
@@ -715,7 +781,8 @@ fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
         state(&mut runs, 2, Phase::Answering),
         Applied {
             stop: None,
-            credit: 0
+            credit: 0,
+            visible: true,
         },
         "b isn't cancelled, and a's held frame is gone"
     );
@@ -764,7 +831,8 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
         state(&mut runs, 5, Phase::Thinking),
         Applied {
             stop: Some(stop(5)),
-            credit: 0
+            credit: 0,
+            visible: false,
         },
         "a's run is stopped once it's named"
     );
@@ -804,8 +872,10 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
     assert_eq!(
         sent,
         [DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: None,
-            text: "one".to_owned(),
+            text: "one".into(),
         }]
     );
     assert_eq!(runs.submitted.len(), 1);
@@ -825,12 +895,16 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
         sent,
         [
             DataToBrain::TextSubmit {
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "one".to_owned(),
+                text: "one".into(),
             },
             DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(11)),
-                text: "two".to_owned(),
+                text: "two".into(),
             },
         ]
     );
@@ -862,16 +936,22 @@ fn only_a_newer_run_sets_the_next_turn_s_thread() {
         sent,
         [
             DataToBrain::TextSubmit {
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "one".to_owned(),
+                text: "one".into(),
             },
             DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: None,
-                text: "two".to_owned(),
+                text: "two".into(),
             },
             DataToBrain::TextSubmit {
+                turn: 3,
+                screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: Some(ThreadId(22)),
-                text: "third".to_owned(),
+                text: "third".into(),
             },
         ]
     );
@@ -899,8 +979,10 @@ fn a_fenced_older_run_s_late_failure_keeps_the_thread() {
     assert_eq!(
         sent,
         Some(DataToBrain::TextSubmit {
+            turn: 3,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(ThreadId(22)),
-            text: "third".to_owned(),
+            text: "third".into(),
         })
     );
 }
@@ -923,6 +1005,72 @@ fn submits_stay_under_the_brain_s_turn_cap() {
     runs.apply_state(RunId(1), ThreadId(1), Phase::Thinking);
     assert_eq!(runs.submit("again", send), Ok(()));
     assert_eq!(sends.get(), 64);
+}
+
+#[test]
+fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapping() {
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    assert_eq!(runs.submit("unsent", |_| false), Err(Refused::Offline));
+    let mut sent = Vec::new();
+    for text in ["first", "second"] {
+        assert_eq!(
+            runs.submit(text, |message| {
+                sent.push(message);
+                true
+            }),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        sent,
+        [
+            DataToBrain::TextSubmit {
+                turn: 1,
+                screen: kumochi_protocol::message::ScreenChoice::None,
+                thread: Some(ThreadId(1)),
+                text: "first".into()
+            },
+            DataToBrain::TextSubmit {
+                turn: 2,
+                screen: kumochi_protocol::message::ScreenChoice::None,
+                thread: Some(ThreadId(1)),
+                text: "second".into()
+            },
+        ]
+    );
+    runs.turns_sent = u32::MAX - 1;
+    assert_eq!(
+        runs.submit("last", |message| {
+            assert_eq!(
+                message,
+                DataToBrain::TextSubmit {
+                    turn: u32::MAX,
+                    screen: kumochi_protocol::message::ScreenChoice::None,
+                    thread: Some(ThreadId(1)),
+                    text: "last".into()
+                }
+            );
+            true
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        runs.submit("overflow", |_| panic!("overflow cannot reach sender")),
+        Err(Refused::Busy)
+    );
+    runs.disconnected();
+    runs.connected(2);
+    runs.settings(ThreadId(1));
+    assert_eq!(
+        typed(&mut runs, "reset"),
+        Input::Turn {
+            turn: 1,
+            thread: Some(ThreadId(1)),
+            text: "reset".into()
+        }
+    );
 }
 
 #[test]

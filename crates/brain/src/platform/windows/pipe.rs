@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt as _;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle as _, OwnedHandle};
 use std::path::PathBuf;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -17,7 +17,7 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
@@ -178,7 +178,7 @@ fn descriptor_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
 }
 
 /// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
-fn user_sid() -> io::Result<String> {
+pub(super) fn user_sid() -> io::Result<String> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: plain call returning a pseudo-handle that needs no closing.
     let process = unsafe { GetCurrentProcess() };
@@ -264,6 +264,19 @@ pub fn client_image(server: &NamedPipeServer) -> io::Result<PathBuf> {
     let mut pid = 0;
     // SAFETY: the handle is open for the borrow and `pid` is a writable u32.
     if unsafe { GetNamedPipeClientProcessId(server.as_raw_handle(), &raw mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    process_image(pid)
+}
+
+/// The executable of the process serving the pipe `client` is connected to.
+///
+/// # Errors
+/// Fails when the handle isn't a connected pipe client or the server can't be queried.
+pub fn server_image(client: &impl AsRawHandle) -> io::Result<PathBuf> {
+    let mut pid = 0;
+    // SAFETY: the handle is open for the borrow and `pid` is a writable u32.
+    if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &raw mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
     process_image(pid)

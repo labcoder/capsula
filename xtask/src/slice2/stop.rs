@@ -174,8 +174,10 @@ pub(super) fn replacement(folder: &Path) -> Result<Row> {
             revealed: Vec::new(),
         })?;
         let submitted = client.data(&DataToBrain::TextSubmit {
+            turn: 1,
+            screen: kumochi_protocol::message::ScreenChoice::None,
             thread: Some(thread),
-            text: "gate replace".to_owned(),
+            text: "gate replace".into(),
         })?;
         gaps.push(submitted.saturating_duration_since(stopped));
         let old = run;

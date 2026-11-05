@@ -49,6 +49,7 @@ impl AccountState {
         let Some(pending) = tokens.map(|tokens| tokens.pending_identity_validation) else {
             return effects.push(Effect::Access {
                 ticket,
+                generation: self.generation,
                 result: Err(Denied::Unusable),
             });
         };
@@ -77,7 +78,8 @@ impl AccountState {
         self.fresh(effects);
     }
 
-    /// Hands out the bearer, renewing it first when it's due, at most once a flight. One still
+    /// Hands out the bearer, renewing it first when it's due or a provider refused it, at most
+    /// once a flight. One still
     /// expired after that renewal isn't handed out or renewed again: callers get a retryable
     /// failure, and the newest refresh token stays saved for the next try.
     fn fresh(&mut self, effects: &mut Vec<Effect>) {
@@ -93,7 +95,8 @@ impl AccountState {
                 now.is_none_or(|now| expires_at <= now.saturating_add(seconds))
             })
         };
-        if within(EARLY_SECONDS) && !self.renewed && !self.tickets.is_empty() {
+        let refused = self.refused == Some(self.generation);
+        if (refused || within(EARLY_SECONDS)) && !self.renewed && !self.tickets.is_empty() {
             return self.waiting.push_back(Waiting::Refresh(self.generation));
         }
         if within(0) {
@@ -298,6 +301,7 @@ impl AccountState {
                 .map_or(old.refresh_token, |token| token.expose().clone()),
             pending_identity_validation: tokens.id_token.is_some(),
             refresh_sent: false,
+            connection: old.connection,
             id_token: tokens
                 .id_token
                 .map_or(old.id_token, |token| Some(token.expose().clone())),
@@ -589,6 +593,7 @@ impl AccountState {
         for ticket in self.tickets.drain(..) {
             effects.push(Effect::Access {
                 ticket,
+                generation: self.generation,
                 result: result.clone(),
             });
         }

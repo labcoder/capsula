@@ -101,6 +101,7 @@ fn received(refresh: Option<&str>, subject: &str, scope: &str) -> Result<Receive
             email: Some(secret(EMAIL)),
         }),
         now: Some(NOW),
+        connection: 1,
     })
 }
 
@@ -118,6 +119,7 @@ fn saved_account(subject: &str, refresh: &str) -> Secret<Account> {
             expires_at: NOW + 60,
             pending_identity_validation: false,
             refresh_sent: false,
+            connection: 0,
         }),
     })
 }
@@ -320,7 +322,7 @@ impl Harness {
                     subject.expose().to_string(),
                     id_token.expose().to_string(),
                 )),
-                Effect::Access { ticket, result } => self
+                Effect::Access { ticket, result, .. } => self
                     .answers
                     .push((ticket, result.map(|bearer| bearer.expose().to_string()))),
             }
@@ -878,6 +880,7 @@ fn no_secret_reaches_the_logs_or_debug_output() {
                 email: Some(secret("SENTINEL@example.invalid")),
             }),
             now: Some(NOW),
+            connection: 1,
         })
     };
     let mut h = Harness::new("account-sentinel");

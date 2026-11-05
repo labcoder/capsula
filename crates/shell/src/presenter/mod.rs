@@ -27,6 +27,7 @@
 
 mod admit;
 mod measure;
+pub(crate) mod overlay_input;
 mod paint;
 mod prepare;
 mod recovery;
@@ -129,6 +130,7 @@ pub(crate) enum Effect {
 
 /// Every v1 scene the shell mirrors, and the work preparing them.
 pub(crate) struct Presenter {
+    pub(crate) input: overlay_input::OverlayOwner,
     surface: SurfaceGeometry,
     theme: Arc<Theme>,
     generation: Option<u64>,
@@ -166,6 +168,7 @@ pub(crate) struct Presenter {
 impl Presenter {
     pub(crate) fn new(surface: SurfaceGeometry, theme: Arc<Theme>) -> Self {
         Self {
+            input: overlay_input::OverlayOwner::default(),
             surface,
             theme,
             generation: None,

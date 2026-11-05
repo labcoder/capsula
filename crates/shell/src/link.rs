@@ -81,6 +81,7 @@ pub(crate) enum LinkEvent {
         run: RunId,
         thread: ThreadId,
         phase: Phase,
+        error: Option<UserError>,
     },
     /// A data frame, with its size on the pipe, header included, for the credit it earns once
     /// the UI has taken it, and the generation of the connection it came on.
@@ -765,7 +766,10 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
-            | ControlToShell::ThreadsChanged,
+            | ControlToShell::ThreadsChanged
+            | ControlToShell::CaptureDone { .. }
+            | ControlToShell::CaptureFailed { .. }
+            | ControlToShell::Connections(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -812,6 +816,7 @@ fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
 
 /// Reads the control pipe until the connection ends: answers pings and passes run states and
 /// scenes on. A repeated handshake ends the connection, as the brain treats a protocol violation.
+#[expect(clippy::too_many_lines, reason = "one arm per control message")]
 fn watch(
     control: &PipeClient,
     out: &Sender<ControlToBrain>,
@@ -838,9 +843,20 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::RunState { run, thread, phase })) => {
+            Ok(Some(ControlToShell::RunState {
+                run,
+                thread,
+                phase,
+                error,
+                ..
+            })) => {
                 if events
-                    .send_blocking(LinkEvent::RunState { run, thread, phase })
+                    .send_blocking(LinkEvent::RunState {
+                        run,
+                        thread,
+                        phase,
+                        error,
+                    })
                     .is_err()
                 {
                     return;
@@ -899,6 +915,13 @@ fn watch(
                     return;
                 }
             }
+            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
+            // brain sends no connections view until C2; the Connect screen reads it.
+            Ok(Some(
+                ControlToShell::CaptureDone { .. }
+                | ControlToShell::CaptureFailed { .. }
+                | ControlToShell::Connections(_),
+            )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
                 tracing::warn!("scene v1 control before its consumer; ending the connection");

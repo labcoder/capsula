@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
+    Content, ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
 
 use super::{Coordinator, Effect, Input, Notify, Stale, StoreOp};
@@ -89,8 +89,9 @@ impl Coordinator {
     /// the shell sent before deleting it, or a blank one, is refused before it gets a run.
     pub(super) fn typed(
         &mut self,
+        turn: u32,
         thread: Option<ThreadId>,
-        text: String,
+        text: Content,
         effects: &mut Vec<Effect>,
     ) {
         let Some(read) = self.turns_read.checked_add(1) else {
@@ -99,9 +100,9 @@ impl Coordinator {
         };
         self.turns_read = read;
         if self.admits(thread) && !text.trim().is_empty() {
-            self.turn(thread, text, effects);
+            self.turn(turn, thread, text, effects);
         } else {
-            let refused = ControlToShell::TurnRefused { thread };
+            let refused = ControlToShell::TurnRefused { turn, thread };
             effects.push(Effect::Control(refused));
         }
     }

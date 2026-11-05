@@ -10,8 +10,8 @@ use std::thread;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, ControlToShell, DataToShell, ErrorKey, ModelInfo,
-    PlanState, SettingsOp, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ControlToShell, DataToShell, ErrorKey,
+    ModelInfo, PlanState, SettingsOp, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -30,13 +30,16 @@ use crate::connections::oauth::refresh::refresh;
 use crate::connections::oauth::revoke::{BUDGET, revoke};
 use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
+use crate::context::ConnectionTag;
+use crate::coordinator::{Availability, Ready};
+use crate::engines::responses::{AccessAsk, Bearer};
 use crate::platform::credential::CredentialStore;
 
 use super::{Brain, Full, Link, settings};
 use crate::coordinator::Input as CoreInput;
 
 /// What a caller of [`Accounts::access`] gets: the bearer, or why there's none.
-pub(crate) type Access = Result<Secret<Zeroizing<String>>, Denied>;
+pub(crate) use crate::engines::responses::Access;
 
 /// Builds the account HTTP client; every exchange builds its own, so a trust store fixed since
 /// the last try is read again.
@@ -133,6 +136,8 @@ pub(crate) struct Accounts {
     catalog: Catalog,
     reads_tx: mpsc::UnboundedSender<Event>,
     reads: mpsc::UnboundedReceiver<Event>,
+    /// Random per process, so each sign-in's connection is one no earlier sign-in used.
+    salt: u64,
 }
 
 impl Accounts {
@@ -151,6 +156,7 @@ impl Accounts {
         let (loaded_tx, loaded) = std_mpsc::channel();
         let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone())?;
         let (reads_tx, reads) = mpsc::unbounded_channel();
+        let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
             state,
             jobs: Some(jobs),
@@ -164,6 +170,7 @@ impl Accounts {
             catalog: Catalog::default(),
             reads_tx,
             reads,
+            salt,
         };
         accounts.apply(started);
         let done = loaded
@@ -187,12 +194,34 @@ impl Accounts {
     /// Asks for the bearer, refreshed first when it's due; it comes on the receiver. Dropping the
     /// receiver cancels only the wait: a refresh it started still runs to its end and is saved.
     pub(crate) fn access(&mut self) -> (oneshot::Receiver<Access>, Vec<ControlToShell>) {
+        let (answer, receiver) = oneshot::channel();
+        (receiver, self.answer_access(answer))
+    }
+
+    /// A model round's ask for the bearer: only the connection `wanted` gets it, while it's
+    /// the ready one, so a round never sends on an account its run wasn't bound to.
+    pub(crate) fn access_for(
+        &mut self,
+        wanted: Option<ConnectionTag>,
+        answer: oneshot::Sender<Access>,
+    ) -> Vec<ControlToShell> {
+        match self.availability() {
+            Availability::Ready(ready) if Some(ready.connection) == wanted => {
+                self.answer_access(answer)
+            }
+            _ => {
+                answer.send(Err(Denied::Unusable)).ok();
+                Vec::new()
+            }
+        }
+    }
+
+    fn answer_access(&mut self, answer: oneshot::Sender<Access>) -> Vec<ControlToShell> {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        let (answer, receiver) = oneshot::channel();
         self.tickets.insert(ticket, answer);
         let now = self.net.clock.unix_seconds();
-        (receiver, self.handle(Input::Access { ticket, now }))
+        self.handle(Input::Access { ticket, now })
     }
 
     /// Applies an input; what the shell should hear, in order. The catalog is read when the
@@ -216,7 +245,8 @@ impl Accounts {
         {
             let (wait, access) = self.access();
             frames.extend(access);
-            let task = tokio::spawn(read_catalog(wait, Arc::clone(&self.net.http)));
+            let http = Arc::clone(&self.net.http);
+            let task = tokio::spawn(read_catalog(wait, http, self.reads_tx.clone()));
             self.catalog.read = Some(task.abort_handle());
             drop(tokio::spawn(catalog_task(
                 self.catalog.epoch,
@@ -253,6 +283,48 @@ impl Accounts {
                 frames
             }
         }
+    }
+
+    /// Whether runs can be answered: a usable account's connection and catalog, or what the
+    /// user can do. An accepted sign-out is already unavailable.
+    pub(super) fn availability(&self) -> Availability {
+        let error = |key, action| {
+            UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
+        };
+        let reason = match self.state.view() {
+            AccountView::SignedIn {
+                plan: PlanState::Enabled,
+                recovery: None | Some(AccountRecovery::Retry),
+                ..
+            } => match self.state.connection() {
+                Some(connection) => {
+                    return Availability::Ready(Ready {
+                        connection: ConnectionTag(connection),
+                        models: self.catalog.models.clone().unwrap_or_default(),
+                        #[cfg(debug_assertions)]
+                        trusted_draw: false,
+                    });
+                }
+                None => error(ErrorKey::SignInNeeded, Action::SignIn),
+            },
+            AccountView::SignedIn {
+                recovery: Some(AccountRecovery::SignInAgain),
+                ..
+            } => error(ErrorKey::SessionEnded, Action::SignIn),
+            AccountView::SignedIn {
+                plan: PlanState::Declined,
+                ..
+            } => error(ErrorKey::PlanNotEnabled, Action::Enable),
+            AccountView::SignedIn {
+                plan: PlanState::Unavailable,
+                ..
+            } => UserError::from(ErrorKey::PlanUnavailable),
+            AccountView::Busy => error(ErrorKey::CredentialsUnavailable, Action::Retry),
+            AccountView::SignedOut { .. }
+            | AccountView::SigningIn
+            | AccountView::SigningOut { .. } => error(ErrorKey::SignInNeeded, Action::SignIn),
+        };
+        Availability::Unavailable(reason)
     }
 
     /// The account's catalog epoch while it can send model requests: its generation for jobs.
@@ -318,6 +390,8 @@ impl Accounts {
                     authorization,
                 } => drop(tokio::spawn(exchange_task(
                     attempt,
+                    // The top bit keeps it apart from sets saved before connections, which read 0.
+                    self.salt.wrapping_add(attempt) | 1 << 63,
                     authorization,
                     self.net.clone(),
                     self.events_tx.clone(),
@@ -350,10 +424,16 @@ impl Accounts {
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
-                Effect::Access { ticket, result } => {
+                Effect::Access {
+                    ticket,
+                    generation,
+                    result,
+                } => {
                     // A caller that stopped waiting just doesn't hear it.
                     if let Some(answer) = self.tickets.remove(&ticket) {
-                        answer.send(result).ok();
+                        answer
+                            .send(result.map(|token| Bearer { generation, token }))
+                            .ok();
                     }
                 }
             }
@@ -402,6 +482,27 @@ impl Accounts {
 }
 
 impl Brain {
+    /// A round asks for the bearer, of the connection the coordinator says its send may use, or
+    /// says the provider refused the one it had.
+    pub(super) fn access_asked(
+        &mut self,
+        ask: AccessAsk,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), Full> {
+        let (key, answer) = match ask {
+            AccessAsk::Bearer { key, answer } => (key, answer),
+            AccessAsk::Refused(generation) => {
+                return self.account_input(Input::Refused { generation }, link);
+            }
+        };
+        let wanted = self.coordinator.sending(key);
+        let frames = self.account.access_for(wanted, answer);
+        let Some(link) = link else {
+            return Ok(());
+        };
+        frames.iter().try_for_each(|frame| link.control(frame))
+    }
+
     /// Applies an account input and tells the connected shell, if any, what changed. A catalog
     /// read that leaves `default_model` unset or unlisted queues the brain's own change to it.
     pub(super) fn account_input(
@@ -424,6 +525,8 @@ impl Brain {
                 }
             }
         }
+        self.availability_changed(link.as_deref_mut())
+            .map_err(|_| Full)?;
         if read
             && let Some(choice) = self
                 .account
@@ -441,7 +544,10 @@ impl Brain {
         };
         frames.iter().try_for_each(|frame| link.control(frame))?;
         match self.account.models_unsent() {
-            Some(models) => link.data(&DataToShell::Models { models }),
+            Some(models) => link.data(&DataToShell::Models {
+                connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                models,
+            }),
             None => Ok(()),
         }
     }
@@ -522,11 +628,12 @@ async fn revoke_task(
     events.send(Input::Revoked(confirmed)).ok();
 }
 
-/// Reads the catalog with the bearer `wait` brings. Aborting it drops only that wait, never a
-/// refresh it started.
+/// Reads the catalog with the bearer `wait` brings, telling the account on `reads` when the
+/// provider refused it. Aborting it drops only that wait, never a refresh it started.
 async fn read_catalog(
     wait: oneshot::Receiver<Access>,
     http: HttpFactory,
+    reads: mpsc::UnboundedSender<Event>,
 ) -> Result<Vec<ModelInfo>, Option<UserError>> {
     let bearer = match wait.await {
         Ok(Ok(bearer)) => bearer,
@@ -538,9 +645,13 @@ async fn read_catalog(
         .await
         .map_err(|_| failed(HttpError::Configuration))?
         .map_err(failed)?;
-    read(&http, bearer)
-        .await
-        .map_err(|error| Some(error.failure()))
+    read(&http, bearer.token).await.map_err(|error| {
+        if matches!(error, CatalogError::Refused { status: 401, .. }) {
+            let generation = bearer.generation;
+            reads.send(Input::Refused { generation }.into()).ok();
+        }
+        Some(error.failure())
+    })
 }
 
 /// Reports the end of `task`, a read in its own task so one that panics still ends; a cancelled
@@ -634,6 +745,7 @@ async fn validate_task(
 
 pub(super) async fn exchange_task(
     attempt: u64,
+    connection: u64,
     authorization: Authorization,
     net: Net,
     events: mpsc::UnboundedSender<Input>,
@@ -664,6 +776,7 @@ pub(super) async fn exchange_task(
             tokens,
             identity,
             now,
+            connection,
         })
     }
     .await;

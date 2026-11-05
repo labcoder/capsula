@@ -453,7 +453,10 @@ fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
         presenter.returned.store(0, Ordering::Relaxed);
         if over == 1 {
             assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert!(
+                presenter.scenes.is_empty(),
+                "a later valid begin cannot undo failure"
+            );
             assert_eq!(presenter.residency(), 0);
         }
     }
@@ -493,7 +496,10 @@ fn recovery_checks_its_view_and_frame_at_the_cap() {
         presenter.returned.store(0, Ordering::Relaxed);
         if over == 1 {
             assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert!(
+                presenter.scenes.is_empty(),
+                "a later valid begin cannot undo failure"
+            );
             assert_eq!(presenter.residency(), 0);
         }
     }
@@ -530,7 +536,10 @@ fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
         presenter.returned.store(0, Ordering::Relaxed);
         if over == 1 {
             assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-            assert!(presenter.scenes.is_empty(), "a later valid begin cannot undo failure");
+            assert!(
+                presenter.scenes.is_empty(),
+                "a later valid begin cannot undo failure"
+            );
             assert_eq!(presenter.residency(), 0);
         }
     }

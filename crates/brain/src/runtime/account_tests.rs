@@ -27,7 +27,9 @@ use crate::connections::oauth::{Authorization, LaunchError, LaunchTarget, Launch
 use crate::connections::records::{Account, Tokens};
 use crate::connections::vault::fake::FakeStore;
 use crate::connections::vault::{SaveResult, Vault};
-use crate::coordinator::StoreOp;
+use crate::context::ConnectionTag;
+use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
+use crate::engines::responses::Bearer;
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
@@ -391,7 +393,7 @@ async fn a_token_set_is_stamped_when_it_arrives_not_after_its_identity_check() {
         redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
     };
     let (events, mut results) = mpsc::unbounded_channel();
-    exchange_task(1, authorization, net, events).await;
+    exchange_task(1, 1, authorization, net, events).await;
     let Some(Input::Exchanged {
         attempt: 1,
         result: Ok(received),
@@ -461,6 +463,7 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
             expires_at: 1_800_000_000,
             pending_identity_validation: false,
             refresh_sent: false,
+            connection: 0,
         }),
     }));
     assert!(matches!(saved, SaveResult::Committed { .. }));
@@ -541,6 +544,9 @@ fn due_account(scratch: &Scratch, store: &FakeStore, http: SharedHttp) -> Accoun
     seeded(scratch, store, http, 1_800_000_000)
 }
 
+/// The connection [`seeded`] saves.
+const SEEDED: u64 = 42;
+
 /// Saves an account whose bearer expires at `expires_at`, then starts the account system on it
 /// with `http` at 1,800,000,000.
 fn seeded(scratch: &Scratch, store: &FakeStore, http: SharedHttp, expires_at: u64) -> Accounts {
@@ -570,6 +576,7 @@ fn seeded_on(scratch: &Scratch, store: &FakeStore, http: HttpFactory, expires_at
                 expires_at,
                 pending_identity_validation: false,
                 refresh_sent: false,
+                connection: SEEDED,
             }),
         }));
     assert!(matches!(saved, SaveResult::Committed { .. }));
@@ -611,6 +618,17 @@ fn saved_refresh(scratch: &Scratch, store: &FakeStore) -> (String, bool) {
         .expect("an account");
     let tokens = account.expose().tokens.as_ref().expect("tokens");
     (tokens.refresh_token.to_string(), tokens.refresh_sent)
+}
+
+/// The saved set's connection.
+fn saved_connection(scratch: &Scratch, store: &FakeStore) -> u64 {
+    let lock = scratch.db().with_file_name("reader.lock");
+    let account = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &lock)
+        .expect("vault")
+        .load_account()
+        .expect("readable")
+        .expect("an account");
+    account.expose().tokens.as_ref().expect("tokens").connection
 }
 
 /// Panics on the refresh-token grant or, with `check`, answers it with a set to check and panics
@@ -657,7 +675,7 @@ async fn answered(
     })
     .await
     .expect("answered in time");
-    answer.map(|bearer| bearer.expose().to_string())
+    answer.map(|bearer| bearer.token.expose().to_string())
 }
 
 fn failed(key: ErrorKey, action: Action) -> Result<String, Denied> {
@@ -735,6 +753,11 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
     assert_eq!(
         saved_refresh(&scratch, &store),
         ("refresh-new".to_owned(), false)
+    );
+    assert_eq!(
+        saved_connection(&scratch, &store),
+        SEEDED,
+        "a refreshed set keeps its sign-in's connection"
     );
     drop(SessionLock::try_acquire(&lock).expect("released"));
 }
@@ -857,6 +880,150 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
         accounts.models(),
         None,
         "a read from before the sign-out is dropped"
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// D13-H1: a usable account is ready on its saved set's connection with its catalog, and an
+/// accepted sign-out is unavailable at once, before the sign-out finishes.
+#[tokio::test]
+async fn availability_is_the_saved_connection_until_a_sign_out_is_accepted() {
+    let scratch = Scratch::new("account-availability");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        accounts.availability(),
+        Availability::Ready(Ready {
+            connection: ConnectionTag(SEEDED),
+            models: accounts.models().expect("read").to_vec(),
+            trusted_draw: false,
+        })
+    );
+    let frames = accounts.handle(Input::Op(AccountOp::SignOut));
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            ControlToShell::Account(AccountView::SigningOut { .. })
+        )),
+        "the sign-out was accepted and hasn't finished"
+    );
+    let sign_in = UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn]);
+    assert_eq!(
+        accounts.availability(),
+        Availability::Unavailable(sign_in.expect("valid"))
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// A round's ask gets the bearer only for the ready connection it names, so a round never sends
+/// on an account its run wasn't bound to.
+#[tokio::test]
+async fn a_rounds_ask_gets_the_bearer_only_of_the_connection_it_names() {
+    let scratch = Scratch::new("account-access-for");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    for (wanted, bearer) in [
+        (Some(ConnectionTag(SEEDED + 1)), Err(Denied::Unusable)),
+        (None, Err(Denied::Unusable)),
+        (Some(ConnectionTag(SEEDED)), Ok("access-old".to_owned())),
+    ] {
+        let (answer, wait) = oneshot::channel();
+        accounts.access_for(wanted, answer);
+        assert_eq!(answered(&mut accounts, wait).await, bearer, "{wanted:?}");
+    }
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Answers the model list with a 401 and the refresh-token grant with a rotated set, counting
+/// the grants.
+struct RefusingModels(Arc<AtomicU64>);
+
+impl Http for RefusingModels {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let refused = matches!(request.endpoint, Endpoint::Models(_));
+        if matches!(request.endpoint, Endpoint::Token) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        let rotated = Rotating.execute(request);
+        async move {
+            if !refused {
+                return rotated.await;
+            }
+            Ok(Response {
+                status: 401,
+                request_id: None,
+                body: Secret::new(Zeroizing::new(Vec::new())),
+            })
+        }
+    }
+}
+
+/// Runs the account system until `wait` is answered with a bearer.
+async fn granted(accounts: &mut Accounts, mut wait: oneshot::Receiver<Access>) -> Bearer {
+    timeout(PATIENCE, async {
+        loop {
+            if let Ok(answer) = wait.try_recv() {
+                return answer.expect("a bearer");
+            }
+            let input = accounts.next().await;
+            accounts.handle(input);
+        }
+    })
+    .await
+    .expect("answered in time")
+}
+
+/// OSC-223: a bearer the provider refused marks its set as due, so the next access refreshes it
+/// once, though it isn't near its expiry. A late refusal of the set it replaced, or one naming
+/// a generation that never was, marks nothing.
+#[tokio::test]
+async fn a_refused_bearer_is_refreshed_on_the_next_access() {
+    let scratch = Scratch::new("account-refused");
+    let store = FakeStore::default();
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let http = SharedHttp::new(RefusingModels(Arc::clone(&refreshes)));
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]);
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline.expect("valid"))],
+        "the catalog's 401"
+    );
+    let (wait, _) = accounts.access();
+    let rotated = granted(&mut accounts, wait).await;
+    assert_eq!(rotated.token.expose().as_str(), "access-new");
+    accounts.handle(Input::Refused {
+        generation: rotated
+            .generation
+            .checked_sub(1)
+            .expect("a rotation moved it"),
+    });
+    let (wait, _) = accounts.access();
+    assert_eq!(
+        answered(&mut accounts, wait).await,
+        Ok("access-new".to_owned())
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "one refresh in all");
+    accounts.close(Instant::now(), Instant::now()).await;
+
+    let scratch = Scratch::new("account-refused-stale");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    let (wait, _) = accounts.access();
+    let generation = granted(&mut accounts, wait).await.generation;
+    accounts.handle(Input::Refused {
+        generation: generation + 1,
+    });
+    let (wait, _) = accounts.access();
+    assert_eq!(
+        answered(&mut accounts, wait).await,
+        Ok("access-old".to_owned())
     );
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -1020,12 +1187,17 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     let luna = ModelChoice {
         model: ModelSlug::new("gpt-6-luna").expect("valid"),
         effort: Effort::Low,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         match timeout(PATIENCE, shell.data()).await.expect("in time") {
-            DataToShell::Models { models } => {
+            DataToShell::Models { connection, models } => {
+                assert_eq!(
+                    connection,
+                    kumochi_protocol::message::ConnectionKind::ChatGpt
+                );
                 assert_eq!(slugs(&models), ["gpt-6-sol", "gpt-6-luna"]);
             }
             other => panic!("expected Models, got {other:?}"),
@@ -1074,16 +1246,21 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
     let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     let mut brain = test_support::brain_with(&scratch, "", accounts);
     let mut seen = brain.observe();
-    let mut titles = move || {
-        std::iter::from_fn(|| seen.try_recv().ok())
-            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadTitle(_))))
-            .count()
-    };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         shell.finish_task("first").await;
-        assert_eq!(titles(), 1, "the account could send at startup");
+        timeout(PATIENCE, async {
+            while !matches!(
+                seen.recv().await.expect("the brain reports"),
+                Seen::StoreOpQueued(StoreOp::ReadJob(ReadJob {
+                    kind: JobKind::Title,
+                    ..
+                }))
+            ) {}
+        })
+        .await
+        .expect("the account could send at startup, so the title job starts");
         shell
             .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
             .await;
@@ -1091,8 +1268,15 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
             shell.frame().await,
             ControlToShell::Account(AccountView::SignedOut { .. })
         ) {}
+        // The first task's jobs, compaction after its title included, end with the sign-out.
+        while seen.try_recv().is_ok() {}
         shell.finish_task("second").await;
-        assert_eq!(titles(), 0, "signed out, so no job starts");
+        // Done is told in the same step that would start the run's job, after it, so a job
+        // queued for the second task would already be here.
+        let jobs = std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|seen| matches!(seen, Seen::StoreOpQueued(StoreOp::ReadJob(_))))
+            .count();
+        assert_eq!(jobs, 0, "signed out, so no job starts");
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);

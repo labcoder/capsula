@@ -79,6 +79,12 @@ pub enum Input {
     },
     /// The model list refused this account's plan (`subscription_sharing_user_not_eligible`).
     PlanUnavailable,
+    /// A provider refused the bearer of `generation` (a 401): that set is due, so the next
+    /// access refreshes it once.
+    Refused {
+        /// The generation of the set the bearer came from.
+        generation: u64,
+    },
     /// The identity check of `generation`'s rotated set ended.
     Validated {
         /// The account generation it checked.
@@ -122,6 +128,8 @@ pub struct Received {
     pub identity: Result<VerifiedIdentity, IdentityError>,
     /// Wall time when it arrived, for its expiry.
     pub now: Option<u64>,
+    /// A name for this sign-in no earlier one used, which the set keeps through refreshes.
+    pub connection: u64,
 }
 
 /// What the runtime must do.
@@ -179,6 +187,8 @@ pub enum Effect {
     Access {
         /// The caller's ticket.
         ticket: u64,
+        /// The generation of the set the bearer came from.
+        generation: u64,
         /// The bearer, or why there's none.
         result: Result<Secret<Zeroizing<String>>, Denied>,
     },
@@ -245,6 +255,8 @@ pub struct AccountState {
     /// The flight already sent a refresh, so it hands out what that brought rather than
     /// renewing again.
     renewed: bool,
+    /// The generation whose bearer a provider refused, renewed on the next access.
+    refused: Option<u64>,
     /// The wall time the latest timed input carried, for the expiry of a set saved since.
     now: Option<u64>,
     /// The generation a session the provider ended left: the registration and email stay, shown
@@ -283,6 +295,7 @@ impl AccountState {
             validating: None,
             tickets: Vec::new(),
             renewed: false,
+            refused: None,
             now: None,
             ended: None,
             jobs: VecDeque::new(),
@@ -299,6 +312,13 @@ impl AccountState {
         let mut effects = Vec::new();
         state.dispatch(&mut effects);
         (state, effects)
+    }
+
+    /// The connection of the saved token set, if there is one.
+    #[must_use]
+    pub fn connection(&self) -> Option<u64> {
+        let account = self.loaded.account.as_ref()?.expose();
+        account.tokens.as_ref().map(|tokens| tokens.connection)
     }
 
     /// Where the account stands now.
@@ -367,6 +387,10 @@ impl AccountState {
                         .as_ref()
                         .is_some_and(|account| account.expose().tokens.is_some());
             }
+            Input::Refused { generation } if generation == self.generation => {
+                self.refused = Some(generation);
+            }
+            Input::Refused { .. } => {}
             Input::Access { ticket, now } => self.access(ticket, now, &mut effects),
             Input::Refreshed {
                 generation,
@@ -557,6 +581,10 @@ impl AccountState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exchange, from its result through its verdict to what's saved"
+    )]
     fn exchanged(
         &mut self,
         attempt: u64,
@@ -604,6 +632,7 @@ impl AccountState {
             tokens,
             identity,
             now,
+            connection,
         } = received;
         let refresh_token = match tokens.refresh_token {
             Some(token) if entry_fits(client.expose(), token.expose()) => token,
@@ -641,6 +670,7 @@ impl AccountState {
                         expires_at,
                         pending_identity_validation: false,
                         refresh_sent: false,
+                        connection,
                     }),
                 };
                 if account.validate().is_ok() {

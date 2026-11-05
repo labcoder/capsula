@@ -37,6 +37,7 @@ pub(crate) fn default_model(
     Some(ModelChoice {
         model: model.slug.clone(),
         effort: Effort::Low,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
     })
 }
 
@@ -70,8 +71,8 @@ impl CatalogError {
                 status: 403,
                 code: OAuthCode::NotEligible,
             } => (ErrorKey::PlanUnavailable, false),
-            // A busy or failing server offers Retry whatever code it sent. shortcut: a rejected
-            // bearer only offers Retry, not a refresh; PR 11's request path handles a 401 properly.
+            // A busy or failing server offers Retry whatever code it sent. A rejected bearer's
+            // set is marked due, so Retry refreshes it.
             Self::Refused {
                 status: 401 | 429 | 500..,
                 ..

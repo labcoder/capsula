@@ -150,6 +150,81 @@ tangent dot product strictly below `−1 + REL` is refused. These failures are t
 original typed field and code. `ErrorCode::Degenerate` is appended for the later
 admission boundary, which alone will convert these errors into sanitized paths.
 
+### 3D tessellation
+
+`three::Transform` composes f64 affine transforms. Each canonical local vertex has
+one expression and one narrowing path to world-space f32. Periodic indices wrap
+before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
+endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
+extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
+frames, initially using the axis least aligned with the first tangent.
+
+Generation refuses non-finite world vertices, distinct local vertices that narrow
+to the same world point, and retained triangles whose narrowed points have zero
+area. It never rebases coordinates. Any source triangle with area below `dist_eps²`
+is refused too, except coincident-vertex candidates at lathe axis bands, which are
+dropped and counted. A successful result satisfies `written + dropped == triangles`.
+A thin solid can therefore be refused rather than rendered with missing caps.
+Representability does not guarantee analytic area accuracy: the world f32 lattice
+can change lengths substantially near large translations. Sub-ulp distortion is accepted
+because the camera's near-plane precision floor bounds its screen size.
+
+The caller owns the output and cancellation flag. `Full` means the candidate count
+does not fit beyond the existing prefix and appends nothing. `Cancelled` and
+`Degenerate` can leave appended triangles; callers save the original length and
+truncate back after failure. Cancellation is checked at entry, throughout vertex
+checks, during ear clipping, per emitted triangle and before success.
+
+Large scratch buffers belong to the caller's `MeshScratch`. `MeshScratch::new()` allocates
+collision keys (384 KiB), tube frames and tangents (36 KiB), and sphere vertices/faces
+(about 23 KiB) once. `build` borrows that scratch and never grows its private boxed buffers.
+Only small retained-index and ear-clipping arrays remain on the stack. No build allocates
+once the caller has constructed scratch and reserved its output.
+
+### 3D raster
+
+`three::raster` fills one view's straight-alpha BGRA texels and a u8 solid id per texel from
+convex screen polygons. It has no GPUI: the shell wraps the colour as an image.
+
+```mermaid
+flowchart LR
+  F["Fragment<br/>(snapped points, 1/z plane,<br/>colour, opacity, solid)"] -->|push: dedupe, CCW, convex| S["FrameScratch"]
+  S --> O["opaque pass<br/>input order, depth write"]
+  O --> T["translucent pass<br/>centroid back to front, no depth write"]
+  T --> R["resolve: box filter,<br/>majority id, straight alpha"]
+  R --> BL["bleed clear texels"]
+```
+
+- **Coverage.** Vertices are in 1/256 texel. `FrameScratch::push` removes duplicate and collinear
+  vertices, makes the loop counter-clockwise in y-down space and keeps it only if strictly convex;
+  a collapsed or reflex loop is discarded and counted. Edge functions are exact i64 with the
+  top-left rule, so polygons with identical shared endpoints cover each sample exactly once.
+  Coordinates stay within ±2^21 (4,096 texels plus a 4,096-texel guard band), keeping every
+  edge function under 2^45.
+- **Depth.** The plane gives 1/z over texel coordinates, evaluated in f64 and narrowed to f32; it
+  must be finite and positive at every vertex. Keys clear the 3 lowest mantissa bits and compare
+  strictly, so depths within about 1e-6 relative tie and the earlier input wins, coplanar faces
+  included.
+- **Translucency.** Polygons under opacity 1 are sorted farthest first by their centroid's camera
+  depth (ties by input order) with an in-place sort, depth-tested against opaque samples and
+  blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
+  write depth or split. One at authored opacity 0.5 or more writes its solid id, so the id is
+  the last qualifying layer in that order, not necessarily the nearest surface. Interpenetrating
+  translucent solids can blend in the wrong order (`shortcut:`, OSC-218).
+- **Samples.** Motion frames take one sample at the texel centre; rest frames take four on a
+  rotated grid at (−1/8, −3/8), (3/8, −1/8), (−3/8, 1/8) and (1/8, 3/8) from the centre and
+  box-resolve them. A texel's id is the most frequent sample id, background included, with ties
+  to the id whose first sample is lowest.
+- **Bands and work.** A frame renders in 32-row bands, so only a band's depth, colour and id
+  samples are resident: `BandScratch::new(width)` reserves 1,152 bytes per column once. A
+  `ScreenPoly` is 84 bytes, plus an 8-byte sort key. Cancellation is polled per polygon, every
+  65,536 sample tests and per resolved and bled row, because a band doesn't bound work.
+- **Bleed.** Each clear texel takes the colour of its first covered neighbour (left, right, up,
+  down), keeping alpha 0, so a scaled image doesn't fringe under straight-alpha filtering.
+
+Nothing allocates once the caller holds the scratch, band and target. Targets are 1 to 4,096
+texels per axis; anything else, or a band narrower than the target, is `RasterError::Size`.
+
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
 
@@ -413,9 +488,8 @@ Prepared residency remains the preparation layer's separate limit.
 | Visible scenes | — | 4 |
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
-24,000 triangles per scene/globally, 48 curved segments, and BSP limits of
-4,000,000 classifications, depth 64 and twice the input triangle count in
-fragments. The 3D records exist (see Records), but admission refuses them as `Unsupported`
+24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
+the depth-buffered raster (3D raster below), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
 and no 3D geometry is built yet.
 
 ## Preparation

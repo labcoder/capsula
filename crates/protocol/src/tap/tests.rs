@@ -2,9 +2,9 @@ use super::{Direction, MAGIC, Record, Tapped, dump, read, read_header, write, wr
 use crate::Secret;
 use crate::frame::{FrameError, HEADER_LEN, Pipe, encode};
 use crate::message::{
-    AccountEmail, AccountOp, AccountView, AssistantName, ControlToBrain, ControlToShell,
-    DataToBrain, Hello, Incarnation, PlanState, SettingsOp, SettingsView, ThreadId, ThreadOp,
-    ThreadTitle, UserName,
+    AccountEmail, AccountOp, AccountView, AssistantName, ClaudeCodeView, ClaudeVersion,
+    ConnectionOp, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
+    KeyView, PlanState, SettingsOp, SettingsView, ThreadId, ThreadOp, ThreadTitle, UserName,
 };
 
 const NAME: &str = "Zqxassistant";
@@ -166,6 +166,41 @@ fn an_account_op_keeps_its_fields_and_the_account_view_only_its_name() {
             "    0 Control shell -> brain  AccountOp(SignIn)\n    1 Control brain -> shell  Account ({} bytes)\n2 frames\n",
             wire_len(&view, Pipe::Control)
         )
+    );
+}
+
+#[test]
+fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
+    let records = [
+        record(
+            Direction::ToBrain,
+            &ControlToBrain::Connection(ConnectionOp::CheckAnthropicKey),
+        ),
+        record(
+            Direction::ToBrain,
+            &ControlToBrain::Warm {
+                thread: ThreadId(3),
+            },
+        ),
+        record(
+            Direction::ToShell,
+            &ControlToShell::Connections(ConnectionsView {
+                anthropic: KeyView::Unconfirmed,
+                claude_code: ClaudeCodeView::SignedOut {
+                    version: ClaudeVersion {
+                        major: 2,
+                        minor: 1,
+                        patch: 306,
+                    },
+                },
+            }),
+        ),
+    ];
+    let mut out = Vec::new();
+    dump(&mut recording(&records).as_slice(), &mut out).expect("dumps");
+    assert_eq!(
+        String::from_utf8(out).expect("utf-8"),
+        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
     );
 }
 
