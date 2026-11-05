@@ -39,6 +39,71 @@ fn accounts(scratch: &Scratch, http: SharedHttp) -> Accounts {
 
 struct Held(Arc<Notify>);
 
+struct EmptyCatalog;
+
+impl Http for EmptyCatalog {
+    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
+        std::future::ready(Ok(Response {
+            status: 200,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn duplicate_staged_ops_keep_the_saved_key_ready() {
+    let scratch = Scratch::new("key-double-submit");
+    let store = FakeStore::default();
+    let owned = store.clone();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(owned.clone(), "key-test", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn(
+        worker,
+        Net {
+            http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
+            ..test_support::net()
+        },
+    )
+    .expect("worker");
+    store
+        .set(
+            "anthropic-key-staged.key-test",
+            &Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec())),
+        )
+        .expect("fake paste");
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+    timeout(Duration::from_secs(5), async {
+        while accounts.connections.loading || accounts.connections.read.is_some() {
+            let event = accounts.next().await;
+            accounts.handle(event);
+        }
+    })
+    .await
+    .expect("both submissions settle");
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    assert_eq!(
+        store
+            .get("anthropic-key.key-test")
+            .expect("active")
+            .expect("saved")
+            .expose()
+            .as_slice(),
+        b"sk-ant-api-fake-staged-value"
+    );
+    assert_eq!(
+        store.get("anthropic-key-staged.key-test").expect("staged"),
+        None
+    );
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
 struct HeldStore {
     armed: Arc<std::sync::atomic::AtomicBool>,
     store: FakeStore,

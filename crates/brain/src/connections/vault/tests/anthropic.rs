@@ -56,12 +56,12 @@ fn missing_or_unreadable_staging_is_cleaned_and_never_adopted() {
     let (_scratch, path, service, store) = setup("staging-read");
     let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
     let mut vault = open(&store, &service, &path);
-    assert!(
-        matches!(
-            vault.anthropic(KeyOp::Adopt),
-            Err(KeyError::Rejected(KeyRejection::Format))
-        ),
-        "missing paste rejected"
+    assert_eq!(
+        vault
+            .anthropic(KeyOp::Adopt)
+            .expect("missing paste loads saved state")
+            .map(|_| ()),
+        None
     );
     store
         .set(
@@ -77,6 +77,44 @@ fn missing_or_unreadable_staging_is_cleaned_and_never_adopted() {
     store.0.lock().expect("fake lock").denied_read = None;
     assert_eq!(store.get(&staged).expect("fake read"), None);
     assert_eq!(store.names(), Vec::<String>::new());
+}
+
+#[test]
+fn adoption_retries_read_misses_then_falls_back_to_the_saved_key() {
+    for (misses, expected) in [(1, KEY), (3, KEY), (4, "sk-ant-api-old-fake-value")] {
+        let (_scratch, path, service, store) = setup("staging-miss");
+        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
+        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{service}");
+        store
+            .set(
+                &active,
+                &Secret::new(Zeroizing::new(b"sk-ant-api-old-fake-value".to_vec())),
+            )
+            .expect("old fake");
+        store
+            .set(
+                &staged,
+                &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
+            )
+            .expect("stage fake");
+        let mut vault = open(&store, &service, &path);
+        store.0.lock().expect("fake lock").missed_reads = misses;
+        let adopted = vault
+            .anthropic(KeyOp::Adopt)
+            .expect("adopt or load saved state")
+            .expect("saved key");
+        assert_eq!(adopted.expose().as_str(), expected);
+        assert_eq!(store.get(&staged).expect("stage deleted"), None);
+        assert_eq!(
+            store
+                .get(&active)
+                .expect("active key")
+                .expect("saved")
+                .expose()
+                .as_slice(),
+            expected.as_bytes()
+        );
+    }
 }
 
 #[test]

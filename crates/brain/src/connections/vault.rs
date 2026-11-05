@@ -95,21 +95,25 @@ impl<S: CredentialStore> Vault<S> {
     ) -> Result<Option<Secret<super::anthropic::key::AnthropicKey>>, super::anthropic::KeyError>
     {
         use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
-        use kumochi_protocol::constants::{ANTHROPIC_KEY_ACCOUNT, ANTHROPIC_STAGING_ACCOUNT};
-        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{}", self.service);
-        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{}", self.service);
+        use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
+        let active = anthropic_key_target(&self.service);
+        let staged = anthropic_staging_target(&self.service);
         if matches!(op, KeyOp::Remove) {
             let first = self.store.delete(&active);
             let second = self.store.delete(&staged);
             first.and(second).map_err(VaultError::from)?;
             return Ok(None);
         }
-        let read = self.store.get(&staged);
-        let adopting = matches!(op, KeyOp::Adopt) || !matches!(read, Ok(None));
+        let read = if matches!(op, KeyOp::Adopt) {
+            self.store.get_recent(&staged)
+        } else {
+            self.store.get(&staged)
+        };
+        let adopting = !matches!(read, Ok(None));
         if adopting {
             let result = (|| {
-                let bytes = read.map_err(VaultError::from)?.ok_or(KeyError::Rejected(
-                    kumochi_protocol::message::KeyRejection::Format,
+                let bytes = read.map_err(VaultError::from)?.ok_or(VaultError::from(
+                    crate::platform::credential::CredentialStoreError::Unsettled,
                 ))?;
                 let key = AnthropicKey::parse(bytes).map_err(KeyError::Rejected)?;
                 let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
@@ -119,6 +123,9 @@ impl<S: CredentialStore> Vault<S> {
             let cleanup = self.store.delete(&staged).map_err(VaultError::from);
             cleanup?;
             return result;
+        }
+        if matches!(op, KeyOp::Adopt) {
+            self.store.delete(&staged).map_err(VaultError::from)?;
         }
         self.store
             .get(&active)
