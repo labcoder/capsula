@@ -19,7 +19,7 @@ pub(super) struct ThreadsPanel {
     pub(super) view: Entity<ThreadsView>,
     pub(super) typing: Typing,
     pub(super) focused: bool,
-    bounds: [i32; 4],
+    pub(super) bounds: [i32; 4],
     previous: Option<Foreground>,
     activation: Option<Subscription>,
 }

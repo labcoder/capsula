@@ -103,7 +103,11 @@ rows read as `thread` and `words` with no model:
   title isn't first words. A later `BeginTurn` on an existing thread never touches its title or
   source. Neither a rename nor a model choice moves the thread in the list.
 - **Model choice.** `SetModel` stores a live thread's `model` and `effort`; a hidden or missing
-  thread changes nothing.
+  thread changes nothing. The worker answers `ModelSet` only after the write, echoing the
+  thread and exact choice with `applied=true` when a live row matched. Hidden, missing or
+  unrepresentable ids, failed writes and operations refused before reaching the store answer
+  `applied=false`. The coordinator forwards that result as `ThreadModelSet`; a later write
+  cannot change an earlier result. Write failures log only fixed text.
 - **Deletion and the purge.** The four columns live in the `threads` row, so deleting a task's row
   removes them with it, and the purge's `VACUUM INTO` copy carries the kept rows' columns over
   unchanged. No table is added, so `store::delete`'s table list and the remnants scan need nothing

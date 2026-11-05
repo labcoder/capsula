@@ -58,6 +58,31 @@ the edit clears the local indicator. General brain errors use **Needs attention*
 No additional platform-specific code is needed. See [panels](panels.md#settings-panel) and
 the [user guide](../user/settings.md).
 
+## Dock position and taskbar preference
+
+`DockPosition` travels in the settings snapshot and uses nine snake-case names in TOML.
+The brain persists it through the same atomic save path as names. `show_in_taskbar` is a
+saved boolean, false by default; its control and native button are separate changes.
+
+A tray pick moves the dock immediately and joins the settings answer FIFO when admitted.
+While disconnected or the control queue is full, the model retains only the newest unsent
+pick. Every current-generation snapshot attempts to flush it. The effective position is the
+unsent pick, then the newest queued dock choice, then the saved position; older answers
+cannot pull the dock back from a newer choice. Disconnect retains an unanswered dock setter
+for replay, which is safe because it is absolute. A replacement snapshot already containing
+that replayed value suppresses the redundant write. An explicit same-value pick still writes,
+so the user can replace an invalid stored value that loaded as the default.
+
+A refused answer restores the saved position unless a newer intent remains, and never
+replays that refused intent. A successful answer clears a refusal only for the same setting
+kind, independent of its value. Settings answers stay pipe-ordered and generation-fenced.
+Snapshot restoration uses placement without panel dismissal; tray choices retain the usual
+dismissal behavior. The existing layout and native placement interfaces are unchanged.
+After a placement lands, open surfaces follow the new anchor without changing visibility,
+focus or size. A moved anchor ends any active screen selection because its input geometry is
+no longer current. Under `--gate-observer`, snapshots leave the launch seed unchanged so
+the observer's recorded target remains valid; persistence and replay still work normally.
+
 ## Accounts
 
 `shell/accounts.rs` retains the authoritative AccountView inside Settings. It never invents
@@ -122,6 +147,8 @@ than growing the window with the text. The existing Settings content region owns
 | `onboarded` | boolean | `false` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
 | `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
+| `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
+| `show_in_taskbar` | boolean | `false` |
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
