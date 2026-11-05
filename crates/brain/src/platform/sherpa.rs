@@ -65,34 +65,50 @@ pub(crate) const NATIVE_CLOSURE: [&str; 10] = [
 ];
 
 /// Why speech input's native side failed. It carries no native text and no paths.
-#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeError {
+#[derive(
+    Debug, thiserror::Error, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum NativeError {
+    /// A native library is missing.
     #[error("a native library is missing")]
     Missing,
+    /// A folder or native library on the load path is a reparse point or resolves elsewhere.
     #[error("a folder or native library on the load path is a reparse point or resolves elsewhere")]
     Reparse,
+    /// Someone other than this user or the system can change the load path.
     #[error("someone other than this user or the system can change the load path")]
     Unsafe,
+    /// A native library doesn't match its pin.
     #[error("a native library doesn't match its pin")]
     Pin,
+    /// A module the native libraries import is already loaded from another folder.
     #[error("a module the native libraries import is already loaded from another folder")]
     Conflict,
+    /// A system library the native libraries need is missing.
     #[error("a system library the native libraries need is missing")]
     Dependency,
+    /// Loading brought in a module from an unexpected folder.
     #[error("loading brought in a module from an unexpected folder")]
     Unexpected,
+    /// A native library failed to load.
     #[error("a native library failed to load")]
     Load,
+    /// A native library lacks an export.
     #[error("a native library lacks an export")]
     Symbol,
+    /// The native library isn't the pinned release.
     #[error("the native library isn't the pinned release")]
     Abi,
+    /// The recognizer or a stream couldn't be created.
     #[error("the recognizer or a stream couldn't be created")]
     Create,
+    /// The audio can't be handed to the recognizer.
     #[error("the audio can't be handed to the recognizer")]
     Input,
+    /// Decoding gave no result.
     #[error("decoding gave no result")]
     Decode,
+    /// The transcript is too long or isn't UTF-8.
     #[error("the transcript is too long or isn't UTF-8")]
     Text,
 }
@@ -400,7 +416,6 @@ impl Drop for ResultGuard<'_> {
 
 /// The trusted root natives are staged under: Kumochi's folder in the local application data
 /// folder the shell reports, never the environment's `LOCALAPPDATA`.
-#[cfg_attr(test, expect(dead_code, reason = "tests stage into scratch roots"))]
 pub(crate) fn staging_root() -> Result<PathBuf, NativeError> {
     let root = local_app_data()
         .map_err(|_| NativeError::Unsafe)?
@@ -515,6 +530,7 @@ fn copy_pin(source: &Path, path: &Path, pin: &NativeFile) -> Result<(), NativeEr
 }
 
 /// Opens `path` against writers and checks its size and SHA-256 through that handle.
+#[cfg(test)]
 fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<File, NativeError> {
     let mut file = open_locked(path).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => NativeError::Missing,
