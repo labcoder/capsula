@@ -122,9 +122,10 @@ fn parse_row(line: &str, expected_pid: u32, csv_row: usize) -> Result<SeedSource
     unsigned(&fields[5])?;
     let dropped = bit(&fields[6])?;
     bit(&fields[10])?;
-    for index in [7, 8, 12, 15, 16, 17] {
+    for index in [7, 8, 12, 15, 17] {
         decimal(&fields[index])?;
     }
+    signed_decimal(&fields[16])?;
     let display_after_ms = optional_interval(&fields[13])?.filter(|value| *value > 0.0);
     let qpc = i64::try_from(unsigned(&fields[18])?)?;
     ensure!(qpc > 0, "invalid raw PresentMon QPC");
@@ -186,6 +187,15 @@ fn decimal(value: &str) -> Result<f64> {
         "invalid PresentMon timing"
     );
     Ok(number)
+}
+
+fn signed_decimal(value: &str) -> Result<f64> {
+    let magnitude = decimal(value.strip_prefix('-').unwrap_or(value))?;
+    Ok(if value.starts_with('-') {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 fn csv_fields(line: &str) -> Result<Vec<String>> {
@@ -618,6 +628,19 @@ mod tests {
             parse(&mixed_pid, 35620).is_err(),
             "later PID must match too"
         );
+    }
+
+    #[test]
+    fn render_start_may_precede_the_present_but_stays_a_number() {
+        let valid = csv(&row(1000, 10, Presented, "1"));
+        assert!(parse(&valid.replace(",0.3765,", ",-13.5436,"), 35620).is_ok());
+        for bad in [",--1,", ",-,", ",-NaN,", ",1-,"] {
+            assert!(
+                parse(&valid.replace(",0.3765,", bad), 35620).is_err(),
+                "must reject {bad}"
+            );
+        }
+        assert!(parse(&valid.replace(",0.7355,", ",-0.7355,"), 35620).is_err());
     }
 
     #[test]
