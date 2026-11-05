@@ -38,15 +38,19 @@ impl SettingsView {
                     .then(|| div().text_sm().child(strings.get(Text::SettingsOffline))),
             )
             .children(
-                [self.dock_notice, self.taskbar_notice]
-                    .into_iter()
-                    .flatten()
-                    .map(|notice| {
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(strings.get(notice))
-                    }),
+                [
+                    self.dock_notice,
+                    self.taskbar_notice,
+                    self.model.read(cx).taskbar_notice,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|notice| {
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(strings.get(notice))
+                }),
             )
             .children(self.model.read(cx).notice().map(|error| {
                 div()

@@ -84,6 +84,8 @@ pub(crate) enum Text {
     SettingsCopyBuild,
     SettingsPositionUnavailable,
     SettingsTaskbar,
+    TaskbarAddFailed,
+    TaskbarRemoveFailed,
     DockBrainError,
     MaxFrameRate,
     FrameRateAutomatic,
@@ -136,7 +138,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 122] = [
+    const ALL: [Self; 124] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -211,6 +213,8 @@ impl Text {
         Self::SettingsCopyBuild,
         Self::SettingsPositionUnavailable,
         Self::SettingsTaskbar,
+        Self::TaskbarAddFailed,
+        Self::TaskbarRemoveFailed,
         Self::DockBrainError,
         Self::MaxFrameRate,
         Self::FrameRateAutomatic,
@@ -283,6 +287,8 @@ impl Text {
             Self::SettingsCopyBuild => "settings-copy-build",
             Self::SettingsPositionUnavailable => "settings-position-unavailable",
             Self::SettingsTaskbar => "settings-taskbar",
+            Self::TaskbarAddFailed => "taskbar-add-failed",
+            Self::TaskbarRemoveFailed => "taskbar-remove-failed",
             Self::AccountProvider => "accounts-provider",
             Self::AccountWaiting => "accounts-waiting",
             Self::AccountOffline => "accounts-offline",

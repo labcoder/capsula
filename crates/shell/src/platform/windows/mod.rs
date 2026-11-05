@@ -8,6 +8,7 @@ mod overlay_input;
 mod pipe;
 mod presence;
 mod process;
+mod taskbar;
 
 pub(crate) use folders::data_dir;
 pub(crate) use hit_mask::MaskUpdate;

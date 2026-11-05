@@ -71,6 +71,7 @@ const QUIT_COMMAND: usize = 11;
 /// What the presence surfaces tell the UI thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresenceEvent {
+    ShowStatus,
     DockPressed {
         qpc: i64,
     },
@@ -216,6 +217,7 @@ struct ProxyState {
 /// can stay click-through. Owned by the UI thread that created it; dropping it removes both.
 #[derive(Debug)]
 pub(crate) struct PresenceNative {
+    taskbar: super::taskbar::TaskbarButton,
     instance: HINSTANCE,
     atom: u16,
     hwnd: HWND,
@@ -227,6 +229,13 @@ pub(crate) struct PresenceNative {
 }
 
 impl PresenceNative {
+    pub(crate) fn set_taskbar_button(
+        &mut self,
+        choice: crate::settings::TaskbarChoice,
+    ) -> Result<(), super::taskbar::TaskbarError> {
+        self.taskbar.set(choice)
+    }
+
     /// Adds the tray icon and creates the proxy, hidden until the first `show`, with a mask
     /// for proxies up to `mask_size` physical pixels.
     ///
@@ -249,7 +258,7 @@ impl PresenceNative {
         let state = Rc::new(ProxyState {
             labels,
             keys: Keys::default(),
-            hover: Hover::new(events),
+            hover: Hover::new(events.clone()),
             icon,
             taskbar_created,
             position: Cell::new(1),
@@ -258,6 +267,7 @@ impl PresenceNative {
         });
         // Every field Drop cleans up starts empty, so a failure below undoes only what was done.
         let mut native = Self {
+            taskbar: super::taskbar::TaskbarButton::new(events),
             instance,
             atom: 0,
             hwnd: HWND::default(),
@@ -858,7 +868,7 @@ fn pick_from_tray_menu(
 }
 
 /// Queues an event for the UI thread; the queue is unbounded, so this never blocks.
-fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
+pub(super) fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
     if events.try_send(event).is_err() {
         tracing::debug!("the UI stopped listening to presence events");
     }

@@ -64,8 +64,8 @@ the [user guide](../user/settings.md).
 
 `DockPosition` travels in the settings snapshot and uses nine snake-case names in TOML.
 The brain persists it through the same atomic save path as names. `show_in_taskbar` is a
-saved boolean, false by default. General exposes its checkbox; the native taskbar button is a
-separate platform change, so saving this preference alone does not add a button yet.
+saved boolean, false by default. General exposes its checkbox. The shell applies the effective
+taskbar choice after an admitted pick, an accepted snapshot/answer, or a refused change.
 
 General's three-by-three picker reads the model's effective dock choice. Its change uses the
 same send path as the tray but placement without dismissal, keeping Settings attached to the
@@ -79,6 +79,24 @@ pending choice wins until an answer supplies the saved value. The checkbox is un
 without an authoritative view. Failed admission leaves the selection unchanged and General
 explains the failure; no taskbar intent is replayed after disconnect. A successful taskbar
 answer clears only a taskbar refusal, not a name, frame-rate or dock-position refusal.
+
+On Windows, `platform/windows/taskbar.rs` owns a separate unowned zero-area window at the
+primary monitor origin. It uses `WS_POPUP | WS_SYSMENU` and exactly
+`WS_EX_APPWINDOW | WS_EX_NOACTIVATE`, a display-name constant and the shared stock icon.
+`SW_SHOWNA` shows it without focus; turning the choice off destroys it. No existing window's
+styles or dock proxy change. GPUI's Windows options do not expose this taskbar policy.
+Active/restore/minimize messages open the existing status panel; Close requests the same
+idempotent Quit as the tray. All other system commands are consumed so they cannot move,
+resize or maximize the window into view. `TaskbarCreated` hides/shows the same HWND for
+Explorer to rediscover. Native refusal leaves the desired preference intact and adds a
+localized General/status notice, separate from backend save errors. Disconnect leaves the
+last applied native state until a new authoritative snapshot arrives.
+
+The mechanism follows Microsoft's documented APPWINDOW/NOACTIVATE rules, not calibrated
+taskbar observations: UIA and MSAA both failed an ordinary-window positive control. Native
+window lifecycle tests are ignored in ordinary gates and require an approved window turn.
+Actual button visibility, click, Alt-Tab's blank preview, taskbar Close and Explorer restart
+remain owner installed-build checks. macOS activation policy is not implemented.
 
 A tray pick moves the dock immediately and joins the settings answer FIFO when admitted.
 While disconnected or the control queue is full, the model retains only the newest unsent
