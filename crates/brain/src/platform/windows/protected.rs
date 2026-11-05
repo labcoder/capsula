@@ -9,17 +9,16 @@
 //! isn't defended against here.
 
 use std::ffi::OsString;
-use std::fs;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE,
-    LocalFree,
+    ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE,
+    GENERIC_READ, GENERIC_WRITE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
@@ -32,12 +31,15 @@ use windows_sys::Win32::Security::{
     PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, READ_CONTROL, SYNCHRONIZE,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_DELETE_CHILD, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+    FILE_WRITE_EA, FileAttributeTagInfo, FileDispositionInfo, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle,
     VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -180,24 +182,170 @@ pub(crate) fn hold_file(path: &Path) -> Result<File, Untrusted> {
     open_checked(path, Kind::File, &Trusted::new()?)
 }
 
-/// Deletes `path` and everything in it, a missing one included. A reparse point anywhere in it
-/// is refused, never followed or removed, and stops the deletion. Its parent must be held.
-pub(crate) fn remove_tree(path: &Path) -> Result<(), Untrusted> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(Untrusted::Io),
+/// Makes the empty marker file at `path` and flushes it, or takes the one an earlier deletion
+/// left there. Nothing at `path` is truncated or followed: an existing one must be a plain file
+/// with no other name, trusted like a held file. Its parent must be held.
+pub(crate) fn mark(path: &Path) -> Result<(), Untrusted> {
+    let options = |create: bool| {
+        let mut options = File::options();
+        options
+            .write(create)
+            .create_new(create)
+            .access_mode(FILE_GENERIC_WRITE | READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        options
     };
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    let marker = match options(true).open(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => options(false).open(path),
+        opened => opened,
+    }
+    .map_err(|_| Untrusted::Io)?;
+    check(&marker, path, Kind::File, &Trusted::new()?)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is writable and the handle is open for the call.
+    if unsafe { GetFileInformationByHandle(marker.as_raw_handle(), &raw mut info) } == 0 {
+        return Err(Untrusted::Io);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 || info.nNumberOfLinks != 1 {
+        return Err(Untrusted::Unsafe);
+    }
+    marker.sync_all().map_err(|_| Untrusted::Io)
+}
+
+/// Deletes `path` and everything in it, a missing one included. Each entry is opened without
+/// following a reparse point and deleted through that handle. A folder must pass the held-folder
+/// checks and stays open, so no one can rename it, while what's in it is listed through its
+/// handle and deleted. A reparse point or a folder others could change stops the deletion. Its
+/// parent must be held.
+pub(crate) fn remove_tree(path: &Path) -> Result<(), Untrusted> {
+    match remove_entry(path, &Trusted::new()?) {
+        Err(Untrusted::Missing) => Ok(()),
+        removed => removed,
+    }
+}
+
+fn remove_entry(path: &Path, trusted: &Trusted) -> Result<(), Untrusted> {
+    let entry = open(path, Kind::Folder, DELETE | FILE_LIST_DIRECTORY)?;
+    let attributes = attributes(&entry)?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Untrusted::Reparse);
     }
-    if !metadata.is_dir() {
-        return fs::remove_file(path).map_err(|_| Untrusted::Io);
+    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        check(&entry, path, Kind::Folder, trusted)?;
+        #[cfg(test)]
+        paused(path);
+        for name in names(&entry)? {
+            match remove_entry(&path.join(name), trusted) {
+                Ok(()) | Err(Untrusted::Missing) => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
-    for entry in fs::read_dir(path).map_err(|_| Untrusted::Io)? {
-        remove_tree(&entry.map_err(|_| Untrusted::Io)?.path())?;
+    let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).map_err(|_| Untrusted::Io)?;
+    // SAFETY: `delete` is readable for `size` bytes and the handle is open with DELETE.
+    let set = unsafe {
+        SetFileInformationByHandle(
+            entry.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const delete).cast(),
+            size,
+        )
+    };
+    // The entry goes when `entry`, its last handle, closes.
+    if set == 0 {
+        return Err(Untrusted::Io);
     }
-    fs::remove_dir(path).map_err(|_| Untrusted::Io)
+    Ok(())
+}
+
+/// The names in the folder open as `folder`, read through its handle.
+fn names(folder: &File) -> Result<Vec<OsString>, Untrusted> {
+    let mut buffer = vec![0_u64; 8 * 1024];
+    let size = u32::try_from(buffer.len() * size_of::<u64>()).map_err(|_| Untrusted::Io)?;
+    let mut names = Vec::new();
+    let mut class = FileFullDirectoryRestartInfo;
+    loop {
+        // SAFETY: `buffer` is writable for `size` bytes and aligned for the records, and the
+        // handle is open for the call.
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                folder.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read == 0 {
+            return match io::Error::last_os_error().raw_os_error() {
+                Some(code) if code == ERROR_NO_MORE_FILES.cast_signed() => Ok(names),
+                _ => Err(Untrusted::Io),
+            };
+        }
+        class = FileFullDirectoryInfo;
+        let bytes: Vec<u8> = buffer.iter().flat_map(|word| word.to_ne_bytes()).collect();
+        let mut at = 0;
+        loop {
+            let field = |offset: usize| {
+                bytes
+                    .get(at + offset..at + offset + 4)
+                    .and_then(|field| <[u8; 4]>::try_from(field).ok())
+                    .and_then(|field| usize::try_from(u32::from_ne_bytes(field)).ok())
+                    .ok_or(Untrusted::Io)
+            };
+            let next = field(0)?;
+            let len = field(std::mem::offset_of!(FILE_FULL_DIR_INFO, FileNameLength))?;
+            let start = at + std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName);
+            let units = bytes
+                .get(start..start + len)
+                .ok_or(Untrusted::Io)?
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_ne_bytes(*unit))
+                .collect::<Vec<u16>>();
+            let name = OsString::from_wide(&units);
+            if name != "." && name != ".." {
+                names.push(name);
+            }
+            if next == 0 {
+                break;
+            }
+            at += next;
+        }
+    }
+}
+
+/// A hook the deletion walk runs once, when it has checked the folder at the path.
+#[cfg(test)]
+type Pause = (PathBuf, Box<dyn FnOnce() + Send>);
+
+#[cfg(test)]
+static PAUSES: std::sync::Mutex<Vec<Pause>> = std::sync::Mutex::new(Vec::new());
+
+/// Runs `hook` once, when the deletion walk has checked the folder at `path` and before it lists
+/// what's in it.
+#[cfg(test)]
+pub(crate) fn pause_after_check(path: PathBuf, hook: Box<dyn FnOnce() + Send>) {
+    PAUSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((path, hook));
+}
+
+#[cfg(test)]
+fn paused(path: &Path) {
+    let hook = {
+        let mut pauses = PAUSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = pauses.iter().position(|(paused, _)| paused == path);
+        at.map(|at| pauses.swap_remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -248,6 +396,13 @@ fn check(opened: &File, path: &Path, kind: Kind, trusted: &Trusted) -> Result<()
 }
 
 fn check_not_reparse(opened: &File) -> Result<(), Untrusted> {
+    if attributes(opened)? & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Untrusted::Reparse);
+    }
+    Ok(())
+}
+
+fn attributes(opened: &File) -> Result<u32, Untrusted> {
     let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
     let size = u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).map_err(|_| Untrusted::Io)?;
     // SAFETY: `info` is writable for `size` bytes and the handle is open for the call.
@@ -262,10 +417,7 @@ fn check_not_reparse(opened: &File) -> Result<(), Untrusted> {
     if read == 0 {
         return Err(Untrusted::Io);
     }
-    if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(Untrusted::Reparse);
-    }
-    Ok(())
+    Ok(info.FileAttributes)
 }
 
 /// Whether the object behind the handle is the one `path` names.

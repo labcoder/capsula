@@ -25,10 +25,6 @@ pub(crate) const SIGN_IN: SignInStore = SignInStore::Undecided;
 
 /// The connection's state; the lane does the work.
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent facts about the jobs; no two combine into one state"
-)]
 pub(crate) struct Claude {
     lane: Option<Lane>,
     sign_in: SignInStore,
@@ -36,8 +32,8 @@ pub(crate) struct Claude {
     finds: bool,
     generation: u64,
     view: ClaudeCodeView,
-    /// A job of this generation is out.
-    out: bool,
+    /// The job of this generation that's out, if one is.
+    out: Option<Work>,
     /// A Find was asked for while it was.
     again: bool,
     /// A Disconnect is still to finish.
@@ -59,7 +55,7 @@ impl Claude {
             finds: true,
             generation: 0,
             view,
-            out: false,
+            out: None,
             again: false,
             cleaning: false,
         }
@@ -85,15 +81,30 @@ impl Claude {
         self.view
     }
 
-    /// Starts `work` under a new generation, which ends whatever an older one still runs.
-    fn begin(&mut self, work: Work) {
+    /// Starts `work` under a new generation, which ends whatever an older one still runs; false
+    /// when it isn't out.
+    fn begin(&mut self, work: Work) -> bool {
         let Some(lane) = &self.lane else {
-            return;
+            return false;
         };
         self.generation += 1;
         lane.fence(self.generation);
-        self.out = lane.submit(self.generation, work);
         self.again = false;
+        self.submit(work)
+    }
+
+    /// Queues `work` under this generation. When the lane can't take it, nothing is out and the
+    /// view says so, since no result will come to settle it.
+    fn submit(&mut self, work: Work) -> bool {
+        let admitted = self
+            .lane
+            .as_ref()
+            .is_some_and(|lane| lane.submit(self.generation, work));
+        self.out = admitted.then_some(work);
+        if !admitted {
+            self.view = ClaudeCodeView::Unavailable;
+        }
+        admitted
     }
 
     /// Finds the install again, or retries a deletion still to finish; after the job that's out,
@@ -101,7 +112,7 @@ impl Claude {
     fn find(&mut self) {
         // shortcut: a pending deletion is retried here and at each start, not on a timer; add one
         // if locked files turn out to outlive a session.
-        if self.out {
+        if self.out.is_some() {
             self.again = true;
             return;
         }
@@ -119,22 +130,28 @@ impl Claude {
             ConnectionOp::FindClaudeCode => self.find(),
             ConnectionOp::ConnectClaudeCode
                 if signs_in
-                    && !self.out
+                    && self.out.is_none()
                     && matches!(self.view, ClaudeCodeView::SignedOut { .. }) =>
             {
-                self.view = ClaudeCodeView::SigningIn;
-                self.begin(Work::Login);
+                if self.begin(Work::Login) {
+                    self.view = ClaudeCodeView::SigningIn;
+                }
             }
-            // The new generation ends the sign-in; the Status after it shows where it got.
+            // The new generation ends the sign-in; the Status after it shows where it got. Only
+            // the sign-in itself is cancelled, so a repeated Cancel queues nothing more.
             ConnectionOp::CancelClaudeSignIn
-                if signs_in && self.view == ClaudeCodeView::SigningIn =>
+                if signs_in
+                    && self.view == ClaudeCodeView::SigningIn
+                    && self.out == Some(Work::Login) =>
             {
                 self.begin(Work::Version);
             }
+            // A Disconnect the lane can't take leaves nothing marked, so it may be asked again.
             ConnectionOp::DisconnectClaudeCode if signs_in && self.finds && !self.cleaning => {
-                self.cleaning = true;
-                self.view = ClaudeCodeView::CleanupPending;
-                self.begin(Work::Disconnect { logout: true });
+                self.cleaning = self.begin(Work::Disconnect { logout: true });
+                if self.cleaning {
+                    self.view = ClaudeCodeView::CleanupPending;
+                }
             }
             _ => {}
         }
@@ -142,13 +159,12 @@ impl Claude {
 
     /// A lane result; true when the view may have changed.
     pub(crate) fn done(&mut self, Done { generation, result }: Done) -> bool {
-        if generation != self.generation || !self.out {
+        if generation != self.generation || self.out.is_none() {
             return false;
         }
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
-                let lane = self.lane.as_ref().expect("a result comes from the lane");
-                if lane.submit(self.generation, Work::Status) {
+                if self.submit(Work::Status) {
                     return false;
                 }
             }
@@ -173,13 +189,9 @@ impl Claude {
                     self.view = ClaudeCodeView::TurnedOff;
                 }
             }
-            Err(failure) => {
-                if let Some(view) = failed(failure) {
-                    self.view = view;
-                }
-            }
+            Err(failure) => self.view = failed(failure),
         }
-        self.out = false;
+        self.out = None;
         if std::mem::take(&mut self.again) {
             self.find();
         }
@@ -202,12 +214,13 @@ impl Claude {
     }
 }
 
-/// The view a failure leaves; `None` keeps the last one, for a call that never started.
-fn failed(failure: Failure) -> Option<ClaudeCodeView> {
+/// The view a failure leaves.
+fn failed(failure: Failure) -> ClaudeCodeView {
     use kumochi_protocol::message::AuditFailed;
 
-    Some(match failure {
-        Failure::Refused => return None,
+    match failure {
+        // The lane is stuck or closing: whatever showed before can't be acted on any more.
+        Failure::Refused => ClaudeCodeView::Unavailable,
         Failure::Busy => ClaudeCodeView::InUse,
         Failure::Cleanup => ClaudeCodeView::CleanupPending,
         Failure::Find(FindError::NotFound) => ClaudeCodeView::NotFound,
@@ -221,7 +234,7 @@ fn failed(failure: Failure) -> Option<ClaudeCodeView> {
         | Failure::TooLong
         | Failure::Pipe
         | Failure::Status(_) => ClaudeCodeView::AuditFailed(AuditFailed::Malformed),
-    })
+    }
 }
 
 impl Brain {

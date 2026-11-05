@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write as _};
-use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::fs::{OpenOptionsExt as _, symlink_file};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
@@ -26,8 +26,10 @@ use super::{
 use crate::engines::claude_code::auth::StatusFailure;
 use crate::engines::claude_code::install::FindError;
 use crate::platform::Stdio;
-use crate::platform::sherpa::tests::set_junction;
-use crate::platform::{FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, local_app_data};
+use crate::platform::sherpa::tests::{icacls, set_junction};
+use crate::platform::{
+    FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, local_app_data, pause_after_check,
+};
 
 /// The version every fake reports.
 pub(crate) const V: ClaudeVersion = ClaudeVersion {
@@ -736,6 +738,157 @@ async fn a_reparse_point_in_the_folder_is_refused_and_its_target_kept() {
     assert_eq!(fs::read(&kept).expect("still there"), b"kept");
     assert!(link.exists(), "refused, not removed");
     assert!(base.marker().exists());
+    assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+/// What a scratch file outside Kumochi's folder holds.
+const KEPT: &[u8] = b"kept, not Kumochi's";
+
+/// A scratch file outside Kumochi's folder holding [`KEPT`].
+fn kept(base: &Base) -> PathBuf {
+    let outside = base.0.join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    let kept = outside.join("kept.txt");
+    fs::write(&kept, KEPT).expect("a file outside");
+    kept
+}
+
+/// Renames the folder `dir` aside and puts a junction to `target` in its place.
+fn swap_for_junction(dir: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(dir, dir.with_extension("moved"))?;
+    fs::create_dir(dir)?;
+    set_junction(dir, target)
+}
+
+#[tokio::test]
+async fn a_folder_swapped_for_a_junction_once_checked_is_never_followed() {
+    let base = Base::new("swapped");
+    marked(&base);
+    let config = base.owned().join("config");
+    fs::create_dir(config.join("inner")).expect("a folder in it");
+    let kept = kept(&base);
+    let outside = kept.parent().expect("outside").to_owned();
+    let renamed = Arc::new(AtomicBool::new(false));
+    let noted = Arc::clone(&renamed);
+    let checked = config.clone();
+    pause_after_check(
+        config,
+        Box::new(move || {
+            noted.store(
+                swap_for_junction(&checked, &outside).is_ok(),
+                Ordering::SeqCst,
+            );
+            // The checked folder is held, but what's in it isn't checked yet.
+            swap_for_junction(&checked.join("inner"), &outside).ok();
+        }),
+    );
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Cleanup));
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(&kept).expect("still there"), KEPT);
+    assert!(
+        !renamed.load(Ordering::SeqCst),
+        "the checked folder kept its name"
+    );
+    assert!(base.marker().exists(), "the deletion waits");
+    assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_nested_folder_others_can_change_stops_the_deletion_before_its_listed() {
+    let base = Base::new("writable");
+    marked(&base);
+    let deep = base.owned().join("config").join("deep");
+    fs::create_dir(&deep).expect("a nested folder");
+    fs::write(deep.join("left.json"), b"{}").expect("a file in it");
+    icacls(&deep, &["/grant", "*S-1-1-0:(M)"]);
+    let kept = kept(&base);
+    let outside = kept.parent().expect("outside").to_owned();
+    let checked = deep.clone();
+    pause_after_check(
+        deep.clone(),
+        Box::new(move || {
+            swap_for_junction(&checked, &outside).ok();
+        }),
+    );
+    let (host, _switches) = host(&base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(call(&mut lane, Work::Version).await, Err(Failure::Cleanup));
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(&kept).expect("still there"), KEPT);
+    assert!(deep.join("left.json").exists(), "refused, not emptied");
+    assert!(base.marker().exists(), "the deletion waits");
+    assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+/// Signs in on the fake, runs `plant`, then asserts a Disconnect refuses: no sign-out, nothing
+/// deleted and `kept` still holding [`KEPT`].
+async fn assert_disconnect_refused(base: &Base, kept: &Path, plant: impl FnOnce()) {
+    let (host, _switches) = host(base, "out");
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Version).await,
+        Ok(Outcome::Version(V))
+    );
+    assert_eq!(call(&mut lane, Work::Login).await, Ok(Outcome::LoginEnded));
+    plant();
+    assert_eq!(
+        call(&mut lane, Work::Disconnect { logout: true }).await,
+        Err(Failure::Cleanup)
+    );
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(kept).expect("still there"), KEPT);
+    assert_eq!(base.calls(), ["--version", "auth login"], "no sign-out");
+    assert!(
+        base.owned().join("config").join("signed-in").exists(),
+        "nothing deleted"
+    );
+}
+
+#[tokio::test]
+async fn a_file_hard_linked_at_the_marker_keeps_its_bytes() {
+    let base = Base::new("marker-hard-link");
+    let kept = kept(&base);
+    assert_disconnect_refused(&base, &kept, || {
+        fs::hard_link(&kept, base.marker()).expect("a hard link at the marker");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_file_symlink_at_the_marker_is_refused_and_its_target_kept() {
+    let base = Base::new("marker-symlink");
+    let kept = kept(&base);
+    assert_disconnect_refused(&base, &kept, || {
+        symlink_file(&kept, base.marker()).expect("a file symlink at the marker");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_redirected_base_is_refused_before_the_marker() {
+    let base = Base::new("marker-redirected");
+    let outside = base.0.join("outside");
+    fs::create_dir(&outside).expect("outside");
+    let there = outside.join(CLAUDE_CODE_DELETING);
+    fs::write(&there, KEPT).expect("a file where the marker would land");
+    let link = base.0.join("base");
+    fs::create_dir(&link).expect("an empty folder");
+    set_junction(&link, &outside).expect("a junction for the base");
+    let (mut host, _switches) = host(&base, "out");
+    host.base = link;
+    let mut lane = Lane::start(host).expect("lane");
+    assert_eq!(
+        call(&mut lane, Work::Disconnect { logout: true }).await,
+        Err(Failure::Cleanup)
+    );
+    assert!(lane.close(soon()).await);
+    assert_eq!(fs::read(&there).expect("still there"), KEPT);
+    assert!(
+        !outside.join(CLAUDE_CODE_LOCK).exists(),
+        "nothing was made through it"
+    );
     assert_eq!(base.calls(), Vec::<String>::new());
 }
 

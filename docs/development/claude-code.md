@@ -176,8 +176,9 @@ sequenceDiagram
   as `configDirectory`, byte for byte; anything else fails closed.
 - **One job per process,** nested in the brain job. A call ends only when its root has exited, its
   job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
-  empty the lane is stuck: it refuses everything and never lets the lock go.
-- **Bounds.** The queue holds 4 jobs and refuses more without waiting. stdout is capped at 4 KiB for
+  empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`.
+- **Bounds.** The queue holds 4 jobs and refuses more without waiting. A job it refuses leaves
+  nothing out and shows `Unavailable` until a later op is taken. stdout is capped at 4 KiB for
   Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
   A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
   read is retried.
@@ -204,27 +205,39 @@ sequenceDiagram
 stateDiagram-v2
     SignedOut --> SigningIn: Connect
     SigningIn --> SignedOut: Cancel, then Status
-    SigningIn --> Ready: login ends, then Status
+    SigningIn --> Ready: login ends, or Cancel after it saved a sign-in, then Status
     Ready --> CleanupPending: Disconnect
     SigningIn --> CleanupPending: Disconnect
     CleanupPending --> SignedOut: folder and marker gone, then Version and Status
-    CleanupPending --> CleanupPending: a file is locked, or a reparse point is inside
+    CleanupPending --> CleanupPending: a file is locked, or a reparse point or open folder is inside
+    SigningIn --> Unavailable: a call's processes can't be confirmed ended
+    Ready --> Unavailable: a call's processes can't be confirmed ended
 ```
 
 - **Connect** runs `auth login` in a console the user answers, in its own job, for up to 5 minutes,
   then a Status. A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
-  new generation, and the running call ends at once: its job is terminated and its late result is
-  dropped.
-- **Disconnect** writes and flushes `claude-code.deleting` beside the folder, then runs
-  `auth logout` and deletes the folder, then the marker. If the marker can't be written, nothing
-  is signed out or deleted and the view stays `CleanupPending`. A failed sign-out still ends in
-  the deletion. A second Disconnect while one is pending is ignored.
+  new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
+  bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
+  already saved one, the Status after it shows Ready, and only Disconnect signs out. A second
+  Cancel while the first's Status is out is ignored.
+- **Disconnect** holds the chain from the volume root, then makes `claude-code.deleting` beside the
+  folder as a new file, never truncating or following what's at that name; one an earlier
+  Disconnect left is taken only if it's a plain file with no other name that passes the folder
+  checks through its handle. It flushes the marker, runs `auth logout`, and deletes the folder,
+  then the marker. If the marker can't be made or taken, nothing is signed out or deleted and the
+  view is `CleanupPending`. A sign-out that exits nonzero, fails to start or is refused by policy
+  still ends in the deletion. One whose processes can't be confirmed ended leaves the lane stuck,
+  with the folder in place and the marker down. A second Disconnect while one is pending is
+  ignored; one the lane can't queue marks nothing and may be asked again.
 - **While the marker stands,** every call that would start `claude` first tries the deletion, and
   if it can't finish, starts nothing and answers `CleanupPending`. So a brain that stopped part
   way finishes the deletion before its first discovery. A Find while it's pending retries the
   deletion alone. With the off switch, only that deletion runs.
-- **The deletion** holds the chain from the volume root, walks Kumochi's folder without following
-  anything, and refuses any reparse point inside it, leaving its target alone and the marker down.
+- **The deletion** holds the chain from the volume root, then opens each entry in Kumochi's folder
+  without following it and deletes it through that handle. Each folder must pass the chain's checks
+  and stays open while its entries are listed through its handle, so its name can't be rebound
+  mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
+  target alone and the marker down.
   The marker's name and the folder are constants, never a path from input.
 - shortcut: a pending deletion is retried at each start and each Find, not on a timer; add one if
   locked files turn out to outlive a session.

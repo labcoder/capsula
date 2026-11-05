@@ -450,7 +450,7 @@ fn sharing_violation(result: io::Result<()>) -> bool {
     result.err().and_then(|error| error.raw_os_error()) == Some(32)
 }
 
-fn icacls(path: &Path, args: &[&str]) {
+pub(crate) fn icacls(path: &Path, args: &[&str]) {
     run(std::process::Command::new("icacls").arg(path).args(args));
 }
 

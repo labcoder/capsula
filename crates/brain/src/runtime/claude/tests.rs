@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
@@ -12,9 +13,11 @@ use crate::connections::account::Worker;
 use crate::connections::clock::FixedClock;
 use crate::connections::http_client::{Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::vault::{Vault, fake::FakeStore};
+use crate::engines::claude_code::lane::LANE_QUEUE;
 use crate::engines::claude_code::lane::tests::{
     Base, V, host, host_finding, locked, marked, soon, started,
 };
+use crate::platform::Job;
 use crate::platform::credential::CredentialStore;
 use crate::runtime::account::{Accounts, Net};
 use crate::runtime::connections::ConnectionEvent;
@@ -28,7 +31,7 @@ pub(in crate::runtime) const READY: ClaudeCodeView = ClaudeCodeView::Ready {
 /// Runs the lane's results through the connection until no job is out.
 async fn settle(claude: &mut Claude) {
     timeout(Duration::from_secs(30), async {
-        while claude.out {
+        while claude.out.is_some() {
             let done = claude.next().await;
             claude.done(done);
         }
@@ -182,7 +185,7 @@ async fn key_ready(brain: &mut Brain) -> Vec<ControlToShell> {
 fn status_out() -> Claude {
     let mut claude = Claude::new(None, SignInStore::FileWithDacl, ClaudeCodeView::NotFound);
     claude.generation = 1;
-    claude.out = true;
+    claude.out = Some(Work::Status);
     claude
 }
 
@@ -388,4 +391,143 @@ async fn another_kumochi_holding_claude_code_shows_it_in_use() {
     assert!(claude.close(soon()).await);
     assert_eq!(claude.view(), ClaudeCodeView::InUse);
     assert_eq!(base.calls(), Vec::<String>::new());
+}
+
+/// Held by a test while its lane's worker must wait to end a call's processes.
+static ENDING: Mutex<()> = Mutex::new(());
+
+fn end_once_let_go(job: &Job) -> io::Result<()> {
+    drop(ENDING.lock().unwrap_or_else(PoisonError::into_inner));
+    Job::terminate(job)
+}
+
+#[tokio::test]
+async fn cancel_pressed_past_the_queue_then_disconnect_still_signs_out_and_cleans_up() {
+    let base = Base::new("cancel-burst");
+    let (mut host, _switches) = host(&base, "loginhang");
+    host.terminate = end_once_let_go;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    {
+        let _ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        for _ in 0..=LANE_QUEUE + 1 {
+            claude.op(ConnectionOp::CancelClaudeSignIn);
+        }
+        assert_eq!(claude.view(), ClaudeCodeView::SigningIn);
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::CleanupPending);
+    }
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert_eq!(
+        base.calls(),
+        [
+            FOUND[0],
+            FOUND[1],
+            "auth login",
+            "auth logout",
+            FOUND[0],
+            FOUND[1]
+        ]
+    );
+    assert!(!base.marker().exists());
+}
+
+#[tokio::test]
+async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() {
+    let base = Base::new("disconnect-refused");
+    let (mut host, _switches) = host(&base, "loginhang");
+    host.terminate = end_once_let_go;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    {
+        let _ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let lane = claude.lane.as_ref().expect("a lane");
+        for _ in 0..LANE_QUEUE {
+            assert!(lane.submit(0, Work::Version), "an old job fills a slot");
+        }
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::Unavailable);
+        assert!(!claude.cleaning, "nothing to finish");
+        assert_eq!(claude.out, None);
+    }
+    assert!(!base.marker().exists(), "nothing was marked");
+    timeout(Duration::from_secs(10), async {
+        while !claude.cleaning {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            claude.op(ConnectionOp::DisconnectClaudeCode);
+        }
+    })
+    .await
+    .expect("taken once the old jobs are gone");
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert_eq!(
+        base.calls()
+            .iter()
+            .filter(|call| *call == "auth logout")
+            .count(),
+        1
+    );
+    assert!(!base.marker().exists());
+}
+
+/// Makes every call's processes unconfirmed once set; only the test below sets it.
+static UNCONFIRMED: AtomicBool = AtomicBool::new(false);
+
+fn end_unless_unconfirmed(job: &Job) -> io::Result<()> {
+    if UNCONFIRMED.load(Ordering::SeqCst) {
+        return Err(io::ErrorKind::Other.into());
+    }
+    Job::terminate(job)
+}
+
+/// A lane on the fake in `mode`, found and settled, whose later calls can't be confirmed ended
+/// once [`UNCONFIRMED`] is set.
+async fn unconfirmable(base: &Base, mode: &str) -> Claude {
+    let (mut host, _switches) = host(base, mode);
+    host.terminate = end_unless_unconfirmed;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude
+}
+
+#[tokio::test]
+async fn a_stuck_lane_shows_unavailable_never_signing_in_or_ready() {
+    let signing = Base::new("stuck-signing-in");
+    let ready = Base::new("stuck-ready");
+    let mut signing_in = unconfirmable(&signing, "out").await;
+    let mut found = unconfirmable(&ready, "in").await;
+    assert_eq!(found.view(), READY);
+    UNCONFIRMED.store(true, Ordering::SeqCst);
+
+    signing_in.op(ConnectionOp::ConnectClaudeCode);
+    assert_eq!(signing_in.view(), ClaudeCodeView::SigningIn);
+    settle(&mut signing_in).await;
+    assert_eq!(signing_in.view(), ClaudeCodeView::Unavailable);
+    found.op(ConnectionOp::FindClaudeCode);
+    settle(&mut found).await;
+    assert_eq!(found.view(), ClaudeCodeView::Unavailable);
+
+    for (claude, base, calls) in [
+        (
+            &mut signing_in,
+            &signing,
+            vec![FOUND[0], FOUND[1], "auth login"],
+        ),
+        (&mut found, &ready, vec![FOUND[0], FOUND[1], FOUND[0]]),
+    ] {
+        claude.op(ConnectionOp::FindClaudeCode);
+        settle(claude).await;
+        assert_eq!(claude.view(), ClaudeCodeView::Unavailable, "still");
+        assert_eq!(base.calls(), calls, "nothing started after");
+        // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
+        assert!(!claude.close(soon()).await, "close can't confirm it");
+    }
 }

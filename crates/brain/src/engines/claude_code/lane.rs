@@ -75,7 +75,8 @@ pub(crate) enum Work {
     /// Claude Code's own sign-in, for up to [`LOGIN_DEADLINE`].
     Login,
     /// Mark Kumochi's folder for deletion, sign out first when `logout` and an install was found,
-    /// then delete the folder and the marker. A failed sign-out still ends in the deletion.
+    /// then delete the folder and the marker. A sign-out that fails or is refused still ends in
+    /// the deletion, unless its processes weren't confirmed ended: then the marker stays.
     Disconnect { logout: bool },
     /// Finish a deletion already marked, and nothing else.
     Cleanup,
@@ -98,8 +99,8 @@ pub(crate) enum Outcome {
 /// Why a call gave nothing. It carries nothing Claude Code printed and no path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
-    /// Nothing started: an earlier call's processes weren't confirmed ended, or the lane is
-    /// closing.
+    /// The lane is stuck or closing, and nothing more starts: this or an earlier call's
+    /// processes weren't confirmed ended, or it was told to close.
     Refused,
     /// Nothing started: another brain holds Claude Code's lock, or this one doesn't hold the
     /// vault's.
@@ -314,9 +315,9 @@ impl Worker {
                 }
             }
             Work::Disconnect { logout } => {
+                let _base = platform::hold_chain(&self.host.base).map_err(|_| Failure::Cleanup)?;
                 self.hold()?;
-                File::create(self.host.base.join(CLAUDE_CODE_DELETING))
-                    .and_then(|marker| marker.sync_all())
+                platform::mark(&self.host.base.join(CLAUDE_CODE_DELETING))
                     .map_err(|_| Failure::Cleanup)?;
                 if logout && let Ok((program, version)) = self.found() {
                     let folders =
