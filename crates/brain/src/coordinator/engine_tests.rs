@@ -11,7 +11,7 @@ use super::{
 };
 use crate::connections::model::error::Failure as Stream;
 use crate::coordinator::{Effect, Input, Stale};
-use crate::engines::{EngineFailure, Finish, Opaque, ToolName, TurnEvent};
+use crate::engines::{EngineFailure, Finish, Opaque, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd};
 
 fn args(delta: &str) -> TurnEvent {
@@ -213,19 +213,10 @@ fn a_ready_draw_call_must_match_what_streamed_and_its_open_line_is_a_step() {
 }
 
 #[test]
-fn arguments_for_a_call_never_started_and_other_tools_fail_the_run() {
+fn arguments_for_a_call_never_started_fail_the_run() {
     let mut core = started();
     assert_eq!(
         core.handle(engine(R, delta("a"))),
-        Ok(ends_failed(Failure::Engine))
-    );
-    let mut core = started();
-    let unknown = TurnEvent::ToolCallStarted {
-        call: call(),
-        name: ToolName::Unknown,
-    };
-    assert_eq!(
-        core.handle(engine(R, unknown)),
         Ok(ends_failed(Failure::Engine))
     );
 }

@@ -41,16 +41,25 @@ pub(crate) struct Pull {
 
 impl Pull {
     /// A pull grabbed at `press` on the body at `home`, under the line's centre `dock`.
-    pub(crate) fn grab(dock: Vec2, home: Vec2, press: Vec2, bounds: Rect, motion: Motion) -> Self {
+    /// The body starts at `start` and is held there until the pointer moves, so a home
+    /// farther from the line than the snap length doesn't break the neck at rest.
+    pub(crate) fn grab(
+        dock: Vec2,
+        home: Vec2,
+        start: Vec2,
+        press: Vec2,
+        bounds: Rect,
+        motion: Motion,
+    ) -> Self {
         let mut neck = Neck::new(dock, CARRY_WIDTH);
         neck.set_motion(motion);
         Self {
             neck,
             home,
-            grip: press - home,
-            offset: v2(0.0, 0.0),
+            grip: press - start,
+            offset: start - home,
             velocity: v2(0.0, 0.0),
-            target: home,
+            target: start,
             bounds,
             motion,
             released: false,
@@ -133,6 +142,11 @@ impl Pull {
         mix(PEEK_WIDTH, CARRY_WIDTH, out)
     }
 
+    /// The pull area, which the free body stays inside.
+    pub(crate) fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
     pub(crate) fn neck(&self) -> &Neck {
         &self.neck
     }
@@ -159,7 +173,7 @@ mod tests {
     };
 
     fn grab(motion: Motion) -> Pull {
-        Pull::grab(DOCK, HOME, HOME, BOUNDS, motion)
+        Pull::grab(DOCK, HOME, HOME, HOME, BOUNDS, motion)
     }
 
     fn run(pull: &mut Pull, frames: usize) {
@@ -184,7 +198,7 @@ mod tests {
 
     #[test]
     fn the_body_follows_the_pointer_from_where_it_was_pressed() {
-        let mut pull = Pull::grab(DOCK, HOME, HOME + v2(10.0, 4.0), BOUNDS, Motion::Full);
+        let mut pull = Pull::grab(DOCK, HOME, HOME, HOME + v2(10.0, 4.0), BOUNDS, Motion::Full);
         pull.aim(v2(450.0, 104.0));
         run(&mut pull, 72);
         assert!(
@@ -273,7 +287,7 @@ mod tests {
                     let dt = 1.0 / f32::from(rate);
                     let second = usize::from(rate);
                     let mut pull =
-                        Pull::grab(home - v2(0.0, 34.0), home, home, screen, Motion::Full);
+                        Pull::grab(home - v2(0.0, 34.0), home, home, home, screen, Motion::Full);
                     pull.aim(home + reach);
                     for _ in 0..second {
                         pull.update(dt);
@@ -306,7 +320,7 @@ mod tests {
             origin: v2(380.0, 0.0),
             size: v2(40.0, 30.0),
         };
-        let mut pull = Pull::grab(DOCK, HOME, HOME, tight, Motion::Reduced);
+        let mut pull = Pull::grab(DOCK, HOME, HOME, HOME, tight, Motion::Reduced);
         pull.aim(v2(400.0, 900.0));
         pull.update(FRAME);
         assert!(pull.neck().broken());

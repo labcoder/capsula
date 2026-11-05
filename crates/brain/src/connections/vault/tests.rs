@@ -10,6 +10,9 @@ use crate::connections::records::{Origin, Revocable, Tokens};
 use crate::platform::credential::CredentialStoreError;
 use crate::test_support::Scratch;
 
+mod anthropic;
+#[cfg(all(windows, debug_assertions))]
+mod anthropic_roundtrip;
 mod bounds;
 mod inventory;
 mod marker;

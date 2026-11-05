@@ -22,6 +22,7 @@ mod store_op;
 #[cfg(test)]
 mod tests;
 mod thread_op;
+mod tools;
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -41,6 +42,8 @@ pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
 pub use store_op::{StoreOp, SummaryText};
+pub(crate) use tools::UNKNOWN_TOOL;
+pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
@@ -179,6 +182,13 @@ pub enum Input {
         step: Step,
         /// Its scene; a run's first step learns its new scene's id here.
         scene: SceneId,
+    },
+    /// The store committed a round's items and results.
+    RoundStored {
+        /// The run.
+        run: RunId,
+        /// The round.
+        round: u32,
     },
     /// The store committed a run's outcome.
     RunStored {
@@ -367,7 +377,10 @@ struct Run {
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
-    /// The engine's round completed while steps were pending; the run ends with the last one.
+    /// The run's calls and the current round's native items.
+    tools: tools::Loop,
+    /// The engine's round completed while steps or its items' write were pending; the round
+    /// ends with the last of them.
     finishing: bool,
     ending: Option<Ending>,
 }
@@ -406,7 +419,7 @@ impl Run {
     }
 
     fn outstanding(&self) -> bool {
-        !self.turn_stored || self.acked < self.sent()
+        !self.turn_stored || self.acked < self.sent() || self.tools.writing()
     }
 }
 
@@ -522,7 +535,7 @@ impl Coordinator {
     }
 
     /// A coordinator the dev fixture answers for, as most tests need.
-    #[cfg(all(debug_assertions, any(test, feature = "test-support")))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     pub fn ready_for_tests(
         main_thread: ThreadId,
         last_thread: ThreadId,
@@ -641,6 +654,7 @@ impl Coordinator {
             } => {
                 self.step_stored(run, index, step, scene, &mut effects)?;
             }
+            Input::RoundStored { run, round } => self.round_stored(run, round, &mut effects)?,
             Input::RunStored { run } => self.run_stored(run, &mut effects)?,
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
             Input::ShellLost => {
@@ -660,8 +674,9 @@ impl Coordinator {
                 self.end(current, stalled, None, Notify::Shell, &mut effects);
             }
             Input::Deadline { run } => {
-                // The engine finished within its budget; only its last step is being stored.
-                if self.current(run)?.finishing {
+                // The engine finished within its budget; only its last writes are being stored.
+                let current = self.current(run)?;
+                if current.finishing && !current.tools.calling() {
                     return Err(Stale);
                 }
                 let current = self.take(run)?;
@@ -786,6 +801,7 @@ impl Coordinator {
             compacted: None,
             draw: None,
             error: None,
+            tools: tools::Loop::default(),
             finishing: false,
             ending: None,
         });
@@ -874,10 +890,13 @@ impl Coordinator {
             self.owe(clear, kept);
             return Ok(());
         }
-        if ending.written {
-            ending.written = false;
-        } else {
-            ended.acked += 1;
+        // The oldest pending write failed: the round's, the outcome, or the next step.
+        if !ended.tools.write_failed() {
+            if ending.written {
+                ending.written = false;
+            } else {
+                ended.acked += 1;
+            }
         }
         ending.failed = true;
         self.settle(run, effects);

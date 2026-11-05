@@ -3,6 +3,7 @@
 //! lands. Nothing here runs at rest: a settled peek shades nothing and allocates nothing.
 //! Pulling Kumo out of the peek starts here too, in `pull`.
 
+mod picture;
 mod pull;
 
 use std::sync::Arc;
@@ -13,9 +14,10 @@ use gpui_kit::{
     Task, Window, canvas, div, img, px,
 };
 
-use super::kumo::{Animator, Look, Mood, Motion, Renderer, Silhouette};
-use super::line::on_next_frame;
-use super::pulling::{Phase, Pulling};
+use super::kumo::{Animator, CARRY_WIDTH, Look, Mood, Motion, Renderer, Silhouette};
+use super::line::{on_next_frame, slot};
+use super::pull_picture::{PullArt, PullPicture, Rows, largest_area};
+use super::pulling::Pulling;
 use super::{Presence, diagnostics};
 use crate::presenter::overlay_input::DragLease;
 pub(super) use pull::{LeaseReturned, PullChanged, PullSite, bridge};
@@ -52,6 +54,24 @@ pub(super) struct KumoView {
     origin: [i32; 2],
     /// The shell is quitting: no new grab starts.
     closing: bool,
+    /// What a pull draws, from the carry-width bake.
+    art: Option<PullArt>,
+    /// The next pulled picture, waiting for the dock to accept its mask, and its pixels.
+    next: Option<PullPicture>,
+    next_rows: Rows,
+    /// Which window shows the body.
+    pulled: Pulled,
+    /// The released body is home and still: the dock's next accepted mask is the line alone,
+    /// and the pull wants no frame until then. Whichever window showed the body still does.
+    resting: bool,
+}
+
+/// Which window shows the body: the peek until the dock has drawn a pulled picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pulled {
+    Peek,
+    /// The dock has drawn the pulled body, so the peek's slot is empty.
+    Dock,
 }
 
 impl EventEmitter<WantsFrames> for KumoView {}
@@ -76,6 +96,11 @@ impl KumoView {
             site: None,
             origin: [0, 0],
             closing: false,
+            art: None,
+            next: None,
+            next_rows: Rows::default(),
+            pulled: Pulled::Peek,
+            resting: false,
         }
     }
 
@@ -87,16 +112,29 @@ impl KumoView {
     // lands, so a step wraps the old renderer's pixels at the new size, and a landing bake can
     // overwrite a pending `retired` image without `drop_image`.
     pub(super) fn rebake(&mut self, scale: f32, cx: &mut Context<'_, Self>) {
-        let size = device(scale);
+        let size = device(SIZE, scale);
         if size == self.size {
             return;
         }
         self.size = size;
         self.bake = Some(cx.spawn(async move |this, cx| {
             let started = Instant::now();
-            let renderer = cx
+            let (renderer, art) = cx
                 .background_executor()
-                .spawn(async move { Renderer::new(&Silhouette::emoji(), size, Look::default()) })
+                .spawn(async move {
+                    let carry = device(CARRY_WIDTH, scale);
+                    let art = PullArt::new(
+                        &Renderer::new(&Silhouette::emoji(), carry, Look::default()),
+                        carry,
+                        Silhouette::emoji(),
+                        Look::default(),
+                        pull_rows(scale),
+                    );
+                    (
+                        Renderer::new(&Silhouette::emoji(), size, Look::default()),
+                        art,
+                    )
+                })
                 .await;
             let baked_us = started.elapsed().as_micros();
             let kept = this.update(cx, |view, cx| {
@@ -105,6 +143,10 @@ impl KumoView {
                 }
                 view.bake = None;
                 view.renderer = Some(Arc::new(renderer));
+                view.art = art
+                    .inspect_err(|error| tracing::error!(%error, "can't bake the pulled Kumo"))
+                    .ok();
+                view.next_rows = Rows::with_capacity(pull_rows(scale));
                 // An image from another size would show at the wrong scale.
                 view.retired = view.image.take().or(view.retired.take());
                 diagnostics::record(cx, format_args!("kumo baked size={size} us={baked_us}"));
@@ -147,13 +189,19 @@ impl KumoView {
         }
     }
 
-    /// Whether the next frame has something to draw or to drop, or a pull to step.
+    /// Whether the next frame has something to draw or to drop. A pull's frames come from the
+    /// dock, which stays shown through its return.
     pub(super) fn wants_frame(&self) -> bool {
-        self.retired.is_some()
-            || self.pulling.phase() != Phase::Idle
-            || (self.shown
-                && self.renderer.is_some()
-                && (self.image.is_none() || self.animator.is_animating()))
+        self.retired.is_some() || self.shades()
+    }
+
+    /// Whether the peek shades its next frame: it's shown, draws the body itself rather than
+    /// leaving it to the dock, and has no image yet or an animation under way.
+    fn shades(&self) -> bool {
+        self.shown
+            && self.pulled == Pulled::Peek
+            && self.renderer.is_some()
+            && (self.image.is_none() || self.animator.is_animating())
     }
 
     /// One paced frame: drops the image the last one replaced, then shades the next if
@@ -170,19 +218,13 @@ impl KumoView {
             reason = "a frame step is at most two intervals"
         )]
         let dt = dt as f32;
-        if self.pulling.step(dt).is_some() {
-            // shortcut: nothing draws the pull yet, so the peek's own body is its resting picture;
-            // the picture layer calls `rested` only once the dock accepts the resting mask.
-            self.pulling.rested();
-        }
         if let Some(retired) = self.retired.take()
             && let Err(error) = window.drop_image(retired)
         {
             tracing::debug!(%error, "can't drop Kumo's last frame");
         }
-        if let Some(renderer) = self.renderer.clone()
-            && self.shown
-            && (self.image.is_none() || self.animator.is_animating())
+        if self.shades()
+            && let Some(renderer) = self.renderer.clone()
         {
             let frame = self.animator.tick(dt, 0.0);
             self.reshades += 1;
@@ -227,7 +269,12 @@ impl Render for KumoView {
             .relative()
             .size(px(SIZE))
             .flex_none()
-            .children(self.image.clone().map(|image| img(image).size_full()))
+            .children(
+                self.image
+                    .clone()
+                    .filter(|_| self.pulled == Pulled::Peek)
+                    .map(|image| img(image).size_full()),
+            )
             .child(
                 canvas(
                     |_, _, _| {},
@@ -291,15 +338,20 @@ pub(super) fn motion(cx: &mut App) -> Motion {
     }
 }
 
-/// `SIZE` in device pixels at `scale`.
+/// The tallest pull area at `scale`, in rows.
+pub(super) fn pull_rows(scale: f32) -> usize {
+    usize::try_from(largest_area(slot(scale), scale)[1]).unwrap_or(0)
+}
+
+/// `logical` pixels in device pixels at `scale`.
 #[expect(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "Kumo's side at any real scale fits u16"
 )]
-fn device(scale: f32) -> u16 {
-    (SIZE * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16
+fn device(logical: f32, scale: f32) -> u16 {
+    (logical * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]

@@ -23,6 +23,8 @@ mod overlay_input;
 mod paint;
 mod panels;
 mod position;
+mod pull_dock;
+mod pull_picture;
 mod pulling;
 mod settings;
 mod settings_view;
@@ -65,7 +67,6 @@ use crate::threads::Threads;
 #[cfg(debug_assertions)]
 pub(crate) use accounts_fixture::run as run_accounts_fixture;
 pub(crate) use diagnostics::Diagnostics;
-use diagnostics::PendingPaint;
 use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
@@ -125,6 +126,7 @@ struct Presence {
     drawn: Drawn,
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
+    pull_dock: pull_dock::PullDock,
     /// The one source of animation frames.
     frames: FrameLoop,
     /// Retries deletes the control queue had no room for.
@@ -791,13 +793,7 @@ pub(crate) fn open(
     let (dock_window, dock) = gpui_kit::open_window(options(), cx, |window, cx| {
         window.set_window_title(constants::DISPLAY_NAME);
         window.on_window_should_close(cx, |_, _| false);
-        cx.new(|_| Dock {
-            pending_paint: PendingPaint::default(),
-            paint: None,
-            origin: [0; 2],
-            drawn: Drawn::default(),
-            listening: false,
-        })
+        cx.new(|_| Dock::new())
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
     let mut input_windows = platform::OverlayWindows::default();
@@ -810,7 +806,8 @@ pub(crate) fn open(
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
-    let native = PresenceNative::new(presence_labels(cx), events.clone(), line::slot(scale))?;
+    let mask = pull_picture::largest_area(line::slot(scale), scale);
+    let native = PresenceNative::new(presence_labels(cx), events.clone(), mask)?;
     input_windows.proxy(native.input_proxy());
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
@@ -864,6 +861,7 @@ pub(crate) fn open(
             line: Line::default(),
             drawn: Drawn::default(),
             kumo: kumo.clone(),
+            pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
         }
     });

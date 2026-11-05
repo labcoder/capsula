@@ -14,9 +14,10 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, body_buffer,
-    connecting_within, from_roots, read_response,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, anthropic_request,
+    body_buffer, connecting_within, from_roots, read_response,
 };
+use crate::connections::anthropic::key::AnthropicKey;
 use crate::platform::{TrustRoots, TrustRootsError};
 use crate::test_support::{Captured, SENTINEL};
 
@@ -25,12 +26,16 @@ struct Server {
     root: Vec<u8>,
     config: Arc<rustls::ServerConfig>,
     task: Option<JoinHandle<io::Result<WireRequest>>>,
+    flushed: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: std::sync::mpsc::Sender<()>,
 }
 
 struct WireRequest {
     line: Zeroizing<String>,
     content_type: Option<String>,
     authorization: Option<String>,
+    api_key: Option<String>,
+    anthropic_version: Option<String>,
     body: Secret<Zeroizing<Vec<u8>>>,
 }
 
@@ -85,6 +90,8 @@ impl Server {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback port 0");
         let address = listener.local_addr().expect("bound address");
         let worker_config = Arc::clone(&config);
+        let (flushed, received) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
         let task = thread::spawn(move || {
             let (socket, _) = listener.accept()?;
             socket.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -132,6 +139,16 @@ impl Server {
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
                     .map(|(_, value)| value.trim().to_owned()),
+                api_key: header
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("x-api-key"))
+                    .map(|(_, value)| value.trim().to_owned()),
+                anthropic_version: header
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-version"))
+                    .map(|(_, value)| value.trim().to_owned()),
                 body: Secret::new(body),
             };
             tls.write_all(&reply)?;
@@ -139,7 +156,10 @@ impl Server {
                 tls.conn.send_close_notify();
             }
             tls.flush()?;
-            thread::sleep(delay);
+            flushed.send(()).unwrap_or(());
+            if !delay.is_zero() {
+                let _release = held.recv_timeout(delay);
+            }
             Ok(wire)
         });
         Self {
@@ -147,6 +167,8 @@ impl Server {
             root,
             config,
             task: Some(task),
+            flushed: Some(received),
+            release,
         }
     }
 
@@ -166,6 +188,7 @@ impl Server {
     }
 
     fn finish(mut self) -> io::Result<WireRequest> {
+        self.release.send(()).unwrap_or(());
         self.task
             .take()
             .expect("fixture task")
@@ -177,6 +200,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
+            self.release.send(()).unwrap_or(());
             if !task.is_finished() {
                 drop(TcpStream::connect_timeout(
                     &self.address,
@@ -204,6 +228,181 @@ fn request(endpoint: Endpoint) -> Request {
     Request {
         endpoint,
         fields: Vec::new(),
+    }
+}
+
+fn anthropic_key() -> Secret<AnthropicKey> {
+    AnthropicKey::parse(Secret::new(Zeroizing::new(
+        b"sk-ant-api-fake-only".to_vec(),
+    )))
+    .expect("synthetic API key")
+}
+
+#[tokio::test]
+async fn anthropic_models_use_the_fixed_url_and_sensitive_bearer_without_legacy_header() {
+    let captured = Captured::default();
+    let _logging = captured.install();
+    tracing::info!("capture-control");
+    let key = anthropic_key();
+    let endpoint = Endpoint::AnthropicModels(key.clone());
+    assert_eq!(
+        endpoint.url(),
+        "https://api.anthropic.com/v1/models?limit=65"
+    );
+    let server = Server::start(reply("200 OK", b"{}", ""));
+    let client = server.client();
+    let prepared = anthropic_request(&client.0, endpoint.url(), &key)
+        .expect("checked headers")
+        .build()
+        .expect("request encoding");
+    assert_eq!(prepared.method(), reqwest::Method::GET);
+    assert_eq!(
+        prepared.url().as_str(),
+        "https://api.anthropic.com/v1/models?limit=65"
+    );
+    assert_eq!(prepared.timeout(), Some(&Duration::from_secs(15)));
+    let tls = super::client_config(Ok(TrustRoots {
+        certificates: vec![server.root.clone()],
+        skipped: 0,
+        unreadable: 0,
+    }))
+    .expect("supplied test CA");
+    let name = rustls::pki_types::ServerName::try_from(
+        prepared.url().host_str().expect("fixed host").to_owned(),
+    )
+    .expect("DNS server name");
+    let mut connection =
+        rustls::ClientConnection::new(Arc::new(tls), name).expect("in-memory client hello");
+    let mut hello = Vec::new();
+    connection.write_tls(&mut hello).expect("encode TLS hello");
+    let mut acceptor = rustls::server::Acceptor::default();
+    acceptor
+        .read_tls(&mut std::io::Cursor::new(hello))
+        .expect("read in-memory TLS hello");
+    let accepted = acceptor
+        .accept()
+        .expect("valid TLS hello")
+        .expect("complete TLS hello");
+    assert_eq!(
+        accepted.client_hello().server_name(),
+        Some("api.anthropic.com")
+    );
+    let authorization = prepared
+        .headers()
+        .get("authorization")
+        .expect("bearer header");
+    assert_eq!(
+        authorization.to_str().expect("ASCII"),
+        "Bearer sk-ant-api-fake-only"
+    );
+    assert!(
+        authorization.is_sensitive(),
+        "reqwest must redact the bearer"
+    );
+    assert_eq!(prepared.headers().get("x-api-key"), None);
+    assert_eq!(prepared.headers()["anthropic-version"], "2023-06-01");
+    for printed in [format!("{prepared:?}"), format!("{endpoint:?}")] {
+        assert!(
+            !printed.contains(key.expose().as_str()),
+            "request key text is redacted"
+        );
+        assert!(
+            !printed.contains(&format!("{:?}", key.expose().as_str().as_bytes())),
+            "request key bytes are redacted"
+        );
+    }
+    client
+        .send_to(
+            &format!("https://{}/v1/models?limit=65", server.address),
+            request(endpoint),
+        )
+        .await
+        .expect("loopback GET");
+    let wire = server.finish().expect("captured Anthropic GET");
+    assert_eq!(wire.line.as_str(), "GET /v1/models?limit=65 HTTP/1.1");
+    assert_eq!(
+        wire.authorization.as_deref(),
+        Some("Bearer sk-ant-api-fake-only")
+    );
+    assert_eq!(wire.api_key, None);
+    assert_eq!(wire.anthropic_version.as_deref(), Some("2023-06-01"));
+    assert_eq!(wire.content_type, None);
+    assert_eq!(wire.body.expose().as_slice(), b"");
+    let logs = captured.text();
+    assert!(logs.contains("capture-control"), "capture active");
+    assert!(
+        !logs.contains(key.expose().as_str()),
+        "bearer never enters logs"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_models_keep_the_shared_body_cap_and_refuse_truncation() {
+    for length in [MAX_BODY_BYTES, MAX_BODY_BYTES + 1] {
+        let server = Server::start(reply("200 OK", &vec![b'x'; length], ""));
+        let result = server
+            .client()
+            .send_to(
+                &server.url(),
+                request(Endpoint::AnthropicModels(anthropic_key())),
+            )
+            .await;
+        if length == MAX_BODY_BYTES {
+            assert_eq!(
+                result.expect("exact body cap").body.expose().as_slice(),
+                vec![b'x'; 1_048_576]
+            );
+        } else {
+            assert_eq!(result.expect_err("one byte over"), HttpError::BodyTooLarge);
+        }
+        server.finish().expect("captured request");
+    }
+    let server = Server::start(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx".to_vec(),
+    );
+    assert_eq!(
+        server
+            .client()
+            .send_to(
+                &server.url(),
+                request(Endpoint::AnthropicModels(anthropic_key()))
+            )
+            .await
+            .expect_err("truncated body"),
+        HttpError::Transport
+    );
+    server.finish().expect("captured request");
+}
+
+#[tokio::test]
+async fn anthropic_deadline_fires_for_held_headers_and_held_body() {
+    for reply in [
+        Vec::new(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n".to_vec(),
+    ] {
+        let mut server = Server::start_delayed(reply, Duration::from_secs(20));
+        let client = server.client();
+        let url = server.url();
+        let mut task = tokio::spawn(async move {
+            client
+                .send_to(&url, request(Endpoint::AnthropicModels(anthropic_key())))
+                .await
+        });
+        server
+            .flushed
+            .take()
+            .expect("flush notification")
+            .await
+            .expect("TLS request captured");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let result = tokio::select! {
+            result = &mut task => result.expect("request task"),
+            () = tokio::time::sleep(Duration::from_millis(1)) => panic!("whole deadline didn't end the request"),
+        };
+        assert_eq!(result.expect_err("held response"), HttpError::Timeout);
+        tokio::time::resume();
+        server.finish().expect("captured request");
     }
 }
 
@@ -540,6 +739,7 @@ async fn public_endpoints_refuse_fields_before_connecting() {
         Endpoint::Discovery,
         Endpoint::Jwks(IssuerUrl::parse("https://auth.openai.com/keys").expect("same origin")),
         Endpoint::Models(Secret::new(Zeroizing::new("bearer-token".to_owned()))),
+        Endpoint::AnthropicModels(anthropic_key()),
     ] {
         let server = Server::start(reply("200 OK", b"{}", ""));
         let client = server.client();

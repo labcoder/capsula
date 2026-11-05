@@ -18,11 +18,12 @@ mod pull;
 mod raster;
 mod shape;
 
+pub(crate) use coverage::{Placement as Quad, Span, device_spans, row_hulls};
 pub(crate) use expression::{Animator, Mood, Motion};
 pub(crate) use frame::FrameState;
 pub(crate) use look::Look;
 pub(crate) use math::{Vec2, v2};
-pub(crate) use neck::{Rect, SNAP_LEN};
+pub(crate) use neck::{GooMismatch, GooShader, MAX_SCALE, Piece, Rect, SNAP_LEN};
 pub(crate) use pull::{CARRY_WIDTH, Pull};
-pub(crate) use raster::Renderer;
+pub(crate) use raster::{Renderer, SizeMismatch};
 pub(crate) use shape::Silhouette;

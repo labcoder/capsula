@@ -1,5 +1,41 @@
 # Accounts
 
+## Anthropic API key
+
+The shell staging helper validates and trims a pasted API key, then writes it to
+Credential Manager. Its caller must run it on a background worker and send only
+`AnthropicKeyStaged` after success; the Accounts UI wiring lands separately.
+The key never crosses the pipe or enters a file, log, command line or environment variable.
+Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
+credential, never another app's key.
+
+Windows stores the staging and active records as `anthropic-key-staged.{service}` and
+`anthropic-key.{service}`, where the service is the product's debug or release credential
+service. These are keyring's exact target spelling, not the ChatGPT vault's slash targets.
+The brain's existing credential worker adopts a validated staged key, attempts staging
+deletion on every outcome, and resolves leftover staging at startup. An explicit adoption
+retries an absent staging read four times, 25 ms apart; if it stays absent, it loads the saved
+key instead of reporting a malformed paste, so duplicate submissions keep their saved state.
+Remove attempts both deletions and reports failure until both are verified absent. All work
+shares the vault's session lock; a cancelled waiter never interrupts an in-flight operation.
+
+The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
+`Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
+a 1 MiB body bound and a 15-second whole-check deadline. More than 64 entries or `has_more`
+refuses the catalog. A successful catalog is tagged AnthropicKey; 401/403 rejects the saved key,
+as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` token
+(`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
+server, transport or catalog failures keep it Unconfirmed for a later Check.
+Every change fences late worker/HTTP replies
+by generation and clears the old catalog. Catalog checks do not authorize inference or
+automatic fallback to another connection. Fixtures are synthetic API-reference examples;
+no live provider call is part of the tests.
+
+The ignored `dev_keyring_staging_round_trip` test runs the shell's actual staging helper
+against the native vault on Rez with a dummy value. It requires the Dev identity and unused
+Dev key names, refuses to overwrite an existing key, and removes both records on success or
+panic unwinding. A terminated test can leave only its dummy Dev credential behind.
+
 ## Stored namespaces and credential names
 
 `protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
@@ -9,15 +45,18 @@ itself is built in debug. Stored spellings are unchanged; there is no migration.
 
 The raw account vault uses `account_target(service, entry)` and the bounded
 `account_targets(service)` inventory: host, sign-out marker, chatgpt/revoke manifests,
-and each record's two slots of 64 chunks. These are 260 exact targets, not a service-prefix
-match. A new credential producer must extend this inventory with its actual stored names.
+and each record's two slots of 64 chunks, plus the active and staged Anthropic targets in
+their dot form. These are 262 exact targets, not a service-prefix match. A new credential
+producer must extend this inventory with its actual stored names.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
 `capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
 On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
 `capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
 target is not an account and must not be fed directly to the account parser. Existing
-callers retain keyring's default mapping; they do not switch to custom targets.
+instance callers retain keyring's default mapping. Anthropic staging instead passes the
+shared `anthropic_staging_target` explicitly to `Entry::new_with_target`; the brain and
+purge inventory use the same helper, so a keyring default change cannot separate them.
 
 ## Sign-in callback
 

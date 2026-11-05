@@ -40,7 +40,8 @@ pub(crate) enum Origin {
     Task(ThreadId),
 }
 
-/// Which connection produced a reasoning item. PR 13b records it with the item.
+/// Which connection produced a native item: the account's generation, fixed for a run at its
+/// first build (D13-H1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionTag(pub(crate) u64);
 
@@ -86,10 +87,7 @@ impl fmt::Debug for Summary {
 /// One item of a run, ordered by its event id.
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "PRs 13b and 14a store calls, results and reasoning"
-    )
+    expect(dead_code, reason = "PR 14a stores history calls and their results")
 )]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Body {
@@ -106,10 +104,15 @@ pub(crate) enum Body {
         call: CallId,
         refs: Vec<HistoryRef>,
     },
-    /// A native reasoning item (PR 13b), replayed only on the connection that made it.
-    Reasoning {
+    /// A native output item of a stored round, replayed only on the connection that made it.
+    Native {
         connection: ConnectionTag,
         item: Opaque,
+    },
+    /// The result Kumochi answered a native call with, after its round's items.
+    Result {
+        call: CallId,
+        output: String,
     },
 }
 
@@ -124,10 +127,15 @@ impl fmt::Debug for Body {
                 .field("call", call)
                 .field("refs", refs)
                 .finish(),
-            Self::Reasoning { connection, item } => f
-                .debug_struct("Reasoning")
+            Self::Native { connection, item } => f
+                .debug_struct("Native")
                 .field("connection", connection)
                 .field("item", item)
+                .finish(),
+            Self::Result { call, output } => f
+                .debug_struct("Result")
+                .field("call", call)
+                .field("output_bytes", &output.len())
                 .finish(),
         }
     }
@@ -181,7 +189,8 @@ pub(crate) enum InputItem {
         call: CallId,
         output: String,
     },
-    Reasoning(Opaque),
+    /// A provider's own output item, sent back as the same JSON value.
+    Native(Opaque),
 }
 
 impl fmt::Debug for InputItem {
@@ -200,7 +209,7 @@ impl fmt::Debug for InputItem {
                 .field("call", call)
                 .field("output_bytes", &output.len())
                 .finish(),
-            Self::Reasoning(item) => f.debug_tuple("Reasoning").field(item).finish(),
+            Self::Native(item) => f.debug_tuple("Native").field(item).finish(),
         }
     }
 }

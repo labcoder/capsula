@@ -437,6 +437,11 @@ impl GooShader {
         }
     }
 
+    /// The largest image side, pixels, this shader can shade.
+    pub(crate) fn capacity(&self) -> usize {
+        self.max
+    }
+
     /// The image size, pixels, of region `r` at `scale`.
     pub(crate) fn size(r: Rect, scale: f32) -> (usize, usize) {
         (pixels(r.size.x, scale), pixels(r.size.y, scale))
