@@ -23,6 +23,7 @@ mod overlay_input;
 mod paint;
 mod panels;
 mod perch;
+mod position;
 mod pull_dock;
 mod pull_picture;
 mod pulling;
@@ -138,49 +139,6 @@ struct Presence {
 }
 
 impl Presence {
-    fn position(
-        &mut self,
-        position: Position,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
-        // shortcut: work-area changes need another position choice; slice 10 adds live settings updates.
-        let area = platform::work_area()?;
-        self.end_selection(
-            crate::presenter::overlay_input::ExitCause::DisplayChanged,
-            cx,
-        );
-        let physical = |value: f32| scaled(value, self.scale);
-        // Kumo and its gap sit beside the 300 px the details had before the peek; the peek is
-        // only as tall as its content.
-        let layout = position.layout(
-            area,
-            line::slot(self.scale),
-            [physical(380.0), physical(PEEK_HEIGHT)],
-            0,
-        );
-        let index = Position::ALL
-            .iter()
-            .position(|candidate| *candidate == position)
-            .expect("every dock position has a menu entry");
-        let frame = LineFrame::in_slot(layout.dock, self.scale);
-        self.request_line(
-            Placement {
-                layout,
-                frame,
-                index,
-            },
-            cx,
-        )?;
-        self.dismiss_settings(cx)?;
-        self.dismiss_text(cx)?;
-        self.dismiss_threads(cx)?;
-        self.set_panel(PanelVisibility::Hidden, cx)?;
-        if let Err(error) = self.pointer_changed(cx) {
-            tracing::debug!(%error, "can't recheck the pointer after moving the dock");
-        }
-        Ok(())
-    }
-
     fn set_panel(
         &mut self,
         visibility: PanelVisibility,
@@ -976,8 +934,10 @@ fn listen(
                         this.pointer_moved(entered_qpc, cx)?;
                     }
                     PresenceEvent::Position(index) => {
-                        if let Some(position) = Position::ALL.get(index) {
-                            this.position(*position, cx)?;
+                        if let Some(position) =
+                            kumochi_protocol::message::DockPosition::ALL.get(index)
+                        {
+                            this.pick_dock_position(*position, cx)?;
                         }
                     }
                     PresenceEvent::Retry => {

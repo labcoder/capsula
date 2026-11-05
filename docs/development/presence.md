@@ -204,10 +204,14 @@ sequenceDiagram
     Proxy->>W: drawn frame=F (dispatched after)
 ```
 
-`main` creates the file, a bounded queue of 256 fixed-size records and the writer thread before
-GPUI starts. The UI thread only stamps the performance counter and moves a record into the
-queue without waiting; the writer formats it and flushes whenever it catches up. Each record
-is one line:
+`main` creates the file, a bounded queue of 256 fixed-size records, 256 spare row tables and the
+writer thread before GPUI starts. The UI thread only stamps the performance counter and moves a
+record into the queue without waiting; the writer formats it and flushes whenever it catches up.
+A record is a few words. A geometry's 512-row table stays on the heap: the UI thread fills its
+own table, swaps it for a spare and moves only the pointer through the queue, and the writer
+hands the table back once it's written. So a commit allocates nothing and never copies a row
+table on the stack; with no spare left, the geometry is dropped and counted like a full queue.
+Each record is one line:
 
 - `startup version=2 pid= dock_hwnd= panel_hwnd= proxy_hwnd= scale= position= work_area= dock= overlay=
   panel= qpc_frequency= row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331`. It

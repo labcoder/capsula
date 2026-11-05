@@ -75,6 +75,23 @@ impl Position {
     }
 }
 
+impl From<kumochi_protocol::message::DockPosition> for Position {
+    fn from(position: kumochi_protocol::message::DockPosition) -> Self {
+        use kumochi_protocol::message::DockPosition;
+        match position {
+            DockPosition::TopLeft => Self::TopLeft,
+            DockPosition::TopCenter => Self::TopCenter,
+            DockPosition::TopRight => Self::TopRight,
+            DockPosition::MiddleLeft => Self::MiddleLeft,
+            DockPosition::Center => Self::Center,
+            DockPosition::MiddleRight => Self::MiddleRight,
+            DockPosition::BottomLeft => Self::BottomLeft,
+            DockPosition::BottomCenter => Self::BottomCenter,
+            DockPosition::BottomRight => Self::BottomRight,
+        }
+    }
+}
+
 /// The two surfaces share an edge, so the pointer never crosses an unowned gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelVisibility {
@@ -127,6 +144,38 @@ fn contains([x, y, width, height]: [i32; 4], [px, py]: [i32; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{PanelVisibility, Position};
+
+    #[test]
+    fn every_saved_position_maps_to_its_tray_and_geometry_entry() {
+        use kumochi_protocol::message::DockPosition;
+        let expected = [
+            Position::TopLeft,
+            Position::TopCenter,
+            Position::TopRight,
+            Position::MiddleLeft,
+            Position::Center,
+            Position::MiddleRight,
+            Position::BottomLeft,
+            Position::BottomCenter,
+            Position::BottomRight,
+        ];
+        assert_eq!(Position::ALL, expected);
+        for (index, position) in DockPosition::ALL.into_iter().enumerate() {
+            assert_eq!(Position::from(position), expected[index]);
+        }
+        let labels = DockPosition::ALL.map(|position| match position {
+            DockPosition::TopLeft => crate::strings::Text::TopLeft,
+            DockPosition::TopCenter => crate::strings::Text::TopCenter,
+            DockPosition::TopRight => crate::strings::Text::TopRight,
+            DockPosition::MiddleLeft => crate::strings::Text::MiddleLeft,
+            DockPosition::Center => crate::strings::Text::Center,
+            DockPosition::MiddleRight => crate::strings::Text::MiddleRight,
+            DockPosition::BottomLeft => crate::strings::Text::BottomLeft,
+            DockPosition::BottomCenter => crate::strings::Text::BottomCenter,
+            DockPosition::BottomRight => crate::strings::Text::BottomRight,
+        });
+        assert_eq!(crate::strings::Text::POSITIONS, labels);
+    }
 
     #[test]
     fn a_larger_threads_surface_uses_the_same_anchor_and_stays_in_the_work_area() {
