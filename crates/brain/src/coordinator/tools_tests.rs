@@ -451,20 +451,46 @@ fn a_rounds_items_fill_the_request_bound_and_no_more() {
 #[test]
 fn round_writes_show_lengths_never_content() {
     const MARKER: &str = "zqxplantedmarker";
-    let op = StoreOp::RoundItems(RoundItems {
+    let call = CallId::new(&format!("call-{MARKER}")).expect("short ASCII");
+    let op = Effect::Store(StoreOp::RoundItems(RoundItems {
         thread: T,
         run: R,
         round: 1,
         connection: ConnectionTag(0),
         text: Some(format!("said {MARKER}").into()),
         items: vec![item(&format!("{{\"text\":\"{MARKER}\"}}"))],
-        calls: vec![id(1)],
-    });
+        calls: vec![call.clone()],
+    }));
     let result = crate::context::Body::Result {
-        call: id(1),
+        call: call.clone(),
         output: MARKER.to_owned(),
     };
-    let printed = format!("{op:?} {result:?}");
+    let request = [
+        crate::context::InputItem::FunctionCall {
+            call: call.clone(),
+            name: MARKER.to_owned(),
+            arguments: MARKER.to_owned(),
+        },
+        crate::context::InputItem::FunctionOutput {
+            call: call.clone(),
+            output: MARKER.to_owned(),
+        },
+    ];
+    let events = [
+        TurnEvent::ToolCallStarted {
+            call: call.clone(),
+            name: ToolName::Unknown,
+        },
+        TurnEvent::ToolArgsDelta {
+            call: call.clone(),
+            delta: MARKER.to_owned(),
+        },
+        TurnEvent::ToolCallReady {
+            call,
+            args: MARKER.to_owned(),
+        },
+    ];
+    let printed = format!("{op:?} {result:?} {request:?} {events:?}");
     assert!(!printed.contains(MARKER), "{printed}");
     let bytes = format!("{:?}", MARKER.as_bytes());
     let listed = bytes.trim_start_matches('[').trim_end_matches(']');
