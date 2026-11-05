@@ -280,8 +280,42 @@ invalid opacity or sizes outside 1–4,096 per axis. Numeric failures include un
 planes; raster push checks positive finite depth at the snapped vertices. Cancellation polls at
 each face and every 1,024 vertex/index/triangle visits. Any error clears the whole output; the
 host must retain its previous displayed frame. Frame construction allocates nothing with reserved
-`FrameScratch`. Picking, frozen display mapping and publication belong to the next split; there
-is no `DisplayedFrame` or shell integration yet.
+`FrameScratch`. Shell integration and publication remain staged.
+
+### 3D picking
+
+`three::pick::DisplayedFrame` owns the completed raster's ids and `FrameState`: geometry revision,
+camera, composed sampled pose per solid, frozen `Mapping` and solid-index-to-`Handle` map. Parts
+carry existing host handles, not user labels; handles retain their original commit identities.
+Construction checks the exact width × height id length, at most 160 matching poses/parts and
+every one-based solid id. Background is 0. There are no mutable accessors; retirement consumes
+the frame with `into_parts` to return the id allocation for reuse.
+
+`Mapping` snapshots the logical destination origin/extent, effective DPI (physical pixels per
+logical pixel) and exact integer raster dimensions, each 1–4,096. Rectangle ends must be finite
+and greater than their origins; extents and DPI must be finite and positive. `pick(&frame, at)`
+takes a pointer in that same logical coordinate space. It rejects non-finite pointers and points
+outside the half-open rectangle, then uses `(at - origin) / extent × texels` **per axis**.
+DPI is not applied twice. Integer rounding can make the two ratios different, including in
+scaled and half-resolution motion frames. A labelled id returns `Part(handle)`, an unlabelled id
+returns `Blocked` and background returns `Miss`. A pick performs no allocation or ray traversal.
+
+Ids already encode raster coverage and opacity: an opaque unlabelled solid blocks, material
+below authored opacity 0.5 passes, and 0.5 blocks. Near-clipped geometry has no id. Rest chooses
+the most frequent of four sample ids, background included, with ties won by the lowest first
+sample index. Translucent ids follow the last qualifying polygon in the approximate painted
+centroid order, **not necessarily the nearest geometric surface** (OSC-218). A pick within one
+**internal texel** of an edge, mapped separately through both frozen axis ratios and including
+bilinear filtering, can differ from an exact ray. This is not a one-display-pixel tolerance.
+The scaled pointer/oracle fixtures reuse the frame's independent f64 ray oracle and omit only
+that edge neighbourhood and the declared 1e-6 relative depth ambiguity.
+
+The host must publish the same image and `DisplayedFrame` together at accepted paint, not on
+worker completion. Until then picks read the old pair, even if the desired camera, pose, DPI,
+rectangle or geometry revision changed. A skipped, failed, stale or superseded paint cannot
+advance picking. Unique ownership keeps the displayed ids unavailable for worker writes; the
+other buffer can belong to the running job or ready candidate, never both. Host job admission,
+image lifetime and the actual paint transaction belong to PR 6/10, not this scene primitive.
 
 JSON decoding enables exact float round trips: a stored and reloaded typed step must retain
 the original f64 chart values, rather than changing a final bit during recovery.
