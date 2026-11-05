@@ -1,18 +1,22 @@
-//! The background job slot: one model request at a time outside any run, which a task's run
-//! ending `Done` starts and any new run cancels (docs/development/engines.md, "Background jobs").
+//! The background job slot: one model request at a time outside any run, which a run ending
+//! `Done` starts and any new run cancels (docs/development/engines.md, "Background jobs").
 //!
-//! A job reads like a build: on the page reader, after every op sent before it, with its own
-//! exposure to deletes, so a delete of what it read voids it. It asks to send under its own
-//! [`SendKey::Job`], so a delete of its task is held while its body goes out, and its write is
-//! conditional on the deletion generation it read. It runs only while an account is signed in,
-//! and a sign-out cancels it before anything else. A job is never resumed or retried on its own:
-//! the next trigger starts a new one.
+//! A task's run starts a title job, and when that ends on its own a compaction job for the same
+//! thread; Kumo's run starts compaction only. A job reads like a build: on the page reader,
+//! after every op sent before it, with its own exposure to deletes, so a delete of what it read
+//! voids it. It asks to send under its own [`SendKey::Job`], so a delete of what it read is held
+//! while its body goes out, and its write is conditional on the deletion generation it read. It
+//! runs only while an account is signed in, and a sign-out cancels it before anything else. A
+//! job is never resumed or retried on its own: the next trigger starts a new one.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
-use kumochi_protocol::message::{RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadTitle};
 
-use super::{Coordinator, Effect, SendKey, Stale, StoreOp, Unbuilt};
+use super::admission::origin;
+use super::{Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
+use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin, RunSnapshot};
 use crate::engines::RunRequest;
 use crate::store::{Generation, TitleSource};
@@ -20,40 +24,76 @@ use crate::store::{Generation, TitleSource};
 /// One background job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobKey {
-    /// The task it's for.
+    /// The thread it's for.
     pub thread: ThreadId,
     /// A serial from the build attempts' counter, so no key repeats.
     pub serial: u64,
 }
 
-/// A title job's read, for the page reader.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReadTitle {
-    pub(crate) key: JobKey,
-    /// The names and default model now; the runtime fills it in, and the read takes the task's
-    /// own model choice into it.
-    pub(crate) snapshot: Option<RunSnapshot>,
+/// What a job does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobKind {
+    /// Titles a task from its first ask.
+    Title,
+    /// Summarizes a thread's oldest runs.
+    Compact,
 }
 
-/// A title job's read, finished.
+/// A job's read, for the page reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadJob {
+    pub(crate) key: JobKey,
+    pub(crate) kind: JobKind,
+    pub(crate) origin: Origin,
+    /// The names and default model now; the runtime fills it in, and the read takes the
+    /// thread's own model choice into it.
+    pub(crate) snapshot: Option<RunSnapshot>,
+    /// The uncovered backlog, in estimated tokens, that compaction waits for; the runtime
+    /// fills it in.
+    pub(crate) compact_at: u64,
+}
+
+/// A job's read, finished.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobBuilt {
     pub(crate) key: JobKey,
-    /// The request; `Ok(None)` when the task's title isn't its first words any more.
-    pub(crate) result: Result<Option<TitleAsk>, Unbuilt>,
+    /// The request; `Ok(None)` when there's nothing to do: the task's title isn't its first
+    /// words, or the thread has nothing to compact.
+    pub(crate) result: Result<Option<JobAsk>, Unbuilt>,
 }
 
-/// What a title job sends, and the deletion generation it read the task in.
+/// What a job sends, and the deletion generation it read the thread in.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TitleAsk {
+pub(crate) struct JobAsk {
     pub(crate) generation: Generation,
     pub(crate) built: Built,
+    /// The events a compaction's summary covers; `None` for a title.
+    pub(crate) covers: Option<(EventId, EventId)>,
+}
+
+/// What a job's request came to, cleaned.
+#[derive(Clone, PartialEq, Eq)]
+pub enum JobOutput {
+    /// A title.
+    Title(ThreadTitle),
+    /// A summary.
+    Summary(String),
+}
+
+impl fmt::Debug for JobOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Title(title) => f.debug_tuple("Title").field(&title.as_str().len()).finish(),
+            Self::Summary(text) => f.debug_tuple("Summary").field(&text.len()).finish(),
+        }
+    }
 }
 
 /// The job in the slot.
 #[derive(Debug)]
 pub(super) struct Job {
     key: JobKey,
+    kind: JobKind,
     /// The run whose end started it.
     run: RunId,
     /// Threads whose delete was pending when it began or was accepted since.
@@ -67,6 +107,8 @@ enum Stage {
     Sending {
         generation: Generation,
         sources: Vec<ThreadId>,
+        covers: Option<(EventId, EventId)>,
+        model: Option<String>,
     },
     Writing,
 }
@@ -78,15 +120,26 @@ impl Job {
 }
 
 impl Coordinator {
-    /// `run` in `thread` ended `Done`: a task's title job starts, unless a run is current, no
-    /// account is signed in or sends failed closed. The read stops it when the title isn't
-    /// first words, so a renamed or model-titled task never sends.
-    pub(super) fn title_job(&mut self, thread: ThreadId, run: RunId, effects: &mut Vec<Effect>) {
-        if self.account.is_none()
-            || thread == self.main_thread
-            || self.current.is_some()
-            || self.transport_failed
-        {
+    /// `run` in `thread` ended `Done`: a task's title job starts, or Kumo's compaction.
+    pub(super) fn after_run(&mut self, thread: ThreadId, run: RunId, effects: &mut Vec<Effect>) {
+        let kind = if thread == self.main_thread {
+            JobKind::Compact
+        } else {
+            JobKind::Title
+        };
+        self.start_job(kind, thread, run, effects);
+    }
+
+    /// Starts `kind` for `thread` in the slot, unless a run is current, no account is signed in
+    /// or sends failed closed. Its read stops it when there's nothing to do.
+    fn start_job(
+        &mut self,
+        kind: JobKind,
+        thread: ThreadId,
+        run: RunId,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.account.is_none() || self.current.is_some() || self.transport_failed {
             return;
         }
         self.cancel_job(effects);
@@ -97,14 +150,29 @@ impl Coordinator {
         };
         self.job = Some(Job {
             key,
+            kind,
             run,
             exposed: self.pending_deletes(),
             stage: Stage::Reading,
         });
-        effects.push(Effect::Store(StoreOp::ReadTitle(ReadTitle {
+        effects.push(Effect::Store(StoreOp::ReadJob(ReadJob {
             key,
+            kind,
+            origin: origin(thread, self.main_thread),
             snapshot: None,
+            compact_at: COMPACT_AT,
         })));
+    }
+
+    /// The job in the slot ended on its own: a title job hands over to its thread's compaction,
+    /// unless a delete reached that thread.
+    fn job_ended(&mut self, effects: &mut Vec<Effect>) {
+        let Some(job) = self.job.take() else {
+            return;
+        };
+        if job.kind == JobKind::Title && !job.exposed.contains(&job.key.thread) {
+            self.start_job(JobKind::Compact, job.key.thread, job.run, effects);
+        }
     }
 
     /// Empties the slot; the runtime drops the job's request, whose lease settles on its own.
@@ -128,8 +196,8 @@ impl Coordinator {
         }
     }
 
-    /// The job's read finished: its request starts, unless the title isn't first words, the
-    /// read failed or a delete reached what it read.
+    /// The job's read finished: its request starts, unless there's nothing to do, the read
+    /// failed or a delete reached what it read.
     pub(super) fn job_built(
         &mut self,
         done: JobBuilt,
@@ -141,25 +209,34 @@ impl Coordinator {
             .filter(|job| job.key == done.key && matches!(job.stage, Stage::Reading))
             .ok_or(Stale)?;
         let Ok(Some(ask)) = done.result else {
-            self.job = None;
+            self.job_ended(effects);
             return Ok(());
         };
         if job.voided(&ask.built.sources) {
-            self.job = None;
+            self.job_ended(effects);
             return Ok(());
         }
-        let (key, run) = (job.key, job.run);
+        let (key, kind, run) = (job.key, job.kind, job.run);
+        let origin = origin(key.thread, self.main_thread);
         job.stage = Stage::Sending {
             generation: ask.generation,
             sources: ask.built.sources,
+            covers: ask.covers,
+            model: ask
+                .built
+                .request
+                .choice
+                .as_ref()
+                .map(|choice| choice.model.as_str().to_owned()),
         };
         effects.push(Effect::StartJob {
             job: key,
+            kind,
             request: RunRequest {
                 key: SendKey::Job(key),
                 run,
                 thread: key.thread,
-                origin: Origin::Task(key.thread),
+                origin,
                 request: ask.built.request,
             },
         });
@@ -189,12 +266,12 @@ impl Coordinator {
         }
     }
 
-    /// The job's request ended with `title`, or failed. The title is written, conditional on
-    /// the generation the job read, unless a delete reached the task meanwhile.
+    /// The job's request ended with `output`, or failed. A title or summary is written,
+    /// conditional on the generation the job read, unless a delete reached what it read.
     pub(super) fn job_done(
         &mut self,
         key: JobKey,
-        title: Option<ThreadTitle>,
+        output: Option<JobOutput>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let job = self
@@ -202,36 +279,54 @@ impl Coordinator {
             .as_mut()
             .filter(|job| job.key == key)
             .ok_or(Stale)?;
+        let voided = match &job.stage {
+            Stage::Sending { sources, .. } => job.voided(sources),
+            Stage::Reading | Stage::Writing => return Err(Stale),
+        };
         let Stage::Sending {
             generation,
-            sources,
-        } = &job.stage
+            covers,
+            model,
+            ..
+        } = &mut job.stage
         else {
             return Err(Stale);
         };
-        let generation = *generation;
-        let (Some(title), false) = (title, job.voided(sources)) else {
-            self.job = None;
+        let write = match (output, *covers) {
+            _ if voided => None,
+            (Some(JobOutput::Title(title)), None) => Some(StoreOp::SetTitle {
+                thread: key.thread,
+                title,
+                source: TitleSource::Model(*generation),
+                job: Some(key),
+            }),
+            (Some(JobOutput::Summary(text)), Some(covers)) => Some(StoreOp::StoreSummary {
+                owner: SendKey::Job(key),
+                thread: key.thread,
+                generation: *generation,
+                covers,
+                text: SummaryText(text),
+                model: model.take(),
+            }),
+            _ => None,
+        };
+        let Some(write) = write else {
+            self.job_ended(effects);
             return Ok(());
         };
         job.stage = Stage::Writing;
-        effects.push(Effect::Store(StoreOp::SetTitle {
-            thread: key.thread,
-            title,
-            source: TitleSource::Model(generation),
-            job: Some(key),
-        }));
+        effects.push(Effect::Store(write));
         Ok(())
     }
 
-    /// A title write by `job` finished: only the slot's own write empties the slot.
-    pub(super) fn title_written(&mut self, job: Option<JobKey>) {
+    /// A title or summary write by `job` finished: only the slot's own write ends the job.
+    pub(super) fn job_written(&mut self, job: Option<JobKey>, effects: &mut Vec<Effect>) {
         if job.is_some_and(|key| {
             self.job
                 .as_ref()
                 .is_some_and(|held| held.key == key && matches!(held.stage, Stage::Writing))
         }) {
-            self.job = None;
+            self.job_ended(effects);
         }
     }
 

@@ -148,6 +148,7 @@ mod tests {
     fn setup(cx: &mut TestAppContext) -> (&mut VisualTestContext, Rc<Cell<usize>>, FocusHandle) {
         cx.update(|cx| {
             gpui_kit::init(cx);
+            crate::theme::init(cx);
             cx.set_reduce_motion(true);
         });
         let (_, cx) = cx.add_window_view(|window, cx| {

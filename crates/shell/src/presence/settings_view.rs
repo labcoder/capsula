@@ -132,6 +132,11 @@ impl SettingsView {
     }
 
     #[cfg(debug_assertions)]
+    pub(super) fn fixture_general(&mut self) {
+        self.fixture = true;
+    }
+
+    #[cfg(debug_assertions)]
     pub(super) fn fixture_accounts(&mut self) {
         self.tab = 1;
         self.fixture = true;

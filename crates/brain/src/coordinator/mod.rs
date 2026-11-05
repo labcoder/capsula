@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
-    ThreadTitle, UserError,
+    UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -35,10 +35,10 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use availability::{Availability, Ready};
-pub(crate) use job::TitleAsk;
-pub use job::{JobBuilt, JobKey, ReadTitle};
+pub(crate) use job::JobAsk;
+pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
-pub use store_op::StoreOp;
+pub use store_op::{StoreOp, SummaryText};
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
@@ -119,18 +119,25 @@ pub enum Input {
     },
     /// A background job's read finished.
     JobBuilt(JobBuilt),
-    /// A background job's request ended: the cleaned title, or `None` when it failed.
+    /// A background job's request ended: the cleaned title or summary, or `None` when it failed.
     JobDone {
         /// The job.
         key: JobKey,
-        /// The title.
-        title: Option<ThreadTitle>,
+        /// What it came to.
+        output: Option<JobOutput>,
     },
     /// A `SetTitle` finished.
     TitleSet {
         /// The job that wrote it; `None` for the user's rename.
         job: Option<JobKey>,
         /// It changed the title.
+        applied: bool,
+    },
+    /// A `StoreSummary` finished.
+    SummaryStored {
+        /// The job or build that wrote it.
+        owner: SendKey,
+        /// It was stored.
         applied: bool,
     },
     /// An account can send model requests, as account generation `generation`.
@@ -260,6 +267,8 @@ pub enum Effect {
     StartJob {
         /// The job.
         job: JobKey,
+        /// What it does, which decides how its output is cleaned.
+        kind: JobKind,
         /// What it sends.
         request: RunRequest,
     },
@@ -596,14 +605,22 @@ impl Coordinator {
                 key: SendKey::Job(key),
             } => self.job_ready(key, &mut effects),
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
-            Input::JobDone { key, title } => self.job_done(key, title, &mut effects)?,
+            Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,
             Input::TitleSet { job, applied } => {
                 // A committed title is news to the shell, whoever wrote it.
                 if applied {
                     effects.push(Effect::Control(ControlToShell::ThreadsChanged));
                 }
-                self.title_written(job);
+                self.job_written(job, &mut effects);
             }
+            Input::SummaryStored {
+                owner: SendKey::Job(key),
+                ..
+            } => self.job_written(Some(key), &mut effects),
+            Input::SummaryStored {
+                owner: SendKey::Build(_),
+                ..
+            } => return Err(Stale),
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
@@ -702,7 +719,7 @@ impl Coordinator {
             ..
         }) = done.ending
         {
-            self.title_job(done.thread, done.id, effects);
+            self.after_run(done.thread, done.id, effects);
         }
         if let Some(Ending {
             outcome: RunEnd::Done,

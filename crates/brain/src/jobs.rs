@@ -1,12 +1,14 @@
-//! Background jobs: model requests a run's end starts, outside any run (plans/slice-3.md PR 16;
-//! docs/development/engines.md, "Background jobs"). The coordinator owns the one job slot and
-//! every decision about it; this module holds the pure parts of the title job: its request and
-//! the clean-up of what the model answered.
+//! Background jobs: model requests a run's end starts, outside any run (plans/slice-3.md PRs 16
+//! and 17; docs/development/engines.md, "Background jobs"). The coordinator owns the one job
+//! slot and every decision about it; this module holds the pure parts of the title job, its
+//! request and the clean-up of what the model answered, and compaction's threshold.
+//! `context::compact` builds compaction's request.
 
-use kumochi_protocol::constants::DISPLAY_NAME;
+use kumochi_protocol::constants::{COMPACT_AT_ENV, DISPLAY_NAME};
 use kumochi_protocol::message::{Effort, MAX_TITLE_CHARS, ModelChoice, ThreadTitle};
 
 use crate::context::build::fill;
+use crate::context::compact::{COMPACT_AT, MAX_SUMMARY};
 use crate::context::{InputItem, ModelRequest, Role, RunSnapshot};
 
 const TITLE_PROMPT: &str = include_str!("../prompts/title.md");
@@ -14,6 +16,18 @@ const TITLE_PROMPT: &str = include_str!("../prompts/title.md");
 const ASK_CHARS: usize = 2000;
 /// The most text a title job takes from the model; more fails the job [guess].
 pub(crate) const MAX_OUTPUT: usize = 4 * 1024;
+/// The most text a compaction job takes from the model; more fails the job. The summary kept is
+/// cut shorter, to [`MAX_SUMMARY`] [guess].
+pub(crate) const MAX_SUMMARY_OUTPUT: usize = 2 * MAX_SUMMARY;
+
+/// The compaction threshold: [`COMPACT_AT`], or in a dev build the count [`COMPACT_AT_ENV`] names.
+pub(crate) fn compact_at() -> u64 {
+    std::env::var(COMPACT_AT_ENV)
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(COMPACT_AT)
+}
 
 /// The title request for a task whose first ask is `ask`: the title prompt with the run's names,
 /// the ask as the only input, no tools, and the task's model at the lowest effort.
@@ -116,7 +130,7 @@ mod tests {
         assert!(request.instructions.contains("Zqxuser"));
         assert!(!request.instructions.contains('{'));
         assert_eq!(
-            request.choice.map(|choice| choice.effort),
+            request.choice.as_ref().map(|choice| choice.effort),
             Some(Effort::Low)
         );
         assert!(request.tools.is_empty());
@@ -127,6 +141,24 @@ mod tests {
                 text: "a".repeat(ASK_CHARS),
             }]
         );
+        assert_eq!(
+            request.choice.map(|choice| choice.model),
+            Some(ModelSlug::new("gpt-test").expect("valid")),
+            "the task's own model"
+        );
+        for (ask, sent) in [
+            ("é".repeat(2001), "é".repeat(2000)),
+            ("é".repeat(2000), "é".repeat(2000)),
+        ] {
+            assert_eq!(
+                title_request(&snapshot, &ask).input,
+                vec![InputItem::Message {
+                    role: Role::User,
+                    text: sent,
+                }],
+                "cut at 2,000 characters, not bytes"
+            );
+        }
         let unnamed = RunSnapshot {
             user: None,
             ..snapshot

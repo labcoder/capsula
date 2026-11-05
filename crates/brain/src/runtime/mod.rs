@@ -35,7 +35,9 @@ use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
 #[cfg(debug_assertions)]
 use crate::coordinator::{Availability, Ready};
-use crate::coordinator::{BuildContext, Coordinator, Effect, Input, JobKey, LeaseId, StoreOp};
+use crate::coordinator::{
+    BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
+};
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
@@ -149,6 +151,8 @@ pub(crate) struct Brain {
     round: Option<(RunId, Cancel)>,
     /// The background job's request, aborted the same way.
     job: Option<(JobKey, Cancel)>,
+    /// The uncovered backlog, in estimated tokens, at which a thread compacts after a run.
+    pub(crate) compact_at: u64,
     /// Rounds waiting for leave to send.
     asks: Asks,
     /// When each granted send's deadline passes, in no order.
@@ -265,6 +269,7 @@ impl Brain {
             engine_events,
             round: None,
             job: None,
+            compact_at: crate::jobs::compact_at(),
             asks: Asks::default(),
             send_deadlines: Vec::new(),
             deadline: None,
@@ -834,10 +839,29 @@ impl Brain {
         });
     }
 
+    /// Seeds a build, or a job's read with the names and default model now and the compaction
+    /// threshold.
+    fn seed_op(&self, op: &mut StoreOp) {
+        match op {
+            StoreOp::BuildContext(build) => self.seed(build),
+            StoreOp::ReadJob(read) => {
+                read.snapshot = Some(self.snapshot(read.origin));
+                read.compact_at = self.compact_at;
+            }
+            _ => {}
+        }
+    }
+
     /// Starts `job`'s request on the engine, replacing any job still running.
-    fn start_job(&mut self, job: JobKey, request: engines::RunRequest) {
+    fn start_job(&mut self, job: JobKey, kind: JobKind, request: engines::RunRequest) {
         let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-        let cancel = engines::start_job(&*self.engine, request, job, self.inputs_tx.clone(), gate);
+        let cancel = engines::start_job(
+            &*self.engine,
+            request,
+            (job, kind),
+            self.inputs_tx.clone(),
+            gate,
+        );
         self.job = Some((job, cancel));
     }
 
@@ -869,12 +893,7 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(mut op) => {
-                    if let StoreOp::BuildContext(build) = &mut op {
-                        self.seed(build);
-                    }
-                    if let StoreOp::ReadTitle(read) = &mut op {
-                        read.snapshot = Some(self.snapshot(Origin::Task(read.key.thread)));
-                    }
+                    self.seed_op(&mut op);
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();
@@ -921,7 +940,7 @@ impl Brain {
                         engines::start(&*self.engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
                 }
-                Effect::StartJob { job, request } => self.start_job(job, request),
+                Effect::StartJob { job, kind, request } => self.start_job(job, kind, request),
                 Effect::CancelJob(job) => drop(self.job.take_if(|(held, _)| *held == job)),
                 Effect::Grant(lease) => {
                     let granted = SendLease::new(lease, self.inputs_tx.clone());
