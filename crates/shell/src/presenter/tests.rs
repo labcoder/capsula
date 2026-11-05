@@ -28,7 +28,7 @@ const FRAME: u32 = 40;
 mod measurements;
 
 #[path = "cap_measure_tests.rs"]
-mod cap_measurements;
+pub(crate) mod cap_measurements;
 
 #[path = "frame_tests.rs"]
 mod frames;

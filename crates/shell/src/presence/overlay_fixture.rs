@@ -32,9 +32,11 @@ const END: f32 = 40.0;
 
 type PaintUnit = (FrameItem, Arc<[Prim]>);
 
+#[derive(Clone, Copy)]
 enum Mode {
     Rest,
     Animated,
+    Capped,
 }
 
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
@@ -49,14 +51,24 @@ const TURNED: [(usize, Vec2); 2] = [
 
 /// The fixture step prepared with `measure` at rest: each paint unit with its own primitives,
 /// in paint order, and the rest's paint work.
-fn resting(measure: &mut dyn TextMeasure, logical_size: [f32; 2]) -> (Vec<PaintUnit>, PaintWork) {
+fn resting(
+    measure: &mut dyn TextMeasure,
+    logical_size: [f32; 2],
+    mode: Mode,
+) -> (Vec<PaintUnit>, PaintWork) {
     let header =
         br#"{"begin":{"v":1,"scene":"fixture","surface":"overlay","alt":"painter fixture"}}"#;
     let Ok(Record::Begin(begin)) = parse_record(header) else {
         panic!("a begin record");
     };
-    let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
-        panic!("a step record");
+    let step = match mode {
+        Mode::Capped => crate::presenter::tests::cap_measurements::drawing(0, 40),
+        Mode::Rest | Mode::Animated => {
+            let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
+                panic!("a step record");
+            };
+            step
+        }
     };
     let mut budget = GlobalBudget::default();
     let mut state = SceneState::begin(begin).expect("fixture state");
@@ -85,7 +97,9 @@ fn resting(measure: &mut dyn TextMeasure, logical_size: [f32; 2]) -> (Vec<PaintU
                 .position(|each| std::ptr::eq(each, item))
                 .expect("a paint unit of a frame item");
             let mut item = item.clone();
-            if let Some((_, pivot)) = TURNED.iter().find(|(turned, _)| *turned == index) {
+            if !matches!(mode, Mode::Capped)
+                && let Some((_, pivot)) = TURNED.iter().find(|(turned, _)| *turned == index)
+            {
                 item.transform = Affine::pose(1.0, 0.4, *pivot)
                     .compose(Affine::pose(1.0, 0.0, Vec2::new(-pivot.x, -pivot.y)))
                     .compose(item.transform);
@@ -184,7 +198,7 @@ impl Render for Probe {
     reason = "one bounded native probe and its content-free samples"
 )]
 fn run(mode: Mode) {
-    let animated = matches!(mode, Mode::Animated);
+    let animated = !matches!(mode, Mode::Rest);
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
         std::process::exit(124);
@@ -209,7 +223,7 @@ fn run(mode: Mode) {
                 cx.theme().font_family.clone(),
             );
             let logical = [f32::from(display.width), f32::from(display.height)];
-            let (items, work) = resting(&mut measure, logical);
+            let (items, work) = resting(&mut measure, logical, mode);
             println!(
                 "overlay_fixture items={} dash={} fill={} outline={}",
                 items.len(),
@@ -305,7 +319,7 @@ fn the_fixture_is_a_legal_resting_picture_of_every_mapping() {
     let text = gpui_kit::TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new()));
     let mut measure =
         crate::presenter::Measure::new(Arc::new(text), gpui_kit::Font::default().family);
-    let (items, work) = resting(&mut measure, [1920.0, 1080.0]);
+    let (items, work) = resting(&mut measure, [1920.0, 1080.0], Mode::Rest);
     assert!(work.within_limits(), "{work:?}");
     let prims = || items.iter().flat_map(|(_, prims)| prims.iter());
     assert!(prims().any(|prim| matches!(
@@ -331,6 +345,33 @@ fn the_fixture_is_a_legal_resting_picture_of_every_mapping() {
         [false, true],
         "the turned rect, then the turned note"
     );
+}
+
+#[test]
+fn the_capped_painter_fixture_reuses_the_full_native_preparation_workload() {
+    let text = gpui_kit::TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new()));
+    let mut measure =
+        crate::presenter::Measure::new(Arc::new(text), gpui_kit::Font::default().family);
+    let (items, work) = resting(&mut measure, [2560.0, 1440.0], Mode::Capped);
+    assert_eq!(items.len(), 82);
+    assert_eq!(
+        (work.dash_pieces, work.fill_vertices, work.outline_points),
+        (512, 512, 512)
+    );
+    assert_eq!(
+        items
+            .iter()
+            .flat_map(|(_, prims)| prims.iter())
+            .filter(|prim| matches!(prim, Prim::Text { .. }))
+            .count(),
+        44
+    );
+}
+
+#[test]
+#[ignore = "manual quiet-Rez fixed 60 s production item painter at all paint caps, no input"]
+fn measure_primary_overlay_at_paint_caps() {
+    run(Mode::Capped);
 }
 
 #[test]

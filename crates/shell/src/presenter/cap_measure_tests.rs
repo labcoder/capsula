@@ -9,7 +9,7 @@ use kumochi_scene::{
 
 use super::{LIVE, Shaper, begin, commit, controls, live, only_job, step};
 
-fn drawing(iteration: usize, extra_labels: usize) -> Step {
+pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
     let label = |index| {
         format!(
             "stage {iteration:03} label {index:02} {}",
