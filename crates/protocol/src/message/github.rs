@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Cleanup;
 
-/// The most repositories advertised in one connection view [guess].
+/// The most repositories advertised in one connection view (guess).
 pub const MAX_GITHUB_REPOS: usize = 200;
 
 /// A content-free refusal of a GitHub or issue wire value.

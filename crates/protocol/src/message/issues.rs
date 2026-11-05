@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{GitHubLogin, IssueValueError, RepoName, ThreadId};
 
-/// The title's local limit, in Unicode scalar values [guess].
+/// The title's local limit, in Unicode scalar values (guess).
 pub const MAX_ISSUE_TITLE_CHARS: usize = 256;
-/// The normalized body's local UTF-8 byte limit [guess].
+/// The normalized body's local UTF-8 byte limit (guess).
 pub const MAX_ISSUE_BODY_BYTES: usize = 32 * 1024;
-/// The most cards requested in one frame [guess].
+/// The most cards requested in one frame (guess).
 pub const MAX_ISSUE_CARDS: usize = 16;
 
 checked_text!(IssueTitle, title, "An untrimmed, one-line issue title.");
