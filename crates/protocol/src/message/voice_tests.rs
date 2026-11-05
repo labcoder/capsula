@@ -98,6 +98,12 @@ fn a_speech_chunk_holds_up_to_100_ms_and_a_segment_up_to_30_s() {
     }
     assert_eq!(speech(0, Some(0)).check(24_000), Ok(()));
     assert_eq!(speech(0, Some(720_000)).check(24_000), Ok(()));
+    assert_eq!(speech(1, Some(0)).check(24_000), Err(VoiceBound::Segment));
+    assert_eq!(speech(1, Some(1)).check(24_000), Ok(()));
+    assert_eq!(
+        speech(2_400, Some(2_399)).check(24_000),
+        Err(VoiceBound::Segment)
+    );
     assert_eq!(
         speech(2_401, Some(2_401)).check(24_000),
         Err(VoiceBound::Samples)
@@ -147,17 +153,17 @@ fn the_largest_voice_frames_fit_their_pipes() {
     );
     let worst_speech = DataToShell::SpeechPcm(SpeechPcm {
         run: RunId(u64::MAX),
-        segment: SegmentId(255),
+        segment: SegmentId(u32::MAX),
         output_generation: OutputGeneration(u32::MAX),
-        seq: 299,
+        seq: u32::MAX,
         samples: vec![i16::MIN; 19_200],
         last: Some(5_760_000),
     });
-    // Tag, run, a 2-byte segment, generation, a 2-byte seq, a 3-byte length, 3 bytes a
+    // Tag, run, segment, generation and seq at their widest, a 3-byte length, 3 bytes a
     // sample, then Some and a 4-byte total.
     assert_eq!(
         payload(&worst_speech, Pipe::Data),
-        1 + 10 + 2 + 5 + 2 + 3 + 19_200 * 3 + 1 + 4
+        1 + 10 + 5 + 5 + 5 + 3 + 19_200 * 3 + 1 + 4
     );
     let worst_transcript = DataToShell::Transcript(Transcript {
         run: RunId(u64::MAX),
@@ -235,6 +241,8 @@ fn debug_and_the_tap_show_no_audio_or_text() {
             "{debug}"
         );
         assert!(!debug.contains(bytes), "{debug}");
+        // 12,345 as little-endian bytes, the way a byte list of the PCM would print.
+        assert!(!debug.contains("57, 48"), "{debug}");
         assert_eq!(record.payload, None, "{debug}");
     }
 }

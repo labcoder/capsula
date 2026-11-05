@@ -189,6 +189,7 @@ impl SpeechPcm {
         }
         if self.last.is_some_and(|total| {
             u64::from(total) > u64::from(rate) * u64::from(MAX_SEGMENT_SECONDS)
+                || usize::try_from(total).is_ok_and(|total| total < self.samples.len())
         }) {
             return Err(VoiceBound::Segment);
         }
