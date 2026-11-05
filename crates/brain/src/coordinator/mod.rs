@@ -522,7 +522,7 @@ impl Coordinator {
     }
 
     /// A coordinator the dev fixture answers for, as most tests need.
-    #[cfg(all(debug_assertions, any(test, feature = "test-support")))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     pub fn ready_for_tests(
         main_thread: ThreadId,
         last_thread: ThreadId,

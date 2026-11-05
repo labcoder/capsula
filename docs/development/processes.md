@@ -54,6 +54,11 @@ flowchart LR
 - **Why Win32 and not std:** std's `Command` can't place a process in a job from its first
   instruction, and GPUI has no process API. macOS counterpart: `posix_spawn` with its own process
   group and an explicit `envp`, ended with `killpg` (unverified).
+- **Job membership as a check** (`Job::contains`, `IsProcessInJob`): the bridge listener
+  serves only a client inside its launch's own run job, which a run's children inherit. It proves
+  where a process came from, not which one of the run's processes it is (see
+  [claude-code.md](claude-code.md), "The listener"). macOS counterpart: a process-group check
+  on the peer pid, which is weaker (unverified).
 - **The shell** isn't in any job, so a brain crash doesn't take the window with it. Each process
   starts the other detached and, where the starting job allows it, outside that job.
 

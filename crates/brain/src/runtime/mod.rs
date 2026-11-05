@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
@@ -126,7 +126,7 @@ pub(crate) enum Quit {
 #[derive(Debug)]
 pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     Fixture(Box<dyn Engine>),
     /// The account's engine answers, so runs need a usable account. Its rounds ask for the
     /// bearer on `asks`.
@@ -144,7 +144,7 @@ pub(crate) struct Brain {
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     fixture: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
@@ -238,12 +238,12 @@ impl Brain {
         config: Config,
         account: Accounts,
     ) -> std::io::Result<Self> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
             Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),
             Selected::Account { engine, asks } => (engine, asks, false),
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let Selected::Account {
             engine,
             asks: access,
@@ -271,7 +271,7 @@ impl Brain {
             coordinator,
             store: Some(store),
             engine,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             fixture,
             inputs_tx,
             inputs,
@@ -315,13 +315,13 @@ impl Brain {
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
     /// nothing.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let now = if self.fixture {
             Availability::Ready(Ready::fixture())
         } else {
             self.account.availability()
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
         let effects = self
             .coordinator
