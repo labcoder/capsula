@@ -61,6 +61,11 @@ impl Tapped for ControlToBrain {
             Self::ExclusionLapsed { .. } => "ExclusionLapsed",
             Self::Connection(_) => "Connection",
             Self::Warm { .. } => "Warm",
+            Self::KeyDown { .. } => "KeyDown",
+            Self::SpeechProgress { .. } => "SpeechProgress",
+            Self::SpeechStopped { .. } => "SpeechStopped",
+            Self::SegmentPlayed { .. } => "SegmentPlayed",
+            Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
             Self::Issue(_) => "Issue",
         }
@@ -123,6 +128,7 @@ impl Tapped for ControlToShell {
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
+            Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",
             Self::IssueRefused { .. } => "IssueRefused",
@@ -168,6 +174,7 @@ impl Tapped for DataToBrain {
             Self::TextSubmit { .. } => "TextSubmit",
             Self::Credit { .. } => "Credit",
             Self::PageRequest { .. } => "PageRequest",
+            Self::MicPcm(_) => "MicPcm",
             Self::IssueEdit { .. } => "IssueEdit",
             Self::IssueCards { .. } => "IssueCards",
         }
@@ -196,6 +203,9 @@ impl Tapped for DataToShell {
             Self::SceneCutApplied { .. } => "SceneCutApplied",
             Self::SceneEnd { .. } => "SceneEnd",
             Self::Models { .. } => "Models",
+            Self::Transcript(_) => "Transcript",
+            Self::SegmentQueued { .. } => "SegmentQueued",
+            Self::SpeechPcm(_) => "SpeechPcm",
             Self::IssueCard(_) => "IssueCard",
         }
     }

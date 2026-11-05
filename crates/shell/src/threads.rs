@@ -92,6 +92,17 @@ impl std::fmt::Debug for Threads {
 }
 
 impl Threads {
+    pub(crate) fn chat() -> Self {
+        Self {
+            counter: u32::MAX,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn owns_request(&self, request: u32) -> bool {
+        request % 2 == self.counter % 2
+    }
+
     pub(crate) fn selected_index(&self) -> Option<usize> {
         self.open
             .and_then(|thread| self.rows.iter().position(|row| row.id == thread))
@@ -149,6 +160,19 @@ impl Threads {
     pub(crate) fn show(&mut self) {
         self.shown = true;
         self.refresh();
+    }
+
+    pub(crate) fn show_for(&mut self, thread: Option<ThreadId>) {
+        self.select(thread);
+        self.show();
+    }
+
+    pub(crate) fn follow(&mut self, thread: Option<ThreadId>) -> bool {
+        if self.open == thread {
+            return false;
+        }
+        self.select(thread);
+        true
     }
 
     /// The panel closed: nothing more is read until it opens.
@@ -440,7 +464,10 @@ impl Threads {
             | DataToShell::SceneSnapshotV1 { .. }
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
-            | DataToShell::Models { .. } => {
+            | DataToShell::Models { .. }
+            | DataToShell::Transcript(_)
+            | DataToShell::SegmentQueued { .. }
+            | DataToShell::SpeechPcm(_) => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             }
         }
@@ -531,7 +558,7 @@ impl Threads {
     }
 
     fn number(&mut self) -> u32 {
-        self.counter = self.counter.wrapping_add(1);
+        self.counter = self.counter.wrapping_add(2);
         self.counter
     }
 }

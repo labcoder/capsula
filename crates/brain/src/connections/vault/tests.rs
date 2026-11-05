@@ -11,6 +11,7 @@ use crate::platform::credential::CredentialStoreError;
 use crate::test_support::Scratch;
 
 mod bounds;
+mod inventory;
 mod marker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
