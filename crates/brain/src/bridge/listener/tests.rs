@@ -144,6 +144,15 @@ fn text_result(text: &str) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": true})
 }
 
+/// The frozen tool set's `tools/list` result.
+fn probe_list() -> Value {
+    json!({"tools": [{
+        "name": "probe",
+        "description": "Answers nothing.",
+        "inputSchema": {"type": "object"},
+    }]})
+}
+
 fn invalid_params() -> Value {
     json!({"code": -32602, "message": "Invalid params"})
 }
@@ -172,18 +181,7 @@ async fn methods_answer_from_the_frozen_tool_set() {
             );
         }
         peer.request(&key(2), Method::ToolsList, b"null").await;
-        assert_eq!(
-            peer.reply().await,
-            (
-                key(2),
-                json!({"tools": [{
-                    "name": "probe",
-                    "description": "Answers nothing.",
-                    "inputSchema": {"type": "object"},
-                }]}),
-                false
-            )
-        );
+        assert_eq!(peer.reply().await, (key(2), probe_list(), false));
         for params in [
             call("draw"),
             br#"["probe", {}]"#.to_vec(),
@@ -374,6 +372,9 @@ async fn only_keys_the_bridge_can_make_start_a_request() {
         "m:n:",
         "m:s:abc",
         "m:s:AB",
+        "m:s:ff",
+        "m:s:c3",
+        "m:s:c0af",
         too_long.as_str(),
     ] {
         let context = fixture.context(Duration::from_secs(60));
@@ -745,12 +746,30 @@ fn measure_mcp_round_trip() {
             stdin.write_all(b"\n").expect("stdin");
             stdin.flush().expect("stdin");
         };
+        let parsed = |line: &str| serde_json::from_str::<Value>(line).expect("json");
         send(
             r#"{"jsonrpc":"2.0","id":"i","method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
         );
+        // libtest's own start lines come first; nothing else is skipped.
+        let initialized = loop {
+            let line = next();
+            if !line.is_empty() && line != "running 1 test" {
+                break line;
+            }
+        };
+        assert_eq!(
+            parsed(&initialized),
+            json!({"jsonrpc": "2.0", "id": "i", "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": MCP_SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
+            }})
+        );
         send(r#"{"jsonrpc":"2.0","id":"l","method":"tools/list"}"#);
-        // The harness prints its own lines first; skip them, and the initialize reply.
-        while !next().starts_with(r#"{"jsonrpc":"2.0","id":"l""#) {}
+        assert_eq!(
+            parsed(&next()),
+            json!({"jsonrpc": "2.0", "id": "l", "result": probe_list()})
+        );
         let cold = started.elapsed();
         let mut samples = Vec::with_capacity(SAMPLES);
         let mut reply_len = 0;
@@ -760,10 +779,7 @@ fn measure_mcp_round_trip() {
             send(&line);
             let reply = next();
             let took = at.elapsed();
-            assert_eq!(
-                serde_json::from_str::<Value>(&reply).expect("json"),
-                expected(id)
-            );
+            assert_eq!(parsed(&reply), expected(id));
             reply_len = reply.len() + 1;
             if id >= WARMUP {
                 samples.push(took);
