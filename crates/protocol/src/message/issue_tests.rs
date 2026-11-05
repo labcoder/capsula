@@ -5,7 +5,7 @@ use super::*;
 use crate::frame::{HEADER_LEN, Pipe, encode};
 use crate::tap::{Direction, Record, Tapped, write};
 
-fn checked<T>(good: &[String], bad: &[String])
+fn checked<T>(construct: fn(&str) -> Result<T, IssueValueError>, good: &[String], bad: &[String])
 where
     T: TryFrom<String, Error = IssueValueError>
         + Serialize
@@ -14,7 +14,8 @@ where
         + std::fmt::Debug,
 {
     for text in good {
-        let value = T::try_from(text.clone()).expect("valid constructor");
+        let value = construct(text).expect("valid constructor");
+        assert_eq!(T::try_from(text.clone()).expect("valid conversion"), value);
         let wire = postcard::to_allocvec(text).expect("raw text");
         assert_eq!(
             postcard::from_bytes::<T>(&wire).expect("valid decode"),
@@ -24,6 +25,7 @@ where
         assert!(postcard::from_bytes::<T>(&wire[..wire.len() - 1]).is_err());
     }
     for text in bad {
+        assert_eq!(construct(text), Err(IssueValueError));
         assert_eq!(T::try_from(text.clone()), Err(IssueValueError));
         assert!(
             postcard::from_bytes::<T>(&postcard::to_allocvec(text).expect("raw text")).is_err()
@@ -36,6 +38,7 @@ where
 #[test]
 fn repository_login_and_code_validate_on_constructor_and_decode() {
     checked::<RepoName>(
+        RepoName::new,
         &[
             "a/b".into(),
             format!("{}/{}", "a".repeat(39), "b".repeat(100)),
@@ -56,6 +59,7 @@ fn repository_login_and_code_validate_on_constructor_and_decode() {
         ],
     );
     checked::<GitHubLogin>(
+        GitHubLogin::new,
         &["A-0".into(), "a".repeat(39)],
         &[
             String::new(),
@@ -67,6 +71,7 @@ fn repository_login_and_code_validate_on_constructor_and_decode() {
         ],
     );
     checked::<UserCode>(
+        UserCode::new,
         &["A".into(), format!("{}Z", "A9-".repeat(5))],
         &[
             String::new(),
@@ -81,9 +86,11 @@ fn repository_login_and_code_validate_on_constructor_and_decode() {
 #[test]
 fn title_counts_scalars_and_preserves_nonblank_text() {
     checked::<IssueTitle>(
-        &[" a ".into(), "🦀".repeat(256)],
+        IssueTitle::new,
+        &["a".into(), " a ".into(), "🦀".repeat(256)],
         &[
             String::new(),
+            "   ".into(),
             " \t ".into(),
             "🦀".repeat(257),
             "a\nb".into(),
@@ -98,6 +105,7 @@ fn title_counts_scalars_and_preserves_nonblank_text() {
 #[test]
 fn body_normalizes_only_at_construction_and_bounds_utf8_bytes() {
     checked::<IssueBody>(
+        |text| IssueBody::try_from(text.to_owned()),
         &[String::new(), "\n\t".into(), "🦀".repeat(8192)],
         &[
             "a".repeat(32769),
@@ -130,6 +138,7 @@ fn issue_urls_are_canonical_and_cannot_select_another_origin() {
     );
     assert_eq!(IssueUrl::for_issue(&repo, 0), Err(IssueValueError));
     checked::<IssueUrl>(
+        IssueUrl::new,
         &[
             "https://github.com/a/b/issues/1".into(),
             format!(
