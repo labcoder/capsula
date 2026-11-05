@@ -33,6 +33,15 @@ impl Presence {
     /// Follows the peek's Kumo: the frames it wants, and its pull.
     pub(super) fn follow_kumo(&mut self, cx: &mut Context<'_, Self>) {
         let kumo = self.kumo.clone();
+        let owner = cx.weak_entity();
+        kumo.update(cx, |view, _| view.owner = Some(owner));
+        cx.subscribe(
+            &kumo,
+            |this, _, event: &super::kumo_view::LeaseReturned, _| {
+                this.presenter.input.return_drag(event.0);
+            },
+        )
+        .detach();
         cx.subscribe(&kumo, |this, _, _: &WantsFrames, cx| this.want_frames(cx))
             .detach();
         cx.subscribe(&kumo, |this, _, _: &PullChanged, cx| {

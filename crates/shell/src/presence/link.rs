@@ -302,6 +302,7 @@ impl Presence {
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        self.end_selection(crate::presenter::overlay_input::ExitCause::BrainLost, cx);
         if state == LinkState::Connected {
             self.clear_refusal(cx);
         }
