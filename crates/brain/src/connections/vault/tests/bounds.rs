@@ -234,6 +234,7 @@ fn a_damaged_current_generation_never_falls_back_to_an_older_one() {
     store.rollback(&old, &old.keys().cloned().collect::<Vec<_>>());
     let names = current_names(&vault);
     let first = names[0].clone();
+    let clean = store.snapshot();
     let mut damaged = store.snapshot();
     let length = damaged[&first].expose().len();
     let sentinel = b"secret-test-sentinel-not-json"
@@ -262,6 +263,19 @@ fn a_damaged_current_generation_never_falls_back_to_an_older_one() {
             Err(VaultError::Store(CredentialStoreError::Unsettled))
         ),
         "a chunk one byte short is unsettled"
+    );
+    store.rollback(&clean, &names);
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("a clean current generation")
+            .expect("the account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("new@example.invalid"),
+        "the restored generation reads, so only the missing chunk fails next"
     );
     let last = names.last().expect("a chunk").clone();
     store.rollback(&BTreeMap::new(), std::slice::from_ref(&last));

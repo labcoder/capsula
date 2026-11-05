@@ -379,6 +379,93 @@ fn exercise_save_faults(record: Record) {
     }
 }
 
+/// CAPS-179 M2: begin and every write land, then the head update inside the commit is
+/// refused. Nothing changes, even after the removal's generations retired in the same
+/// transaction, and a retry commits a fresh generation.
+#[test]
+fn a_refused_head_update_rolls_back_the_whole_commit() {
+    let (_scratch, path, service, store) = setup("vault-late-refusal");
+    let mut vault = open(&store, &service, &path);
+    committed(vault.save_account(&account("old")));
+    vault
+        .save_anthropic_key(b"sk-ant-api-fake-late-refusal")
+        .expect("key");
+    let old = current_names(&vault);
+    let marker = vault.marker().expect("marker");
+    let refuse = raw(&path);
+    refuse
+        .execute_batch(
+            "CREATE TRIGGER refuse_head BEFORE UPDATE ON heads \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .expect("refusal trigger");
+    let before = store.0.lock().expect("fake lock").mutations.len();
+    let result = vault.save_account(&account("new"));
+    assert!(
+        matches!(result, SaveResult::NotCommitted(VaultError::Authority)),
+        "{result:?}"
+    );
+    let attempted: Vec<String> = store.0.lock().expect("fake lock").mutations[before..]
+        .iter()
+        .filter_map(|mutation| match mutation {
+            Mutation::Set(name) => Some(name.clone()),
+            Mutation::Delete(_) => None,
+        })
+        .collect();
+    assert!(
+        !attempted.is_empty(),
+        "every write landed before the commit"
+    );
+    assert!(matches!(
+        vault.anthropic(crate::connections::anthropic::KeyOp::Remove),
+        Err(crate::connections::anthropic::KeyError::Vault(
+            VaultError::Authority
+        ))
+    ));
+    refuse
+        .execute_batch("DROP TRIGGER refuse_head;")
+        .expect("drop refusal trigger");
+    drop(vault);
+    let mut vault = open(&store, &service, &path);
+    assert_eq!(current_names(&vault), old, "the head is unchanged");
+    assert_eq!(vault.marker().expect("marker"), marker, "and the marker");
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("read")
+            .expect("the old account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("old@example.invalid")
+    );
+    assert!(
+        is_current(&vault, Kind::AnthropicKey),
+        "the removal rolled back"
+    );
+    committed(vault.save_account(&account("new")));
+    let fresh = current_names(&vault);
+    assert!(
+        fresh
+            .iter()
+            .filter(|name| name.contains("/gen/chatgpt/"))
+            .all(|name| !attempted.contains(name) && !old.contains(name)),
+        "the retry commits a fresh generation"
+    );
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("read")
+            .expect("the new account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("new@example.invalid")
+    );
+}
+
 #[test]
 fn an_interrupted_first_write_leaves_orphans_that_the_next_open_sweeps() {
     let (_scratch, path, service, store) = setup("vault-first-write");

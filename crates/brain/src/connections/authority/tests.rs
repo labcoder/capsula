@@ -576,6 +576,34 @@ fn a_bounded_sweep_reaches_every_retired_generation() {
     );
 }
 
+/// CAPS-176 233-2-M1: 16 generations whose deletes are always refused can't hold back a 17th
+/// across opens that each run a single pass.
+#[test]
+fn refused_sweeps_never_starve_a_later_generation_across_opens() {
+    let setup = Setup::new("auth-sweep-fair");
+    let mut authority = setup.open();
+    for round in 0..18 {
+        setup.save(&mut authority, Kind::Account, &secret(round, 10));
+    }
+    let owed = authority.retired(100).expect("every retired generation");
+    assert_eq!(owed.len(), 17);
+    setup.store.0.lock().expect("fake lock").refusing = true;
+    for retired in &authority.retired(16).expect("first open's pass") {
+        let observed = io::sweep(&setup.store, SERVICE, retired);
+        assert_eq!(observed, Observed::Remains);
+        authority.observed(retired, observed).expect("observed");
+    }
+    drop(authority);
+    let authority = setup.open();
+    let next = authority.retired(16).expect("second open's pass");
+    assert_eq!(next.len(), 16);
+    assert_eq!(
+        next[0], owed[16],
+        "the never-attempted generation comes first"
+    );
+    assert_eq!(next[1..], owed[..15], "then the longest waiting");
+}
+
 #[test]
 fn missing_or_invalid_rows_and_newer_files_are_refused() {
     let setup = Setup::new("auth-corrupt");

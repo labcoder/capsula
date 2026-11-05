@@ -231,6 +231,92 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     );
 }
 
+/// Counts catalog requests, the only authenticated work a key admits.
+struct CountedCatalog(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Http for CountedCatalog {
+    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Ok(Response {
+            status: 200,
+            request_id: None,
+            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
+        }))
+    }
+}
+
+fn authority_sql(lock: &std::path::Path, sql: &str) {
+    rusqlite::Connection::open(lock.with_file_name(crate::connections::authority::FILE))
+        .expect("authority file")
+        .execute_batch(sql)
+        .expect("authority statement");
+}
+
+const REFUSE_HEADS: &str = "CREATE TRIGGER refuse_heads BEFORE UPDATE ON heads \
+                            BEGIN SELECT RAISE(ABORT, 'refused'); END;";
+
+/// CAPS-176 233-2-H1, design §5: a Remove whose commit fails stays pending. A Check queued
+/// behind it or sent after its failure publishes no key and requests nothing; each retries the
+/// removal instead, and the first one that commits ends Missing.
+#[tokio::test]
+async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
+    let scratch = Scratch::new("key-remove-pending");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&requests);
+    let (owned, worker_lock) = (store.clone(), lock.clone());
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(owned.clone(), "key-test", &worker_lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn(
+        worker,
+        Net {
+            http: Arc::new(move || Ok(SharedHttp::new(CountedCatalog(Arc::clone(&counted))))),
+            ..test_support::net()
+        },
+    )
+    .expect("worker");
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    let sent = || requests.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(sent(), 1);
+    authority_sql(&lock, REFUSE_HEADS);
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
+    assert_eq!(
+        sent(),
+        1,
+        "a Check queued behind the failed removal requests nothing"
+    );
+    authority_sql(&lock, "DROP TRIGGER refuse_heads;");
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Missing);
+    assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Missing);
+    assert_eq!(sent(), 1, "no Check after the failure requests anything");
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+    let mut vault = Vault::with_service(store.clone(), "key-test", &lock).expect("reopen");
+    assert_eq!(
+        vault
+            .anthropic(crate::connections::anthropic::KeyOp::Load)
+            .expect("read")
+            .map(|_| ()),
+        None,
+        "the retried removal committed"
+    );
+}
+
 #[tokio::test]
 async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
     let scratch = Scratch::new("key-generation");

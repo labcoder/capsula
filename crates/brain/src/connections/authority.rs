@@ -451,9 +451,10 @@ impl Authority {
         write_marker(&self.conn, marker)
     }
 
-    /// The oldest Removed generations this open hasn't swept yet, at most `limit`, so a pass is
-    /// bounded however many were ever made and the next pass reaches the ones after. One that
-    /// fails or comes back waits for the next open, which revisits every generation still owed.
+    /// At most `limit` Removed generations this open hasn't swept yet, so a pass is bounded
+    /// however many were ever made and the next pass reaches the ones after. One that fails or
+    /// comes back waits for the next open. Never-attempted ones come first, then the longest
+    /// waiting, so failures that never clear can't hold back the rest across opens.
     ///
     /// # Errors
     /// Fails on a SQLite failure or an invalid row.
@@ -462,7 +463,7 @@ impl Authority {
         let mut statement = self.conn.prepare(
             "SELECT generation, kind, chunks, bytes FROM generations
              WHERE state = 'removed' AND (deleted_in IS NULL OR deleted_in < ?1)
-             ORDER BY rowid LIMIT ?2",
+             ORDER BY deleted_in IS NOT NULL, deleted_in, rowid LIMIT ?2",
         )?;
         let rows = statement.query_map(params![self.lifetime, limit], |row| {
             Ok((
