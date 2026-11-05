@@ -3,9 +3,14 @@
 mod capture;
 #[cfg_attr(not(test), expect(dead_code, reason = "A3a2 serves the walk"))]
 mod elements;
+mod encode;
 mod frame;
-#[cfg_attr(not(test), expect(dead_code, reason = "A3a2 serves the walk"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "A3 and A6 populate shared capture masks")
+)]
 mod mask;
+mod sanitize;
 mod supervisor;
 mod wire;
 mod worker;

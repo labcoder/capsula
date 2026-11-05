@@ -1,0 +1,9 @@
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Partial"}}
+
+data: {"type":"error","error":{"type":"overloaded_error","message":"PRIVATE_READER_MARKER"},"request_id":"PRIVATE_READER_MARKER"}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}
+
+: end of synthetic fixture

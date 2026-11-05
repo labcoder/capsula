@@ -2,8 +2,10 @@
 
 pub mod error;
 pub mod key;
+pub mod messages;
 pub mod models;
 pub mod request;
+pub mod sse_map;
 pub mod tls;
 
 use kumochi_protocol::message::KeyRejection;

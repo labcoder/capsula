@@ -14,8 +14,9 @@ directory.
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General** and **Accounts**.
 `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
-`presence/settings.rs` owns the window and session sends, and `presence/settings_view.rs`
-owns the retained Kit inputs and subscriptions. The shell's UI thread never waits for a save.
+`presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
+owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
+compose their tabs without another settings entity. The shell's UI thread never waits for a save.
 The plain model also retains the brain notice across reconnects and fences incoming settings
 by connection generation before changing any draft, save slot or saved view.
 
@@ -48,8 +49,9 @@ See [frame rate](frame-rate.md).
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also
 dismisses it. The status panel is hidden while Settings is open; close Settings to reach Retry
-and Quit there (Retry is also in the dock's native menu). Opening the typing panel or Tasks,
-or moving the dock, uses the same dismissal path: save an active edit as a blur would, hide the window, and use the
+there (Retry is also in the dock's native menu). General has Quit on the same guarded shutdown
+path as the tray. Opening the typing panel or Tasks, or choosing a tray position, uses the same
+dismissal path: save an active edit as a blur would, hide the window, and use the
 existing platform presence functions to restore the previous foreground when still owned.
 Local validation or send errors keep **Settings not saved** on the dock even after dismissal.
 The retained draft and inline error remain available on reopening; correcting or cancelling
@@ -62,7 +64,19 @@ the [user guide](../user/settings.md).
 
 `DockPosition` travels in the settings snapshot and uses nine snake-case names in TOML.
 The brain persists it through the same atomic save path as names. `show_in_taskbar` is a
-saved boolean, false by default; its control and native button are separate changes.
+saved boolean, false by default. General exposes its checkbox; the native taskbar button is a
+separate platform change, so saving this preference alone does not add a button yet.
+
+General's three-by-three picker reads the model's effective dock choice. Its change uses the
+same send path as the tray but placement without dismissal, keeping Settings attached to the
+dock. The version/build row displays `protocol::BUILD_ID`; Kit's Clipboard control copies
+that same value and provides its normal keyboard access and copied feedback.
+
+Taskbar choices use the existing answer FIFO, with a distinct slot kind. The newest unfailed
+pending choice wins until an answer supplies the saved value. The checkbox is unavailable
+without an authoritative view. Failed admission leaves the selection unchanged and General
+explains the failure; no taskbar intent is replayed after disconnect. A successful taskbar
+answer clears only a taskbar refusal, not a name, frame-rate or dock-position refusal.
 
 A tray pick moves the dock immediately and joins the settings answer FIFO when admitted.
 While disconnected or the control queue is full, the model retains only the newest unsent
@@ -92,7 +106,7 @@ and explains the failure inline. Errors survive their first following view, even
 view changed. A later different view, an accepted operation or disconnect clears the error.
 The snapshot and errors are fenced by connection generation, not by a settings answer FIFO.
 
-`presence/accounts_view.rs` renders the snapshot with recovery taking precedence over plan
+`presence/settings/accounts.rs` renders the snapshot with recovery taking precedence over plan
 status. Busy can Retry to acquire the account after the other session exits. Local sign-out
 cleanup and remote confirmation are independent: Running shows no remote warning; Refused
 and NotDurable say “hasn't confirmed yet”; only SignedOut says “didn't confirm”.
@@ -224,3 +238,11 @@ no shell is connected, and Quit and close write what's left before they end.
 - **Unreadable or not TOML:** the brain runs on the defaults and refuses every change, so the file
   is never overwritten. Repair or delete it, then restart Kumochi.
 - **No absolute `%APPDATA%`:** the defaults, and changes are refused.
+
+## Claude Code
+
+`[claude_code] enabled = false` in `config.toml` turns Claude Code's discovery off: the brain
+finds nothing and starts no `claude`, and the view is `TurnedOff`. A missing section or key
+leaves it on; any other value there, or a file that can't be read, turns it off, since it may
+have said so. It's read once at startup, so a change needs a restart. It signs nothing out and
+deletes nothing.

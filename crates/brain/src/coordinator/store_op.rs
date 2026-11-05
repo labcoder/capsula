@@ -130,6 +130,8 @@ pub enum StoreOp {
         /// The model and effort.
         choice: ModelChoice,
     },
+    /// A tool call's write and its ledger row, in one transaction; answered by `CallCommitted`.
+    CommitCall(crate::dispatch::CommitCall),
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -153,6 +155,7 @@ impl StoreOp {
             | Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
+            Self::CommitCall(call) => Some(call.key.run),
             Self::RoundItems(round) => Some(round.run),
             Self::Drawing { .. }
             | Self::ReadPage { .. }
@@ -217,6 +220,10 @@ impl StoreOp {
                 thread: *thread,
                 outcome: Deleted::NotHidden,
                 last_run: None,
+            },
+            Self::CommitCall(call) => Input::CallCommitted {
+                key: call.key.clone(),
+                committed: false,
             },
             Self::SetModel { thread, choice } => Input::ModelSet {
                 thread: *thread,
