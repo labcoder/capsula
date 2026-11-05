@@ -10,6 +10,9 @@ on:
   schedule:
     - cron: '17 8 * * *'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' }}
   cancel-in-progress: true
@@ -35,16 +38,26 @@ jobs:
         id: dependencies
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if ($env:EVENT -in @('schedule', 'workflow_dispatch') -or $env:BASE -match '^0+$') {
+          if ($env:EVENT -in @('schedule', 'workflow_dispatch')) {
             'changed=True' >> $env:GITHUB_OUTPUT
             exit 0
           }
-          $changed = git diff --name-only "$env:BASE...$env:HEAD" -- Cargo.lock Cargo.toml '**/Cargo.toml' deny.toml .cargo/config.toml .github/workflows/ci.yml
+          if ([string]::IsNullOrWhiteSpace($env:HEAD)) { throw 'Missing dependency comparison head' }
+          $base = $env:BASE
+          if ($env:EVENT -eq 'push') {
+            $base = git merge-base origin/main $env:HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Could not find the main merge base' }
+          }
+          if ([string]::IsNullOrWhiteSpace($base)) { throw 'Missing dependency comparison base' }
+          $changed = git diff --name-only "$base...$env:HEAD" -- Cargo.lock Cargo.toml '**/Cargo.toml' deny.toml .cargo/config.toml .github/workflows/ci.yml
           if ($LASTEXITCODE -ne 0) { throw 'Could not compare dependency files' }
           "changed=$([bool]$changed)" >> $env:GITHUB_OUTPUT
+          if (-not $changed) {
+            Write-Output "::notice::cargo deny skipped: no dependency or CI configuration changes since $base"
+          }
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
