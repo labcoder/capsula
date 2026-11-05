@@ -81,7 +81,7 @@ fn frames_paint_in_scene_order_whatever_order_they_recovered_in() {
     let (mut presenter, _) = recovered(vec![(SceneId(30), pair()), (SceneId(10), rect("r"))]);
     assert_eq!(sample(&mut presenter), FIRST);
     let mut items = Vec::new();
-    let failed = presenter.frames().borrow_mut().paint(|frame| {
+    let failed = presenter.frames().borrow().paint(|frame| {
         items.push(frame.paint_items().count());
         Ok::<_, std::fmt::Error>(())
     });
@@ -95,17 +95,17 @@ fn only_a_shown_paint_is_observed_once_per_epoch_and_bound() {
     sample(&mut presenter);
     let frames = presenter.frames();
     let ok = |_: &kumochi_scene::Frame| Ok::<_, std::fmt::Error>(());
-    assert!(!frames.borrow_mut().paint(ok));
+    assert!(!frames.borrow().paint(ok));
     assert_eq!(frames.borrow().painted(LIVE), None, "a hidden overlay");
     assert!(!presenter.drawn());
     frames.borrow_mut().shown = true;
     assert!(presenter.drawn());
-    assert!(!frames.borrow_mut().paint(ok));
+    assert!(!frames.borrow().paint(ok));
     let seen = frames.borrow().painted(LIVE).expect("a shown paint");
     assert_eq!(seen.bound, 1);
     assert!(frames.borrow_mut().acknowledge(LIVE, seen));
     assert!(!frames.borrow_mut().acknowledge(LIVE, seen), "deduplicated");
-    assert!(!frames.borrow_mut().paint(ok));
+    assert!(!frames.borrow().paint(ok));
     assert!(
         !frames.borrow_mut().acknowledge(LIVE, seen),
         "a repaint of the same bound"
@@ -121,7 +121,7 @@ fn only_a_shown_paint_is_observed_once_per_epoch_and_bound() {
         "a stale epoch"
     );
     assert_eq!(sample(&mut presenter), FIRST);
-    assert!(!frames.borrow_mut().paint(ok));
+    assert!(!frames.borrow().paint(ok));
     let cut = frames.borrow().painted(LIVE).expect("the cut rest's paint");
     assert_ne!(cut.epoch, seen.epoch);
     assert_eq!(cut.bound, seen.bound);
@@ -159,11 +159,11 @@ fn a_frame_that_fails_to_paint_paints_no_more_and_clears_its_scene_once() {
     let frames = presenter.frames();
     frames.borrow_mut().shown = true;
     let mut calls = 0;
-    assert!(frames.borrow_mut().paint(|_| {
+    assert!(frames.borrow().paint(|_| {
         calls += 1;
         Err(std::fmt::Error)
     }));
-    assert!(!frames.borrow_mut().paint(|_| {
+    assert!(!frames.borrow().paint(|_| {
         calls += 1;
         Ok::<_, std::fmt::Error>(())
     }));

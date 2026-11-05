@@ -43,7 +43,7 @@ impl Render for Drawing {
         canvas(
             |_, _, _| (),
             move |_, (), window, cx| {
-                let failed = frames.borrow_mut().paint(|frame| {
+                let failed = frames.borrow().paint(|frame| {
                     frame
                         .paint_items()
                         .try_for_each(|(item, prims)| paint_item(item, prims, window, cx))

@@ -708,8 +708,9 @@ Geometry builds before any of its item's primitives paint; a geometry or label f
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
 only the primary display from logical origin, and holds Esc only while shown.
 
-Presenter samples outside paint into its four reserved frames. The paint callback borrows only
-those frames, records shown epoch/bound observations and defers any failure back to Presenter
+Presenter samples outside paint into its four reserved frames. The paint callback borrows the
+cache and frames immutably, records observations/failure flags through UI-thread cells, and
+defers any failure back to Presenter
 after releasing the borrow. Replacement invalidates old observations; removal/disconnect
 retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
 animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.

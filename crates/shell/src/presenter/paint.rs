@@ -1,7 +1,10 @@
 //! The sampled frames the overlay paints: one reserved per adopted scene, kept beside the
 //! presenter on the UI thread so each frame's charge stays inside the residency cap.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
 use kumochi_scene::{Frame, SceneView};
@@ -15,11 +18,11 @@ pub(super) struct Slot {
     /// The activated bound of the last sample at this epoch.
     sampled: Option<u32>,
     /// The bound a shown overlay last painted at this epoch.
-    painted: Option<u32>,
+    painted: Cell<Option<u32>>,
     /// The painted bound already acknowledged at this epoch.
     acknowledged: Option<u32>,
     /// A primitive failed to paint, so the scene paints no more and is cleared.
-    failed: bool,
+    failed: Cell<bool>,
 }
 
 /// What one sample found.
@@ -35,7 +38,7 @@ pub(crate) struct Sample {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6's StepShown is the production reader")
+    expect(dead_code, reason = "B6 StepShown consumes this observation")
 )]
 pub(crate) struct Painted {
     pub(crate) epoch: u64,
@@ -75,9 +78,9 @@ impl Frames {
                 frame,
                 epoch,
                 sampled: None,
-                painted: None,
+                painted: Cell::new(None),
                 acknowledged: None,
-                failed: false,
+                failed: Cell::new(false),
             },
         ));
         self.slots
@@ -93,7 +96,7 @@ impl Frames {
             slot.frame.clear();
             slot.epoch = epoch;
             slot.sampled = None;
-            slot.painted = None;
+            slot.painted.set(None);
             slot.acknowledged = None;
         }
     }
@@ -149,19 +152,19 @@ impl Frames {
     /// Paints every frame in scene order; only the overlay's paint callback calls it. A shown
     /// overlay records each sampled bound it painted. A frame that fails paints no more and
     /// waits for [`Presenter::paint_failed`]. Whether a frame newly failed.
-    pub(crate) fn paint<E>(&mut self, mut paint: impl FnMut(&Frame) -> Result<(), E>) -> bool {
+    pub(crate) fn paint<E>(&self, mut paint: impl FnMut(&Frame) -> Result<(), E>) -> bool {
         let shown = self.shown;
         let mut failed = false;
-        for (_, slot) in self.slots.iter_mut().flatten() {
-            if slot.failed {
+        for (_, slot) in self.slots.iter().flatten() {
+            if slot.failed.get() {
                 continue;
             }
             match paint(&slot.frame) {
-                Ok(()) if shown => slot.painted = slot.sampled,
+                Ok(()) if shown => slot.painted.set(slot.sampled),
                 Ok(()) => {}
                 Err(_) => {
                     tracing::warn!("a drawing couldn't paint; clearing it");
-                    slot.failed = true;
+                    slot.failed.set(true);
                     failed = true;
                 }
             }
@@ -172,13 +175,13 @@ impl Frames {
     /// The bound a shown overlay last painted for `scene`, at its current epoch.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6's StepShown is the production reader")
+        expect(dead_code, reason = "B6 StepShown consumes this observation")
     )]
     pub(crate) fn painted(&self, scene: SceneId) -> Option<Painted> {
         let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
         Some(Painted {
             epoch: slot.epoch,
-            bound: slot.painted?,
+            bound: slot.painted.get()?,
         })
     }
 
@@ -186,14 +189,14 @@ impl Frames {
     /// already acknowledged at this epoch.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6's StepShown is the production reader")
+        expect(dead_code, reason = "B6 StepShown consumes this observation")
     )]
     pub(crate) fn acknowledge(&mut self, scene: SceneId, painted: Painted) -> bool {
         let Some((_, slot)) = self.slots.iter_mut().flatten().find(|(id, _)| *id == scene) else {
             return false;
         };
         if slot.epoch != painted.epoch
-            || slot.painted != Some(painted.bound)
+            || slot.painted.get() != Some(painted.bound)
             || slot.acknowledged == Some(painted.bound)
         {
             return false;
@@ -205,7 +208,7 @@ impl Frames {
     fn failed(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
         self.slots.each_ref().map(|slot| {
             slot.as_ref()
-                .filter(|(_, slot)| slot.failed)
+                .filter(|(_, slot)| slot.failed.get())
                 .map(|(id, _)| *id)
         })
     }

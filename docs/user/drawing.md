@@ -12,5 +12,5 @@ Labels stay upright even when the shape around them is turned. Where translucent
 drawing overlap, the overlap looks darker, as with layered tracing paper.
 
 A drawing at rest uses no animation frames, and when nothing is on screen the drawing layer is
-hidden. If part of a drawing can't be painted, Kumochi clears the whole drawing instead of
-showing it half drawn.
+hidden. If part of a drawing can't be painted, Kumochi clears the whole drawing rather than
+leave only part of it on screen.
