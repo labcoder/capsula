@@ -712,9 +712,9 @@ fn info_is_bounded_and_redacted_like_other_text() {
 }
 
 fn polygon(name: &str) -> String {
-    let points: Vec<String> = (0..96)
+    let points: Vec<String> = (0..64)
         .map(|i| {
-            let angle = f64::from(i) * std::f64::consts::TAU / 96.0;
+            let angle = f64::from(i) * std::f64::consts::TAU / 64.0;
             format!("[{:.0},{:.0}]", 1000.0 * angle.cos(), 1000.0 * angle.sin())
         })
         .collect();
@@ -752,7 +752,7 @@ fn measure_admit() {
     let mut boxes = vec![view("v")];
     boxes.extend((0..160).map(|i| cube(&format!("s{i}"), "")));
     let empty = (scene(), GlobalBudget::default());
-    println!("largest legal step: {count} extrudes of 96 points");
+    println!("largest legal step: {count} extrudes of 64 points");
     for (workload, (state, global), step, refused) in [
         ("largest-legal-extrude-step", &empty, largest, None),
         (

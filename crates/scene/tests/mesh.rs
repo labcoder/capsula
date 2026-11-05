@@ -102,11 +102,11 @@ fn area(mesh: &[Triangle]) -> f64 {
 }
 
 fn maximum_outline() -> Value {
-    let points: Vec<_> = (0..24)
+    let points: Vec<_> = (0..16)
         .map(|i| [i, 0])
-        .chain((0..24).map(|i| [24, i]))
-        .chain((0..24).map(|i| [24 - i, 24]))
-        .chain((0..24).map(|i| [0, 24 - i]))
+        .chain((0..16).map(|i| [16, i]))
+        .chain((0..16).map(|i| [16 - i, 16]))
+        .chain((0..16).map(|i| [0, 16 - i]))
         .collect();
     json!(points)
 }
@@ -534,7 +534,7 @@ fn maximum_point_counts_are_sized_without_allocating() {
     for (shape, expected) in [
         (
             solid("extrude", json!({"depth":1,"points":maximum_outline()})),
-            380,
+            252,
         ),
         (
             solid("lathe", json!({"points":profile,"segments":48})),

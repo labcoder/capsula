@@ -75,4 +75,4 @@ pub const MAX_VIEWS: usize = 1;
 /// Reserved slice 5 cap: segments per curved solid.
 pub const MAX_CURVED_SEGMENTS: usize = 48;
 /// Points in one extrude outline; admission checks outlines quadratically and synchronously.
-pub const MAX_EXTRUDE_POINTS: usize = 96;
+pub const MAX_EXTRUDE_POINTS: usize = 64;

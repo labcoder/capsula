@@ -549,7 +549,7 @@ mod three {
     #[test]
     fn list_presence_counts_and_radius_relations_are_shape_dependent() {
         for (fields, field, min, max) in [
-            (json!({"shape":"extrude","depth":1}), "points", 3, 96),
+            (json!({"shape":"extrude","depth":1}), "points", 3, 64),
             (json!({"shape":"lathe"}), "points", 2, 512),
             (json!({"shape":"tube","r2":1}), "path", 2, 512),
         ] {
@@ -582,7 +582,7 @@ mod three {
                 exact_round_trip(&solid);
             }
             if field == "points" && min == 3 {
-                value[field] = json!(vec![[0, 0]; 97]);
+                value[field] = json!(vec![[0, 0]; 65]);
                 shape_error(&value, field, ErrorCode::OverBudget(Budget::PathPoints));
             }
         }

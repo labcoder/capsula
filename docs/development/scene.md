@@ -93,13 +93,13 @@ then checks counts and radius relations:
 | `cylinder` | Required `r`, `h`. |
 | `cone` | Required `r`, `h`; optional `r2` defaults to zero. |
 | `torus` | Required `r`, `r2`, with 0.001 ≤ `r2` < `r`. |
-| `extrude` | Required `points` (3..=96), `depth`. |
+| `extrude` | Required `points` (3..=64), `depth`. |
 | `lathe` | Required `points` (2..=512), with nonnegative radii in the first component. |
 | `tube` | Required `path` (2..=512), `r2` ≥ 0.001. |
 
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
-All lists decode at most 512 points; extrude counts above 96 are
+All lists decode at most 512 points; extrude counts above 64 are
 `OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
@@ -122,7 +122,7 @@ profile count and q the retained path count:
 | cone, top zero | 2n − 2 | 4 / 94 |
 | cone, top positive | 4n − 4 | 8 / 188 |
 | torus | 2n² | 18 / 4,608 |
-| extrude | 4k − 4 | 380 at k = 96 |
+| extrude | 4k − 4 | 252 at k = 64 |
 | lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
 | tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
 
@@ -161,7 +161,7 @@ removal that would orphan an attached solid fails with `Orphans`. Only solids ow
 refused. Admission sizes each solid with `three::size::triangles` and `three::size::reach`
 (the farthest local vertex from the solid's origin) and never tessellates: that runs off
 the admission path. Outline checks do run here, and they grow with the square of the point
-count, so an extrude outline holds at most 96 points (`MAX_EXTRUDE_POINTS`); draw a smoother
+count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
 profile with a lathe, or split a detailed shape into several extrudes.
 
 | Budget | Limit | Error |
