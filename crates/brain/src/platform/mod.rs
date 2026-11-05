@@ -44,10 +44,17 @@ pub use windows::{
     process_image, quiet_failures, replace_file, server_image, session_id, session_lock_path,
     trust_roots,
 };
+#[cfg(all(test, windows))]
+pub(crate) use windows::{
+    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, set_dacl, this_user,
+};
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(windows)]
-pub(crate) use windows::{Untrusted, hold_chain, local_app_data, owner_only_dir, profile_dir};
+pub(crate) use windows::{
+    Untrusted, hold_chain, local_app_data, mark, marker, owner_only_dir, private_tree, profile_dir,
+    remove_tree, unmark,
+};
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 

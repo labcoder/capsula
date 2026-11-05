@@ -37,12 +37,21 @@ impl SettingsView {
                     .is_none()
                     .then(|| div().text_sm().child(strings.get(Text::SettingsOffline))),
             )
-            .children(self.general_notice.map(|notice| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(strings.get(notice))
-            }))
+            .children(
+                [
+                    self.dock_notice,
+                    self.taskbar_notice,
+                    self.model.read(cx).native_taskbar_notice,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|notice| {
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(strings.get(notice))
+                }),
+            )
             .children(self.model.read(cx).notice().map(|error| {
                 div()
                     .text_sm()
@@ -79,9 +88,18 @@ impl SettingsView {
                             ),
                     )
                     .child(
-                        Clipboard::new("settings-copy-build")
-                            .value(BUILD_ID)
-                            .accessibility_label(strings.get(Text::SettingsCopyBuild)),
+                        div()
+                            .map(|element| {
+                                #[cfg(test)]
+                                let element =
+                                    element.debug_selector(|| "settings-copy-build".into());
+                                element
+                            })
+                            .child(
+                                Clipboard::new("settings-copy-build")
+                                    .value(BUILD_ID)
+                                    .accessibility_label(strings.get(Text::SettingsCopyBuild)),
+                            ),
                     ),
             )
             .child(
@@ -127,7 +145,7 @@ impl SettingsView {
                                                 })
                                                 .is_ok_and(|result| result.is_ok());
                                             let _gone = view.update(cx, |view, cx| {
-                                                view.general_notice = (!moved)
+                                                view.dock_notice = (!moved)
                                                     .then_some(Text::SettingsPositionUnavailable);
                                                 cx.notify();
                                             });
@@ -135,17 +153,9 @@ impl SettingsView {
                                     }))
                                     .map(|radio| {
                                         #[cfg(test)]
-                                        {
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("dock-position-{ix}")
-                                                })
-                                                .child(radio)
-                                        }
-                                        #[cfg(not(test))]
-                                        {
-                                            radio
-                                        }
+                                        let radio = radio
+                                            .debug_selector(move || format!("dock-position-{ix}"));
+                                        radio
                                     })
                             }),
                     ),
@@ -171,9 +181,14 @@ impl SettingsView {
                     .owner
                     .update(cx, |owner, cx| owner.save_taskbar(choice, cx))
                     .unwrap_or(false);
-                view.general_notice = (!sent).then_some(Text::SettingsUnavailable);
+                view.taskbar_notice = (!sent).then_some(Text::SettingsUnavailable);
                 cx.notify();
             }))
+            .map(|checkbox| {
+                #[cfg(test)]
+                let checkbox = checkbox.debug_selector(|| "settings-taskbar".into());
+                checkbox
+            })
     }
 
     fn field(&self, field: Field, cx: &Context<'_, Self>) -> impl IntoElement {
@@ -306,6 +321,65 @@ mod tests {
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
 
+    #[gpui::test]
+    fn the_copy_control_copies_the_running_build(cx: &mut TestAppContext) {
+        let (window, _) = open(cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.simulate_resize(size(px(768.), px(1000.)));
+        visual.write_to_clipboard(gpui_kit::ClipboardItem::new_string("not the build".into()));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let point = visual
+            .debug_bounds("settings-copy-build")
+            .expect("copy control")
+            .center();
+        visual.simulate_click(point, gpui_kit::Modifiers::default());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.read_from_clipboard().and_then(|item| item.text()),
+            Some(kumochi_protocol::BUILD_ID.to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn dock_and_taskbar_failures_keep_independent_notices(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.simulate_resize(size(px(768.), px(1000.)));
+        for selectors in [
+            ["dock-position-0", "settings-taskbar"],
+            ["settings-taskbar", "dock-position-0"],
+        ] {
+            visual.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.dock_notice = None;
+                    view.taskbar_notice = None;
+                    cx.notify();
+                });
+            });
+            for selector in selectors {
+                visual.run_until_parked();
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+                let point = visual
+                    .debug_bounds(selector)
+                    .expect("General control")
+                    .center();
+                visual.simulate_click(point, gpui_kit::Modifiers::default());
+            }
+            visual.run_until_parked();
+            visual.update(|_, cx| {
+                assert_eq!(
+                    view.read(cx).dock_notice,
+                    Some(crate::strings::Text::SettingsPositionUnavailable)
+                );
+                assert_eq!(
+                    view.read(cx).taskbar_notice,
+                    Some(crate::strings::Text::SettingsUnavailable)
+                );
+            });
+        }
+    }
+
     #[test]
     fn the_checked_dock_cell_follows_saved_pending_and_refused_choices() {
         use kumochi_protocol::message::{DockPosition, ErrorKey, UserError};
@@ -342,7 +416,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_offline_dock_cell_still_delivers_its_pick(cx: &mut TestAppContext) {
+    fn an_enabled_offline_dock_cell_reports_its_missing_owner(cx: &mut TestAppContext) {
         let (window, view) = open(cx);
         cx.update(|cx| {
             view.read(cx).model.clone().update(cx, |model, cx| {
@@ -361,9 +435,9 @@ mod tests {
         visual.run_until_parked();
         visual.update(|_, cx| {
             assert_eq!(
-                view.read(cx).general_notice,
+                view.read(cx).dock_notice,
                 Some(crate::strings::Text::SettingsPositionUnavailable),
-                "the unavailable fixture owner refuses an admitted offline pick"
+                "the offline radio runs its deferred callback and reports the missing owner"
             );
         });
     }

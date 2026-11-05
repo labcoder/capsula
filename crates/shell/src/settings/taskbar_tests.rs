@@ -18,6 +18,25 @@ fn view() -> SettingsView {
 }
 
 #[test]
+fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
+    let mut state = Settings::default();
+    state.apply_taskbar(|_| panic!("no snapshot to apply"));
+    let mut saved = view();
+    saved.show_in_taskbar = true;
+    state.set_view(saved, Update::Unsolicited);
+    state.apply_taskbar(|_| Some(crate::strings::Text::TaskbarAddFailed));
+    assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
+    assert!(state.view().expect("saved snapshot").show_in_taskbar);
+    assert_eq!(
+        state.native_taskbar_notice,
+        Some(crate::strings::Text::TaskbarAddFailed)
+    );
+    state.apply_taskbar(|_| None);
+    assert_eq!(state.native_taskbar_notice, None);
+    assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
+}
+
+#[test]
 fn taskbar_admits_only_changed_online_choices_after_successful_send() {
     let mut state = Settings::default();
     assert_eq!(state.taskbar_choice(), None);

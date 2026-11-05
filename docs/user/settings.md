@@ -20,8 +20,10 @@ without closing Settings; the panel follows its new anchor. The choice is saved 
 launch. If a save is refused, the last saved position returns unless a newer choice is pending.
 While disconnected, a pick still moves the dock and the latest choice is saved after reconnect.
 
-The taskbar checkbox saves whether Kumochi should also have a taskbar button. Taskbar visibility
-support is a separate change: saving this preference alone does not add a button in this build.
+The taskbar checkbox saves whether Kumochi should also have a Windows taskbar button. Its
+button opens the status panel; **Close window** requests Quit. If Windows refuses the change,
+General reports it without changing the saved preference. While enabled, Alt-Tab has a blank
+preview.
 
 **Version and build** identifies the running app. Its copy button copies that complete value.
 **Quit** ends Kumochi through the same shutdown path as the tray, and remains available offline.

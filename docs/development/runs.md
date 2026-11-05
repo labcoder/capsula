@@ -182,6 +182,29 @@ never lost:
 
 `revealed` keeps only indices of steps already sent to the shell, each once, in order.
 
+### Draining a spoken run
+
+A run with spoken replies (see [voice.md](voice.md#a-spoken-run)) ends `done` in one place,
+`Coordinator::complete`, and only when four things hold: the engine finished, nothing it wrote is
+pending, its drawing settled, and its speech is final. Until then the run is draining: it stays
+current and stoppable, the 120 s deadline no longer applies, and the settle pass that follows each
+input checks the run again.
+
+- **The stall timer.** A draining run that makes no progress for 5 s (no audio made, no progress
+  played, no segment started) ends `interrupted(stop)`.
+- **Every other ending revokes the speech.** TTS stops, and the shell gets `SpeechRevoked`,
+  unless the ending is its own Stop. Then the terminal `RunState` and the `RunEnd` wait until
+  the outcome is stored *and* the shell's `SpeechStopped` says its output is quiet, in either
+  order. That's the one exception to "told at once" above. If the shell went away, nobody waits
+  for quiet.
+- **A shell that never goes quiet.** If `SpeechStopped` hasn't come 2 s after a revoke, the
+  connection ends as broken. A second `SpeechStopped`, from a Stop that crossed a revoke,
+  changes nothing.
+- **A report that can't be true**, such as a played total that isn't the samples sent, also ends
+  the connection as broken.
+- A store failure while waiting for quiet is told as `Failed` once it's settled. If the store
+  gave up, it's told without waiting for quiet.
+
 ### What the shell can rely on
 
 - **A run's data is complete at its `RunEnd`, on the data pipe.** Every run that reaches a

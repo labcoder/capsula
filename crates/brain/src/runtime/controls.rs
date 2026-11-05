@@ -90,14 +90,29 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::AudioOutput { rate, .. } if check_rate(rate).is_err() => {
             return Err(Ended::Broken("an output rate out of bounds"));
         }
-        // shortcut: slice 7's PR 7 drains spoken replies with these.
-        message @ (ControlToBrain::SpeechProgress { .. }
-        | ControlToBrain::SpeechStopped { .. }
-        | ControlToBrain::SegmentPlayed { .. }
-        | ControlToBrain::AudioOutput { .. }) => {
-            tracing::debug!(op = message.op(), "speech control ignored");
-            None
+        ControlToBrain::AudioOutput { rate, generation } => {
+            Some(Input::AudioOutput { rate, generation })
         }
+        ControlToBrain::SpeechProgress {
+            run,
+            segment,
+            sample,
+            ..
+        } => Some(Input::SpeechProgress {
+            run,
+            segment,
+            sample,
+        }),
+        ControlToBrain::SpeechStopped { run, cursor } => Some(Input::SpeechStopped { run, cursor }),
+        ControlToBrain::SegmentPlayed {
+            run,
+            segment,
+            samples,
+        } => Some(Input::SegmentPlayed {
+            run,
+            segment,
+            samples,
+        }),
         message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue(_)) => {
             tracing::debug!(op = message.op(), "github or issue control ignored");
             None

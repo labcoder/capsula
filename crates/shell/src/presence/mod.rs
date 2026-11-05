@@ -258,9 +258,14 @@ impl Presence {
             self.kumo
                 .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
         }
-        let notice = self.settings.read(cx).dock_notice().filter(|notice| {
-            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
-        });
+        let notice = self
+            .settings
+            .read(cx)
+            .dock_notice()
+            .filter(|notice| {
+                *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
+            })
+            .or(self.settings.read(cx).native_taskbar_notice);
         self.panel.update(cx, |panel, cx| {
             if panel.notice != notice {
                 panel.notice = notice;
@@ -929,6 +934,7 @@ fn listen(
         while let Ok(event) = event_changes.recv().await {
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
+                    PresenceEvent::ShowStatus => this.set_panel(PanelVisibility::Visible, cx)?,
                     // Hover opens the peek; a press does nothing until C2a's pull starts there.
                     // shortcut: no host watch is armed until C2b-2's carry, which handles these.
                     PresenceEvent::DockPressed { .. } | PresenceEvent::HostChanged { .. } => {}

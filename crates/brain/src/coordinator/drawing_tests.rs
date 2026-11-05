@@ -61,6 +61,90 @@ fn commit(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> Vec<
     .expect("matching acknowledgement")
 }
 
+/// A committed step's `say` is spoken as its own segment, named by its step, and its scene's
+/// failure drops it.
+#[test]
+fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm, StepRef};
+    let scratch = Scratch::new("drawing-say");
+    let mut store = open(&scratch);
+    let mut core = super::spoken();
+    let args = serde_json::to_vec(&json!({"records":[
+        {"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"test diagram"}},
+        {"step":{"id":"s1","say":"Look here.","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},
+        {"end":{}}
+    ]}))
+    .expect("arguments");
+    let lookup = core
+        .handle(Input::Drawing(drawing::Input::Call {
+            thread: T,
+            run: R,
+            call: CallId::new("draw").expect("call"),
+            args,
+        }))
+        .expect("fresh call");
+    let step_write = commit(&mut core, &mut store, &lookup);
+    let first = commit(&mut core, &mut store, &step_write);
+    let at = first
+        .iter()
+        .position(|effect| {
+            matches!(
+                effect,
+                Effect::Data(DataToShell::SceneStepCommit { index: 0, .. })
+            )
+        })
+        .expect("the step commits");
+    let Effect::Data(DataToShell::SceneStepCommit { scene, .. }) = first[at] else {
+        unreachable!("matched above");
+    };
+    let segment = SegmentId(0);
+    assert_eq!(
+        first[at + 1..at + 4],
+        [
+            Effect::Data(DataToShell::SegmentQueued {
+                run: R,
+                segment,
+                step: Some(StepRef { scene, index: 0 }),
+            }),
+            Effect::Speak {
+                run: R,
+                segment,
+                rate: 24_000,
+                text: "Look here.".into(),
+            },
+            Effect::Credit {
+                run: R,
+                samples: 480_000,
+            },
+        ]
+    );
+    let failed = core
+        .handle(Input::Drawing(drawing::Input::StepFailed {
+            run: R,
+            scene,
+            index: 0,
+            cut: kumochi_scene::StopCut {
+                activated: 0,
+                revealed: kumochi_scene::text::Bounded::new(Vec::new()).expect("none"),
+            },
+        }))
+        .expect("a committed step");
+    assert_eq!(
+        failed[failed.len() - 2..],
+        [
+            Effect::CancelSpeech { run: R },
+            Effect::Data(DataToShell::SpeechPcm(SpeechPcm {
+                run: R,
+                segment,
+                output_generation: OutputGeneration(1),
+                seq: 0,
+                samples: Vec::new(),
+                last: Some(0),
+            })),
+        ]
+    );
+}
+
 /// A round that completes while its drawing is still being stored ends through the tool loop,
 /// so its call is answered and its items stored before anything else.
 #[test]

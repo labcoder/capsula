@@ -37,10 +37,15 @@ pub use pipe::{
 pub(crate) use pipe::{PipeClient, test_pair};
 pub use policy::{managed_presence, system_env};
 pub use process::launch_detached;
-pub(crate) use protected::{
-    Untrusted, hold_chain, hold_file, local_app_data, owner_only_dir, profile_dir,
-};
 #[cfg(test)]
-pub(super) use protected::{dacl_sddl, final_path_matches};
+pub(super) use protected::final_path_matches;
+#[cfg(test)]
+pub(crate) use protected::{
+    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, set_dacl, this_user,
+};
+pub(crate) use protected::{
+    Untrusted, hold_chain, hold_file, local_app_data, mark, marker, owner_only_dir, private_tree,
+    profile_dir, remove_tree, unmark,
+};
 pub use root_store::trust_roots;
 pub use spawn::{Launch, Spawned, Stdio, spawn};
