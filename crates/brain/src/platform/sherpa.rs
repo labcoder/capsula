@@ -7,7 +7,7 @@
 
 mod abi;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;

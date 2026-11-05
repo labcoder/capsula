@@ -290,6 +290,7 @@ impl Presence {
             state.set_settings(view);
             cx.notify();
         });
+        self.sync_taskbar(cx);
         if let Err(error) =
             self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
         {
@@ -305,6 +306,7 @@ impl Presence {
             cx.notify();
         });
         self.sync_settings_notice(cx);
+        self.sync_taskbar(cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.

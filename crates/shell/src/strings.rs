@@ -83,6 +83,9 @@ pub(crate) enum Text {
     SettingsVersion,
     SettingsCopyBuild,
     SettingsPositionUnavailable,
+    SettingsTaskbar,
+    TaskbarAddFailed,
+    TaskbarRemoveFailed,
     DockBrainError,
     MaxFrameRate,
     FrameRateAutomatic,
@@ -135,7 +138,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 121] = [
+    const ALL: [Self; 124] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -209,6 +212,9 @@ impl Text {
         Self::SettingsVersion,
         Self::SettingsCopyBuild,
         Self::SettingsPositionUnavailable,
+        Self::SettingsTaskbar,
+        Self::TaskbarAddFailed,
+        Self::TaskbarRemoveFailed,
         Self::DockBrainError,
         Self::MaxFrameRate,
         Self::FrameRateAutomatic,
@@ -280,6 +286,9 @@ impl Text {
             Self::SettingsVersion => "settings-version",
             Self::SettingsCopyBuild => "settings-copy-build",
             Self::SettingsPositionUnavailable => "settings-position-unavailable",
+            Self::SettingsTaskbar => "settings-taskbar",
+            Self::TaskbarAddFailed => "taskbar-add-failed",
+            Self::TaskbarRemoveFailed => "taskbar-remove-failed",
             Self::AccountProvider => "accounts-provider",
             Self::AccountWaiting => "accounts-waiting",
             Self::AccountOffline => "accounts-offline",
@@ -419,7 +428,7 @@ impl Strings {
     pub(crate) fn taskbar(&self) -> String {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
-        self.format("settings-taskbar", Some(&args))
+        self.format(Text::SettingsTaskbar.id(), Some(&args))
     }
 
     /// Loads the English catalog compiled into the binary.
