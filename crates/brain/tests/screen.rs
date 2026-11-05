@@ -173,7 +173,15 @@ async fn an_idle_worker_killed_from_outside_is_reported_and_replaced() {
         loss.expect("lost with nothing pending").expect("loss"),
         WorkerLost
     );
-    assert_eq!(screen.request(RequestBody::Ping).await, Ok(ReplyBody::Pong));
+    let started = std::time::Instant::now();
+    let replacement = screen.request(RequestBody::Ping).await;
+    assert_eq!(
+        replacement,
+        Ok(ReplyBody::Pong),
+        "replacement ping elapsed {:?}, injected request deadline {:?}",
+        started.elapsed(),
+        PATIENCE
+    );
     drop(screen);
     tokio::task::yield_now().await;
     job.terminate().expect("end job");
