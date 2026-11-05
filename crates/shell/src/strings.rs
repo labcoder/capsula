@@ -516,6 +516,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ClaudeCodeInputUnsupported => "error-claude-code-input-unsupported",
         ErrorKey::ClaudeCodeBudget => "error-claude-code-budget",
         ErrorKey::ClaudeCodeCleanupPending => "error-claude-code-cleanup-pending",
+        ErrorKey::RenewalUnconfirmed => "error-renewal-unconfirmed",
     }
 }
 

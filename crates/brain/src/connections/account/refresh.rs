@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use super::lane::{Flight, Lane, Queued, Save, Waiting};
 use super::{AccountState, Denied, Effect, Job, classify, identity_key};
 use crate::connections::error::{Recovery, VaultError};
-use crate::connections::oauth::exchange::{ExchangeError, TokenSet};
+use crate::connections::oauth::exchange::{ExchangeError, OAuthCode, TokenSet};
 use crate::connections::oauth::id_token::{IdentityError, permits_plan};
 use crate::connections::records::{Account, Origin, Record as _, Revocable, Tokens, entry_fits};
 use crate::connections::vault::SaveResult;
@@ -205,15 +205,25 @@ impl AccountState {
         self.now = now;
         let tokens = match result {
             Ok(tokens) => tokens,
-            // A typed refusal issued nothing.
+            // A listed refusal issued nothing. An unlisted one shows neither that nothing was
+            // issued nor that the session ended, so its token is kept but never sent again.
             Err(ExchangeError::OAuth { status, code }) => {
+                let recovery = code.recovery(status);
+                let unlisted = code == OAuthCode::Other && recovery == Recovery::SignInAgain;
                 self.jobs.push_back(Queued::Finished {
-                    outcome_unknown: false,
+                    outcome_unknown: unlisted,
                 });
-                if current {
-                    self.refused(code.recovery(status), effects);
+                if !current {
+                    return;
                 }
-                return;
+                if unlisted {
+                    tracing::warn!(
+                        status,
+                        "an unlisted refresh refusal; the session needs a new sign-in"
+                    );
+                    return self.session_lost(ErrorKey::RenewalUnconfirmed, effects);
+                }
+                return self.refused(recovery, effects);
             }
             // An unusable answer that named a successor: the token sent was consumed.
             Err(ExchangeError::Unusable {
@@ -233,7 +243,7 @@ impl AccountState {
                 // The request may have reached the provider, so the token may be consumed.
                 if outcome_unknown {
                     tracing::warn!(%failure, "a refresh's outcome is unknown; the session ends");
-                    return self.session_lost(effects);
+                    return self.session_lost(ErrorKey::RenewalUnconfirmed, effects);
                 }
                 self.unmark();
                 return self.fail(error_of(key, Action::Retry), effects);
@@ -493,7 +503,7 @@ impl AccountState {
     /// Returns the registration's save, which only a refused token's caller queues; any other token
     /// stays on disk until a sign-in's Commit or the sign-out's Prepare owns it.
     fn end_session(&mut self, effects: &mut Vec<Effect>) -> Option<Queued> {
-        self.session_lost(effects);
+        self.session_lost(ErrorKey::SessionEnded, effects);
         let registration = Secret::new(Account {
             plan_enabled: false,
             tokens: None,
@@ -506,12 +516,16 @@ impl AccountState {
         ))
     }
 
-    /// The session can't go on: callers are told to sign in again and the account moves. Tokens
-    /// left in place stay for sign-out to revoke.
-    fn session_lost(&mut self, effects: &mut Vec<Effect>) {
-        self.fail(error_of(ErrorKey::SessionEnded, Action::SignIn), effects);
+    /// The session can't go on: callers are told why, `key`, and to sign in again, and the
+    /// account moves. Tokens left in place stay for sign-out to revoke.
+    fn session_lost(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
+        self.fail(error_of(key, Action::SignIn), effects);
+        // The view only says to sign in again, and a catalog read that asked may be cancelled.
+        if key == ErrorKey::RenewalUnconfirmed {
+            effects.push(Effect::Error(error_of(key, Action::SignIn)));
+        }
         self.moved(effects);
-        self.ended = Some(self.generation);
+        self.ended = Some((self.generation, key));
     }
 
     /// A refresh is out, or the lane still owns its result's save: shutdown waits for it, so a
@@ -530,7 +544,15 @@ impl AccountState {
     }
 
     pub(super) fn session_ended(&self) -> bool {
-        self.ended == Some(self.generation)
+        self.ended_by().is_some()
+    }
+
+    /// Why the current generation's session ended, if it did.
+    #[must_use]
+    pub fn ended_by(&self) -> Option<ErrorKey> {
+        self.ended
+            .filter(|(generation, _)| *generation == self.generation)
+            .map(|(_, key)| key)
     }
 
     /// A rotated set that can't be verified: the session ends, and the set stays in `chatgpt`,
