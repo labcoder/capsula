@@ -1307,7 +1307,10 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
 
 /// Lists the catalog and answers the refresh-token grant with what `token` gives, inside the
 /// refresh's own task, so a panic there is that task's.
-struct Renewing(fn() -> Result<Response, HttpError>);
+struct Renewing(TokenAnswer);
+
+/// How the token endpoint answers a refresh.
+type TokenAnswer = fn() -> Result<Response, HttpError>;
 
 impl Http for Renewing {
     fn execute(
@@ -1369,7 +1372,7 @@ async fn a_run_waiting_on_an_unconfirmed_renewal_fails_saying_so() {
             body: Secret::new(Zeroizing::new(br#"{"error":"invalid_grant"}"#.to_vec())),
         })
     };
-    let cases: [(&str, fn() -> Result<Response, HttpError>, ErrorKey); 3] = [
+    let cases: [(&str, TokenAnswer, ErrorKey); 3] = [
         (
             "timeout",
             || Err(HttpError::Timeout),
