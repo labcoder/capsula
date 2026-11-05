@@ -193,6 +193,15 @@ pub fn anthropic_key_target(service: &str) -> String {
 pub fn anthropic_staging_target(service: &str) -> String {
     format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}")
 }
+
+/// The path segment that sets write-once credential generations apart from every legacy name.
+pub const CREDENTIAL_GENERATION_SEGMENT: &str = "gen";
+
+/// The exact name of chunk `index` of one write-once credential generation.
+#[must_use]
+pub fn generation_target(service: &str, kind: &str, generation: &str, index: usize) -> String {
+    format!("{service}/{CREDENTIAL_GENERATION_SEGMENT}/{kind}/{generation}/{index}")
+}
 /// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
 pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
@@ -218,7 +227,32 @@ mod identity_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG};
+    use super::{
+        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, SCREEN_LOG, SHELL_LOG,
+        SPEECH_LOG, account_targets, generation_target,
+    };
+
+    #[test]
+    fn generation_names_never_overlap_a_legacy_name() {
+        let prefix = format!("{CREDENTIAL_SERVICE}/{CREDENTIAL_GENERATION_SEGMENT}/");
+        let legacy: Vec<String> = account_targets(CREDENTIAL_SERVICE).collect();
+        assert_eq!(legacy.len(), 262, "every legacy name is counted");
+        for name in &legacy {
+            assert!(
+                !name.starts_with(&prefix),
+                "a legacy name is in the generation space"
+            );
+        }
+        let name = generation_target(CREDENTIAL_SERVICE, "chatgpt", &"0".repeat(32), 24);
+        assert!(
+            name.starts_with(&prefix),
+            "generation names use the segment"
+        );
+        assert!(
+            !legacy.contains(&name),
+            "a generation name is a legacy name"
+        );
+    }
 
     #[test]
     fn log_prefixes_dont_overlap() {
