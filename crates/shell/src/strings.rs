@@ -514,6 +514,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::AnthropicUnreachable => "error-anthropic-unreachable",
         ErrorKey::AnthropicRateLimited => "error-anthropic-rate-limited",
         ErrorKey::AnthropicCredit => "error-anthropic-credit",
+        ErrorKey::AnthropicAnswerLimit => "error-anthropic-answer-limit",
         ErrorKey::ClaudeCodeNotFound => "error-claude-code-not-found",
         ErrorKey::ClaudeCodeUnsupported => "error-claude-code-unsupported",
         ErrorKey::ClaudeCodeSignedOut => "error-claude-code-signed-out",

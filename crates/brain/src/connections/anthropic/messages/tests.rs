@@ -118,6 +118,7 @@ impl Connect for Peer {
     }
 }
 
+impl super::super::tls::sealed::Sealed for Peer {}
 impl AnthropicConnect for Peer {}
 
 struct Lease(Shared);
@@ -464,7 +465,9 @@ async fn head_body_and_refusal_reads_end_on_deadline_or_eof() {
             let mut call = Box::pin(harness.call(&run, &live));
             if !eof {
                 assert!(poll(call.as_mut()).is_pending());
-                tokio::time::advance(Duration::from_secs(seconds)).await;
+                tokio::time::advance(Duration::from_secs(seconds - 1)).await;
+                assert!(poll(call.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_secs(1)).await;
             }
             let expected = if eof { "Truncated" } else { "Transport" };
             let Poll::Ready(Err(error)) = poll(call.as_mut()) else {
@@ -488,7 +491,9 @@ async fn backpressure_is_bounded_and_receiver_close_ends_it() {
         if close {
             harness.state.lock().expect("peer state").close_out = true;
         } else {
-            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::advance(Duration::from_secs(59)).await;
+            assert!(poll(call.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(1)).await;
         }
         assert!(matches!(
             (close, poll(call.as_mut())),
@@ -519,7 +524,10 @@ async fn pings_reset_byte_idle_but_cannot_keep_an_empty_stream_alive() {
             .extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
         assert!(poll(call.as_mut()).is_pending());
     }
-    tokio::time::advance(Duration::from_secs(50)).await;
+    tokio::time::advance(Duration::from_secs(49)).await;
+    harness.state.lock().expect("peer state").response.extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
+    assert!(poll(call.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(1)).await;
     assert!(matches!(
         poll(call.as_mut()),
         Poll::Ready(Err(Failure::Transport))

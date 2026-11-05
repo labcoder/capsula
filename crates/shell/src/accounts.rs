@@ -55,6 +55,7 @@ impl Accounts {
             | ErrorKey::AnthropicUnreachable
             | ErrorKey::AnthropicRateLimited
             | ErrorKey::AnthropicCredit
+            | ErrorKey::AnthropicAnswerLimit
             | ErrorKey::ClaudeCodeNotFound
             | ErrorKey::ClaudeCodeUnsupported
             | ErrorKey::ClaudeCodeSignedOut

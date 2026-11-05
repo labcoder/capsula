@@ -151,6 +151,7 @@ impl Coordinator {
         match finish {
             Finish::Truncated => Some(Stream::Truncated.user_error()),
             Finish::Failed(EngineFailure::Stream(failure)) => Some(failure.user_error()),
+            Finish::Failed(EngineFailure::Anthropic(failure)) => Some(failure.user_error()),
             Finish::Failed(EngineFailure::Access(Some(error))) => Some(error),
             Finish::Failed(EngineFailure::Access(None)) => Some(
                 connection

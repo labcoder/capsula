@@ -16,6 +16,8 @@ pub(crate) mod claude_code;
 #[cfg(any(test, debug_assertions))]
 pub(crate) mod fixture;
 pub(crate) mod responses;
+#[cfg_attr(not(test), expect(dead_code, reason = "A3b activates the Anthropic mapper"))]
+pub(crate) mod anthropic;
 
 use std::fmt;
 use std::future::Future;
@@ -280,6 +282,8 @@ pub enum EngineFailure {
     Provider,
     /// The Responses stream failed, was refused, or broke its rules.
     Stream(crate::connections::model::error::Failure),
+    /// The Anthropic stream failed, was refused, or broke its rules.
+    Anthropic(crate::connections::anthropic::error::Failure),
     /// The account gave no bearer for the run's connection; nothing was sent. It carries the
     /// account's own reason when it gave one.
     Access(Option<UserError>),

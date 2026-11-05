@@ -242,6 +242,7 @@ fn provider_body_bound_and_outermost_formatters_are_content_free() {
 
 #[test]
 fn local_and_reused_transport_failures_remain_closed() {
+    check(&Failure::Exhausted, ErrorKey::AnthropicAnswerLimit, &[], Recovery::FixRequest);
     for error in [Failure::Request, Failure::Spent, Failure::Refused] {
         check(&error, ErrorKey::RequestRefused, &[], Recovery::FixRequest);
     }

@@ -11,6 +11,7 @@ fn request() -> Value {
         "system":[{"type":"text","text":"instructions","cache_control":{"type":"ephemeral"}}]})
 }
 
+#[track_caller]
 fn refused(value: &Value) {
     assert!(
         matches!(MessagesBody::new(value), Err(Failure::Request)),
@@ -78,9 +79,27 @@ fn rejects_missing_mistyped_and_unsupported_fields() {
     ] {
         let mut value = request();
         value[key] = bad;
-        refused(&value);
+        assert!(matches!(MessagesBody::new(&value), Err(Failure::Request)), "invalid envelope field: {key}");
     }
     refused(&json!([]));
+}
+
+#[test]
+fn accepts_only_client_tools() {
+    for discriminator in [None, Some(json!("custom"))] {
+        let mut value = request();
+        value["tools"] = json!([{"name":"draw","input_schema":{"type":"object"}}]);
+        if let Some(discriminator) = discriminator {
+            value["tools"][0]["type"] = discriminator;
+        }
+        let body = MessagesBody::new(&value).expect("client tool");
+        assert_eq!(serde_json::from_slice::<Value>(body.bytes()).unwrap(), value);
+    }
+    for discriminator in [json!("web_search_20250305"), json!("bash_20250124"), json!(""), json!(null), json!(1)] {
+        let mut value = request();
+        value["tools"] = json!([{"type":discriminator,"name":"draw"}]);
+        refused(&value);
+    }
 }
 
 #[test]

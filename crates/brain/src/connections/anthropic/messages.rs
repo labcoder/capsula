@@ -107,16 +107,21 @@ pub async fn stream<C: AnthropicConnect, L>(
             out.event(event);
         });
         conn.buf.drain(..length);
-        let progress = fed?;
         if content {
             content_by = Instant::now() + CONTENT_IDLE;
         }
-        let taken = timeout_at(content_by.min(Instant::now() + BACKPRESSURE), out.taken())
+        let capacity_by = Instant::now() + BACKPRESSURE;
+        let taken = timeout_at(content_by.min(capacity_by), out.taken())
             .await
-            .map_err(|_| Failure::BackpressureTimeout)?;
+            .map_err(|_| if content_by <= capacity_by {
+                Failure::Transport
+            } else {
+                Failure::BackpressureTimeout
+            })?;
         if taken == ControlFlow::Break(()) {
             return Err(Failure::Protocol);
         }
+        let progress = fed?;
         if progress == Progress::Completed {
             return reader.finish();
         }
