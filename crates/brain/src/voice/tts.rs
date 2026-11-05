@@ -135,7 +135,7 @@ impl TtsHandle {
         Self::spawn_with(runtime, phonon::Phonon::load)
     }
 
-    pub(super) fn spawn_with<E: Engine>(
+    pub(crate) fn spawn_with<E: Engine>(
         runtime: Handle,
         load: impl FnMut(&Path) -> Result<E, TtsError> + Send + 'static,
     ) -> io::Result<Self> {
@@ -192,12 +192,11 @@ impl TtsHandle {
     /// A waiting Speak of an older generation is replaced unanswered, so a cancel never leaves
     /// the next Speak busy while the owner is loading.
     pub(crate) fn try_speak(&self, speak: Speak) -> Result<(), TtsBusy> {
-        let current = self.generation();
         self.control.update(|state| {
             if state
                 .waiting
                 .as_ref()
-                .is_some_and(|waiting| waiting.generation == current)
+                .is_some_and(|waiting| waiting.generation == speak.generation)
             {
                 return Err(TtsBusy);
             }

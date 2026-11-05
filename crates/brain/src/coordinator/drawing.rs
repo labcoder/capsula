@@ -1,8 +1,8 @@
 //! V1 drawing effects share the coordinator's run fences, store FIFO and clear debt.
 
-use kumochi_protocol::message::{RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp};
+use super::{Coordinator, Effect, Stale, StoreOp, speech};
 use crate::drawing::{CallEnd, Drawing, Input, Output};
 
 const MAX_RESULTS: usize = 64;
@@ -19,7 +19,8 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         if self.current_run() == Some(run) {
-            let current = self.take(run)?;
+            let mut current = self.take(run)?;
+            speech::revoke(&mut current, crate::voice::reply::Revoker::Shell, effects);
             self.end(
                 current,
                 crate::store::RunEnd::Interrupted(crate::store::Interruption::Stop),
@@ -115,8 +116,15 @@ impl Coordinator {
             }
             _ => {}
         }
+        let failed = match &input {
+            Input::StepFailed { run, scene, .. } => Some((*run, *scene)),
+            _ => None,
+        };
         let output = self.drawing.handle(input)?;
         self.drawing_output(output, effects);
+        if let Some((run, scene)) = failed {
+            self.step_failed(run, scene, effects);
+        }
         Ok(())
     }
 
@@ -145,7 +153,25 @@ impl Coordinator {
                     }
                 }
             }
+            let say = match &effect {
+                Effect::Data(DataToShell::SceneStepCommit {
+                    run,
+                    scene,
+                    index,
+                    step,
+                }) => step.say.as_ref().map(|say| {
+                    let step = StepRef {
+                        scene: *scene,
+                        index: *index,
+                    };
+                    (*run, step, say.as_str().to_owned())
+                }),
+                _ => None,
+            };
             effects.push(effect);
+            if let Some((run, step, say)) = say {
+                self.say(run, step, &say, effects);
+            }
         }
         if self.drawing_results.len() + output.calls.len() > MAX_RESULTS {
             effects.push(Effect::Broken("drawing call outcomes were not consumed"));

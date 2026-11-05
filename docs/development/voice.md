@@ -101,7 +101,7 @@ flowchart LR
 
 ### Segments and the reply
 
-A spoken run has two pure parts. Neither does any I/O; slice 7's 7b wires them into the coordinator.
+A spoken run has two pure parts. Neither does any I/O; the coordinator's `speech` module wires them in (see **A spoken run** below).
 
 **`voice::segment`** cuts the run's streamed answer into sentences:
 - A segment ends at `.`, `!` or `?` followed by whitespace. Past 120 characters, `,`, `;` or `:` followed by whitespace also ends one.
@@ -166,6 +166,38 @@ flowchart LR
   silence and flushes the tail.
 - Equal rates pass the audio through untouched.
 - Per-frame cost on Rez is in the PR (the pump around it, 24 kHz to 48 kHz).
+
+### A spoken run
+
+A run speaks when spoken replies are loaded and the connection has sent `AudioOutput` when the run
+is admitted. Otherwise it gets no reply, and its text and steps run as before. Until slice 7's
+PR 8 installs voice, nothing loads spoken replies, so no run speaks yet.
+
+```mermaid
+sequenceDiagram
+  participant E as engine
+  participant C as coordinator (Reply)
+  participant L as core loop (Pump)
+  participant S as shell
+  E->>C: TextDelta
+  C->>S: AssistantText, SegmentQueued
+  C->>L: Speak, Credit
+  L->>C: Tts (audio, done, failed)
+  C->>S: SpeechPcm ... final chunk
+  S->>C: SpeechProgress, SegmentPlayed
+  C->>C: final? end Done
+```
+
+- **Feeding the reply.** Text deltas, and a drawn step's `say` when the store commits the step,
+  feed the run's reply. A failed scene drops that scene's say segments. Speech frames for the
+  shell wait behind a pending step, as the run's text does.
+- **The pump** is owned by the core loop and read only while the data queue has room. With no
+  pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
+- **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
+  speech is final, so it can sit finished with its speech still playing; see
+  [runs.md](runs.md#draining-a-spoken-run).
+- **A device change** (a new `AudioOutput` generation) revokes the current run's speech. The run
+  goes on as text and ends `done` once the shell's `SpeechStopped` comes back.
 
 ## Provenance
 
