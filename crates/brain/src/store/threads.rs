@@ -74,19 +74,24 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Stores a live thread's model and effort; a missing or hidden thread changes nothing.
+    /// Stores a live thread's model and effort, returning whether a live row matched.
+    /// A missing, hidden or unrepresentable thread returns false without changing anything.
     ///
     /// # Errors
     /// Fails when SQLite fails.
-    pub fn set_model(&mut self, thread: ThreadId, choice: &ModelChoice) -> Result<(), StoreError> {
+    pub fn set_model(
+        &mut self,
+        thread: ThreadId,
+        choice: &ModelChoice,
+    ) -> Result<bool, StoreError> {
         let Ok(thread) = sql_id(thread.0, StoreError::NoThread) else {
-            return Ok(());
+            return Ok(false);
         };
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1 AND state = 'live'",
             params![thread, choice.model.as_str(), effort_text(choice.effort)],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 }
 

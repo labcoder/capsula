@@ -929,10 +929,8 @@ impl Brain {
                     let failure = op.failed();
                     if !self.store.as_ref().is_some_and(|store| store.send(op)) {
                         tracing::error!("the store thread is gone");
-                        if let Some(failure) = failure {
-                            let failed = self.inputs_tx.send(failure);
-                            debug_assert!(failed.is_ok(), "the brain holds its own receiver");
-                        }
+                        let failed = self.inputs_tx.send(failure);
+                        debug_assert!(failed.is_ok(), "the brain holds its own receiver");
                     }
                 }
                 Effect::Control(message) => {

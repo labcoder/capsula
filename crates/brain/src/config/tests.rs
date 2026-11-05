@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice, ModelSlug,
-    SettingsOp, ThreadId, UserName,
+    AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice,
+    ModelSlug, SettingsOp, ThreadId, UserName,
 };
 
 use super::{Config, ConfigError};
@@ -20,8 +20,11 @@ fn name(text: &str) -> AssistantName {
 }
 
 fn apply(config: &mut Config, op: SettingsOp) {
+    let before = config.view().clone();
     let pending = config.stage(op).expect("staged");
+    assert_eq!(config.view(), &before);
     pending.write().expect("written");
+    assert_eq!(config.view(), &before);
     config.commit(pending);
 }
 
@@ -34,6 +37,8 @@ fn a_missing_file_gives_the_defaults_and_is_created_on_the_first_change() {
     assert_eq!(view.assistant_name.as_str(), DEFAULT_ASSISTANT_NAME);
     assert_eq!(view.user_name, None);
     assert!(!view.onboarded);
+    assert_eq!(view.dock_position, DockPosition::TopCenter);
+    assert!(!view.show_in_taskbar);
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
     apply(&mut config, SettingsOp::FinishOnboarding);
     let reloaded = Config::load(Some(dir), ThreadId(1));
@@ -219,6 +224,145 @@ fn only_an_unreadable_file_asks_the_user_to_fix_it() {
     assert_eq!(ConfigError::NoHome.key(), ErrorKey::SettingsRefused);
     let write = ConfigError::Write(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     assert_eq!(write.key(), ErrorKey::SettingsRefused);
+}
+
+#[test]
+fn every_dock_position_and_taskbar_choice_persists() {
+    let scratch = Scratch::new("config-dock");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    let cases = [
+        ("top_left", DockPosition::TopLeft),
+        ("top_center", DockPosition::TopCenter),
+        ("top_right", DockPosition::TopRight),
+        ("middle_left", DockPosition::MiddleLeft),
+        ("center", DockPosition::Center),
+        ("middle_right", DockPosition::MiddleRight),
+        ("bottom_left", DockPosition::BottomLeft),
+        ("bottom_center", DockPosition::BottomCenter),
+        ("bottom_right", DockPosition::BottomRight),
+    ];
+    for (literal, position) in cases {
+        std::fs::write(&path, format!("dock_position = \"{literal}\"\n")).expect("seeded");
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .dock_position,
+            position,
+            "{literal}"
+        );
+        apply(&mut config, SettingsOp::SetDockPosition(position));
+        let table: toml::Table = std::fs::read_to_string(&path)
+            .expect("readable")
+            .parse()
+            .expect("parses");
+        assert_eq!(table["dock_position"].as_str(), Some(literal));
+        assert_eq!(config.view().dock_position, position);
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .dock_position,
+            position
+        );
+    }
+    for shown in [true, false] {
+        apply(&mut config, SettingsOp::SetTaskbar(shown));
+        assert_eq!(config.view().show_in_taskbar, shown);
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .show_in_taskbar,
+            shown
+        );
+        let table: toml::Table = std::fs::read_to_string(&path)
+            .expect("readable")
+            .parse()
+            .expect("parses");
+        assert_eq!(table["show_in_taskbar"].as_bool(), Some(shown));
+    }
+}
+
+#[test]
+fn invalid_dock_and_taskbar_values_survive_unrelated_saves_until_explicitly_set() {
+    let scratch = Scratch::new("config-invalid-dock");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    for dock in ["\"unknown\"", "\"\"", "5", "true", "{}"] {
+        for taskbar in ["\"yes\"", "1"] {
+            let text =
+                format!("dock_position = {dock}\nshow_in_taskbar = {taskbar}\nfuture_key = 7\n");
+            std::fs::write(&path, &text).expect("seeded");
+            let original: toml::Table = text.parse().expect("parses");
+            let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+            assert_eq!(config.view().dock_position, DockPosition::TopCenter);
+            assert!(!config.view().show_in_taskbar);
+            apply(&mut config, SettingsOp::FinishOnboarding);
+            let saved: toml::Table = std::fs::read_to_string(&path)
+                .expect("readable")
+                .parse()
+                .expect("parses");
+            assert_eq!(saved["dock_position"], original["dock_position"]);
+            assert_eq!(saved["show_in_taskbar"], original["show_in_taskbar"]);
+            assert_eq!(saved["future_key"].as_integer(), Some(7));
+            let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+            assert_eq!(reloaded.view().dock_position, DockPosition::TopCenter);
+            assert!(!reloaded.view().show_in_taskbar);
+            apply(
+                &mut config,
+                SettingsOp::SetDockPosition(DockPosition::TopCenter),
+            );
+            apply(&mut config, SettingsOp::SetTaskbar(false));
+            let saved: toml::Table = std::fs::read_to_string(&path)
+                .expect("readable")
+                .parse()
+                .expect("parses");
+            assert_eq!(saved["dock_position"].as_str(), Some("top_center"));
+            assert_eq!(saved["show_in_taskbar"].as_bool(), Some(false));
+        }
+    }
+}
+
+#[test]
+fn refused_dock_and_taskbar_writes_do_not_leak_into_a_later_save() {
+    let scratch = Scratch::new("config-refused-dock");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::MiddleLeft),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(false));
+    let before = std::fs::read_to_string(&path).expect("readable");
+    let view = config.view().clone();
+    std::fs::create_dir(&temp).expect("blocker");
+    for op in [
+        SettingsOp::SetDockPosition(DockPosition::BottomRight),
+        SettingsOp::SetTaskbar(true),
+    ] {
+        let pending = config.stage(op).expect("staged");
+        assert_eq!(config.view(), &view);
+        assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
+        drop(pending);
+        assert_eq!(config.view(), &view);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
+    }
+    std::fs::remove_dir(&temp).expect("unblocked");
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(reloaded.view().dock_position, DockPosition::MiddleLeft);
+    assert!(!reloaded.view().show_in_taskbar);
+    assert!(reloaded.view().onboarded);
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::BottomCenter),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(reloaded.view().dock_position, DockPosition::BottomCenter);
+    assert!(reloaded.view().show_in_taskbar);
 }
 
 fn choice(slug: &str, effort: Effort) -> ModelChoice {

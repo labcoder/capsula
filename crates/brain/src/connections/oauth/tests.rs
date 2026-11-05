@@ -65,6 +65,14 @@ fn valid(attempt: &SignIn, address: SocketAddr) -> String {
     )
 }
 
+fn header_with_length(valid: &str, length: usize) -> String {
+    let prefix = valid.trim_end_matches("\r\n");
+    let padding = "x".repeat(length - prefix.len() - "\r\nCookie: \r\n\r\n".len());
+    let request = format!("{prefix}\r\nCookie: {padding}\r\n\r\n");
+    assert_eq!(request.len(), length);
+    request
+}
+
 async fn result(
     task: JoinHandle<Result<Authorization, SignInError>>,
 ) -> Result<Authorization, SignInError> {
@@ -278,6 +286,7 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         valid.replace(&format!("Host: {address}\r\n"), ""),
         valid.replace("HTTP/1.1", "HTTP/1.0"),
         valid.replace("Host:", "Host :"),
+        header_with_length(&valid, 32769),
     ];
     let task = tokio::spawn(attempt.receive());
     for request in invalid {
@@ -290,7 +299,11 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         event(&mut seen, Event::Reading).await;
         event(&mut seen, Event::Rejected).await;
     }
-    let reply = send(address, &valid.replace("Host:", "host:")).await;
+    let reply = send(
+        address,
+        &header_with_length(&valid.replace("Host:", "host:"), 32768),
+    )
+    .await;
     assert!(
         reply.starts_with("HTTP/1.1 200 OK\r\n"),
         "lowercase host accepted after stale requests"
@@ -321,38 +334,41 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_32_kib_header_is_accepted_and_one_more_byte_gets_400() {
+    let address = "127.0.0.1:1455".parse().expect("fixture address");
+    let valid = request(address, "state=state&code=test-code&client_id=issued");
     for (length, status) in [(32768, "200 OK"), (32769, "400 Bad Request")] {
-        let (attempt, address, _seen) = attempt().await;
-        let valid = valid(&attempt, address);
-        let prefix = valid.trim_end_matches("\r\n");
-        let padding = "x".repeat(length - prefix.len() - "\r\nCookie: \r\n\r\n".len());
-        let request = format!("{prefix}\r\nCookie: {padding}\r\n\r\n");
-        assert_eq!(request.len(), length);
-        let task = tokio::spawn(attempt.receive());
+        let request = header_with_length(&valid, length);
+        let (mut writer, mut reader) = tokio::io::duplex(length);
+        writer.write_all(request.as_bytes()).await.expect("header");
+        writer.shutdown().await.expect("header complete");
+        let started = tokio::time::Instant::now();
+        let header = callback::read_header(&mut reader).await;
+        let page = if length == 32769 {
+            assert_eq!(header, Err(CallbackError::Rejected));
+            callback::Page::Rejected
+        } else {
+            let header = header.expect("exact limit accepted");
+            assert_eq!(header.as_str(), request);
+            let (code, client) = callback::parse(
+                &header,
+                "http://127.0.0.1:1455/auth/callback",
+                "state",
+                None,
+            )
+            .expect("valid callback");
+            assert_eq!((code.as_str(), client.as_str()), ("test-code", "issued"));
+            callback::Page::Received
+        };
         assert!(
-            send(address, &request)
-                .await
-                .starts_with(&format!("HTTP/1.1 {status}\r\n")),
+            callback::response(page).starts_with(&format!("HTTP/1.1 {status}\r\n")),
             "exact boundary status"
         );
-        if length == 32769 {
-            assert!(
-                send(address, &valid)
-                    .await
-                    .starts_with("HTTP/1.1 200 OK\r\n"),
-                "oversize didn't consume attempt"
-            );
-        }
         assert_eq!(
-            result(task)
-                .await
-                .expect("valid callback")
-                .code
-                .expose()
-                .as_str(),
-            "test-code"
+            tokio::time::Instant::now() - started,
+            Duration::ZERO,
+            "the byte boundary needs no clock advancement"
         );
     }
 }

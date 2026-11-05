@@ -28,8 +28,8 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    Content, ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId,
-    ThreadOp, UserError,
+    Content, ControlToShell, DataToShell, Deleted, ModelChoice, PageOf, Phase, RunId, SceneId,
+    Step, ThreadId, ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -138,6 +138,15 @@ pub enum Input {
         /// The job that wrote it; `None` for the user's rename.
         job: Option<JobKey>,
         /// It changed the title.
+        applied: bool,
+    },
+    /// A thread's model write finished.
+    ModelSet {
+        /// The requested thread.
+        thread: ThreadId,
+        /// The requested choice.
+        choice: ModelChoice,
+        /// A live row matched the committed write.
         applied: bool,
     },
     /// A `StoreSummary` finished.
@@ -632,6 +641,17 @@ impl Coordinator {
                     effects.push(Effect::Control(ControlToShell::ThreadsChanged));
                 }
                 self.job_written(job, &mut effects);
+            }
+            Input::ModelSet {
+                thread,
+                choice,
+                applied,
+            } => {
+                effects.push(Effect::Control(ControlToShell::ThreadModelSet {
+                    thread,
+                    choice,
+                    applied,
+                }));
             }
             Input::SummaryStored {
                 owner: SendKey::Job(key),
