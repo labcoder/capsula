@@ -521,8 +521,8 @@ impl Runs {
                 }
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
-            DataToShell::IssueCard(_) => {}
-            DataToShell::ThreadList { .. }
+            DataToShell::IssueCard(_)
+            | DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }

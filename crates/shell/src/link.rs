@@ -923,10 +923,8 @@ fn watch(
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::Connections(_),
-            )) => {}
-            Ok(Some(
-                ControlToShell::GitHub(_)
+                | ControlToShell::Connections(_)
+                | ControlToShell::GitHub(_)
                 | ControlToShell::ActionState { .. }
                 | ControlToShell::IssueRefused { .. },
             )) => {}
