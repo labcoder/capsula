@@ -72,7 +72,7 @@ fn rejected(state: &SceneState, global: &GlobalBudget, json: &str, code: ErrorCo
 }
 
 #[test]
-fn three_dimensional_gate_precedes_validation_and_keeps_all_charges() {
+fn the_ingress_gate_refuses_3d_ops_and_2d_tracks_refuse_3d_keys() {
     let mut state = scene();
     let mut global = GlobalBudget::default();
     commit(&mut state, &mut global, &text("first", "t"));
@@ -94,18 +94,17 @@ fn three_dimensional_gate_precedes_validation_and_keeps_all_charges() {
         let input = format!(
             r#"{{"id":"retry","put":[{{"text":{{"id":"new","text":"","at":[0,0]}}}},{op}]}}"#
         );
-        rejected(&state, &global, &input, ErrorCode::Unsupported, "put[1]");
+        let error = kumochi_scene::refuse_three_dimensional(&step(&input))
+            .expect_err("3D waits for prepared views");
         assert_eq!(
-            (
-                state.revision(),
-                state.usage(),
-                global.usage(),
-                global.generation(),
-                state.recovery_log().len()
-            ),
-            before
+            (error.code, error.path.as_str()),
+            (ErrorCode::Unsupported, "put[1]")
         );
     }
+    assert_eq!(
+        kumochi_scene::refuse_three_dimensional(&step(&text("plain", "u"))),
+        Ok(())
+    );
     for track in ["x", "pos", "opacity"] {
         let input = format!(
             r#"{{"id":"retry","put":[{{"anim":{{"target":"t","track":"{track}","keys":[[0,[1,2,3]]]}}}}]}}"#

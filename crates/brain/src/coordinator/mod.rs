@@ -11,6 +11,7 @@
 
 mod admission;
 mod availability;
+mod calls;
 mod delete;
 mod drawing;
 mod inline;
@@ -268,6 +269,13 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs can be answered changed.
     Engines(Availability),
+    /// A `CommitCall` finished.
+    CallCommitted {
+        /// The call.
+        key: crate::dispatch::LedgerKey,
+        /// Its write and ledger row committed.
+        committed: bool,
+    },
     /// The shell's output device: its rate and generation.
     AudioOutput {
         /// The rate in Hz, already checked.
@@ -492,6 +500,12 @@ struct Run {
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
+    /// The run's tool calls, one entry per key.
+    ledger: crate::dispatch::Ledger,
+    /// The Claude Code launch authorized to call tools for this run; C4b-2 sets it.
+    mcp: Option<crate::bridge::LaunchId>,
+    /// Calls answered on their write's acknowledgement, for the tool loop to take.
+    answered: Vec<(crate::dispatch::Caller, crate::dispatch::ToolOutput)>,
     /// The run's calls and the current round's native items.
     tools: tools::Loop,
     /// The engine's round completed while steps or its items' write were pending; the round
@@ -850,6 +864,14 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
+            Input::CallCommitted {
+                key,
+                committed: true,
+            } => self.call_committed(&key)?,
+            Input::CallCommitted {
+                key,
+                committed: false,
+            } => self.call_failed(&key, &mut effects)?,
             input @ (Input::AudioOutput { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
@@ -987,6 +1009,9 @@ impl Coordinator {
             compacted: None,
             draw: None,
             error: None,
+            ledger: crate::dispatch::Ledger::default(),
+            mcp: None,
+            answered: Vec::new(),
             tools: tools::Loop::default(),
             finishing: false,
             ending: None,

@@ -426,9 +426,6 @@ fn held_frames_and_the_lane_share_the_data_window() {
 #[test]
 fn a_discarded_admission_or_lost_answer_keeps_its_payload_and_one_lease_off_the_caller() {
     let text = "x".repeat(400);
-    let control = text.clone().into_boxed_str();
-    let ((), _, [_, freed]) = crate::allocation::usage(|| drop(control));
-    assert_eq!(freed, text.len(), "calibration: a caller drop counts");
     for answered in [false, true] {
         let case = format!("answered {answered}");
         let (mut presenter, now) = live();
@@ -472,12 +469,11 @@ fn a_discarded_admission_or_lost_answer_keeps_its_payload_and_one_lease_off_the_
         let (sender, receiver) = mpsc::channel();
         drop(receiver);
         let release = hold_dropper();
-        crate::allocation::usage(|| match pending {
+        let ((), freed) = crate::allocation::releases_of_size(text.len(), || match pending {
             Ok(answer) => drop(sender.send(answer).expect_err("the recipient is gone")),
             Err(job) => drop(job),
         });
-        let largest = crate::allocation::largest_release();
-        assert!(largest < text.len(), "{case}: freed {largest}");
+        assert_eq!(freed, 0, "{case}: no text payload frees on the caller");
         assert_eq!(Arc::strong_count(&probe), owners, "{case}: the read waits");
         assert_eq!(presenter.workers(), 0, "{case}: the lease frees once");
         drop(release);
