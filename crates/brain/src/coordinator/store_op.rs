@@ -165,9 +165,9 @@ impl StoreOp {
         }
     }
 
-    /// Answers an operation that couldn't reach the store; `None` for one nothing waits on.
-    pub fn failed(&self) -> Option<Input> {
-        Some(match self {
+    /// Answers an operation that couldn't reach the store.
+    pub fn failed(&self) -> Input {
+        match self {
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),
@@ -219,6 +219,6 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-        })
+        }
     }
 }

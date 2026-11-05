@@ -27,11 +27,11 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
     };
     assert_eq!(
         op.failed(),
-        Some(Input::ModelSet {
+        Input::ModelSet {
             thread: T,
             choice: choice.clone(),
             applied: false,
-        })
+        }
     );
     for applied in [false, true] {
         let input = Input::ModelSet {

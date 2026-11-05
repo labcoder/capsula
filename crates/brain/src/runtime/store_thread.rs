@@ -597,15 +597,14 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         }
         StoreOp::SetModel { thread, choice } => {
             purger.op_arriving();
-            let applied = match store
+            let applied = if let Ok(applied) = store
                 .reconnect()
                 .and_then(|()| store.set_model(thread, &choice))
             {
-                Ok(applied) => applied,
-                Err(_) => {
-                    tracing::warn!("a model choice wasn't stored");
-                    false
-                }
+                applied
+            } else {
+                tracing::warn!("a model choice wasn't stored");
+                false
             };
             answer(
                 acks,
