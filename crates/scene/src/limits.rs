@@ -70,9 +70,3 @@ pub const MAX_SOLIDS: usize = 160;
 pub const MAX_TRIANGLES: usize = 24_000;
 /// Reserved slice 5 cap: segments per curved solid.
 pub const MAX_CURVED_SEGMENTS: usize = 48;
-/// Reserved slice 5 cap: BSP plane classifications.
-pub const MAX_BSP_CLASSIFICATIONS: usize = 4_000_000;
-/// Reserved slice 5 cap: BSP tree depth.
-pub const MAX_BSP_DEPTH: usize = 64;
-/// Reserved slice 5 cap: fragments relative to input triangles.
-pub const MAX_BSP_FRAGMENT_FACTOR: usize = 2;
