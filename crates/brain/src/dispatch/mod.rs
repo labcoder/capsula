@@ -379,11 +379,15 @@ fn parameters<A: schemars::JsonSchema>() -> Value {
 }
 
 /// Parses `args` into the tool's closed struct and hashes the tool and the parsed fields, so
-/// whitespace and key order don't change the hash.
+/// whitespace and key order don't change the hash. Only an object is arguments: serde would also
+/// fill a struct from an array.
 fn parse<A: DeserializeOwned + Serialize>(
     wire: &str,
     args: &[u8],
 ) -> Result<(A, [u8; 32]), ToolError> {
+    if args.trim_ascii_start().first() != Some(&b'{') {
+        return Err(ToolError::Invalid);
+    }
     let parsed: A = serde_json::from_slice(args).map_err(|_| ToolError::Invalid)?;
     let fields = serde_json::to_vec(&parsed).map_err(|_| ToolError::Invalid)?;
     let mut hash = Sha256::new();

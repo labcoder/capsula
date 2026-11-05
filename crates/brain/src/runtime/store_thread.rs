@@ -599,8 +599,8 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             purger.op_arriving();
             let committed = match store.reconnect().and_then(|()| store.commit_call(&call)) {
                 Ok(committed) => committed,
-                Err(error) => {
-                    tracing::warn!(%error, "a tool call wasn't stored");
+                Err(_) => {
+                    tracing::warn!("a tool call wasn't stored");
                     false
                 }
             };

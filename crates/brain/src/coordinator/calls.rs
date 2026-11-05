@@ -10,7 +10,8 @@ use crate::store::Failure;
 impl Coordinator {
     /// Dispatches one call. The tool loop (slice 3's 13b-2) and the MCP listener (slice 8's C4b-2)
     /// hand calls here; a call whose run isn't the current, started one, or whose thread is being
-    /// deleted, runs nothing.
+    /// deleted, runs nothing. Nor does a call from a build that rendered a thread a delete has
+    /// reached since: its response is dropped and the round is built again, as for a voided send.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "13b-2's tool loop and C4b-2's listener call it")
@@ -23,6 +24,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Dispatch {
         let ended = Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
+        let pending = self.pending_deletes();
         let Some(thread) = self.current.as_ref().map(|current| current.thread) else {
             return ended;
         };
@@ -37,6 +39,13 @@ impl Coordinator {
             return ended;
         };
         if run.finishing {
+            return ended;
+        }
+        let voided = build.voided(build.sources());
+        if !voided.is_empty() {
+            let key = build.key();
+            effects.push(Effect::CancelEngine { run: key.run });
+            self.rebuild(key, &voided, &pending, effects);
             return ended;
         }
         let mut ctx = RunCtx {

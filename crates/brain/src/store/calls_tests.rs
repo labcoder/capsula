@@ -98,6 +98,34 @@ fn a_failed_record_rolls_back_the_calls_write() {
 }
 
 #[test]
+fn the_ledger_caps_a_result_in_bytes_and_rolls_its_write_back_when_over() {
+    let scratch = Scratch::new("calls-cap");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    // `{"text":""}` is 11 bytes and each two-byte letter counts twice: 65,536 and 65,537
+    // bytes, in far fewer characters.
+    let at = format!("a{}", "\u{e9}".repeat(32_762));
+    let mut fits = renaming(thread, run, "fits");
+    fits.write = LocalWrite::None;
+    fits.output = ToolOutput::Text(at.clone());
+    assert_eq!(fits.output.stored().len(), 65_536);
+    assert!(store.commit_call(&fits).expect("recorded"));
+    let mut over = renaming(thread, run, "over");
+    over.output = ToolOutput::Text(format!("a{at}"));
+    assert_eq!(over.output.stored().len(), 65_537);
+    assert!(store.commit_call(&over).is_err(), "over the cap");
+    assert_eq!(title(&store.conn, thread), "Before");
+    assert_eq!(
+        rows(&store.conn),
+        [(
+            "model".to_owned(),
+            "fits".to_owned(),
+            format!(r#"{{"text":"{at}"}}"#)
+        )]
+    );
+}
+
+#[test]
 fn a_call_in_a_thread_being_deleted_writes_nothing() {
     let scratch = Scratch::new("calls-deleting");
     let mut store = opened(&scratch);

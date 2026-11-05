@@ -113,7 +113,7 @@ CREATE TABLE tool_calls (
     call TEXT NOT NULL CHECK (length(call) BETWEEN 1 AND 64),
     tool TEXT NOT NULL,
     hash BLOB NOT NULL CHECK (length(hash) = 32),
-    result TEXT NOT NULL CHECK (length(result) <= 65536),
+    result TEXT NOT NULL CHECK (length(CAST(result AS BLOB)) <= 65536),
     created_ms INTEGER NOT NULL,
     PRIMARY KEY (run, route, call),
     FOREIGN KEY (run, thread) REFERENCES runs (id, thread)

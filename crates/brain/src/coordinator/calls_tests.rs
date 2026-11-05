@@ -1,10 +1,11 @@
 //! Tool calls through the coordinator: run resolution, MCP authority and acknowledgements.
 
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::{ControlToShell, Deleted, RunId, ThreadId};
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, Stale, StoreOp, T, fresh};
 use crate::bridge::{CallKey, LaunchId};
-use crate::context::{Built, ModelRequest};
+use crate::context::{Built, ModelRequest, Origin};
+use crate::coordinator::{BuildContext, LeaseId, SendKey};
 use crate::dispatch::{Caller, Dispatch, Route, ToolError, ToolOutput, schemas};
 use crate::engines::{CallId, ToolName};
 use crate::store::{Failure, RunEnd};
@@ -34,6 +35,11 @@ fn running(core: &mut Coordinator, run: RunId, thread: Option<ThreadId>) {
 }
 
 fn offering(key: BuildKey) -> Input {
+    rendering(key, Origin::Task(T), vec![T])
+}
+
+/// `key`'s build, offering `reach`'s test tools and rendered from `sources`.
+fn rendering(key: BuildKey, reach: Origin, sources: Vec<ThreadId>) -> Input {
     Input::ContextBuilt(ContextBuilt {
         key,
         snapshot: None,
@@ -42,11 +48,82 @@ fn offering(key: BuildKey) -> Input {
                 choice: None,
                 instructions: "built".to_owned(),
                 input: Vec::new(),
-                tools: schemas(crate::context::Origin::Task(T), Route::Model),
+                tools: schemas(reach, Route::Model),
             },
-            sources: vec![T],
+            sources,
         }),
     })
+}
+
+const KUMO: ThreadId = ThreadId(1);
+const B: ThreadId = ThreadId(2);
+/// B's text, which Kumo's response carries into a call that names no B id.
+const FROM_B: &[u8] = br#"{"word":"zqxfromtaskb","title":"zqxfromtaskb"}"#;
+
+fn build_key(attempt: u64) -> BuildKey {
+    BuildKey {
+        run: R,
+        round: 1,
+        attempt,
+    }
+}
+
+/// Kumo's run 10, whose admitted build rendered task B and whose request was sent.
+fn kumo_rendered_b() -> Coordinator {
+    let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: Some(KUMO),
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(rendering(build_key(1), Origin::Kumo, vec![KUMO, B]))
+        .expect("admitted");
+    let send = SendKey::Build(build_key(1));
+    core.handle(Input::SendReady { key: send })
+        .expect("granted");
+    core.handle(Input::SendSettled {
+        lease: LeaseId { key: send, send: 1 },
+    })
+    .expect("settled");
+    core
+}
+
+fn delete_b(core: &mut Coordinator) {
+    assert_eq!(
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false,
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
+    );
+}
+
+fn b_hidden() -> Input {
+    Input::Deleted {
+        thread: B,
+        outcome: Deleted::Hidden,
+        last_run: None,
+    }
+}
+
+/// Kumo's round built again, from the snapshot it never read.
+fn rebuilt(attempt: u64) -> Effect {
+    Effect::Store(StoreOp::BuildContext(BuildContext {
+        key: build_key(attempt),
+        thread: KUMO,
+        origin: Origin::Kumo,
+        snapshot: None,
+        first: true,
+    }))
+}
+
+fn call_from_b(core: &mut Coordinator) -> (Dispatch, Vec<Effect>) {
+    let mut effects = Vec::new();
+    let dispatch = core.tool_call(model(R, "c1"), ToolName::Probe, FROM_B, &mut effects);
+    (dispatch, effects)
 }
 
 fn model(run: RunId, id: &str) -> Caller {
@@ -165,6 +242,43 @@ fn a_call_after_its_threads_delete_was_accepted_runs_nothing() {
     })
     .expect("delete");
     assert_eq!(call(&mut core, model(R, "c1")), (ended(), false));
+}
+
+#[test]
+fn a_call_from_a_build_that_rendered_a_task_being_deleted_runs_nothing() {
+    let mut core = kumo_rendered_b();
+    delete_b(&mut core);
+    assert_eq!(
+        call_from_b(&mut core),
+        (ended(), vec![Effect::CancelEngine { run: R }]),
+        "the rebuild waits for B's delete"
+    );
+    assert_eq!(
+        core.handle(b_hidden()),
+        Ok(vec![
+            rebuilt(2),
+            Effect::Control(ControlToShell::ThreadDeleted {
+                thread: B,
+                outcome: Deleted::Hidden,
+                last_run: None,
+            })
+        ])
+    );
+    assert_eq!(call_from_b(&mut core), (ended(), Vec::new()));
+    assert_eq!(answered(&core), []);
+}
+
+#[test]
+fn a_call_from_a_build_that_rendered_a_task_deleted_since_runs_nothing() {
+    let mut core = kumo_rendered_b();
+    delete_b(&mut core);
+    core.handle(b_hidden()).expect("answered");
+    assert_eq!(
+        call_from_b(&mut core),
+        (ended(), vec![Effect::CancelEngine { run: R }, rebuilt(2)])
+    );
+    assert_eq!(call_from_b(&mut core), (ended(), Vec::new()));
+    assert_eq!(answered(&core), []);
 }
 
 #[test]

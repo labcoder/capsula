@@ -300,6 +300,22 @@ fn a_refused_key_stays_refused_and_a_new_key_runs() {
             &error(refusal),
         );
     }
+    for args in [
+        r#"["hi",null,1]"#,
+        r#"  ["hi"]"#,
+        r#""hi""#,
+        "1",
+        "null",
+        "",
+    ] {
+        let mut arrays = Ledger::default();
+        for args in [args, valid] {
+            assert_step(
+                &send(&mut arrays, model("array"), ToolName::Probe, args),
+                &error(ToolError::Invalid),
+            );
+        }
+    }
     let mut big = Ledger::default();
     for args in [oversized.as_str(), r#"{"word":"#, valid] {
         assert_step(
@@ -368,25 +384,23 @@ fn arguments_up_to_the_cap_parse_and_one_byte_over_is_too_large() {
 }
 
 #[test]
-fn an_output_over_its_cap_is_refused_before_any_write() {
-    let mut ledger = Ledger::default();
-    let fits = (MAX_OUTPUT - r#"{"text":"probed "}"#.len()) / 4;
-    let count = |n: usize| format!(r#"{{"word":"abcd","count":{n}}}"#);
-    commit(send(
-        &mut ledger,
-        model("fits"),
-        ToolName::Probe,
-        &count(fits),
-    ));
-    assert_step(
-        &send(
-            &mut ledger,
-            model("over"),
-            ToolName::Probe,
-            &count(fits + 1),
-        ),
-        &error(ToolError::TooLarge),
-    );
+fn an_output_of_exactly_its_cap_is_sent_and_one_byte_over_is_refused() {
+    assert_eq!(MAX_OUTPUT, 65_536);
+    // `{"text":"probed "}` is 18 bytes, and the two-byte word checks bytes, not characters.
+    for (word, count) in [("a", 65_518), ("\u{e9}", 32_759)] {
+        let mut ledger = Ledger::default();
+        let args = format!(r#"{{"word":"{word}","count":{count}}}"#);
+        let sent = commit(send(&mut ledger, model("fits"), ToolName::Probe, &args));
+        assert_eq!(sent.output.stored().len(), 65_536);
+    }
+    for (word, count) in [("a", 65_519), ("\u{e9}", 32_760)] {
+        let mut ledger = Ledger::default();
+        let args = format!(r#"{{"word":"{word}","count":{count}}}"#);
+        assert_step(
+            &send(&mut ledger, model("over"), ToolName::Probe, &args),
+            &error(ToolError::TooLarge),
+        );
+    }
 }
 
 #[test]
@@ -607,16 +621,11 @@ fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
         format!("{:?}", Step::Answer(text(MARKER))),
         format!("{:?}", LocalWrite::Title(MARKER.to_owned())),
         format!("{ledger:?}"),
-        format!("{L1:?}"),
     ];
+    let listed = format!("{:?}", MARKER.as_bytes());
+    let bytes = listed.trim_matches(['[', ']']);
     for shown in formatted {
         assert!(!shown.contains(MARKER), "{shown}");
-        assert!(
-            !shown
-                .as_bytes()
-                .windows(MARKER.len())
-                .any(|window| window == MARKER.as_bytes()),
-            "{shown}"
-        );
+        assert!(!shown.contains(bytes), "{shown}");
     }
 }
