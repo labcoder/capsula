@@ -64,7 +64,6 @@ the [user guide](../user/settings.md).
 
 `DockPosition` travels in the settings snapshot and uses nine snake-case names in TOML.
 The brain persists it through the same atomic save path as names. `show_in_taskbar` is a
-<<<<<<< HEAD
 saved boolean, false by default. General exposes its checkbox; the native taskbar button is a
 separate platform change, so saving this preference alone does not add a button yet.
 
@@ -78,9 +77,6 @@ pending choice wins until an answer supplies the saved value. The checkbox is un
 without an authoritative view. Failed admission leaves the selection unchanged and General
 explains the failure; no taskbar intent is replayed after disconnect. A successful taskbar
 answer clears only a taskbar refusal, not a name, frame-rate or dock-position refusal.
-=======
-saved boolean, false by default; its control and native button are separate changes.
->>>>>>> origin/main
 
 A tray pick moves the dock immediately and joins the settings answer FIFO when admitted.
 While disconnected or the control queue is full, the model retains only the newest unsent

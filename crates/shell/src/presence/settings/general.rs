@@ -1,3 +1,5 @@
+#[cfg(test)]
+use gpui_kit::InteractiveElement as _;
 use gpui_kit::base::RadioGroup as PositionGroup;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
@@ -5,6 +7,7 @@ use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
     div,
@@ -92,8 +95,7 @@ impl SettingsView {
     fn dock_positions(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
-        let selected = state.dock_position_choice();
-        let disabled = state.view().is_none();
+        let selected = dock_choice_index(state);
         let label = strings.get(Text::DockPosition);
         div()
             .flex()
@@ -114,19 +116,37 @@ impl SettingsView {
                             .map(|(ix, (position, label))| {
                                 Radio::new(("dock-position", ix))
                                     .label(strings.get(label))
-                                    .checked(selected == Some(position))
-                                    .disabled(disabled)
+                                    .checked(selected == Some(ix))
                                     .on_change(cx.listener(move |view, _, _, cx| {
-                                        let moved = view
-                                            .owner
-                                            .update(cx, |owner, cx| {
-                                                owner.save_dock_position(position, cx)
-                                            })
-                                            .is_ok_and(|result| result.is_ok());
-                                        view.general_notice =
-                                            (!moved).then_some(Text::SettingsPositionUnavailable);
-                                        cx.notify();
+                                        let owner = view.owner.clone();
+                                        let view = cx.weak_entity();
+                                        cx.defer(move |cx| {
+                                            let moved = owner
+                                                .update(cx, |owner, cx| {
+                                                    owner.save_dock_position(position, cx)
+                                                })
+                                                .is_ok_and(|result| result.is_ok());
+                                            let _gone = view.update(cx, |view, cx| {
+                                                view.general_notice = (!moved)
+                                                    .then_some(Text::SettingsPositionUnavailable);
+                                                cx.notify();
+                                            });
+                                        });
                                     }))
+                                    .map(|radio| {
+                                        #[cfg(test)]
+                                        {
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("dock-position-{ix}")
+                                                })
+                                                .child(radio)
+                                        }
+                                        #[cfg(not(test))]
+                                        {
+                                            radio
+                                        }
+                                    })
                             }),
                     ),
             )
@@ -263,6 +283,13 @@ fn rate_at(ix: usize) -> Option<MaxFrameRate> {
     }
 }
 
+fn dock_choice_index(state: &Settings) -> Option<usize> {
+    let choice = state.dock_position_choice()?;
+    DockPosition::ALL
+        .iter()
+        .position(|position| *position == choice)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -275,9 +302,71 @@ mod tests {
     };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
-    use super::{choice_index, rate_at};
+    use super::{choice_index, dock_choice_index, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
+
+    #[test]
+    fn the_checked_dock_cell_follows_saved_pending_and_refused_choices() {
+        use kumochi_protocol::message::{DockPosition, ErrorKey, UserError};
+        for (position, index) in [
+            (DockPosition::TopLeft, 0),
+            (DockPosition::TopCenter, 1),
+            (DockPosition::TopRight, 2),
+            (DockPosition::MiddleLeft, 3),
+            (DockPosition::Center, 4),
+            (DockPosition::MiddleRight, 5),
+            (DockPosition::BottomLeft, 6),
+            (DockPosition::BottomCenter, 7),
+            (DockPosition::BottomRight, 8),
+        ] {
+            let mut model = Settings::default();
+            assert_eq!(dock_choice_index(&model), None);
+            let mut snapshot = saved();
+            snapshot.dock_position = position;
+            model.set_view(snapshot, Update::Unsolicited);
+            assert_eq!(dock_choice_index(&model), Some(index));
+            model.send_dock_position(DockPosition::BottomLeft, |_| true);
+            assert_eq!(dock_choice_index(&model), Some(6));
+            model.send_dock_position(DockPosition::Center, |_| true);
+            assert_eq!(dock_choice_index(&model), Some(4));
+            let mut answer = saved();
+            answer.dock_position = DockPosition::BottomLeft;
+            model.set_view(answer.clone(), Update::Answer);
+            assert_eq!(dock_choice_index(&model), Some(4));
+            model.error(UserError::from(ErrorKey::SettingsRefused));
+            assert_eq!(dock_choice_index(&model), Some(6));
+            model.set_view(answer, Update::Answer);
+            assert_eq!(dock_choice_index(&model), Some(6));
+        }
+    }
+
+    #[gpui::test]
+    fn an_offline_dock_cell_still_delivers_its_pick(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        cx.update(|cx| {
+            view.read(cx).model.clone().update(cx, |model, cx| {
+                model.disconnected();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let point = visual
+            .debug_bounds("dock-position-0")
+            .expect("top left cell")
+            .center();
+        visual.simulate_click(point, gpui_kit::Modifiers::default());
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).general_notice,
+                Some(crate::strings::Text::SettingsPositionUnavailable),
+                "the unavailable fixture owner refuses an admitted offline pick"
+            );
+        });
+    }
 
     fn saved() -> SettingsView {
         SettingsView {

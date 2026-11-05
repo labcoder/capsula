@@ -18,6 +18,7 @@ display's refresh divides evenly, so motion stays steady, and Settings shows tha
 **Dock position** offers the same nine anchors as the tray. Choosing one here moves the dock
 without closing Settings; the panel follows its new anchor. The choice is saved for the next
 launch. If a save is refused, the last saved position returns unless a newer choice is pending.
+While disconnected, a pick still moves the dock and the latest choice is saved after reconnect.
 
 The taskbar checkbox saves whether Kumochi should also have a taskbar button. Taskbar visibility
 support is a separate change: saving this preference alone does not add a button in this build.
