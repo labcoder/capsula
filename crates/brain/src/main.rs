@@ -7,6 +7,17 @@ use kumochi_brain::logging;
 use kumochi_protocol::constants;
 
 fn main() -> ExitCode {
+    let mut args = std::env::args();
+    if args.nth(1).as_deref() == Some(kumochi_brain::MCP_BRIDGE) {
+        let launch = args.next().unwrap_or_default();
+        return match kumochi_brain::bridge::serve(&launch) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error, "mcp bridge stopped");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args().nth(1).as_deref() == Some(kumochi_brain::SCREEN_WORKER) {
         if logging::init(constants::SCREEN_LOG).is_err() {
             return ExitCode::FAILURE;

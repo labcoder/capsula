@@ -49,11 +49,15 @@ pub enum ErrorKey {
     RequestRefused,
     /// The provider's answer couldn't be read.
     ResponseUnreadable,
+    /// No account is signed in and ready, so nothing can answer.
+    SignInNeeded,
+    /// The run's model isn't in the account's catalog.
+    ModelUnavailable,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -73,6 +77,8 @@ impl ErrorKey {
         Self::AccountRefused,
         Self::RequestRefused,
         Self::ResponseUnreadable,
+        Self::SignInNeeded,
+        Self::ModelUnavailable,
     ];
 }
 

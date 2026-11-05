@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::bound::{item_bytes, request_bytes};
 use super::build::{Turn, build};
+use super::compact::{self, Compaction, compaction};
 use super::*;
 use crate::engines::{CallId, Opaque};
 use crate::store::context::Snapshot;
@@ -645,7 +646,7 @@ fn the_bound_is_exact_and_older_runs_go_first() {
     );
     let too_large = world.build(&run, (main, current), Supplied::default(), alone - 1);
     assert!(
-        matches!(too_large, Err(BuildError::TooLarge)),
+        matches!(too_large, Err(BuildError::TooLarge { room: None })),
         "{too_large:?}"
     );
 }
@@ -658,7 +659,10 @@ fn an_oversized_summary_or_turn_ends_with_too_large() {
     let (_, current) = world.run(Some(main), &huge, None);
     let run = snapshot(Origin::Kumo, None);
     let turn = world.build(&run, (main, current), Supplied::default(), BOUND);
-    assert!(matches!(turn, Err(BuildError::TooLarge)), "{turn:?}");
+    assert!(
+        matches!(turn, Err(BuildError::TooLarge { room: None })),
+        "{turn:?}"
+    );
     let (_, small) = world.run(Some(main), "small", None);
     let summary = Supplied {
         summary: Some(Summary {
@@ -670,7 +674,7 @@ fn an_oversized_summary_or_turn_ends_with_too_large() {
     };
     let summarised = world.build(&run, (main, small), summary, BOUND);
     assert!(
-        matches!(summarised, Err(BuildError::TooLarge)),
+        matches!(summarised, Err(BuildError::TooLarge { room: Some(_) })),
         "{summarised:?}"
     );
 }
@@ -879,4 +883,332 @@ fn debug_and_errors_carry_no_content() {
         !shown.contains("private") && !shown.contains("Oscar"),
         "{shown}"
     );
+}
+
+impl World {
+    /// `count` finished runs in `thread`, each an ask of `bytes` and a reply of `bytes`.
+    fn runs(&mut self, thread: ThreadId, count: usize, bytes: usize) {
+        for _ in 0..count {
+            self.run(Some(thread), &"a".repeat(bytes), Some(&"b".repeat(bytes)));
+        }
+    }
+
+    fn compact(&self, run: &RunSnapshot, thread: ThreadId, compact_at: u64) -> Option<Compaction> {
+        let reader = Connection::open(self.scratch.db()).expect("reader");
+        let snapshot = Snapshot::begin(&reader).expect("snapshot");
+        compaction(&snapshot, run, thread, compact_at).expect("read")
+    }
+}
+
+const WRITE_NOW: &str = "Write the new summary now.";
+
+#[test]
+fn compaction_waits_for_the_backlog_and_keeps_the_newest_eight_runs_raw() {
+    let mut world = world("compact-threshold");
+    let (task, _) = world.run(None, &"a".repeat(400), Some(&"b".repeat(400)));
+    world.runs(task, 8, 400);
+    let run = snapshot(Origin::Task(task), Some("Oscar"));
+    // Nine runs of 800 bytes: a backlog of 1,800 estimated tokens.
+    assert_eq!(world.compact(&run, task, 1801), None);
+    let found = world.compact(&run, task, 1800).expect("due");
+    let events = world.events(task);
+    assert_eq!(found.covers, (events[0], events[1]), "only the oldest run");
+    assert_eq!(found.built.sources, [task]);
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(Role::User, &"a".repeat(400)),
+            message(Role::Assistant, &"b".repeat(400)),
+            message(Role::Developer, WRITE_NOW),
+        ]
+    );
+    assert!(found.built.request.tools.is_empty());
+    assert!(found.built.request.instructions.contains("Kumo"));
+    assert!(found.built.request.instructions.contains("Oscar"));
+    assert!(!found.built.request.instructions.contains('{'));
+}
+
+#[test]
+fn many_small_runs_outside_the_window_reach_the_threshold() {
+    let mut world = world("compact-small");
+    let (task, _) = world.run(None, "aaaa", Some("bbbb"));
+    world.runs(task, 19, 4);
+    let run = snapshot(Origin::Task(task), None);
+    // Twenty runs of 8 bytes: 40 estimated tokens, though the newest eight hold only 16.
+    assert_eq!(world.compact(&run, task, 41), None);
+    let found = world.compact(&run, task, 40).expect("due");
+    let events = world.events(task);
+    assert_eq!(
+        found.covers,
+        (events[0], events[23]),
+        "the twelve oldest runs"
+    );
+}
+
+#[test]
+fn eight_runs_or_fewer_never_compact() {
+    let mut world = world("compact-none");
+    let (task, _) = world.run(None, &"a".repeat(10_000), None);
+    world.runs(task, 7, 10_000);
+    assert_eq!(
+        world.compact(&snapshot(Origin::Task(task), None), task, 1),
+        None
+    );
+}
+
+#[test]
+fn coverage_only_advances_over_whole_runs_that_fit() {
+    let mut world = world("compact-oversized");
+    let (task, _) = world.run(None, &"a".repeat(compact::SUMMARY_INPUT), None);
+    world.runs(task, 8, 4);
+    let run = snapshot(Origin::Task(task), None);
+    assert_eq!(
+        world.compact(&run, task, 1),
+        None,
+        "an oldest run over the input stalls with no request"
+    );
+
+    let mut world = self::world("compact-prefix");
+    let (task, _) = world.run(None, "aaaa", Some("bbbb"));
+    world.run(Some(task), &"a".repeat(compact::SUMMARY_INPUT), None);
+    world.runs(task, 8, 4);
+    let found = world.compact(&run, task, 1).expect("due");
+    let events = world.events(task);
+    assert_eq!(
+        found.covers,
+        (events[0], events[1]),
+        "only the run that fit"
+    );
+}
+
+#[test]
+fn a_summary_is_carried_forward_replaces_its_events_and_never_hides_them() {
+    let mut world = world("compact-summary");
+    let (task, _) = world.run(None, "first zqxsummarized ask", Some("first reply"));
+    world.runs(task, 8, 4);
+    let events = world.events(task);
+    let generation = crate::store::Generation(0);
+    assert!(
+        world
+            .store
+            .store_summary(task, generation, (events[0], events[1]), "earlier", None)
+            .expect("stored")
+    );
+    let run = snapshot(Origin::Task(task), None);
+    assert_eq!(world.compact(&run, task, 1), None, "eight uncovered runs");
+
+    let (_, current) = world.run(Some(task), "next", None);
+    let found = world.compact(&run, task, 1).expect("due");
+    assert_eq!(found.covers, (events[0], events[3]));
+    assert_eq!(
+        found.built.request.input[0],
+        message(
+            Role::Developer,
+            &format!(
+                "Summary so far, of events {}–{}:\nearlier",
+                events[0].0, events[1].0
+            )
+        )
+    );
+
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let read = Snapshot::begin(&reader).expect("snapshot");
+    let summary = read.summary(task).expect("read");
+    let excerpt = read
+        .excerpt(task, events[0], events[1], REREAD_CAP)
+        .expect("excerpt");
+    assert!(excerpt.text.contains("zqxsummarized"), "the events stay");
+    drop(read);
+    let built = world
+        .build(
+            &run,
+            (task, current),
+            Supplied {
+                summary,
+                items: Vec::new(),
+            },
+            BOUND,
+        )
+        .expect("built");
+    assert!(matches!(
+        &built.request.input[0],
+        InputItem::Message { role: Role::Developer, text } if text.ends_with("earlier")
+    ));
+    assert!(!built.request.input.iter().any(
+        |item| matches!(item, InputItem::Message { text, .. } if text.contains("zqxsummarized"))
+    ));
+
+    world.store.begin_delete(task).expect("begun");
+    assert_eq!(world.compact(&run, task, 1), None, "a task being deleted");
+    assert!(
+        !world
+            .store
+            .store_summary(task, generation, (events[0], events[3]), "late", None)
+            .expect("ran"),
+        "a delete during compaction stores nothing"
+    );
+}
+
+#[test]
+fn a_summary_is_trimmed_and_cut_on_a_character_boundary() {
+    assert_eq!(compact::clean_summary("", compact::MAX_SUMMARY), None);
+    assert_eq!(compact::clean_summary(" \n\t ", compact::MAX_SUMMARY), None);
+    let exact = "s".repeat(compact::MAX_SUMMARY);
+    assert_eq!(
+        compact::clean_summary(&format!("  {exact}\n"), compact::MAX_SUMMARY),
+        Some(exact.clone())
+    );
+    assert_eq!(
+        compact::clean_summary(&format!("{exact}t"), compact::MAX_SUMMARY),
+        Some(exact)
+    );
+    let multibyte = format!("{}é", "s".repeat(compact::MAX_SUMMARY - 1));
+    assert_eq!(
+        compact::clean_summary(&multibyte, compact::MAX_SUMMARY),
+        Some("s".repeat(compact::MAX_SUMMARY - 1))
+    );
+}
+
+#[test]
+fn inline_compaction_rewrites_the_summary_within_the_room_the_turn_leaves() {
+    let mut world = world("compact-rewrite");
+    let (task, _) = world.run(None, "ask", Some("reply"));
+    let run = snapshot(Origin::Task(task), None);
+    let rewrite = |world: &World, room: usize| {
+        let reader = Connection::open(world.scratch.db()).expect("reader");
+        let read = Snapshot::begin(&reader).expect("snapshot");
+        compact::rewrite(&read, &run, task, room).expect("read")
+    };
+    assert_eq!(rewrite(&world, 4096), None, "no summary to rewrite");
+    let events = world.events(task);
+    assert!(
+        world
+            .store
+            .store_summary(
+                task,
+                crate::store::Generation(0),
+                (events[0], events[1]),
+                "long",
+                None
+            )
+            .expect("stored")
+    );
+    let wrapper = item_bytes(&summary_item(events[0], events[1], ""));
+    assert_eq!(rewrite(&world, wrapper), None, "no room left");
+    let (found, limit) = rewrite(&world, wrapper + 100).expect("rewritten");
+    assert_eq!(limit, 100);
+    assert_eq!(
+        found.covers,
+        (events[0], events[1]),
+        "it covers what the summary did"
+    );
+    assert_eq!(found.built.sources, [task]);
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(
+                Role::Developer,
+                &format!(
+                    "Summary so far, of events {}–{}:\nlong",
+                    events[0].0, events[1].0
+                )
+            ),
+            message(
+                Role::Developer,
+                "Write the new summary now, in at most 100 bytes."
+            ),
+        ]
+    );
+    let (found, _) = rewrite(&world, usize::MAX / 2).expect("rewritten");
+    assert_eq!(
+        found.built.request.input[1],
+        message(
+            Role::Developer,
+            "Write the new summary now, in at most 8192 bytes."
+        ),
+        "the request never asks for more than the stored cap"
+    );
+}
+
+#[test]
+fn an_inline_answer_is_cut_where_its_escaped_text_reaches_the_allowance() {
+    assert_eq!(compact::fit_summary("ab\"c", 4), Some("ab\"".to_owned()));
+    assert_eq!(compact::fit_summary("\\\\\\", 3), Some("\\".to_owned()));
+    assert_eq!(
+        compact::fit_summary("line\nnext", 5),
+        Some("line".to_owned())
+    );
+    assert_eq!(compact::fit_summary("é\u{1}", 7), Some("é".to_owned()));
+    assert_eq!(compact::fit_summary("éé", 3), Some("é".to_owned()));
+    assert_eq!(compact::fit_summary("\"", 1), None);
+    assert_eq!(compact::fit_summary("  ", 10), None);
+    assert_eq!(
+        compact::fit_summary(&"s".repeat(compact::MAX_SUMMARY + 1), usize::MAX),
+        Some("s".repeat(compact::MAX_SUMMARY)),
+        "the stored cap still holds"
+    );
+}
+
+#[test]
+fn an_escaped_inline_rewrite_is_stored_and_the_next_build_fits() {
+    let mut world = world("compact-fit");
+    let (task, _) = world.run(None, "ask", Some("reply"));
+    let (_, current) = world.run(Some(task), "next", None);
+    let events = world.events(task);
+    let run = snapshot(Origin::Task(task), None);
+    let covers = (events[0], events[1]);
+    assert!(
+        world
+            .store
+            .store_summary(
+                task,
+                crate::store::Generation(0),
+                covers,
+                &"s".repeat(4000),
+                None
+            )
+            .expect("stored")
+    );
+    let stored = |world: &World| {
+        let reader = Connection::open(world.scratch.db()).expect("reader");
+        let read = Snapshot::begin(&reader).expect("snapshot");
+        Supplied {
+            summary: read.summary(task).expect("read"),
+            items: Vec::new(),
+        }
+    };
+    let full = world
+        .build(&run, (task, current), stored(&world), BOUND)
+        .expect("built");
+    let bound = request_bytes(&full.request) - 3000;
+    let Err(BuildError::TooLarge { room: Some(room) }) =
+        world.build(&run, (task, current), stored(&world), bound)
+    else {
+        panic!("the summary alone is over the bound");
+    };
+    let (found, allowance) = {
+        let reader = Connection::open(world.scratch.db()).expect("reader");
+        let read = Snapshot::begin(&reader).expect("snapshot");
+        compact::rewrite(&read, &run, task, room)
+            .expect("read")
+            .expect("rewritten")
+    };
+    let answer = "say \"hi\" \\ then\n".repeat(allowance / 8);
+    let fitted = compact::fit_summary(&answer, allowance).expect("fitted");
+    let encoded = serde_json::to_string(&fitted).expect("json").len() - 2;
+    assert_eq!(allowance, 1000, "the 4,000-byte summary is 3,000 over");
+    assert!(answer.starts_with(&fitted));
+    // Each 16-byte line escapes to 20, so 50 lines take the allowance; the last newline trims.
+    assert_eq!(encoded, 998);
+    assert_eq!(fitted.len(), 799);
+    assert!(
+        world
+            .store
+            .store_summary(task, found.generation, found.covers, &fitted, None)
+            .expect("stored")
+    );
+    let rebuilt = world
+        .build(&run, (task, current), stored(&world), bound)
+        .expect("the rewritten summary fits");
+    assert!(request_bytes(&rebuilt.request) <= bound);
 }

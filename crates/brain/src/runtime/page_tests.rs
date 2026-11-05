@@ -22,6 +22,13 @@ fn threads() -> PageOf {
     }
 }
 
+async fn queue_turn(turns: &mpsc::Sender<crate::runtime::Turn>, turn: u32, text: &str) {
+    turns
+        .send((turn, None, text.to_owned()))
+        .await
+        .expect("turn");
+}
+
 /// The main thread a reply to request 7 lists as a fresh store's only row.
 fn only_kumo(reply: DataToShell) -> ThreadId {
     let DataToShell::ThreadList {
@@ -61,9 +68,11 @@ fn exhausted_queue() -> RefCell<DataQueue> {
 
 #[test]
 fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
-    let mut coordinator = Coordinator::new(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
+    let mut coordinator =
+        Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
     coordinator
         .handle(Input::Turn {
+            turn: 1,
             thread: None,
             text: "go".to_owned(),
         })
@@ -166,6 +175,10 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one connection's credit, stop and reply sequence"
+)]
 async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let scratch = Scratch::new("page-credit");
     let mut brain = test_support::brain(&scratch, "5000 text later");
@@ -205,7 +218,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
             1,
             "without credit the reply stays queued"
         );
-        turns_tx.send((None, "go".to_owned())).await.expect("turn");
+        queue_turn(&turns_tx, 1, "go").await;
         let mut bytes = Vec::new();
         for _ in 0..4 {
             bytes = timeout(PATIENCE, control.recv())
@@ -219,9 +232,11 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         assert!(matches!(
             frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decode"),
             ControlToShell::RunState {
+                origin: Some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
                 run: RunId(1),
                 thread: ThreadId(2),
-                phase: Phase::Thinking
+                phase: Phase::Thinking,
+                ..
             }
         ));
         controls_tx
@@ -342,7 +357,7 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
         })
         .await
         .expect("both pages queued without credit");
-        turns_tx.send((None, "go".to_owned())).await.expect("turn");
+        queue_turn(&turns_tx, 1, "go").await;
         let mut states = Vec::new();
         while states.len() < 3 {
             let bytes = timeout(PATIENCE, control.recv())
@@ -365,10 +380,7 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
         queue.borrow_mut().grant(DATA_WINDOW);
         ready.notify_one();
         read_pages_and_text(&mut client, &title, &history, &expected).await;
-        turns_tx
-            .send((None, "later".to_owned()))
-            .await
-            .expect("turn");
+        queue_turn(&turns_tx, 2, "later").await;
         let bytes = timeout(PATIENCE, control.recv())
             .await
             .expect("state arrives")
@@ -511,7 +523,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         ThreadId(1),
         (ThreadId(1), RunId(0)),
         Vec::new(),
-        Box::new(Fixture::parse("").expect("fixture")),
+        crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
     )

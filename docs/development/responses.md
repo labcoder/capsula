@@ -96,7 +96,9 @@ no framing at all is refused, and so is anything but HTTP/1.1. The request sends
 `Accept-Encoding: identity`, and a head with any other Content-Encoding is refused, so no
 compressed bytes reach the framer or a reader. Header names and tokens match
 case-insensitively, lengths parse with checked arithmetic, and no peer-supplied length sizes an
-allocation. A body that ends inside its framing is `Truncated`.
+allocation. Chunk extensions must follow RFC 9112's grammar (`;name`, optionally `=token` or a
+quoted string) and each trailer must be a field line; both are then ignored. A body that ends
+inside its framing is `Truncated`.
 
 `budget` caps model requests for live checks: debug builds read `KUMOCHI_LIVE_BUDGET`, which
 `cargo xtask live` sets, and a value that isn't a count allows none. Release builds have no cap.

@@ -8,6 +8,7 @@ use kumochi_protocol::message::{
 };
 use rusqlite::{Connection, OptionalExtension as _};
 
+use super::context::{FirstAsk, Snapshot};
 use super::tests::{purge, raw_bytes};
 use super::{Generation, RunEnd, Store, StoreError, Swap, TitleSource, schema};
 use crate::test_support::Scratch;
@@ -539,4 +540,96 @@ fn a_deleted_tasks_title_and_model_leave_the_files_and_a_kept_choice_survives() 
         .map(|row| (row.id, row.choice.clone()))
         .collect();
     assert_eq!(choices, [(ThreadId(1), None), (kept, Some(kept_choice))]);
+}
+
+#[test]
+fn the_first_ask_reads_only_while_the_title_is_first_words_and_a_title_says_if_it_applied() {
+    let scratch = Scratch::new("first-ask");
+    let mut store = opened(&scratch);
+    let task = task(&mut store, "words");
+    let (_, run) = store.high_water().expect("ids");
+    store
+        .begin_turn(task, None, RunId(run.0 + 1), "later")
+        .expect("turn");
+    let read = |store: &Store, thread: ThreadId| {
+        let snapshot = Snapshot::begin(&store.conn).expect("snapshot");
+        let ask = snapshot.first_ask(thread).expect("read");
+        snapshot.end().expect("end");
+        ask
+    };
+    assert_eq!(
+        read(&store, task),
+        Some(FirstAsk {
+            generation: Generation(0),
+            text: "needle".to_owned(),
+        }),
+        "the first ask, not the latest"
+    );
+    let main = store.main_thread().expect("main");
+    assert_eq!(read(&store, main), None, "Kumo has no title job");
+    let model = ThreadTitle::new("Model").expect("valid");
+    assert!(
+        !store
+            .set_title(task, &model, TitleSource::Model(Generation(1)))
+            .expect("set"),
+        "another generation's title doesn't apply"
+    );
+    assert!(
+        store
+            .set_title(task, &model, TitleSource::Model(Generation(0)))
+            .expect("set"),
+        "the read's generation applies over first words"
+    );
+    assert_eq!(read(&store, task), None, "the title isn't first words now");
+    assert!(
+        !store
+            .set_title(task, &model, TitleSource::Model(Generation(0)))
+            .expect("set"),
+        "a model title replaces only first words"
+    );
+    assert!(
+        store
+            .set_title(task, &model, TitleSource::User)
+            .expect("set"),
+        "a user's title always applies"
+    );
+    assert!(
+        !store
+            .set_title(main, &model, TitleSource::User)
+            .expect("set"),
+        "Kumo's title stays empty"
+    );
+}
+
+#[test]
+fn titles_and_their_sources_survive_a_restart() {
+    let scratch = Scratch::new("title-restart");
+    let mut store = opened(&scratch);
+    let task = task(&mut store, "words");
+    drop(store);
+    let mut store = opened(&scratch);
+    assert_eq!(
+        title(&store, task),
+        Some(titled("words", "words")),
+        "a job that failed or was cancelled leaves the first words"
+    );
+    rename(
+        &mut store,
+        task,
+        "Model title",
+        TitleSource::Model(Generation(0)),
+    );
+    drop(store);
+    let mut store = opened(&scratch);
+    assert_eq!(title(&store, task), Some(titled("Model title", "model")));
+    rename(&mut store, task, "Mine", TitleSource::User);
+    let late = ThreadTitle::new("Late model").expect("valid");
+    assert!(
+        !store
+            .set_title(task, &late, TitleSource::Model(Generation(0)))
+            .expect("set")
+    );
+    drop(store);
+    let store = opened(&scratch);
+    assert_eq!(title(&store, task), Some(titled("Mine", "user")));
 }

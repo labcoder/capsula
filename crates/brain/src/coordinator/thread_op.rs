@@ -18,6 +18,7 @@ impl Coordinator {
                 thread,
                 title,
                 source: TitleSource::User,
+                job: None,
             },
             ThreadOp::SetModel { thread, choice } => StoreOp::SetModel { thread, choice },
         };

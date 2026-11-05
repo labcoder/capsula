@@ -7,9 +7,11 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp};
+use super::availability::sign_in_needed;
+use super::inline::Inline;
+use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
-use crate::engines::RunRequest;
+use crate::engines::{DRAW, RunRequest};
 use crate::store::Failure;
 
 /// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
@@ -69,8 +71,12 @@ impl ContextBuilt {
 /// Why a build made no request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unbuilt {
-    /// Even the current turn is over the request's bound.
-    TooLarge,
+    /// Over the request's bound. `room` is what the bound leaves for the thread's summary after
+    /// the current turn, when the turn fits without it.
+    TooLarge {
+        /// Bytes left for a summary; `None` when the current turn alone doesn't fit.
+        room: Option<usize>,
+    },
     /// The read failed, or the stored thread couldn't be built.
     Failed,
 }
@@ -85,13 +91,39 @@ pub(super) struct Build {
     /// A voided build's rebuild waits until these deletes are answered.
     blocked: BTreeSet<ThreadId>,
     admitted: bool,
+    /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
+    offers_draw: bool,
     /// The admitted request's sources, checked again before each send.
     sources: Vec<ThreadId>,
+    /// An inline compaction's progress; `None` for a normal build.
+    pub(super) inline: Option<Inline>,
 }
 
 impl Build {
+    pub(super) fn new(key: BuildKey, exposed: BTreeSet<ThreadId>, inline: Option<Inline>) -> Self {
+        Self {
+            key,
+            exposed,
+            blocked: BTreeSet::new(),
+            admitted: false,
+            offers_draw: false,
+            sources: Vec::new(),
+            inline,
+        }
+    }
+
+    /// Admits the request that carries `sources`.
+    pub(super) fn admit(&mut self, sources: Vec<ThreadId>) {
+        self.admitted = true;
+        self.sources = sources;
+    }
+
     pub(super) fn admitted(&self) -> bool {
         self.admitted
+    }
+
+    pub(super) fn offers_draw(&self) -> bool {
+        self.offers_draw
     }
 
     pub(super) fn key(&self) -> BuildKey {
@@ -127,13 +159,7 @@ impl Coordinator {
         let Ok(current) = self.current(run) else {
             return;
         };
-        current.build = Some(Build {
-            key,
-            exposed,
-            blocked: BTreeSet::new(),
-            admitted: false,
-            sources: Vec::new(),
-        });
+        current.build = Some(Build::new(key, exposed, None));
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             key,
             thread: current.thread,
@@ -145,6 +171,7 @@ impl Coordinator {
 
     /// A delete was accepted: the current build may have read its thread.
     pub(super) fn expose(&mut self, thread: ThreadId) {
+        self.expose_job(thread);
         if let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) {
             build.exposed.insert(thread);
         }
@@ -180,33 +207,58 @@ impl Coordinator {
         let pending = self.pending_deletes();
         let main = self.main_thread;
         let current = self.current(key.run)?;
-        if !current
-            .build
-            .as_ref()
-            .is_some_and(|build| build.key == key && !build.admitted && build.blocked.is_empty())
-        {
+        if !current.build.as_ref().is_some_and(|build| {
+            build.key == key
+                && !build.admitted
+                && build.blocked.is_empty()
+                && build.inline.is_none()
+        }) {
             return Err(Stale);
         }
-        let made = match result {
-            Ok(made) => made,
-            Err(Unbuilt::TooLarge) => return self.fail(key.run, Failure::Budget, effects),
-            Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
-        };
+        let first = current.snapshot.is_none();
         if let Some(snapshot) = snapshot {
             current.snapshot.get_or_insert(snapshot);
         }
+        let made = match result {
+            Ok(made) => Ok(made),
+            Err(Unbuilt::TooLarge { room: Some(room) }) => Err(room),
+            Err(Unbuilt::TooLarge { room: None }) => {
+                return self.fail(key.run, Failure::Budget, effects);
+            }
+            Err(Unbuilt::Failed) => return self.fail(key.run, Failure::Store, effects),
+        };
+        let choice = current
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.clone());
+        let refused = match current.connection {
+            Some(connection) => self.refusal(connection),
+            None => Some(sign_in_needed()),
+        }
+        .or_else(|| first.then(|| self.unlisted(choice.as_ref())).flatten());
+        if let Some(reason) = refused {
+            return self.fail_with(key.run, Failure::Engine, reason, effects);
+        }
+        let made = match made {
+            Ok(made) => made,
+            Err(room) => return self.compact_inline(key, room, effects),
+        };
+        let offers_draw =
+            made.request.tools.iter().any(|tool| tool.name == DRAW) || self.trusted_draw();
+        let current = self.current(key.run)?;
         let thread = current.thread;
         let build = current.build.as_mut().expect("the build was just matched");
+        build.offers_draw = offers_draw;
         let voided = build.voided(&made.sources);
         if !voided.is_empty() {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.admitted = true;
-        build.sources = made.sources;
+        build.admit(made.sources);
+        current.compacted = None;
         effects.push(Effect::StartEngine {
             request: RunRequest {
-                key,
+                key: SendKey::Build(key),
                 run: key.run,
                 thread,
                 origin: origin(thread, main),
@@ -238,7 +290,7 @@ impl Coordinator {
 }
 
 /// A run's origin comes from its thread, never from anything a model produced.
-fn origin(thread: ThreadId, main: ThreadId) -> Origin {
+pub(super) fn origin(thread: ThreadId, main: ThreadId) -> Origin {
     if thread == main {
         Origin::Kumo
     } else {

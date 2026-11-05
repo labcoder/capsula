@@ -5,17 +5,7 @@ use std::fmt::Write as _;
 const CSV_HEADER: &str = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
 
 fn directory() -> std::path::PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "{}-receipt-test-{}-{stamp}",
-        kumochi_protocol::constants::OBJECT_PREFIX,
-        std::process::id()
-    ));
-    fs::create_dir(&directory).unwrap();
-    directory
+    crate::scratch::dir("receipt-test")
 }
 
 #[test]
