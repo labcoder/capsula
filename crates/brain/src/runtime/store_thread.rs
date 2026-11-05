@@ -597,13 +597,13 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         }
         StoreOp::CommitCall(call) => {
             purger.op_arriving();
-            let committed = match store.reconnect().and_then(|()| store.commit_call(&call)) {
-                Ok(committed) => committed,
-                Err(_) => {
+            let committed = store
+                .reconnect()
+                .and_then(|()| store.commit_call(&call))
+                .unwrap_or_else(|_| {
                     tracing::warn!("a tool call wasn't stored");
                     false
-                }
-            };
+                });
             answer(
                 acks,
                 Input::CallCommitted {
