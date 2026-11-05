@@ -93,7 +93,7 @@ fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
 }
 
 #[test]
-fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_connection() {
+fn speech_controls_reach_the_coordinator_and_an_output_rate_out_of_bounds_ends_the_connection() {
     use kumochi_protocol::message::{Cursor, OutputGeneration, SegmentId};
     let (run, segment) = (RunId(1), SegmentId(2));
     for (rate, ok) in [
@@ -107,7 +107,10 @@ fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_conn
             generation: OutputGeneration(1),
         };
         let expected = if ok {
-            Ok(None)
+            Ok(Some(Input::AudioOutput {
+                rate,
+                generation: OutputGeneration(1),
+            }))
         } else {
             Err(super::Ended::Broken("an output rate out of bounds"))
         };
@@ -117,25 +120,43 @@ fn speech_controls_change_nothing_and_an_output_rate_out_of_bounds_ends_the_conn
             "{rate} Hz"
         );
     }
-    for message in [
-        ControlToBrain::SpeechProgress {
-            run,
-            segment,
-            sample: 3,
-            t_qpc: 4,
-        },
-        ControlToBrain::SpeechStopped { run, cursor: None },
-        ControlToBrain::SpeechStopped {
-            run,
-            cursor: Some(Cursor { segment, sample: 5 }),
-        },
-        ControlToBrain::SegmentPlayed {
-            run,
-            segment,
-            samples: 6,
-        },
+    let cursor = Some(Cursor { segment, sample: 5 });
+    for (message, input) in [
+        (
+            ControlToBrain::SpeechProgress {
+                run,
+                segment,
+                sample: 3,
+                t_qpc: 4,
+            },
+            Input::SpeechProgress {
+                run,
+                segment,
+                sample: 3,
+            },
+        ),
+        (
+            ControlToBrain::SpeechStopped { run, cursor: None },
+            Input::SpeechStopped { run, cursor: None },
+        ),
+        (
+            ControlToBrain::SpeechStopped { run, cursor },
+            Input::SpeechStopped { run, cursor },
+        ),
+        (
+            ControlToBrain::SegmentPlayed {
+                run,
+                segment,
+                samples: 6,
+            },
+            Input::SegmentPlayed {
+                run,
+                segment,
+                samples: 6,
+            },
+        ),
     ] {
-        assert_eq!(super::controls::control_input(message), Ok(None));
+        assert_eq!(super::controls::control_input(message), Ok(Some(input)));
     }
 }
 

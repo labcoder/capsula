@@ -7,10 +7,10 @@ use std::fmt;
 
 use kumochi_protocol::message::{Content, RunId, ThreadId};
 
-use super::{Coordinator, Effect, Notify, Stale, StoreOp, unstored};
+use super::{Coordinator, Effect, Stale, StoreOp, unstored};
 use crate::context::{BOUND, ConnectionTag};
 use crate::engines::{CallId, Opaque};
-use crate::store::{Failure, RunEnd};
+use crate::store::Failure;
 
 /// The most model rounds one run may have [guess, from §13b].
 pub const MAX_ROUNDS: u32 = 8;
@@ -132,9 +132,7 @@ impl Coordinator {
             return self.fail(run, Failure::Budget, effects);
         }
         if !calling && current.tools.items.is_empty() {
-            let done = self.take(run)?;
-            self.end(done, RunEnd::Done, None, Notify::Shell, effects);
-            return Ok(());
+            return self.complete(run, effects);
         }
         let Some(connection) = current.connection else {
             return self.fail(run, Failure::Engine, effects);
@@ -178,8 +176,7 @@ impl Coordinator {
             return Ok(());
         }
         if last {
-            let done = self.take(run)?;
-            self.end(done, RunEnd::Done, None, Notify::Shell, effects);
+            self.complete(run, effects)?;
         } else {
             self.build(run, round + 1, effects);
         }

@@ -159,6 +159,7 @@ impl Coordinator {
             }
             rest = tail;
         }
+        self.spoken_text(run, delta, effects);
         Ok(())
     }
 

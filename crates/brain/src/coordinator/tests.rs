@@ -29,6 +29,8 @@ mod jobs;
 mod leases;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "speech_tests.rs"]
+mod speech;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
 #[path = "tools_tests.rs"]
@@ -245,6 +247,27 @@ fn failed_store() -> Effect {
 /// and its turn stored.
 fn started() -> Coordinator {
     let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    admit(&mut core, R);
+    core
+}
+
+/// Run 10 started in a new thread 4, admitted while spoken replies are loaded and the shell has
+/// a 24 kHz output.
+fn spoken() -> Coordinator {
+    let mut core = fresh();
+    core.handle(Input::AudioOutput {
+        rate: 24_000,
+        generation: kumochi_protocol::message::OutputGeneration(1),
+    })
+    .expect("never stale");
+    core.handle(Input::SpokenReplies { loaded: true })
+        .expect("never stale");
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
