@@ -16,7 +16,7 @@ pub(super) struct SettingsPanel {
     pub(super) view: Entity<SettingsView>,
     visible: bool,
     focused: bool,
-    bounds: [i32; 4],
+    pub(super) bounds: [i32; 4],
     previous: Option<Foreground>,
     activation: Option<Subscription>,
 }

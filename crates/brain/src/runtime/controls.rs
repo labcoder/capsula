@@ -98,6 +98,10 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             tracing::debug!(op = message.op(), "speech control ignored");
             None
         }
+        message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue(_)) => {
+            tracing::debug!(op = message.op(), "github or issue control ignored");
+            None
+        }
         // shortcut: nothing answers Connection or Warm until A1, C2 and C5b build them.
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
@@ -115,6 +119,11 @@ impl Brain {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
         if let ControlToBrain::AccountOp(op) = message {
             let applied = self.account_input(AccountInput::Op(op), None);
+            debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+            return;
+        }
+        if let ControlToBrain::Connection(op) = message {
+            let applied = self.connection_op(op, None);
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
             return;
         }
@@ -157,6 +166,11 @@ impl Brain {
         }
         if let ControlToBrain::AccountOp(op) = message {
             self.account_input(AccountInput::Op(op), Some(link))
+                .map_err(|Full| Ended::Lost)?;
+            return Ok(None);
+        }
+        if let ControlToBrain::Connection(op) = message {
+            self.connection_op(op, Some(link))
                 .map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }

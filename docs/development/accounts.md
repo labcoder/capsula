@@ -1,5 +1,41 @@
 # Accounts
 
+## Anthropic API key
+
+The shell staging helper validates and trims a pasted API key, then writes it to
+Credential Manager. Its caller must run it on a background worker and send only
+`AnthropicKeyStaged` after success; the Accounts UI wiring lands separately.
+The key never crosses the pipe or enters a file, log, command line or environment variable.
+Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
+credential, never another app's key.
+
+Windows stores the staging and active records as `anthropic-key-staged.{service}` and
+`anthropic-key.{service}`, where the service is the product's debug or release credential
+service. These are keyring's exact target spelling, not the ChatGPT vault's slash targets.
+The brain's existing credential worker adopts a validated staged key, attempts staging
+deletion on every outcome, and resolves leftover staging at startup. An explicit adoption
+retries an absent staging read four times, 25 ms apart; if it stays absent, it loads the saved
+key instead of reporting a malformed paste, so duplicate submissions keep their saved state.
+Remove attempts both deletions and reports failure until both are verified absent. All work
+shares the vault's session lock; a cancelled waiter never interrupts an in-flight operation.
+
+The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
+`Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
+a 1 MiB body bound and a 15-second whole-check deadline. More than 64 entries or `has_more`
+refuses the catalog. A successful catalog is tagged AnthropicKey; 401/403 rejects the saved key,
+as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` token
+(`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
+server, transport or catalog failures keep it Unconfirmed for a later Check.
+Every change fences late worker/HTTP replies
+by generation and clears the old catalog. Catalog checks do not authorize inference or
+automatic fallback to another connection. Fixtures are synthetic API-reference examples;
+no live provider call is part of the tests.
+
+The ignored `dev_keyring_staging_round_trip` test runs the shell's actual staging helper
+against the native vault on Rez with a dummy value. It requires the Dev identity and unused
+Dev key names, refuses to overwrite an existing key, and removes both records on success or
+panic unwinding. A terminated test can leave only its dummy Dev credential behind.
+
 ## Stored namespaces and credential names
 
 `protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
@@ -9,15 +45,18 @@ itself is built in debug. Stored spellings are unchanged; there is no migration.
 
 The raw account vault uses `account_target(service, entry)` and the bounded
 `account_targets(service)` inventory: host, sign-out marker, chatgpt/revoke manifests,
-and each record's two slots of 64 chunks. These are 260 exact targets, not a service-prefix
-match. A new credential producer must extend this inventory with its actual stored names.
+and each record's two slots of 64 chunks, plus the active and staged Anthropic targets in
+their dot form. These are 262 exact targets, not a service-prefix match. A new credential
+producer must extend this inventory with its actual stored names.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
 `capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
 On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
 `capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
 target is not an account and must not be fed directly to the account parser. Existing
-callers retain keyring's default mapping; they do not switch to custom targets.
+instance callers retain keyring's default mapping. Anthropic staging instead passes the
+shared `anthropic_staging_target` explicitly to `Entry::new_with_target`; the brain and
+purge inventory use the same helper, so a keyring default change cannot separate them.
 
 ## Sign-in callback
 
@@ -431,17 +470,28 @@ sequenceDiagram
 
 | Provider answer | Recovery | Shown |
 | --- | --- | --- |
-| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused` | sign in again | `SessionEnded`, Sign in |
-| `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable`, other codes with 429 or 5xx | retry later | `AccountOffline`, Retry |
-| `subscription_sharing_user_not_eligible` | unavailable | `PlanUnavailable` |
-| `invalid_client`, `chatpass_v2_*`, other codes | fix the request | `AccountMisconfigured` |
+| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused` on a 4xx | sign in again | `SessionEnded`, Sign in |
+| `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable` on a 4xx, any other code on a 429 | retry later | `AccountOffline`, Retry |
+| `subscription_sharing_user_not_eligible` on a 4xx | unavailable | `PlanUnavailable` |
+| `invalid_client`, `chatpass_v2_scope_not_authorized`, `chatpass_v2_invalid_authorization_context` on a 4xx | fix the request | `AccountMisconfigured` |
+| any other code on a 4xx other than 429 | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
 | connection never opened | nothing sent | `AccountOffline`, Retry |
-| timeout, transport failure, untyped 5xx | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
-| malformed, oversized or untyped 4xx reply | unknown | `outcome_unknown` set, `SessionEnded`, Sign in |
+| timeout, transport failure, a panicked refresh task | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
+| any 5xx, typed or not; a malformed, oversized or untyped 4xx | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
 
-Every row but the first keeps the credentials; the two unknown rows keep them only for sign-out
-to revoke. A typed refusal or a connection that never opened issued nothing, so it clears the
-pending flag without setting `outcome_unknown`, and clears the sent mark.
+The refresh parser reads an OAuth code only from a 4xx, so every 5xx is an unknown outcome here,
+even though a plan request's 5xx asks for a retry. Only the first row deletes credentials: the
+registration-only save happens only when the provider names the session as ended. The unknown
+rows keep the set exactly as it was, marked as sent, so it's never sent again and stays for a
+sign-in's Commit or the sign-out to revoke; an unlisted code isn't evidence that nothing was
+issued. `RenewalUnconfirmed` ends the session like `SessionEnded`, but says the renewal may have
+gone through unconfirmed rather than that ChatGPT ended it. The account keeps that reason with
+the generation it ended, so a run's failure and the next task's refusal say the same, and it
+sends the shell that error once before the view, since the view alone only says to sign in
+again and a catalog read that asked may be cancelled; after a
+restart, a set still marked as sent reads as `RenewalUnconfirmed`. A listed refusal or a
+connection that never opened issued nothing, so it clears the pending flag without setting
+`outcome_unknown`, and clears the sent mark.
 
 **Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
 at once: the attempt moves, the listener closes, the account leaves memory, and the view is

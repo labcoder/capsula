@@ -173,6 +173,16 @@ impl Worker<NativeCredentialStore> {
 }
 
 impl<S: CredentialStore> Worker<S> {
+    pub(crate) fn anthropic(
+        &mut self,
+        op: crate::connections::anthropic::KeyOp,
+    ) -> Result<
+        Option<Secret<crate::connections::anthropic::key::AnthropicKey>>,
+        crate::connections::anthropic::KeyError,
+    > {
+        self.vault.as_mut().ok_or(VaultError::Busy)?.anthropic(op)
+    }
+
     /// A worker that opens its vault with `open` and stamps revocation entries with `clock`.
     pub fn new(
         open: Box<dyn FnMut() -> Result<Vault<S>, VaultError> + Send>,

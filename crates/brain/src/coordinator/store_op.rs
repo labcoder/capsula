@@ -61,6 +61,8 @@ pub enum StoreOp {
         /// The step.
         step: Step,
     },
+    /// A round's text, native items and results.
+    RoundItems(super::RoundItems),
     /// The text streamed since the last write, the revealed set, then the run's outcome.
     EndRun {
         /// The thread.
@@ -121,7 +123,7 @@ pub enum StoreOp {
         /// The model that wrote it; `None` when the engine took none.
         model: Option<String>,
     },
-    /// Store a live thread's model and effort. Nothing answers it.
+    /// Store a live thread's model and effort; `ModelSet` answers the result.
     SetModel {
         /// The thread.
         thread: ThreadId,
@@ -151,6 +153,7 @@ impl StoreOp {
             | Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
+            Self::RoundItems(round) => Some(round.run),
             Self::Drawing { .. }
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
@@ -165,9 +168,9 @@ impl StoreOp {
         }
     }
 
-    /// Answers an operation that couldn't reach the store; `None` for one nothing waits on.
-    pub fn failed(&self) -> Option<Input> {
-        Some(match self {
+    /// Answers an operation that couldn't reach the store.
+    pub fn failed(&self) -> Input {
+        match self {
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),
@@ -201,6 +204,7 @@ impl StoreOp {
             Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
             | Self::EndRun { run, .. } => Input::StoreFailed { run: *run },
+            Self::RoundItems(round) => Input::StoreFailed { run: round.run },
             Self::ClearScenes { scenes } => Input::ScenesCleared {
                 scenes: scenes.clone(),
                 ok: false,
@@ -214,7 +218,11 @@ impl StoreOp {
                 outcome: Deleted::NotHidden,
                 last_run: None,
             },
-            Self::SetModel { .. } => return None,
-        })
+            Self::SetModel { thread, choice } => Input::ModelSet {
+                thread: *thread,
+                choice: choice.clone(),
+                applied: false,
+            },
+        }
     }
 }

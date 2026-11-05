@@ -33,9 +33,9 @@ pub(crate) enum BodyError {
     /// The request names no model, because no catalog had been read.
     #[error("the request names no model")]
     NoModel,
-    /// A stored reasoning item isn't JSON.
-    #[error("a stored reasoning item isn't JSON")]
-    Reasoning,
+    /// A stored native item isn't JSON.
+    #[error("a stored native item isn't JSON")]
+    Native,
     /// The serialised body is over the request's bound.
     #[error("the request body is over its size bound")]
     TooLarge,
@@ -104,8 +104,8 @@ fn input_item(item: &InputItem) -> Result<Value, BodyError> {
             "output": output,
         }),
         // Parsed only to be sent back as the same JSON value; it's never read or logged.
-        InputItem::Reasoning(item) => {
-            serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Reasoning)?
+        InputItem::Native(item) => {
+            serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?
         }
     })
 }

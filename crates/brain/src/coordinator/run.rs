@@ -58,6 +58,10 @@ impl Coordinator {
         }
         match event {
             TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
+            // Charged before anything of the call is kept (D13-M2).
+            TurnEvent::ToolCallStarted { .. } if !current.tools.charge() => {
+                self.fail(run, Failure::Budget, effects)?;
+            }
             // A draw the request didn't offer has no effect (D13-H2).
             TurnEvent::ToolCallStarted {
                 call,
@@ -75,29 +79,42 @@ impl Coordinator {
                     ready: false,
                 });
             }
-            // shortcut: one draw call per run and no other tool, since nothing answers a call;
-            // the tool loop (slice 3's PR 13b) answers every call.
-            TurnEvent::ToolCallStarted { .. } => self.fail(run, Failure::Engine, effects)?,
+            // Every other call keeps nothing but its id, and gets the unknown-tool result.
+            TurnEvent::ToolCallStarted { call, .. } => {
+                if current.draw.as_ref().is_some_and(|draw| draw.call == call)
+                    || !current.tools.open(call)
+                {
+                    self.fail(run, Failure::Engine, effects)?;
+                }
+            }
+            TurnEvent::ToolArgsDelta { call, .. } if current.tools.takes(&call) => {}
             TurnEvent::ToolArgsDelta { call, delta } => {
                 self.draw_delta(run, &call, &delta, effects)?;
+            }
+            TurnEvent::ToolCallReady { call, .. } if current.tools.takes(&call) => {
+                current.tools.ready(&call);
             }
             TurnEvent::ToolCallReady { call, args } => {
                 self.draw_ready(run, &call, &args, effects)?;
             }
-            // Native items have no reader until the tool loop stores them, and nothing records
-            // usage yet.
-            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
-            // shortcut: a completed round ends the run, draw call and all, which only the fixture
-            // adapter's draw-only rounds rely on; the tool loop answers the call and goes on.
+            TurnEvent::OutputItem { index, item } => {
+                if !current.tools.keep(index, item) {
+                    self.fail(run, Failure::Budget, effects)?;
+                }
+            }
+            // Nothing records usage yet.
+            TurnEvent::Usage(_) => {}
+            TurnEvent::Finished(Finish::Completed) if !current.tools.all_ready() => {
+                self.fail(run, Failure::Engine, effects)?;
+            }
+            // shortcut: the offered draw call gets no result and ends its round's loop, which
+            // only the fixture's draw-only rounds rely on until B10 offers draw to a model.
             TurnEvent::Finished(Finish::Completed)
                 if current.acked < current.steps || drawing_pending =>
             {
                 current.finishing = true;
             }
-            TurnEvent::Finished(Finish::Completed) => {
-                let done = self.take(run)?;
-                self.end(done, RunEnd::Done, None, Notify::Shell, effects);
-            }
+            TurnEvent::Finished(Finish::Completed) => self.round_end(run, effects)?,
             // Only the coordinator interrupts a run, so an engine's interruption fails it too.
             TurnEvent::Finished(finish) => {
                 let connection = current.connection;
@@ -345,9 +362,12 @@ impl Coordinator {
                 step,
             }));
         }
-        if found.finishing && found.acked == found.steps && !self.drawing.pending_for(run) {
-            let done = self.take(run)?;
-            self.end(done, RunEnd::Done, None, Notify::Shell, effects);
+        if found.finishing
+            && !found.tools.writing()
+            && found.acked == found.steps
+            && !self.drawing.pending_for(run)
+        {
+            self.round_end(run, effects)?;
         }
         Ok(())
     }

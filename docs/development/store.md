@@ -21,7 +21,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 |---|---|
 | `threads` | Title, timestamps, `state` (`live` or `deleting`), `deletion_generation`, `kind` (`main` or `thread`), `title_source` (`words`, `model` or `user`), and the nullable `model` and `effort`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted |
-| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`, and a model round's `output_item` and `tool_result`, whose JSON `body` holds the native item with its connection, or the call id and its result, with no searchable text), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 | `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. A deleted task's summaries go in the deletion's second transaction, and the purge clears their leftover copies like the events'. Version 4 |
@@ -102,7 +102,11 @@ rows read as `thread` and `words` with no model:
   title isn't first words. A later `BeginTurn` on an existing thread never touches its title or
   source. Neither a rename nor a model choice moves the thread in the list.
 - **Model choice.** `SetModel` stores a live thread's `model` and `effort`; a hidden or missing
-  thread changes nothing.
+  thread changes nothing. The worker answers `ModelSet` only after the write, echoing the
+  thread and exact choice with `applied=true` when a live row matched. Hidden, missing or
+  unrepresentable ids, failed writes and operations refused before reaching the store answer
+  `applied=false`. The coordinator forwards that result as `ThreadModelSet`; a later write
+  cannot change an earlier result. Write failures log only fixed text.
 - **Deletion and the purge.** The four columns live in the `threads` row, so deleting a task's row
   removes them with it, and the purge's `VACUUM INTO` copy carries the kept rows' columns over
   unchanged. No table is added, so `store::delete`'s table list and the remnants scan need nothing

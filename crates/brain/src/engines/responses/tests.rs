@@ -46,7 +46,7 @@ fn the_body_is_the_request_as_data() {
             role: Role::User,
             text: "Draw \"a\"".to_owned(),
         },
-        InputItem::Reasoning(Opaque::new(reasoning.to_vec()).expect("small")),
+        InputItem::Native(Opaque::new(reasoning.to_vec()).expect("small")),
         InputItem::FunctionCall {
             call: call_id("call_1"),
             name: "draw".to_owned(),
@@ -129,14 +129,8 @@ fn a_request_with_no_model_is_refused() {
 #[test]
 fn a_stored_reasoning_item_that_isnt_json_is_refused() {
     for bad in [&b""[..], b"{\"type\":", b"not json"] {
-        let input = vec![InputItem::Reasoning(
-            Opaque::new(bad.to_vec()).expect("small"),
-        )];
-        assert_eq!(
-            body(&request("", input)),
-            Err(BodyError::Reasoning),
-            "{bad:?}"
-        );
+        let input = vec![InputItem::Native(Opaque::new(bad.to_vec()).expect("small"))];
+        assert_eq!(body(&request("", input)), Err(BodyError::Native), "{bad:?}");
     }
 }
 

@@ -61,6 +61,47 @@ fn commit(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> Vec<
     .expect("matching acknowledgement")
 }
 
+/// A round that completes while its drawing is still being stored ends through the tool loop,
+/// so its call is answered and its items stored before anything else.
+#[test]
+fn a_round_completed_behind_a_drawing_still_answers_its_calls() {
+    let scratch = Scratch::new("drawing-round");
+    let mut store = open(&scratch);
+    let mut core = started();
+    let lookup = draw(&mut core);
+    let call = CallId::new("tool-1").expect("call");
+    for event in [
+        TurnEvent::ToolCallStarted {
+            call: call.clone(),
+            name: crate::engines::ToolName::Unknown,
+        },
+        TurnEvent::ToolCallReady {
+            call: call.clone(),
+            args: "{}".to_owned(),
+        },
+        TurnEvent::Finished(Finish::Completed),
+    ] {
+        core.handle(Input::Engine { run: R, event })
+            .expect("current");
+    }
+    let first = commit(&mut core, &mut store, &lookup);
+    let second = commit(&mut core, &mut store, &first);
+    let last = commit(&mut core, &mut store, &second);
+    let writes: Vec<_> = last
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::RoundItems(round)) => Some(round.calls.clone()),
+            Effect::Store(StoreOp::EndRun { .. }) => Some(Vec::new()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        writes,
+        [vec![call]],
+        "the round's write, and no outcome yet"
+    );
+}
+
 #[test]
 fn provider_completion_waits_for_the_accepted_drawing_prefix() {
     let scratch = Scratch::new("drawing-completion");

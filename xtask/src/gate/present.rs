@@ -122,9 +122,10 @@ fn parse_row(line: &str, expected_pid: u32, csv_row: usize) -> Result<SeedSource
     unsigned(&fields[5])?;
     let dropped = bit(&fields[6])?;
     bit(&fields[10])?;
-    for index in [7, 8, 12, 15, 16, 17] {
+    for index in [7, 8, 12, 15, 17] {
         decimal(&fields[index])?;
     }
+    signed_decimal(&fields[16])?;
     let display_after_ms = optional_interval(&fields[13])?.filter(|value| *value > 0.0);
     let qpc = i64::try_from(unsigned(&fields[18])?)?;
     ensure!(qpc > 0, "invalid raw PresentMon QPC");
@@ -186,6 +187,15 @@ fn decimal(value: &str) -> Result<f64> {
         "invalid PresentMon timing"
     );
     Ok(number)
+}
+
+fn signed_decimal(value: &str) -> Result<f64> {
+    let magnitude = decimal(value.strip_prefix('-').unwrap_or(value))?;
+    Ok(if value.starts_with('-') {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 fn csv_fields(line: &str) -> Result<Vec<String>> {
@@ -593,6 +603,67 @@ mod tests {
     }
 
     #[test]
+    fn accepts_negative_render_start_without_changing_present_or_display_endpoints() {
+        let text = csv(
+            "app.exe,35620,0x00000219B0B418E0,DXGI,0,0,0,0.33896090000000,0.09260000000000,9.50300000000000,0,Composed: Flip,0.46690000000000,11.69600000000000,6.94230000000000,0.00000000000000,-8.81940000000000,0.36800000000000,491958575952\r\n",
+        );
+        let mut parsed = parse(&text, 35620).unwrap();
+        assert_eq!(parsed.rows().len(), 1);
+        assert_eq!(
+            parsed.rows()[0],
+            Present {
+                qpc: 491_958_575_952,
+                swapchain: 0x0219_B0B4_18E0,
+                dropped: false,
+                display_after_ms: Some(11.696),
+            }
+        );
+        assert_eq!(
+            parsed.join(
+                0x0219_B0B4_18E0,
+                491_958_575_951,
+                491_958_575_953,
+                10_000_000
+            ),
+            Join::Displayed {
+                present_qpc: 491_958_575_952,
+                displayed_qpc: 491_958_692_912,
+            }
+        );
+    }
+
+    #[test]
+    fn signed_render_start_keeps_other_timings_and_decimal_syntax_strict() {
+        let valid = row(1000, 10, Presented, "1");
+        let fields: Vec<_> = valid.trim_end().split(',').collect();
+        for index in [7, 8, 9, 12, 13, 14, 15, 17] {
+            let mut fields = fields.clone();
+            fields[index] = "-1.0";
+            assert!(
+                parse(&csv(&format!("{}\r\n", fields.join(","))), 35620).is_err(),
+                "column {index} remains nonnegative"
+            );
+        }
+        for value in [
+            "", "-", "--1", "+1", "-+1", "-NaN", "-inf", "-1e3", "-.", "-1.2.3", " -1", "-1 ",
+        ] {
+            let mut fields = fields.clone();
+            fields[16] = value;
+            assert!(
+                parse(&csv(&format!("{}\r\n", fields.join(","))), 35620).is_err(),
+                "invalid render start {value:?}"
+            );
+        }
+        let mut fields = fields.clone();
+        let overflow = format!("-{}", "9".repeat(400));
+        fields[16] = &overflow;
+        assert!(
+            parse(&csv(&format!("{}\r\n", fields.join(","))), 35620).is_err(),
+            "render start must remain finite"
+        );
+    }
+
+    #[test]
     fn actual_bom_header_uses_raw_qpc_and_retains_dropped() {
         let text = csv(&[
             row(2_215_640_628_595, 0x277_660D_D170, Presented, "13.2356"),
@@ -618,6 +689,19 @@ mod tests {
             parse(&mixed_pid, 35620).is_err(),
             "later PID must match too"
         );
+    }
+
+    #[test]
+    fn render_start_may_precede_the_present_but_stays_a_number() {
+        let valid = csv(&row(1000, 10, Presented, "1"));
+        assert!(parse(&valid.replace(",0.3765,", ",-13.5436,"), 35620).is_ok());
+        for bad in [",--1,", ",-,", ",-NaN,", ",1-,"] {
+            assert!(
+                parse(&valid.replace(",0.3765,", bad), 35620).is_err(),
+                "must reject {bad}"
+            );
+        }
+        assert!(parse(&valid.replace(",0.7355,", ",-0.7355,"), 35620).is_err());
     }
 
     #[test]

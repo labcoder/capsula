@@ -7,8 +7,8 @@ use kumochi_protocol::message::{EventId, ModelChoice, RunId, ThreadId, ThreadKin
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::threads::{choice_of, kind_of};
-use super::{Generation, StoreError, row_id, sql_id};
-use crate::context::Summary;
+use super::{Generation, StoreError, rounds, row_id, sql_id};
+use crate::context::{Body, Item, Summary};
 
 /// A thread as a reference finds it.
 #[derive(Clone, PartialEq, Eq)]
@@ -150,49 +150,52 @@ impl Snapshot<'_> {
         Ok(found)
     }
 
-    /// The thread's messages after `after`, oldest first. It reads newest first and stops at the
-    /// first run boundary past `budget` bytes, since older runs couldn't fit the request.
+    /// The thread's conversation after `after`, oldest first: its messages and its stored rounds'
+    /// items and results. It reads newest first and stops at the first run boundary past
+    /// `budget` bytes, since older runs couldn't fit the request.
     ///
     /// # Errors
-    /// Fails when SQLite fails or a stored row is malformed.
+    /// Fails when SQLite fails or a stored row is malformed or over its bound.
     pub(crate) fn conversation(
         &self,
         thread: ThreadId,
         after: Option<EventId>,
         budget: usize,
-    ) -> Result<Vec<Said>, StoreError> {
+    ) -> Result<Vec<Item>, StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
         let after = after.map_or(Ok(0), |id| sql_id(id.0, StoreError::Read))?;
         let mut statement = self.0.prepare(
-            "SELECT id, run, kind, coalesce(text, '') FROM events
+            "SELECT id, run, kind, coalesce(text, ''), coalesce(body, '') FROM events
              WHERE thread = ?1 AND id > ?2 AND run IS NOT NULL
-             AND kind IN ('user', 'assistant_text') ORDER BY id DESC",
+             AND kind IN ('user', 'assistant_text', 'output_item', 'tool_result')
+             ORDER BY id DESC",
         )?;
         let mut rows = statement.query(params![thread, after])?;
-        let mut said: Vec<Said> = Vec::new();
+        let mut items: Vec<Item> = Vec::new();
         let mut bytes = 0_usize;
         while let Some(row) = rows.next()? {
             let run = RunId(row_id(row.get(1)?));
-            if bytes > budget && said.last().is_some_and(|last| last.run != run) {
+            if bytes > budget && items.last().is_some_and(|last| last.run != run) {
                 break;
             }
             let kind: String = row.get(2)?;
-            let speaker = if kind == "user" {
-                Speaker::User
-            } else {
-                Speaker::Assistant
-            };
             let text: String = row.get(3)?;
-            bytes = bytes.saturating_add(text.len());
-            said.push(Said {
+            let stored: String = row.get(4)?;
+            bytes = bytes.saturating_add(text.len() + stored.len());
+            let body = match kind.as_str() {
+                "user" => Body::User(text),
+                "assistant_text" => Body::Assistant(text),
+                "output_item" => rounds::native(&stored)?,
+                _ => rounds::result(&stored)?,
+            };
+            items.push(Item {
                 id: EventId(row_id(row.get(0)?)),
                 run,
-                speaker,
-                text,
+                body,
             });
         }
-        said.reverse();
-        Ok(said)
+        items.reverse();
+        Ok(items)
     }
 
     /// A live thread's deletion generation; `None` once it's being deleted or gone.
