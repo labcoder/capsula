@@ -48,7 +48,7 @@ impl ProviderFailure {
     /// Classifies HTTP and SSE refusals without retaining parse diagnostics.
     ///
     /// # Errors
-    /// Protocol for an oversized body or invalid status; Truncated for context exhaustion.
+    /// Protocol for an oversized body or invalid status.
     pub fn answered(status: u16, body: Secret<Zeroizing<Vec<u8>>>) -> Result<Self, Failure> {
         if body.expose().len() > MAX_BODY_BYTES || !(status == 200 || (400..600).contains(&status))
         {
@@ -59,9 +59,6 @@ impl ProviderFailure {
             .as_ref()
             .filter(|value| value["type"] == "error" && value["error"]["message"].is_string())
             .and_then(|value| value["error"]["type"].as_str());
-        if kind == Some("model_context_window_exceeded") {
-            return Err(Failure::Truncated);
-        }
         let kind = match (status, kind) {
             (401, _) | (_, Some("authentication_error")) => Kind::Authentication,
             (403, _) | (_, Some("permission_error")) => Kind::Permission,

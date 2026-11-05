@@ -18,6 +18,7 @@ pub(crate) struct RawFrame {
 
 impl RawFrame {
     /// Drops the held image and returns exactly `width * height * 4` bytes to fill.
+    /// This write-only capture seam invalidates the image before lending its buffer.
     ///
     /// # Errors
     /// `Invalid` for an empty side, a side over [`MAX_SIDE`] or an overflowing length.
@@ -46,6 +47,10 @@ impl RawFrame {
         }
         self.valid = Some(meta);
         Ok(())
+    }
+
+    pub(super) fn image_mut(&mut self) -> Option<(FrameMeta, &mut [u8])> {
+        self.valid.map(|meta| (meta, self.bgra.as_mut_slice()))
     }
 
     #[cfg(test)]

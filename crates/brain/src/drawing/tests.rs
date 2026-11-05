@@ -1071,6 +1071,17 @@ fn a_fifth_scene_evicts_the_oldest_even_when_its_first_step_is_rejected() {
 }
 
 #[test]
+fn three_dimensional_steps_wait_for_prepared_views() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let view = r#"{"id":"a","put":[{"view3d":{"id":"v"}}]}"#.to_owned();
+    let out = store.run(&mut drawing, call(1, "c1", args("s1", &[view])));
+    assert_eq!(error(&out.calls[0]), ErrorCode::Unsupported);
+    assert!(drawing.scenes.is_empty());
+    assert_eq!(drawing.global.usage().scenes, 0);
+}
+
+#[test]
 fn a_failed_fifth_scene_write_keeps_its_eviction_and_the_retry_fits() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
