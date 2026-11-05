@@ -224,3 +224,11 @@ no shell is connected, and Quit and close write what's left before they end.
 - **Unreadable or not TOML:** the brain runs on the defaults and refuses every change, so the file
   is never overwritten. Repair or delete it, then restart Kumochi.
 - **No absolute `%APPDATA%`:** the defaults, and changes are refused.
+
+## Claude Code
+
+`[claude_code] enabled = false` in `config.toml` turns Claude Code's discovery off: the brain
+finds nothing and starts no `claude`, and the view is `TurnedOff`. A missing section or key
+leaves it on; any other value there, or a file that can't be read, turns it off, since it may
+have said so. It's read once at startup, so a change needs a restart. It signs nothing out and
+deletes nothing.
