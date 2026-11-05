@@ -13,6 +13,7 @@ mod admission;
 mod availability;
 mod delete;
 mod drawing;
+mod inline;
 mod job;
 mod lease;
 mod run;
@@ -26,8 +27,8 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId, ThreadOp,
-    UserError,
+    Content, ControlToShell, DataToShell, Deleted, PageOf, Phase, RunId, SceneId, Step, ThreadId,
+    ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -35,6 +36,7 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use availability::{Availability, Ready};
+pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
@@ -93,7 +95,7 @@ pub enum Input {
         /// The thread to continue, or `None` for a new one.
         thread: Option<ThreadId>,
         /// What the user typed.
-        text: String,
+        text: Content,
     },
     /// The shell stopped `run` locally; `revealed` are the steps that stayed on screen.
     Stop {
@@ -117,6 +119,8 @@ pub enum Input {
         /// The build or job.
         key: SendKey,
     },
+    /// An inline compaction's read finished.
+    CompactBuilt(CompactBuilt),
     /// A background job's read finished.
     JobBuilt(JobBuilt),
     /// A background job's request ended: the cleaned title or summary, or `None` when it failed.
@@ -346,7 +350,7 @@ struct Run {
     /// The scene the first step's write evicts, until it's acknowledged.
     evict: Option<SceneId>,
     /// Steps after the first, with the text streamed before each, until the scene has its id.
-    waiting: VecDeque<(Option<String>, u32, Step)>,
+    waiting: VecDeque<(Option<Content>, u32, Step)>,
     /// One entry per pending step: the frames the engine produced after it, sent once it's
     /// acknowledged, so the shell sees the engine's order.
     held: VecDeque<Vec<DataToShell>>,
@@ -357,6 +361,8 @@ struct Run {
     /// The connection that was ready when the run's turn arrived; none means the run failed
     /// then.
     connection: Option<crate::context::ConnectionTag>,
+    /// The round that compacted inline since the run's last admitted build.
+    compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
@@ -604,6 +610,7 @@ impl Coordinator {
             Input::SendReady {
                 key: SendKey::Job(key),
             } => self.job_ready(key, &mut effects),
+            Input::CompactBuilt(built) => self.compact_built(built, &mut effects)?,
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,
             Input::TitleSet { job, applied } => {
@@ -618,9 +625,9 @@ impl Coordinator {
                 ..
             } => self.job_written(Some(key), &mut effects),
             Input::SummaryStored {
-                owner: SendKey::Build(_),
+                owner: SendKey::Build(key),
                 ..
-            } => return Err(Stale),
+            } => self.inline_written(key, &mut effects)?,
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
@@ -737,7 +744,7 @@ impl Coordinator {
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
-        text: String,
+        text: Content,
         effects: &mut Vec<Effect>,
     ) {
         self.cancel_job(effects);
@@ -751,7 +758,7 @@ impl Coordinator {
             (thread, None)
         } else {
             self.last_thread = ThreadId(self.last_thread.0 + 1);
-            (self.last_thread, Some(title(&text)))
+            (self.last_thread, Some(title(&text).into()))
         };
         let begin = StoreOp::BeginTurn {
             thread,
@@ -776,6 +783,7 @@ impl Coordinator {
             snapshot: None,
             build: None,
             connection: self.connection(),
+            compacted: None,
             draw: None,
             error: None,
             finishing: false,
@@ -1031,8 +1039,8 @@ fn told(run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
 }
 
 /// The text streamed since the last write, taken for the next one.
-fn unstored(run: &mut Run) -> Option<String> {
-    (!run.unstored.is_empty()).then(|| std::mem::take(&mut run.unstored))
+fn unstored(run: &mut Run) -> Option<Content> {
+    (!run.unstored.is_empty()).then(|| std::mem::take(&mut run.unstored).into())
 }
 
 /// A new thread's title: the first line of its first turn, cut to [`TITLE_CHARS`].

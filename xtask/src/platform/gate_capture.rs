@@ -338,29 +338,23 @@ mod tests {
 
     #[test]
     fn file_handle_resolves_to_the_retained_transcript_path() {
-        let path = std::env::temp_dir().join(format!(
-            "{}-transcript-test-{}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
+        let directory = crate::scratch::dir("transcript-test");
+        let path = directory.join("transcript");
         let file = std::fs::File::create_new(&path).unwrap();
         let resolved = final_path(super::HANDLE(file.as_raw_handle()));
         let expected = path.canonicalize().unwrap();
         drop(file);
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(resolved.unwrap(), expected);
     }
 
     #[test]
     fn sha256_matches_standard_empty_file_vector() {
-        let path = std::env::temp_dir().join(format!(
-            "{}-hash-test-{}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
+        let directory = crate::scratch::dir("hash-test");
+        let path = directory.join("empty");
         drop(std::fs::File::create_new(&path).unwrap());
         let result = file_sha256(&path);
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(
             result.unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

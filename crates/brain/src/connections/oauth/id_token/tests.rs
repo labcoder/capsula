@@ -584,9 +584,15 @@ fn a_modulus_under_2048_bits_is_refused_though_ring_would_verify_it() {
     assert_eq!((short.len(), short[0].leading_zeros()), (256, 1));
     assert_eq!((full.len(), full[0].leading_zeros()), (256, 0));
     let (message, signature) = SHORT_TOKEN.rsplit_once('.').expect("a signed token");
+    let (head, payload) = message.split_once('.').expect("a header and a payload");
+    let decoded = |part: &str| {
+        let json = URL_SAFE_NO_PAD.decode(part).expect("a base64url part");
+        serde_json::from_slice::<Value>(&json).expect("a JSON part")
+    };
+    // Compared as values: key order depends on whether serde_json's preserve_order is unified in.
     assert_eq!(
-        message,
-        format!("{}.{}", part(&header("RS256", Some(KID))), part(&claims()))
+        (decoded(head), decoded(payload)),
+        (header("RS256", Some(KID)), claims())
     );
     let ring_alone = RsaPublicKeyComponents {
         n: &short,

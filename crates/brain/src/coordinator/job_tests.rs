@@ -35,7 +35,7 @@ fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec
     core.handle(Input::Turn {
         turn: 1,
         thread,
-        text: "Plan a trip".to_owned(),
+        text: "Plan a trip".into(),
     })
     .expect("a turn is never stale");
     admit(core, run);
@@ -337,7 +337,7 @@ fn a_new_run_cancels_the_job_and_its_late_answers_are_stale() {
         .handle(Input::Turn {
             turn: 1,
             thread: Some(T),
-            text: "More".to_owned(),
+            text: "More".into(),
         })
         .expect("a turn is never stale");
     assert_eq!(effects.first(), Some(&Effect::CancelJob(key(2))));
@@ -350,16 +350,21 @@ fn a_new_run_cancels_the_job_and_its_late_answers_are_stale() {
 }
 
 #[test]
-fn a_failed_job_keeps_the_first_words_and_the_next_done_retries() {
+fn a_failed_job_starts_nothing_after_it_and_the_next_done_retries() {
     let mut core = reading();
     assert_eq!(
         core.handle(job_built(key(2), &[T])),
         Ok(vec![start_job(key(2), R)])
     );
-    assert_eq!(core.handle(job_done(key(2), None)), Ok(vec![compacts(3)]));
+    assert_eq!(
+        core.handle(job_done(key(2), None)),
+        Ok(Vec::new()),
+        "a request went out and failed, so no compaction follows it"
+    );
+    assert_eq!(core.handle(job_done(key(2), None)), Err(Stale));
     assert_eq!(
         run_done(&mut core, Some(T), R2),
-        done_starting(R2, 5),
+        done_starting(R2, 4),
         "the next Done tries again, with a new key"
     );
 }
@@ -423,7 +428,7 @@ fn a_done_whose_write_failed_starts_no_job() {
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
-        text: "Plan a trip".to_owned(),
+        text: "Plan a trip".into(),
     })
     .expect("a turn is never stale");
     admit(&mut core, R);
@@ -716,5 +721,9 @@ fn a_title_output_never_becomes_a_summary_or_the_reverse() {
         core.handle(job_built(key(2), &[T])),
         Ok(vec![start_job(key(2), R)])
     );
-    assert_eq!(core.handle(summarized(key(2))), Ok(vec![compacts(3)]));
+    assert_eq!(
+        core.handle(summarized(key(2))),
+        Ok(Vec::new()),
+        "a title request whose answer is unusable failed, so no compaction follows it"
+    );
 }

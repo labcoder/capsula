@@ -2,8 +2,9 @@
 
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
-Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it. Until 13b-1b,
-every run is answered by a script that sends nothing (runs.md, "The fixture engine").
+Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it on the
+signed-in account ("The Responses engine"). A dev build can play a script instead, which sends
+nothing (runs.md, "The fixture engine").
 
 ```mermaid
 flowchart LR
@@ -130,8 +131,8 @@ that.
 
 A job is one model request outside any run, in a one-job slot the coordinator owns
 (`coordinator/job.rs`; the pure parts are in `jobs.rs` and `context/compact.rs`). A task's run
-starts a title job, and when that ends on its own, a compaction job for the same thread (see
-[Compaction](#compaction)); Kumo's run starts compaction only.
+starts a title job, and when that writes its title or its read finds nothing to do, a compaction
+job for the same thread (see [Compaction](#compaction)); Kumo's run starts compaction only.
 
 ```mermaid
 stateDiagram-v2
@@ -140,7 +141,7 @@ stateDiagram-v2
     Reading --> Sending: the read finds work and no delete reached what it read
     Sending --> Writing: the round completes with a title or summary
     Writing --> Idle: TitleSet or SummaryStored for this job
-    Idle --> Reading: a title job ended on its own, so compaction follows
+    Idle --> Reading: a title job wrote its title or had nothing to do, so compaction follows
     Reading --> Idle: a new run, a delete, sign-out, nothing to do, failure
     Sending --> Idle: a new run, a delete, sign-out, a lease deadline, failure
 ```
@@ -149,7 +150,9 @@ stateDiagram-v2
   account is signed in, no run is current and sends haven't failed closed. The read finds nothing
   once the title isn't first words (a user's rename or an earlier model title), so the trigger
   keeps no state of its own: a failed job, or a first run that didn't end `Done`, tries again at
-  the next `Done`. A job never retries on its own.
+  the next `Done`. A job never retries on its own, and a job whose request went out but wrote
+  nothing (it failed, or a delete voided its answer) ends with nothing after it, so after a
+  usage-limit answer no further automatic request goes out until the next `Done`.
 - **Key.** `JobKey { thread, serial }`, the serial from the build attempts' counter, so no key
   repeats. An input for any other key is stale.
 - **Read.** `StoreOp::ReadJob` runs on the page reader after every op sent before it, in one read
@@ -213,15 +216,33 @@ uses the thread's newest summary in place of every event through `last_event`. T
   task keeps that text, as Kumo's replies do (OSC-161), so no summary records its sources; a
   delete accepted while Kumo's compaction is reading or sending voids it like any job.
 
-Inline compaction, for a run whose own build doesn't fit, comes in a later PR.
+**Inline (B5).** A build is `TooLarge { room }`, where `room` is what the bound leaves for the
+summary after the fixed parts and the current run, `None` when those alone don't fit. With
+`None` the run ends as `failed(budget)` and spends no request. With room, the run compacts once
+per admission episode (the round, until a build is admitted), so a delete's rebuild can't start a
+second one:
+
+1. A fresh build attempt of the same round, `StoreOp::CompactContext`, reads the summary in one
+   read transaction and returns the request and its sources, exposed to deletes from its start.
+2. Admission against those sources, then a send lease under `SendKey::Build`, so a delete between
+   the read and the grant gets `Rebuild`; the rebuild is a normal build.
+3. The request asks for the summary rewritten within the room left, at most `MAX_SUMMARY`. Its
+   text is collected, never shown, and goes through the same budget and deadline as the run. The
+   answer is cut on a character boundary until its summary item fits the room as the bound counts
+   it, escapes included, and to `MAX_SUMMARY` raw bytes.
+4. `StoreSummary` and its acknowledgement are owned by that build's key; only the current run's
+   own acknowledgement starts the next normal build. After Stop or a replacement it's stale.
+5. A second `TooLarge` ends the run as `failed(budget)`.
 
 ## The bound
 
 A request is held to 512 KiB [guess], counted as its JSON body would be: every string escaped,
 plus a fixed allowance for each item's and the body's own fields. 13a checks the serialised body
 again. The current run, the summary, the instructions and the tools must fit. If they don't, the
-build ends with `BuildError::TooLarge`, and the run ends as `failed(budget)` rather than send
-(shortcut: the shell shows the generic failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
+build ends with `BuildError::TooLarge`. When the current run fits without the summary, the run
+rewrites the summary inline once ([Compaction](#compaction)); otherwise, or when that doesn't
+help, the run ends as `failed(budget)` rather than send (shortcut: the shell shows the generic
+failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
 context size yet, so the byte bound is the only one.
 
 ## What builds nothing
@@ -232,15 +253,15 @@ context size yet, so the byte bound is the only one.
 | `Origin` | The origin doesn't match the thread. |
 | `NoTurn` | The run's turn isn't stored. |
 | `InvalidCut` | A tool call is apart from its result, or an item repeats. |
-| `TooLarge` | The parts that can't be dropped are over the bound. |
+| `TooLarge { room }` | The parts that can't be dropped are over the bound; `room` is what's left for a summary when the current run fits without one. |
 | `Store` | The read failed. |
 
 No error and no `Debug` output carries message text or names.
 
 ## The Responses engine
 
-`engines/responses.rs` holds the two halves that need no network. PR 11b's transport sends the
-body and feeds the stream, and engine selection arrives with it.
+`engines/responses.rs` builds the body and maps the stream; `engines/responses/engine.rs` runs a
+round on the account.
 
 **The body** is `ModelRequest` as JSON: `model`, `instructions`, `input`, `tools` (each a
 `function`), `reasoning.effort`, `include: ["reasoning.encrypted_content"]`, `store: false` and
@@ -272,6 +293,32 @@ its call ready.
 A round keeps at most 64 calls and items and 1 MiB of ids, arguments and items [guesses], charged
 before each is kept. A stream whose bytes run out has no ending of its own, so the round's pump
 reports it as `Truncated`.
+
+**A round** (`Responses`, one per `StartEngine`) goes in this order, so nothing is asked for that
+isn't needed:
+
+1. **The body** is built and checked. A refused body fails the round as `Stream(Request)` and asks
+   for no bearer.
+2. **The bearer.** The round asks the brain over the `AccessHandle` with its `SendKey`. The
+   coordinator names the connection the send may use (`Coordinator::sending`): a round's run's
+   own, only while that run is current, and the ready one for a job. The account answers only
+   when that connection is the ready one, refreshing first when it's due. Any other answer, or a
+   brain that's gone, fails the round as `Failed(Access)` with nothing sent. The shell hears the
+   account's own reason when it gave one (a refresh that couldn't connect keeps `AccountOffline`
+   with Retry), else why the run's connection can't send, else `SignInNeeded`. The bearer stays a
+   `Secret` and is dropped when the stream ends. A stream that ends in `AccountRefused` tells
+   the account which generation was refused, so the next access renews it (accounts.md).
+3. **The ask.** The transport asks the `SendGate` right before the body goes out (see
+   [The send lease](#the-send-lease)), which checks the round's build key and its sources. A
+   `Rebuild` drops the round with nothing more said, since the coordinator already dropped it.
+4. **The stream.** Each read's events go to the pump before the next read, through the bounded
+   events channel, so a slow coordinator slows the read and nothing queues without bound. A gone
+   pump, or a round its rules broke, stops the stream and closes its connection. The round's
+   end follows its last events.
+
+A dev build caps its requests with `KUMOCHI_LIVE_BUDGET` (`Budget::from_env`); a release build
+has no cap. One round per run: the tool loop that starts the next round, the store's round kinds
+and replay are 13b-2's.
 
 ## The Claude Code stream
 

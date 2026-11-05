@@ -6,7 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::settings::checked;
-use super::{NameError, ThreadId};
+use super::{ConnectionKind, NameError, ThreadId};
 
 /// The longest thread title, in Unicode scalar values.
 pub const MAX_TITLE_CHARS: usize = 80;
@@ -129,6 +129,10 @@ pub struct ModelChoice {
     pub model: ModelSlug,
     /// Its effort.
     pub effort: Effort,
+    /// The connection it runs on. A choice saved before Claude existed reads as `ChatGpt`; postcard
+    /// still always encodes it.
+    #[serde(default)]
+    pub connection: ConnectionKind,
 }
 
 /// A change to one thread, shell to brain; nothing answers it.

@@ -1,7 +1,8 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
 use kumochi_protocol::message::{
-    DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId, ThreadTitle,
+    Content, DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId,
+    ThreadTitle,
 };
 
 use std::fmt;
@@ -32,16 +33,18 @@ pub enum StoreOp {
     BuildContext(super::BuildContext),
     /// Read a background job's request on the page reader, in one read transaction.
     ReadJob(super::ReadJob),
+    /// Read an inline compaction's request on the page reader, in one read transaction.
+    CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
         thread: ThreadId,
         /// The new thread's title, or `None` for an existing thread.
-        title: Option<String>,
+        title: Option<Content>,
         /// The run.
         run: RunId,
         /// The user's text.
-        text: String,
+        text: Content,
     },
     /// The text streamed since the last write, then one step.
     CommitStep {
@@ -50,7 +53,7 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
         /// Text streamed before the step, if any.
-        text: Option<String>,
+        text: Option<Content>,
         /// A new scene for a run's first step, or the run's scene.
         scene: SceneTarget,
         /// Its index.
@@ -65,7 +68,7 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
         /// Text streamed since the last step, if any.
-        text: Option<String>,
+        text: Option<Content>,
         /// The steps that stayed on screen, when the user stopped the run.
         revealed: Option<Vec<u32>>,
         /// The run's scene, when a Stop kept none of its steps.
@@ -152,6 +155,7 @@ impl StoreOp {
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
             | Self::ReadJob(_)
+            | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
@@ -176,6 +180,10 @@ impl StoreOp {
             Self::BuildContext(build) => Input::ContextBuilt(super::ContextBuilt {
                 key: build.key,
                 snapshot: build.snapshot.clone(),
+                result: Err(super::Unbuilt::Failed),
+            }),
+            Self::CompactContext(read) => Input::CompactBuilt(super::CompactBuilt {
+                key: read.key,
                 result: Err(super::Unbuilt::Failed),
             }),
             Self::ReadJob(read) => Input::JobBuilt(super::JobBuilt {

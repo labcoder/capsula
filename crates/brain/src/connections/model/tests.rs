@@ -4,6 +4,7 @@
 
 use std::future::Future;
 use std::io;
+use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker, ready};
@@ -19,7 +20,8 @@ use zeroize::Zeroizing;
 use super::budget::Budget;
 use super::conn::{Connect, MAX_WIRE_BYTES, ModelClient, POOL_IDLE};
 use super::error::{Code, Failure, Param, ProviderError};
-use super::{ResponsesBody, stream, wire};
+use super::sse::SseEvent;
+use super::{Events, ResponsesBody, stream, wire};
 use crate::connections::http_client::MAX_BODY_BYTES;
 use crate::test_support::Captured;
 
@@ -1434,4 +1436,54 @@ async fn measure_the_exchange_against_the_reader_and_a_handshake() {
         "TLS handshake over in-memory pipes, both ends' CPU and no network: {:.0} us",
         handshakes.as_secs_f64() * 1e6 / f64::from(rounds)
     );
+}
+
+/// Takes nothing: stops at the first wait, as the engine does when a read's events are refused.
+struct Refuses<'a>(&'a mut Vec<String>);
+
+impl Events for Refuses<'_> {
+    fn event(&mut self, event: &SseEvent) {
+        self.0.push(event.kind().to_owned());
+    }
+
+    fn taken(&mut self) -> impl Future<Output = ControlFlow<()>> + Send {
+        std::future::ready(ControlFlow::Break(()))
+    }
+}
+
+#[tokio::test]
+async fn a_refused_read_stops_the_stream_and_closes_its_connection() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut kinds = Vec::new();
+    let mut call: Pin<Box<dyn Future<Output = Result<(), Failure>> + '_>> =
+        Box::pin(tokio::task::unconstrained(stream(
+            &harness.client,
+            &body,
+            &harness.bearer,
+            ask(&harness.gate, key(1)),
+            &harness.budget,
+            Refuses(&mut kinds),
+        )));
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    let first = TEXT
+        .windows(2)
+        .position(|pair| pair == b"\n\n")
+        .expect("the fixture has an event")
+        + 2;
+    let mut bytes =
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec();
+    bytes.extend(format!("{first:x}\r\n").into_bytes());
+    bytes.extend_from_slice(&TEXT[..first]);
+    bytes.extend_from_slice(b"\r\n");
+    reply(&mut server, &bytes);
+    assert_eq!(poll(&mut call), Poll::Ready(Err(Failure::Protocol)));
+    drop(call);
+    assert_eq!(kinds, ["response.created"]);
+    assert_eq!(received(&mut server), (Vec::new(), true));
 }

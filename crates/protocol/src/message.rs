@@ -10,6 +10,8 @@ use crate::Secret;
 use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
 
 mod account;
+mod connections;
+mod content;
 mod error;
 mod pages;
 mod scenes;
@@ -20,6 +22,11 @@ pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
     MAX_EMAIL_BYTES, PlanState,
 };
+pub use connections::{
+    AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp, ConnectionsView,
+    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError,
+};
+pub use content::Content;
 pub use error::{
     Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
 };
@@ -314,6 +321,14 @@ pub enum ControlToBrain {
         /// The lease that stopped protecting capture.
         lease: LeaseGeneration,
     },
+    /// Something the user asked of a Claude connection; answered by one
+    /// [`ControlToShell::Connections`].
+    Connection(ConnectionOp),
+    /// The user started typing or holding in `thread`, so a Claude Code launch may warm up.
+    Warm {
+        /// The thread.
+        thread: ThreadId,
+    },
 }
 
 /// What a thread's delete came to.
@@ -426,6 +441,9 @@ pub enum ControlToShell {
         /// A content-free failure category.
         reason: CaptureFailure,
     },
+    /// Both Claude connections: once per connection after `Settings` and `Account` and before
+    /// `Scenes`, after every change, and once per [`ControlToBrain::Connection`].
+    Connections(ConnectionsView),
 }
 
 /// Shell to brain, on the data pipe.
@@ -442,7 +460,7 @@ pub enum DataToBrain {
         /// The thread to continue.
         thread: Option<ThreadId>,
         /// What the user typed.
-        text: String,
+        text: Content,
     },
     /// The shell has taken `bytes` more of the brain's data frames, header included, and the
     /// brain may send that many more.
@@ -467,7 +485,7 @@ pub enum DataToShell {
         /// The run it belongs to.
         run: RunId,
         /// The new text.
-        delta: String,
+        delta: Content,
     },
     /// One step, sent only once the brain has committed it.
     StepCommit {
@@ -572,6 +590,8 @@ pub enum DataToShell {
     /// connects after one, and empty once the account stops being usable. Nothing is sent before a
     /// read succeeds.
     Models {
+        /// The connection whose catalog this is.
+        connection: ConnectionKind,
         /// At most [`MAX_MODELS`], in the catalog's order.
         models: Vec<ModelInfo>,
     },
@@ -584,6 +604,10 @@ mod scene_frame_tests;
 #[cfg(test)]
 #[path = "message/hold_frame_tests.rs"]
 mod hold_frame_tests;
+
+#[cfg(test)]
+#[path = "message/content_tests.rs"]
+mod content_tests;
 
 #[cfg(test)]
 mod tests {
@@ -696,6 +720,7 @@ mod tests {
             choice: Some(ModelChoice {
                 model: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
                 effort: Effort::XHigh,
+                connection: super::ConnectionKind::ChatGpt,
             }),
         };
         let list = DataToShell::ThreadList {
@@ -708,8 +733,8 @@ mod tests {
             }),
         };
         // Per row: id, a 2-byte length and 320 bytes of title, time, kind, Some, a 1-byte length
-        // and 64 bytes of slug, effort.
-        let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1;
+        // and 64 bytes of slug, effort, connection.
+        let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1 + 1;
         let payload = payload(&list, Pipe::Data);
         assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
         assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
@@ -753,10 +778,11 @@ mod tests {
             display_name: ModelName::new(&"\u{1F600}".repeat(MAX_MODEL_NAME_CHARS)).expect("valid"),
         };
         let models = DataToShell::Models {
+            connection: super::ConnectionKind::ClaudeCode,
             models: vec![model; MAX_MODELS],
         };
-        // Tag and a two-byte count, then 200 times a one-byte slug length, 64 bytes of slug, a
-        // two-byte name length and 80 four-byte characters.
-        assert_eq!(payload(&models, Pipe::Data), 77_403);
+        // Tag, the connection's tag and a two-byte count, then 200 times a one-byte slug length,
+        // 64 bytes of slug, a two-byte name length and 80 four-byte characters.
+        assert_eq!(payload(&models, Pipe::Data), 77_404);
     }
 }

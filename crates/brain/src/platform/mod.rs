@@ -26,12 +26,54 @@ pub fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "calls into the pinned sherpa-onnx C API")]
+pub(crate) mod sherpa;
+
+#[cfg(all(windows, debug_assertions))]
+pub(crate) use windows::call_throwing_export;
+#[cfg(all(windows, debug_assertions))]
+pub use windows::raise_access_violation;
+#[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, config_dir, create_owner_only,
-    data_dir, free_space, launch_detached, links_unsupported, replace_file, session_id,
-    session_lock_path, trust_roots,
+    data_dir, free_space, launch_detached, links_unsupported, quiet_failures, replace_file,
+    server_image, session_id, session_lock_path, trust_roots,
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
+#[cfg(windows)]
+pub use windows::{managed_presence, system_env};
+
+/// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
+/// `Absent`; access denied and every other unresolved result are `Indeterminate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Proven missing.
+    Absent,
+    /// It exists.
+    Present,
+    /// Couldn't be ruled out; counts as present.
+    Indeterminate,
+}
+
+/// Claude Code's endpoint-managed policy sources (macOS counterpart: /Library/Application
+/// Support/ClaudeCode, unverified).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManagedPresence {
+    /// `managed-settings.json`, `managed-settings.d` and `managed-mcp.json`.
+    pub files: [Presence; 3],
+    /// The machine's `Settings` policy value.
+    pub machine: Presence,
+    /// The user's `Settings` policy value.
+    pub user: Presence,
+}
+
+impl ManagedPresence {
+    /// Every source.
+    pub fn all(&self) -> [Presence; 5] {
+        let [settings, folder, mcp] = self.files;
+        [settings, folder, mcp, self.machine, self.user]
+    }
+}
 #[cfg(all(test, windows))]
 pub(crate) use windows::{PipeClient, test_pair};

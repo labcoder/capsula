@@ -7,10 +7,11 @@ use std::collections::BTreeSet;
 use kumochi_protocol::constants::DISPLAY_NAME;
 use kumochi_protocol::message::{EventId, ThreadId, ThreadKind};
 
-use super::bound::{fixed_bytes, item_bytes};
+use super::bound::{escaped, fixed_bytes, item_bytes};
 use super::build::{fill, render};
 use super::{
     Body, BuildError, Built, InputItem, Item, ModelRequest, Origin, RAW_RUNS, Role, RunSnapshot,
+    Summary, summary_item,
 };
 use crate::store::Generation;
 use crate::store::context::{Snapshot, Speaker};
@@ -49,17 +50,9 @@ pub(crate) fn compaction(
     thread: ThreadId,
     compact_at: u64,
 ) -> Result<Option<Compaction>, BuildError> {
-    let (Some(source), Some(generation)) = (snapshot.source(thread)?, snapshot.generation(thread)?)
-    else {
+    let Some(generation) = owned(snapshot, run, thread)? else {
         return Ok(None);
     };
-    let owns = match run.origin {
-        Origin::Kumo => source.kind == ThreadKind::Main,
-        Origin::Task(task) => task == thread && source.kind == ThreadKind::Thread,
-    };
-    if !owns {
-        return Err(BuildError::Origin);
-    }
     let previous = snapshot.summary(thread)?;
     let after = previous.as_ref().map(|summary| summary.last);
     let uncovered = snapshot.uncovered(thread, after)?;
@@ -75,13 +68,7 @@ pub(crate) fn compaction(
     let mut said = said.into_iter().peekable();
 
     let instructions = instructions(run);
-    let prior = previous.as_ref().map(|summary| InputItem::Message {
-        role: Role::Developer,
-        text: format!(
-            "Summary so far, of events {}–{}:\n{}",
-            summary.first.0, summary.last.0, summary.text
-        ),
-    });
+    let prior = previous.as_ref().map(so_far);
     let closing = InputItem::Message {
         role: Role::Developer,
         text: "Write the new summary now.".to_owned(),
@@ -142,16 +129,116 @@ pub(crate) fn compaction(
     }))
 }
 
-/// The model's answer as a summary: trimmed, cut to [`MAX_SUMMARY`] bytes on a character
-/// boundary. `None` when nothing is left.
-pub(crate) fn clean_summary(output: &str) -> Option<String> {
+/// The model's answer as a summary: trimmed, cut to `max` bytes on a character boundary. `None`
+/// when nothing is left.
+pub(crate) fn clean_summary(output: &str, max: usize) -> Option<String> {
     let text = output.trim();
-    let mut end = text.len().min(MAX_SUMMARY);
+    let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     let text = text[..end].trim_end();
     (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Inline compaction's answer as a summary: cleaned to [`MAX_SUMMARY`] bytes, then cut on a
+/// character boundary so its text adds at most `allowance` bytes to its item once JSON-escaped,
+/// the way the bound counts it. `None` when nothing is left.
+pub(crate) fn fit_summary(output: &str, allowance: usize) -> Option<String> {
+    let text = clean_summary(output, MAX_SUMMARY)?;
+    let mut added = 0;
+    let end = text
+        .char_indices()
+        .find_map(|(at, c)| {
+            added += escaped(c.encode_utf8(&mut [0; 4])) - 2;
+            (added > allowance).then_some(at)
+        })
+        .unwrap_or(text.len());
+    let text = text[..end].trim_end();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Inline compaction's request (B5), when a run's current turn fits without the thread's summary
+/// but not with it: the summary rewritten to fit the `room` the bound leaves. It covers what the
+/// summary covered. The allowance returned with it is what the new text may add to its item,
+/// counted escaped, for [`fit_summary`]. `None` when the thread is being deleted or gone, has no
+/// summary, or leaves no room.
+///
+/// # Errors
+/// [`BuildError`] when the read fails or the run's origin doesn't own the thread.
+pub(crate) fn rewrite(
+    snapshot: &Snapshot<'_>,
+    run: &RunSnapshot,
+    thread: ThreadId,
+    room: usize,
+) -> Result<Option<(Compaction, usize)>, BuildError> {
+    let Some(generation) = owned(snapshot, run, thread)? else {
+        return Ok(None);
+    };
+    let Some(previous) = snapshot.summary(thread)? else {
+        return Ok(None);
+    };
+    let wrapper = item_bytes(&summary_item(previous.first, previous.last, ""));
+    let allowance = room.saturating_sub(wrapper);
+    if allowance == 0 {
+        return Ok(None);
+    }
+    let limit = allowance.min(MAX_SUMMARY);
+    let request = ModelRequest {
+        choice: run.choice.clone(),
+        instructions: instructions(run),
+        input: vec![
+            so_far(&previous),
+            InputItem::Message {
+                role: Role::Developer,
+                text: format!("Write the new summary now, in at most {limit} bytes."),
+            },
+        ],
+        tools: Vec::new(),
+    };
+    Ok(Some((
+        Compaction {
+            generation,
+            covers: (previous.first, previous.last),
+            built: Built {
+                request,
+                sources: vec![thread],
+            },
+        },
+        allowance,
+    )))
+}
+
+/// The thread's deletion generation, while it's live; the run's origin must own it.
+fn owned(
+    snapshot: &Snapshot<'_>,
+    run: &RunSnapshot,
+    thread: ThreadId,
+) -> Result<Option<Generation>, BuildError> {
+    let (Some(source), Some(generation)) = (snapshot.source(thread)?, snapshot.generation(thread)?)
+    else {
+        return Ok(None);
+    };
+    let owns = match run.origin {
+        Origin::Kumo => source.kind == ThreadKind::Main,
+        Origin::Task(task) => task == thread && source.kind == ThreadKind::Thread,
+    };
+    if owns {
+        Ok(Some(generation))
+    } else {
+        Err(BuildError::Origin)
+    }
+}
+
+/// The previous summary, as a summary request carries it.
+fn so_far(summary: &Summary) -> InputItem {
+    InputItem::Message {
+        role: Role::Developer,
+        text: format!(
+            "Summary so far, of events {}–{}:\n{}",
+            summary.first.0, summary.last.0, summary.text
+        ),
+    }
 }
 
 /// The summary prompt with the run's names.

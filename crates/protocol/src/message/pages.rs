@@ -135,6 +135,7 @@ mod tests {
         let choice = ModelChoice {
             model: ModelSlug::new(slug).expect("valid"),
             effort: Effort::Medium,
+            connection: crate::message::ConnectionKind::ChatGpt,
         };
         let set_model = ThreadOp::SetModel {
             thread: ThreadId(1),
@@ -160,11 +161,11 @@ mod tests {
         };
         assert_eq!(
             format!("{row:?}"),
-            "ThreadRow { id: ThreadId(1), updated_ms: 2, kind: Thread, choice: Some(ModelChoice { model: ModelSlug(len=15), effort: Medium }), .. }"
+            "ThreadRow { id: ThreadId(1), updated_ms: 2, kind: Thread, choice: Some(ModelChoice { model: ModelSlug(len=15), effort: Medium, connection: ChatGpt }), .. }"
         );
         assert_eq!(
             format!("{set_model:?}"),
-            "SetModel { thread: ThreadId(1), choice: ModelChoice { model: ModelSlug(len=15), effort: Medium } }"
+            "SetModel { thread: ThreadId(1), choice: ModelChoice { model: ModelSlug(len=15), effort: Medium, connection: ChatGpt } }"
         );
         let output = format!(
             "{page:?} {row:?} {event:?} {set_model:?} {:?} {:?} {:?}",

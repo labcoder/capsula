@@ -3,6 +3,7 @@
 //! The library holds everything; `main.rs` only starts it, so integration tests can reach the
 //! platform code.
 
+pub mod bridge;
 mod config;
 pub mod connections;
 mod context;
@@ -17,7 +18,10 @@ pub mod platform;
 mod relaunch;
 mod runtime;
 pub mod screen;
+#[cfg(windows)]
+pub mod speech;
 pub mod store;
+mod supervise;
 mod tap;
 #[cfg(test)]
 mod test_support;
@@ -25,7 +29,7 @@ mod test_support;
     not(test),
     expect(
         dead_code,
-        reason = "PR 7 wires spoken replies; PR 8 wires voice installation"
+        reason = "PR 5 wires speech input; PR 7 wires spoken replies; PR 8 wires voice installation"
     )
 )]
 mod voice;
@@ -41,7 +45,11 @@ use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
-use crate::engines::fixture::{self, Fixture};
+use crate::connections::model::budget::Budget;
+use crate::connections::model::conn::{ModelClient, Tls};
+#[cfg(debug_assertions)]
+use crate::engines::fixture::Fixture;
+use crate::engines::responses::{AccessHandle, Responses};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::runtime::{Brain, Selected};
@@ -53,6 +61,11 @@ const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
 
 /// The argument that starts `kumochid` as the screen worker.
 pub const SCREEN_WORKER: &str = "--screen";
+/// The argument that starts `kumochid` as the speech worker.
+pub const SPEECH_WORKER: &str = "--speech";
+
+/// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
+pub const MCP_BRIDGE: &str = "--mcp-bridge";
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +97,9 @@ pub enum BrainError {
     /// The account's credential thread couldn't be started.
     #[error("can't start the credential thread")]
     Accounts(#[source] io::Error),
+    /// The model connection's TLS setup failed.
+    #[error("can't set up the model connection")]
+    Model(#[source] connections::http_client::HttpError),
 }
 
 /// Ends the runtime [`run`] ran on without waiting for blocking work. Quit and close already
@@ -185,14 +201,7 @@ fn accounts() -> io::Result<runtime::account::Accounts> {
 
 /// The engine runs use: in a dev build that names a script in
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
-/// account's engine answers, once the account is ready.
-#[cfg_attr(
-    not(debug_assertions),
-    expect(
-        clippy::unnecessary_wraps,
-        reason = "only a dev build reads a script, which can fail"
-    )
-)]
+/// account's Responses engine answers, once the account is ready.
 fn engine() -> Result<Selected, BrainError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
@@ -202,12 +211,13 @@ fn engine() -> Result<Selected, BrainError> {
         })?;
         return Ok(Selected::Fixture(Box::new(fixture)));
     }
-    // shortcut: the built-in script answers a ready account's runs until 13b-1b sends them to
-    // the Responses engine.
-    let parsed = Fixture::parse(fixture::DEFAULT);
-    Ok(Selected::Account(Box::new(
-        parsed.expect("the built-in script parses, as a test checks"),
-    )))
+    let (access, asks) = AccessHandle::new();
+    let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?);
+    let engine = Responses::new(client, Budget::from_env(), access);
+    Ok(Selected::Account {
+        engine: Box::new(engine),
+        asks,
+    })
 }
 
 /// Serves shells until one quits or is from another build, relaunching a shell that dies. A quit
