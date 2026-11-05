@@ -13,6 +13,10 @@ use crate::connections::model::conn::Connect;
 
 pub(super) const HOST: &str = "api.anthropic.com";
 
+fn server_name() -> io::Result<ServerName<'static>> {
+    ServerName::try_from(HOST).map_err(io::Error::other)
+}
+
 /// Only connectors for the Anthropic route implement this marker.
 pub trait AnthropicConnect: Connect {}
 
@@ -43,7 +47,7 @@ impl Connect for AnthropicTls {
     async fn connect(&self) -> io::Result<Self::Io> {
         let tcp = TcpStream::connect((HOST, 443)).await?;
         tcp.set_nodelay(true)?;
-        let name = ServerName::try_from(HOST).map_err(io::Error::other)?;
+        let name = server_name()?;
         self.0.connect(name, tcp).await
     }
 }
@@ -60,7 +64,7 @@ mod tests {
         let config = tls.0.config();
         assert_eq!(config.alpn_protocols, [b"http/1.1".to_vec()]);
         assert!(!config.enable_early_data);
-        let name = ServerName::try_from(HOST).expect("fixed DNS host");
+        let name = server_name().expect("fixed DNS host");
         let mut client =
             rustls::ClientConnection::new(Arc::clone(config), name).expect("TLS client");
         let mut hello = Vec::new();

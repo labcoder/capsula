@@ -160,23 +160,12 @@ fn malformed_and_unknown_errors_do_not_invent_diagnoses() {
             Recovery::FixRequest,
         );
     }
-    assert!(
-        matches!(
-            Failure::streamed(
-                &json!({"type":"error","error":{"type":"model_context_window_exceeded","message":"synthetic"}})
-            ),
-            Failure::Truncated
-        ),
-        "streamed context exhaustion truncates"
-    );
-    let body = Secret::new(Zeroizing::new(serde_json::to_vec(&json!({"type":"error","error":{"type":"model_context_window_exceeded","message":"synthetic"}})).unwrap()));
-    assert!(
-        matches!(
-            ProviderFailure::answered(400, body),
-            Err(Failure::Truncated)
-        ),
-        "HTTP context exhaustion truncates"
-    );
+    let unknown = json!({"type":"error","error":{"type":"model_context_window_exceeded","message":"synthetic"}});
+    assert_eq!(answered(400, &unknown).kind(), Kind::InvalidRequest);
+    let Failure::Provider(error) = Failure::streamed(&unknown) else {
+        panic!("unknown provider category");
+    };
+    assert_eq!(error.kind(), Kind::Other);
 }
 
 #[test]
@@ -300,5 +289,52 @@ fn local_and_reused_transport_failures_remain_closed() {
         ),
     ] {
         assert_eq!(format!("{:?}", Failure::from(source)), expected);
+    }
+}
+
+#[test]
+fn every_anthropic_failure_renders_without_naming_chatgpt() {
+    use fluent_bundle::{FluentBundle, FluentResource};
+    let source = include_str!("../../../../../locales/en/shell.ftl");
+    let resource = FluentResource::try_new(source.to_owned()).expect("English catalog");
+    let mut bundle = FluentBundle::new(vec!["en".parse().expect("English locale")]);
+    bundle.add_resource(resource).expect("unique catalog keys");
+    let mut failures = vec![
+        Failure::Request,
+        Failure::Credential,
+        Failure::Rebuild,
+        Failure::Spent,
+        Failure::Transport,
+        Failure::Protocol,
+        Failure::Truncated,
+        Failure::Refused,
+        Failure::BackpressureTimeout,
+    ];
+    for status in [401, 403, 402, 429, 529, 500, 400, 404] {
+        failures.push(Failure::Provider(answered(status, &json!({}))));
+    }
+    for failure in failures {
+        let id = match failure.user_error().key() {
+            ErrorKey::RequestRefused => "error-request-refused",
+            ErrorKey::ResponseUnreadable => "error-response-unreadable",
+            ErrorKey::AnthropicKeyRejected => "error-anthropic-key-rejected",
+            ErrorKey::AnthropicUnreachable => "error-anthropic-unreachable",
+            ErrorKey::AnthropicRateLimited => "error-anthropic-rate-limited",
+            ErrorKey::AnthropicCredit => "error-anthropic-credit",
+            _ => panic!("new Anthropic error key needs a rendering fixture"),
+        };
+        let pattern = bundle
+            .get_message(id)
+            .expect("catalog key")
+            .value()
+            .expect("catalog value");
+        let mut errors = Vec::new();
+        let rendered = bundle.format_pattern(pattern, None, &mut errors);
+        assert!(errors.is_empty(), "catalog value formats without arguments");
+        assert!(!rendered.is_empty());
+        assert!(
+            !rendered.contains("ChatGPT"),
+            "{id} names the wrong provider"
+        );
     }
 }
