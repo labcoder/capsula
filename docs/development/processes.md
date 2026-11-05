@@ -11,6 +11,7 @@ flowchart LR
   Shell["kumochi.exe (no job)"]
   subgraph BrainJob["brain job (kill on close)"]
     Screen["kumochid --screen"]
+    Speech["kumochid --speech"]
     subgraph RunJob["run job, one per run"]
       Child["a run's helper"]
     end
@@ -28,7 +29,10 @@ flowchart LR
   processes and nothing else.
 - **The screen worker** sits in the brain job directly, so ending a run never touches it.
   Its [supervisor](screen.md) owns its pipes, deadlines and respawns.
-- Helpers inherit no handles except the screen worker's two explicit stdin/stdout handles.
+- **The speech worker** sits there too, under the same supervisor. It's the only process that
+  loads sherpa-onnx (see [voice.md](voice.md), "The speech worker").
+- Helpers inherit no handles except each worker's two explicit stdin/stdout handles. A worker's
+  stderr is disconnected.
   Nothing secret is ever on their command lines.
 - **Starting a helper with an explicit launch** (`platform::spawn`, for Claude Code) takes an
   argument vector, a working folder and the whole environment: nothing is inherited from the

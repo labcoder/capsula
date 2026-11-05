@@ -15,13 +15,16 @@ flowchart LR
   Supervisor -->|broadcast loss| Watches[Watch owners]
 ```
 
-The task owns the process, pending replies, request ids and crash history. The last request handle
+The supervisor is the shared one in `supervise`, which also runs the speech worker (see
+[voice.md](voice.md), "The speech worker"); this page gives the screen kind's numbers. The task
+owns the process, pending replies, request ids and crash history. The last request handle
 closing stops it. Pipe threads own their file ends; they end when their channels close and the
 worker terminates. The worker inherits exactly two handles through an explicit handle list and is
 created inside the brain job, never a run job. Closing the brain job kills it.
 
-Frames use the protocol's 256 KiB data cap before allocation. A reply carries serialized body bytes
-in ordered chunks starting at zero, with one request id throughout, under 4 MiB per reply [guess].
+Frames use the protocol's 256 KiB data cap before allocation. A request and a reply each carry
+serialized body bytes in ordered chunks starting at zero, with one request id throughout, under
+64 KiB per screen request and 4 MiB per reply [guess]. A worker that reads a broken request exits.
 Unknown ids, gaps, duplicates, empty chunks, chunks after completion, malformed or truncated frames,
 trailing bytes and EOF all lose the worker. Sixteen pending requests and sixteen queued frames per
 channel bound pressure [guess]; overload fails fast rather than buffering more work. A hostile

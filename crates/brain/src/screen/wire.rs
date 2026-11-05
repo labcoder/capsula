@@ -1,8 +1,8 @@
-use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
 use kumochi_protocol::message::RunId;
 use serde::{Deserialize, Serialize};
 
+/// The largest reply, serialized.
 pub(super) const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Why screen work did not finish. No foreign error text crosses this boundary.
@@ -173,54 +173,6 @@ impl std::fmt::Debug for ReplyBody {
             Self::Refused(refusal) => write!(f, "Refused({refusal:?})"),
         }
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Request {
-    pub id: u64,
-    pub body: RequestBody,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Reply {
-    pub id: u64,
-    pub chunk: u32,
-    pub last: bool,
-    pub body: Vec<u8>,
-}
-
-#[derive(Default)]
-pub(super) struct Assembly {
-    next: u32,
-    bytes: Vec<u8>,
-}
-
-impl Assembly {
-    pub(super) fn push(&mut self, reply: Reply) -> Result<Option<Vec<u8>>, ScreenError> {
-        if reply.chunk != self.next
-            || reply.body.is_empty()
-            || reply.body.len() > MAX_REPLY_BYTES - self.bytes.len()
-        {
-            return Err(ScreenError::WorkerLost);
-        }
-        self.next = self.next.checked_add(1).ok_or(ScreenError::WorkerLost)?;
-        self.bytes.extend(reply.body);
-        if !reply.last {
-            return Ok(None);
-        }
-        Ok(Some(std::mem::take(&mut self.bytes)))
-    }
-}
-
-/// One single-chunk reply; every reply the worker sends today fits one frame.
-pub(super) fn reply(id: u64, body: &ReplyBody) -> Result<Reply, frame::FrameError> {
-    let encoded = frame::encode(body, Pipe::Data)?;
-    Ok(Reply {
-        id,
-        chunk: 0,
-        last: true,
-        body: encoded[frame::HEADER_LEN..].to_vec(),
-    })
 }
 
 #[cfg(test)]

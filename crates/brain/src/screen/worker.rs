@@ -1,10 +1,12 @@
 use std::io::{self, Write as _};
 use std::time::Instant;
 
-use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::frame;
 
 use super::capture::{Capturer, Failure, Screen};
-use super::wire::{ReplyBody, Request, RequestBody, reply};
+use super::supervisor::Screen as ScreenKind;
+use super::wire::{ReplyBody, RequestBody};
+use crate::supervise::{Kind as _, read_request, write_message};
 
 /// Serves stdin/stdout after the caller initializes content-free logging.
 ///
@@ -39,11 +41,11 @@ pub fn serve() -> Result<(), frame::FrameError> {
     if fault == Some(super::wire::WorkerFault::Exit) {
         return Ok(());
     }
-    while let Some(request) = frame::read::<Request>(&mut input, Pipe::Data)? {
+    while let Some((id, body)) = read_request::<RequestBody>(&mut input, ScreenKind::MAX_REQUEST)? {
         let received = Instant::now();
         #[cfg(debug_assertions)]
         {
-            if let RequestBody::Fault(requested) = request.body {
+            if let RequestBody::Fault(requested) = body {
                 fault = Some(requested);
             }
             if let Some(fault) = fault.take() {
@@ -63,7 +65,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
                 }
             }
         }
-        let (body, retire) = match request.body {
+        let (reply, retire) = match body {
             RequestBody::Ping => (ReplyBody::Pong, false),
             RequestBody::Capture {
                 ticket,
@@ -81,8 +83,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
             #[cfg(debug_assertions)]
             RequestBody::Fault(_) => continue,
         };
-        frame::write(&mut output, &reply(request.id, &body)?, Pipe::Data)?;
-        output.flush()?;
+        write_message(&mut output, id, &reply, ScreenKind::MAX_REPLY)?;
         if retire {
             return Ok(());
         }
