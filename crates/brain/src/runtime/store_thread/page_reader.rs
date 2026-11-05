@@ -200,6 +200,12 @@ pub(super) fn spawn_reader(
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
+                    StoreOp::CompactContext(read) => Input::CompactBuilt(context::read_compact(
+                        open.then_some(&*side),
+                        read,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
                     StoreOp::ReadJob(read) => Input::JobBuilt(context::read_job(
                         open.then_some(&*side),
                         read,

@@ -32,6 +32,8 @@ pub enum StoreOp {
     BuildContext(super::BuildContext),
     /// Read a background job's request on the page reader, in one read transaction.
     ReadJob(super::ReadJob),
+    /// Read an inline compaction's request on the page reader, in one read transaction.
+    CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
     BeginTurn {
         /// The thread.
@@ -152,6 +154,7 @@ impl StoreOp {
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
             | Self::ReadJob(_)
+            | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
             | Self::Delete { .. }
@@ -176,6 +179,10 @@ impl StoreOp {
             Self::BuildContext(build) => Input::ContextBuilt(super::ContextBuilt {
                 key: build.key,
                 snapshot: build.snapshot.clone(),
+                result: Err(super::Unbuilt::Failed),
+            }),
+            Self::CompactContext(read) => Input::CompactBuilt(super::CompactBuilt {
+                key: read.key,
                 result: Err(super::Unbuilt::Failed),
             }),
             Self::ReadJob(read) => Input::JobBuilt(super::JobBuilt {
