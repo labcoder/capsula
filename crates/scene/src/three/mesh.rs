@@ -377,9 +377,9 @@ fn extrude(
         [x, y, f64::from(depth) * if i < n { -0.5 } else { 0.5 }]
     };
     check_vertices(2 * n, &point, emit.world, emit.cancel, keys)?;
-    let mut indices = [0_u8; 128];
+    let mut indices = [0_u8; crate::limits::MAX_EXTRUDE_POINTS];
     for (i, index) in indices[..n].iter_mut().enumerate() {
-        *index = u8::try_from(i).expect("outline cap is 128");
+        *index = u8::try_from(i).expect("the outline cap fits u8");
     }
     let area: f64 = (1..n - 1)
         .map(|i| orient(points.point(0), points.point(i), points.point(i + 1)))
@@ -393,7 +393,7 @@ fn extrude(
         emit.quad([a, b, b + n, a + n].map(point), Face::Surface)?;
     }
     let mut len = n;
-    let mut ears = [false; 128];
+    let mut ears = [false; crate::limits::MAX_EXTRUDE_POINTS];
     for (i, ear) in ears[..len].iter_mut().enumerate() {
         poll(emit.cancel)?;
         *ear = is_ear(&indices[..len], i, points);
