@@ -1007,6 +1007,7 @@ fn listen(
                             let events = this.events.clone();
                             cx.defer(move |_| send(&events, PresenceEvent::Reconcile));
                         }
+                        // Kumo's drag must hear every capture loss, even when restoring failed.
                         kumo_view::bridge(&this.kumo, event, cx);
                         selection?;
                     }

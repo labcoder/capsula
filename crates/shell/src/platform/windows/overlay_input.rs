@@ -55,26 +55,36 @@ impl InputPlatform for OverlayWindows {
     type Error = PresenceError;
 
     fn configure(&mut self, mode: OverlayInput, regions: &Regions) -> Result<(), PresenceError> {
-        configure_if_changed(&mut self.applied, mode, regions, || {
-            configure(&self.layers, &self.regions, mode, regions)
+        configure_tracked(&mut self.applied, mode, regions, |styles| {
+            configure(&self.layers, &self.regions, mode, regions, styles)
         })
     }
 }
 
-fn configure_if_changed<E>(
+/// Whether a configure also rewrites the hit-test styles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Styles {
+    Apply,
+    Keep,
+}
+
+/// Restacks every time, because placing or showing a presence window lifts it to the top of
+/// the topmost band; only the style changes are skipped when nothing changed since the last
+/// successful apply.
+fn configure_tracked<E>(
     applied: &mut Option<(OverlayInput, Regions)>,
     mode: OverlayInput,
     regions: &Regions,
-    configure: impl FnOnce() -> Result<(), E>,
+    configure: impl FnOnce(Styles) -> Result<(), E>,
 ) -> Result<(), E> {
-    if applied
+    let unchanged = applied
         .as_ref()
-        .is_some_and(|(old_mode, old_regions)| *old_mode == mode && old_regions == regions)
-    {
-        return Ok(());
+        .is_some_and(|(old_mode, old_regions)| *old_mode == mode && old_regions == regions);
+    if unchanged {
+        return configure(Styles::Keep);
     }
     *applied = None;
-    configure()?;
+    configure(Styles::Apply)?;
     *applied = Some((mode, regions.clone()));
     Ok(())
 }
@@ -100,6 +110,7 @@ fn configure(
     bindings: &BTreeMap<RegionId, HWND>,
     mode: OverlayInput,
     regions: &Regions,
+    styles: Styles,
 ) -> Result<(), PresenceError> {
     if mode == OverlayInput::Selecting
         && layers
@@ -115,7 +126,9 @@ fn configure(
                     continue;
                 }
                 let rect = regions.get(id).copied();
-                interactive(*hwnd, mode == OverlayInput::Regions && rect.is_some())?;
+                if styles == Styles::Apply {
+                    interactive(*hwnd, mode == OverlayInput::Regions && rect.is_some())?;
+                }
                 restack(*hwnd, rect)?;
             }
         }
@@ -123,7 +136,7 @@ fn configure(
             if !owned(*hwnd) {
                 continue;
             }
-            if matches!(layer, Layer::Overlay | Layer::Selection) {
+            if styles == Styles::Apply && matches!(layer, Layer::Overlay | Layer::Selection) {
                 interactive(
                     *hwnd,
                     layer == Layer::Selection && mode == OverlayInput::Selecting,
@@ -189,58 +202,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unchanged_configuration_skips_native_work_and_failed_changes_retry() {
+    fn unchanged_configuration_still_restacks_and_skips_only_styles() {
+        use Styles::{Apply, Keep};
         let mut applied = None;
-        let mut calls = 0;
+        let mut styles = Vec::new();
         let empty = Regions::new();
         let registered = Regions::from([(RegionId(1), [10, 20, 4, 5])]);
-        let mut apply = |applied: &mut _, mode, regions: &_| {
-            configure_if_changed(applied, mode, regions, || {
-                calls += 1;
-                Ok::<_, &str>(())
+        let mut apply = |applied: &mut _, mode, regions: &_, result: Result<(), &'static str>| {
+            configure_tracked(applied, mode, regions, |changed| {
+                styles.push(changed);
+                result
             })
         };
         assert_eq!(
-            apply(&mut applied, OverlayInput::PassThrough, &empty),
+            apply(&mut applied, OverlayInput::PassThrough, &empty, Ok(())),
+            Ok(())
+        );
+        // A placement lifted a window above the overlay; the unchanged configure restacks.
+        assert_eq!(
+            apply(&mut applied, OverlayInput::PassThrough, &empty, Ok(())),
             Ok(())
         );
         assert_eq!(
-            apply(&mut applied, OverlayInput::PassThrough, &empty),
+            apply(&mut applied, OverlayInput::Regions, &registered, Ok(())),
             Ok(())
         );
-        assert_eq!(calls, 1);
         assert_eq!(
-            configure_if_changed(&mut applied, OverlayInput::Regions, &registered, || {
-                calls += 1;
-                Ok::<_, &str>(())
-            }),
+            apply(&mut applied, OverlayInput::Regions, &empty, Ok(())),
             Ok(())
         );
-        assert_eq!(calls, 2);
         assert_eq!(
-            configure_if_changed(&mut applied, OverlayInput::Regions, &empty, || {
-                calls += 1;
-                Ok::<_, &str>(())
-            }),
-            Ok(())
-        );
-        assert_eq!(calls, 3);
-        assert_eq!(
-            configure_if_changed(&mut applied, OverlayInput::Selecting, &empty, || {
-                calls += 1;
+            apply(
+                &mut applied,
+                OverlayInput::Selecting,
+                &empty,
                 Err("partial setup")
-            }),
+            ),
             Err("partial setup")
         );
         assert_eq!(applied, None);
         assert_eq!(
-            configure_if_changed(&mut applied, OverlayInput::Regions, &empty, || {
-                calls += 1;
-                Ok::<_, &str>(())
-            }),
+            apply(&mut applied, OverlayInput::Regions, &empty, Ok(())),
             Ok(())
         );
-        assert_eq!(calls, 5);
+        assert_eq!(styles, vec![Apply, Keep, Apply, Apply, Apply, Apply]);
         assert_eq!(applied, Some((OverlayInput::Regions, empty)));
     }
 

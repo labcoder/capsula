@@ -33,8 +33,10 @@ pixels completes as a region; anything smaller cancels. B3a's low-level hook sup
 swallows it only while Selecting is live. B3a/B3b will produce selection entry; B0 sends no hold.
 The pick stays on GPUI mouse events and the existing stamped capture-loss/reconcile bridge.
 
-Native configuration skips an unchanged mode and registry after a successful apply. Binding
-changes invalidate that cache, and a failed partial apply invalidates it so restoration retries.
+Native configuration always restacks, because placing or showing a presence window lifts it to
+the top of the topmost band. It skips only the style changes when the mode and registry match the
+last successful apply. That cache records what was last applied, not the windows' real state.
+Binding changes invalidate it, and a failed partial apply invalidates it so restoration retries.
 Restore errors don't drop selection notifications or Kumo's capture-loss/reconcile bridge:
 all effects run, then the first error is reported. New bindings prune dead native handles and
 skip duplicates within their layer.
