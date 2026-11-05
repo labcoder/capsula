@@ -7,14 +7,6 @@ use super::mask::{Completeness, MaskSet};
 use super::wire::{FrameMeta, Refusal};
 
 /// A borrowed image with every known password rectangle blacked out.
-///
-/// ```compile_fail
-/// use kumochi_brain::screen::mask::Completeness;
-/// use kumochi_brain::screen::sanitize::SanitizedFrame;
-/// let frame = SanitizedFrame {
-///     bgra: &[], meta: todo!(), generation: 0, completeness: Completeness::Pending,
-/// };
-/// ```
 pub(crate) struct SanitizedFrame<'a> {
     bgra: &'a [u8],
     meta: FrameMeta,

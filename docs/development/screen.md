@@ -119,6 +119,7 @@ carry their capture id and generation: A6 must never stage a superseded generati
 The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
 fills it, but invalidates the image before lending its buffer. Read access to a committed image
 is restricted to `screen/` through `image_mut` and `sanitize`; sanitized fields are private.
+Rust's visibility rules enforce this boundary; no test checks it.
 
 The overview uses exact area weights (a box filter), rounding channel averages to the nearest
 byte with halves upward. It fits within 1280×720, preserves the aspect ratio to integer-pixel
