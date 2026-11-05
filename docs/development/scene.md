@@ -58,9 +58,10 @@ Screen/capture anchors are absent, not ignored.
 
 ### 3D records
 
-The decoder accepts the following records, but admission refuses every `view3d`,
-`solid`, `pos3` track and `rot3` track as `Unsupported` at `put[i]` until slice 5's
-3D admission lands. No 3D objects commit, lay out or animate yet. `pos3` and `rot3`
+Scene admission validates and charges the following records (see 3D admission). Until shell
+views can prepare them, the brain's one drawing ingress calls `refuse_three_dimensional`, which
+refuses the first `view3d`, `solid`, `pos3` track or `rot3` track as `Unsupported` at `put[i]`
+(`shortcut:`, removed in slice 5 PR 6). `pos3` and `rot3`
 use three-component keys; existing tracks retain their existing key types.
 
 | Record | Fields and decode bounds |
@@ -108,7 +109,7 @@ later requires an explicit wire-version decision, not rewritten goldens.
 `three::size::triangles` validates one decoded solid and returns its candidate
 triangle capacity without allocating. This count does not depend on world transforms.
 Triangle generation is a separate module; sizing alone does not establish world-space
-representability. Admission still refuses 3D until its later slice lands.
+representability. Admission charges this count (see 3D admission).
 
 Let n be `segments` (default 24), k the retained outline count, p the retained
 profile count and q the retained path count:
@@ -127,7 +128,7 @@ profile count and q the retained path count:
 
 Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
 Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
-count at 49,148. Counts over the future per-view triangle budget remain legal here.
+count at 49,148. Sizing allows counts over the triangle budget; admission refuses them.
 Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
 
 The shared numeric policy is `three::REL = 1e-6` and
@@ -149,6 +150,40 @@ tangent dot product strictly below `−1 + REL` is refused. These failures are t
 `MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
 original typed field and code. `ErrorCode::Degenerate` is appended for the later
 admission boundary, which alone will convert these errors into sanitized paths.
+
+### 3D admission
+
+A `view3d` is a root object and at most one lives in a scene, a pending removal included.
+A `solid` names its view with `in`, and `attach` names an earlier solid (lower revision, or
+the same revision and a lower slot) in the same view; attachment counts toward depth 16 and a
+removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
+`pos3` and `rot3`; a view owns no `color`; 2D tracks and `ref` anchors to 3D objects are
+refused. Admission sizes each solid with `three::size::triangles` and `three::size::reach`
+(the farthest local vertex from the solid's origin) and never tessellates: that runs off
+the admission path.
+
+| Budget | Limit | Error |
+|---|---|---|
+| Views | 1 per scene | `OverBudget(Views)` |
+| Solids | 160 per scene | `OverBudget(Solids)` |
+| Triangles | 24,000 per scene and across visible scenes | `OverBudget(Triangles)` |
+| Moving view | 6,000 triangles in a view with any `pos3` or `rot3` track | `OverBudget(MovingTriangles)` |
+
+Like 2D charges, these recompute from the after, pending and changed versions, so a removed
+solid releases its triangles only at retirement and a refusal moves no counter.
+
+**Coordinate bound.** 3D admission refuses a solid unless the sum of its chain's translation
+lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its
+`pos3` envelope, both multiplied by the ancestors' composed scale; summing lengths ignores
+cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is refused. The
+`pos3` envelope is the largest key length plus, for `spring`, the overshoot
+`|b − a| × SPRING_OVERSHOOT` per key pair (both directions with `yoyo`), taken over every
+charged version of the solid, so a delayed replacement cannot hide an earlier envelope.
+Rotation preserves lengths and adds nothing. Non-finite compositions fail with
+`TransformOverflow`, the bound with `OutOfRange`.
+
+**Stop.** A 3D object never re-roots: after a cut it survives only when its view and its whole
+attachment chain survive.
 
 ### 3D tessellation
 
@@ -579,11 +614,12 @@ Prepared residency remains the preparation layer's separate limit.
 | Prepared residency | Charged at preparation, independent of admission | 64 MiB |
 | Decoded images | Reserved for capture/image support | 64 MiB |
 | Visible scenes | — | 4 |
+| 3D | 1 view, 160 solids, 24,000 triangles; 6,000 in a moving view | 24,000 triangles |
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
 24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
-the depth-buffered raster (3D raster above), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
-and no 3D geometry is built yet.
+the depth-buffered raster (3D raster above), so there are no ordering budgets. 3D admission
+charges them (see 3D admission).
 
 ## Preparation
 

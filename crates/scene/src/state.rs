@@ -858,10 +858,7 @@ impl SceneState {
             if orphans.is_empty() {
                 break;
             }
-            for id in orphans {
-                let object = after.remove(&id).expect("orphans were just found in after");
-                discarded.push((id, object));
-            }
+            discarded.extend(orphans.iter().filter_map(|id| after.remove_entry(id)));
         }
         let discarded_bytes = records_bytes(&discarded);
         discarded.attribute(discarded_bytes);

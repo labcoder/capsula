@@ -205,34 +205,40 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
                 work.extent = rect_extent(b).map_err(|code| fail("box", code))?;
             }
         }
-        Op::Solid(r) => {
-            let sized = |error| match error {
-                MeshError::Shape(shape) => fail(shape.field, shape.code),
-                MeshError::Degenerate(field) => fail(field, ErrorCode::Degenerate),
-                MeshError::Cancelled | MeshError::Full => {
-                    unreachable!("sizing neither polls nor writes")
-                }
-            };
-            let triangles = three::size::triangles(r).map_err(sized)?;
-            work.usage.solids = 1;
-            work.usage.triangles =
-                usize::try_from(triangles).expect("solid triangle counts fit usize");
-            work.solid = Some(SolidWork {
-                pos: r.pos.map_or(0.0, |p| {
-                    p.iter()
-                        .map(|v| f64::from(v.get()).powi(2))
-                        .sum::<f64>()
-                        .sqrt()
-                }),
-                scale: r.scale.map_or(1.0, |s| f64::from(s.get())),
-                reach: three::size::reach(r).map_err(sized)?,
-            });
-        }
+        Op::Solid(r) => solid_work(&mut work, r, fail)?,
         Op::Anim(_) | Op::Mermaid(_) => {
             unreachable!("only model operations get work metadata")
         }
     }
     Ok(work)
+}
+
+fn solid_work(
+    work: &mut Work,
+    r: &crate::record::Solid,
+    fail: impl Fn(&'static str, ErrorCode) -> StepError,
+) -> Result<(), StepError> {
+    let sized = |error| match error {
+        MeshError::Shape(shape) => fail(shape.field, shape.code),
+        MeshError::Degenerate(field) => fail(field, ErrorCode::Degenerate),
+        MeshError::Cancelled | MeshError::Full => {
+            unreachable!("sizing neither polls nor writes")
+        }
+    };
+    let triangles = three::size::triangles(r).map_err(sized)?;
+    work.usage.solids = 1;
+    work.usage.triangles = usize::try_from(triangles).expect("solid triangle counts fit usize");
+    work.solid = Some(SolidWork {
+        pos: r.pos.map_or(0.0, |p| {
+            p.iter()
+                .map(|v| f64::from(v.get()).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }),
+        scale: r.scale.map_or(1.0, |s| f64::from(s.get())),
+        reach: three::size::reach(r).map_err(sized)?,
+    });
+    Ok(())
 }
 
 fn fixed_segments(op: &Op) -> usize {

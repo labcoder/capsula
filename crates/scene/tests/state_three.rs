@@ -102,7 +102,11 @@ fn solids_per_scene_stop_at_160() {
     let all = put("all", &boxes);
     commit(&mut state, &mut global, &all);
     assert_eq!(
-        (state.usage().solids, state.usage().triangles, state.usage().views),
+        (
+            state.usage().solids,
+            state.usage().triangles,
+            state.usage().views
+        ),
         (160, 1_920, 1)
     );
     let (fresh, global) = (scene(), GlobalBudget::default());
@@ -116,7 +120,11 @@ fn solids_per_scene_stop_at_160() {
 #[test]
 fn triangles_per_scene_stop_at_24000_and_refusals_leave_counters_alone() {
     let (mut state, mut global) = (scene(), GlobalBudget::default());
-    commit(&mut state, &mut global, &put("a", &[view("v"), lathe("l", 251, 48)]));
+    commit(
+        &mut state,
+        &mut global,
+        &put("a", &[view("v"), lathe("l", 251, 48)]),
+    );
     assert_eq!(state.usage().triangles, 24_000);
     assert_eq!(
         refused(&state, &global, &put("b", &[cube("c", "")])),
@@ -152,7 +160,11 @@ fn global_triangles_stop_at_24000_across_visible_scenes() {
     let mut global = GlobalBudget::default();
     let mut scenes: Vec<SceneState> = (0..4).map(|_| scene()).collect();
     for state in &mut scenes {
-        commit(state, &mut global, &put("a", &[view("v"), lathe("l", 126, 24)]));
+        commit(
+            state,
+            &mut global,
+            &put("a", &[view("v"), lathe("l", 126, 24)]),
+        );
     }
     assert_eq!(global.usage().triangles, 24_000);
     assert_eq!(
@@ -184,7 +196,9 @@ fn global_triangles_stop_at_24000_across_visible_scenes() {
         .expect("detached admission is local only");
     assert!(matches!(
         bindings[1].apply_detached(read, candidate, &mut global),
-        Err(BindingError::OverBudget(ErrorCode::OverBudget(Budget::Triangles)))
+        Err(BindingError::OverBudget(ErrorCode::OverBudget(
+            Budget::Triangles
+        )))
     ));
     assert_eq!(
         before,
@@ -220,12 +234,19 @@ fn one_view_per_scene_counts_a_pending_removal() {
 fn attachment_counts_toward_depth_16() {
     let mut ops = vec![view("v"), cube("s0", "")];
     for i in 1..15 {
-        ops.push(cube(&format!("s{i}"), &format!(r#","attach":"s{}""#, i - 1)));
+        ops.push(cube(
+            &format!("s{i}"),
+            &format!(r#","attach":"s{}""#, i - 1),
+        ));
     }
     let (mut state, mut global) = (scene(), GlobalBudget::default());
     commit(&mut state, &mut global, &put("deep", &ops));
     assert_eq!(
-        refused(&state, &global, &put("more", &[cube("s15", r#","attach":"s14""#)])),
+        refused(
+            &state,
+            &global,
+            &put("more", &[cube("s15", r#","attach":"s14""#)])
+        ),
         at(ErrorCode::TooDeep, "put")
     );
 }
@@ -233,9 +254,8 @@ fn attachment_counts_toward_depth_16() {
 #[test]
 fn attachment_names_an_earlier_solid_in_the_same_view() {
     let (state, global) = (scene(), GlobalBudget::default());
-    let other = format!(
-        r#"{{"solid":{{"in":"w","id":"b","shape":"box","size":[1,1,1],"attach":"a"}}}}"#
-    );
+    let other =
+        r#"{"solid":{"in":"w","id":"b","shape":"box","size":[1,1,1],"attach":"a"}}"#.to_owned();
     assert_eq!(
         refused(
             &state,
@@ -248,12 +268,19 @@ fn attachment_names_an_earlier_solid_in_the_same_view() {
         refused(
             &state,
             &global,
-            &put("x", &[view("v"), cube("a", r#","attach":"b""#), cube("b", "")])
+            &put(
+                "x",
+                &[view("v"), cube("a", r#","attach":"b""#), cube("b", "")]
+            )
         ),
         at(ErrorCode::ForwardRef, "put[1].solid.attach")
     );
     assert_eq!(
-        refused(&state, &global, &put("x", &[view("v"), cube("a", r#","attach":"z""#)])),
+        refused(
+            &state,
+            &global,
+            &put("x", &[view("v"), cube("a", r#","attach":"z""#)])
+        ),
         at(ErrorCode::UnknownRef, "put[1].solid.attach")
     );
     let mut state = state;
@@ -261,7 +288,10 @@ fn attachment_names_an_earlier_solid_in_the_same_view() {
     commit(
         &mut state,
         &mut global,
-        &put("a", &[view("v"), cube("a", ""), cube("b", r#","attach":"a""#)]),
+        &put(
+            "a",
+            &[view("v"), cube("a", ""), cube("b", r#","attach":"a""#)],
+        ),
     );
     assert_eq!(
         refused(&state, &global, r#"{"id":"r","remove":["a"]}"#),
@@ -280,8 +310,16 @@ fn attachment_names_an_earlier_solid_in_the_same_view() {
 #[test]
 fn a_3d_track_limits_its_view_to_6000_triangles() {
     let (mut state, mut global) = (scene(), GlobalBudget::default());
-    commit(&mut state, &mut global, &put("a", &[view("v"), lathe("l", 126, 24)]));
-    commit(&mut state, &mut global, &put("b", &[track("l", "pos3", [1.0, 0.0, 0.0], "linear")]));
+    commit(
+        &mut state,
+        &mut global,
+        &put("a", &[view("v"), lathe("l", 126, 24)]),
+    );
+    commit(
+        &mut state,
+        &mut global,
+        &put("b", &[track("l", "pos3", [1.0, 0.0, 0.0], "linear")]),
+    );
     assert_eq!(
         refused(&state, &global, &put("c", &[cube("c", "")])),
         over(Budget::MovingTriangles)
@@ -295,7 +333,11 @@ fn a_3d_track_limits_its_view_to_6000_triangles() {
             &put("a", &[view("v"), lathe("l", 126, 24), cube("c", "")]),
         );
         assert_eq!(
-            refused(&state, &global, &put("b", &[track("c", kind, [1.0, 0.0, 0.0], "linear")])),
+            refused(
+                &state,
+                &global,
+                &put("b", &[track("c", kind, [1.0, 0.0, 0.0], "linear")])
+            ),
             over(Budget::MovingTriangles),
             "{kind}"
         );
@@ -307,7 +349,11 @@ fn a_3d_track_limits_its_view_to_6000_triangles() {
         &mut global,
         &put(
             "a",
-            &[view("v"), cube("m", ""), track("m", "rot3", [0.0, 90.0, 0.0], "linear")],
+            &[
+                view("v"),
+                cube("m", ""),
+                track("m", "rot3", [0.0, 90.0, 0.0], "linear"),
+            ],
         ),
     );
     assert_eq!(
@@ -332,10 +378,16 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
     let (state, global) = (scene(), GlobalBudget::default());
     let linear = put(
         "a",
-        &[view("v"), cube("s", ""), track("s", "pos3", [19_000.0, 0.0, 0.0], "linear")],
+        &[
+            view("v"),
+            cube("s", ""),
+            track("s", "pos3", [19_000.0, 0.0, 0.0], "linear"),
+        ],
     );
     let spring = linear.replace("linear", "spring");
-    state.admit(&step(&linear), &global).expect("keys inside the bound");
+    state
+        .admit(&step(&linear), &global)
+        .expect("keys inside the bound");
     assert_eq!(
         refused(&state, &global, &spring),
         at(ErrorCode::OutOfRange, "put")
@@ -352,7 +404,9 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
             ],
         )
     };
-    state.admit(&step(&parent("linear")), &global).expect("16,001.7");
+    state
+        .admit(&step(&parent("linear")), &global)
+        .expect("16,001.7");
     assert_eq!(
         refused(&state, &global, &parent("spring")),
         at(ErrorCode::OutOfRange, "put")
@@ -364,7 +418,11 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
         &mut global,
         &put(
             "a",
-            &[view("v"), cube("s", ""), track("s", "pos3", [14_000.0, 0.0, 0.0], "spring")],
+            &[
+                view("v"),
+                cube("s", ""),
+                track("s", "pos3", [14_000.0, 0.0, 0.0], "spring"),
+            ],
         ),
     );
     let replace = put(
@@ -383,8 +441,15 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
 #[test]
 fn the_composed_extent_stops_at_20000_and_ignores_cancellation() {
     let (state, global) = (scene(), GlobalBudget::default());
-    let placed = |x: &str| put("a", &[view("v"), sphere("s", &format!(r#","pos":[{x},0,0]"#))]);
-    state.admit(&step(&placed("19999")), &global).expect("exactly 20,000");
+    let placed = |x: &str| {
+        put(
+            "a",
+            &[view("v"), sphere("s", &format!(r#","pos":[{x},0,0]"#))],
+        )
+    };
+    state
+        .admit(&step(&placed("19999")), &global)
+        .expect("exactly 20,000");
     assert_eq!(
         refused(&state, &global, &placed("19999.002")),
         at(ErrorCode::OutOfRange, "put")
@@ -432,14 +497,24 @@ fn sizing_refuses_degenerate_shapes_before_commit() {
 #[test]
 fn a_removed_solid_releases_triangles_only_at_retirement() {
     let (mut state, mut global) = (scene(), GlobalBudget::default());
-    commit(&mut state, &mut global, &put("a", &[view("v"), cube("c", "")]));
+    commit(
+        &mut state,
+        &mut global,
+        &put("a", &[view("v"), cube("c", "")]),
+    );
     let removal = commit(&mut state, &mut global, r#"{"id":"b","remove":["c"]}"#);
-    assert_eq!((state.usage().triangles, global.usage().triangles), (12, 12));
+    assert_eq!(
+        (state.usage().triangles, global.usage().triangles),
+        (12, 12)
+    );
     state.retire(removal.index, &mut global).expect("committed");
     assert_eq!((state.usage().triangles, global.usage().triangles), (0, 0));
     let generation = global.generation();
     state.retire(removal.index, &mut global).expect("repeat");
-    assert_eq!((state.usage().triangles, global.generation()), (0, generation));
+    assert_eq!(
+        (state.usage().triangles, global.generation()),
+        (0, generation)
+    );
 }
 
 #[test]
@@ -512,7 +587,11 @@ fn stop_keeps_a_3d_object_only_with_its_view_and_attachment_chain() {
                 ],
             ),
         );
-        commit(&mut state, global, &put("b", &[cube("b", r#","attach":"a""#)]));
+        commit(
+            &mut state,
+            global,
+            &put("b", &[cube("b", r#","attach":"a""#)]),
+        );
         state
     };
     let handle = |revision, slot| Handle::new(revision, slot).expect("handle");
@@ -524,7 +603,10 @@ fn stop_keeps_a_3d_object_only_with_its_view_and_attachment_chain() {
     let mut global = GlobalBudget::default();
     let mut state = fixture(&mut global);
     let outcome = state
-        .stop(&cut(vec![handle(1, 0), handle(1, 2), handle(2, 0)]), &mut global)
+        .stop(
+            &cut(vec![handle(1, 0), handle(1, 2), handle(2, 0)]),
+            &mut global,
+        )
         .expect("valid cut");
     assert_eq!(outcome, StopOutcome::Kept);
     assert_eq!(
@@ -548,7 +630,10 @@ fn stop_keeps_a_3d_object_only_with_its_view_and_attachment_chain() {
     let mut global = GlobalBudget::default();
     let mut state = fixture(&mut global);
     state
-        .stop(&cut(vec![handle(1, 1), handle(1, 2), handle(2, 0)]), &mut global)
+        .stop(
+            &cut(vec![handle(1, 1), handle(1, 2), handle(2, 0)]),
+            &mut global,
+        )
         .expect("valid cut");
     assert_eq!(
         ["v", "a", "t", "b"].map(|name| state.handle(&id(name)).is_some()),
@@ -612,11 +697,88 @@ fn info_is_bounded_and_redacted_like_other_text() {
     ));
     let debug = format!("{parsed:?}");
     assert!(!debug.contains(marker));
-    assert!(!debug.as_bytes().windows(marker.len()).any(|w| w == marker.as_bytes()));
+    assert!(
+        !debug
+            .as_bytes()
+            .windows(marker.len())
+            .any(|w| w == marker.as_bytes())
+    );
     let over = format!(
         r#"{{"step":{{"id":"x","set":[{{"target":"s","info":"{}"}}]}}}}"#,
         "é".repeat(401)
     );
     let error = parse_record(over.as_bytes()).expect_err("401 characters");
     assert_eq!(error.code, ErrorCode::TooLong);
+}
+
+fn polygon(name: &str) -> String {
+    let points: Vec<String> = (0..128)
+        .map(|i| {
+            let angle = f64::from(i) * std::f64::consts::TAU / 128.0;
+            format!("[{:.0},{:.0}]", 1000.0 * angle.cos(), 1000.0 * angle.sin())
+        })
+        .collect();
+    format!(
+        r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
+        points.join(",")
+    )
+}
+
+#[test]
+#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
+fn measure_admit() {
+    use std::{hint::black_box, time::Instant};
+
+    let extrudes = |first: Option<String>| {
+        let mut ops: Vec<String> = first.into_iter().collect();
+        let mut count = 0;
+        loop {
+            ops.push(polygon(&format!("e{count}")));
+            if format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024 {
+                ops.pop();
+                return (count, step(&put("a", &ops)));
+            }
+            count += 1;
+        }
+    };
+    let (count, largest) = extrudes(Some(view("v")));
+    let (_, late) = extrudes(None);
+    let mut full = (scene(), GlobalBudget::default());
+    commit(
+        &mut full.0,
+        &mut full.1,
+        &put("f", &[view("v"), lathe("l", 251, 48)]),
+    );
+    let mut boxes = vec![view("v")];
+    boxes.extend((0..160).map(|i| cube(&format!("s{i}"), "")));
+    let empty = (scene(), GlobalBudget::default());
+    println!("largest legal step: {count} extrudes of 128 points");
+    for (workload, (state, global), step, refused) in [
+        ("largest-legal-extrude-step", &empty, largest, None),
+        (
+            "extrude-step-refused-late",
+            &full,
+            late,
+            Some(ErrorCode::OverBudget(Budget::Triangles)),
+        ),
+        ("160-small-solids", &empty, step(&put("a", &boxes)), None),
+    ] {
+        assert_eq!(
+            state.admit(&step, global).err().map(|error| error.code),
+            refused,
+            "{workload}"
+        );
+        let mut samples: Vec<f64> = (0..200)
+            .map(|_| {
+                let start = Instant::now();
+                drop(black_box(state.admit(black_box(&step), global)));
+                start.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "{workload}: n=200 p50={:.1}us p99={:.1}us max={:.1}us",
+            samples[100], samples[197], samples[199]
+        );
+    }
 }
