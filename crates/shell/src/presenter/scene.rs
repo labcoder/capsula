@@ -11,6 +11,7 @@ use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, Scene
 use kumochi_scene::{
     Preparation, SceneBinding, SceneEvent, SceneView, StopCut,
     deferred::Deferred,
+    display::PaintWork,
     layout::{LayoutState, PreparedStep},
     text::Bounded,
 };
@@ -25,6 +26,7 @@ pub(super) struct Scene {
     /// The layout at the activated bound: recovered at rest, empty, or the last consumed step's.
     pub(super) rest: LayoutState,
     pub(super) retained: usize,
+    pub(super) paint: PaintWork,
     /// The sampled source of the rest, replaced with it; B6 activates it.
     pub(super) view: SceneView,
     /// The view's bytes, cached when it is replaced.
@@ -123,6 +125,7 @@ impl Scene {
         };
         Self {
             retained,
+            paint: rest.paint_work(),
             view_bytes: view.resident_bytes(),
             view,
             frame_bytes,
@@ -191,6 +194,7 @@ impl Scene {
         ));
         let bytes = self.residency().saturating_sub(self.held());
         drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
+        self.paint = self.rest.paint_work();
         self.pending_consumption = None;
     }
 

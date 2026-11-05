@@ -22,7 +22,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
@@ -279,6 +279,19 @@ impl Helper {
             Ok(true) => Ok(()),
             _ => Err(error),
         }
+    }
+
+    /// The exit code of a process that has exited.
+    ///
+    /// # Errors
+    /// Fails when the OS can't report it.
+    pub fn exit_code(&self) -> io::Result<u32> {
+        let mut code = 0;
+        // SAFETY: the process handle is open for the borrow and `code` is a valid out pointer.
+        if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &raw mut code) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(code)
     }
 
     /// Whether the process exits within `timeout`.

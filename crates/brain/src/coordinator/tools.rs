@@ -7,21 +7,18 @@ use std::fmt;
 
 use kumochi_protocol::message::{Content, RunId, ThreadId};
 
-use super::{Coordinator, Effect, Notify, Stale, StoreOp, unstored};
+use super::{Coordinator, Effect, Stale, StoreOp, unstored};
 use crate::context::{BOUND, ConnectionTag};
-use crate::engines::{CallId, Opaque};
-use crate::store::{Failure, RunEnd};
+use crate::dispatch::{Caller, Dispatch, ToolOutput};
+use crate::engines::{CallId, Opaque, ToolName};
+use crate::store::Failure;
 
 /// The most model rounds one run may have [guess, from §13b].
 pub const MAX_ROUNDS: u32 = 8;
 /// The most tool calls one run may make, across its rounds [guess, from §13b].
 pub const MAX_CALLS: u32 = 16;
-/// What every call gets until a tool answers it (PR 14a). It doesn't repeat the call's name, so
-/// nothing the provider sent comes back.
-pub(crate) const UNKNOWN_TOOL: &str = r#"{"error":"unknown tool"}"#;
-
 /// One round's write, in one transaction: the text streamed since the last write, the round's
-/// native items in output order, then a result for each call in call order. `RoundStored`
+/// native items in output order, then each call's answer in call order. `RoundStored`
 /// answers it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoundItems {
@@ -32,7 +29,15 @@ pub struct RoundItems {
     pub(crate) connection: ConnectionTag,
     pub(crate) text: Option<Content>,
     pub(crate) items: Vec<Opaque>,
-    pub(crate) calls: Vec<CallId>,
+    pub(crate) calls: Vec<(CallId, ToolOutput)>,
+}
+
+/// One of the round's calls: its tool, its arguments once ready, and its answer once it has one.
+struct Open {
+    call: CallId,
+    name: ToolName,
+    args: Option<String>,
+    output: Option<ToolOutput>,
 }
 
 /// A run's tool loop.
@@ -40,8 +45,10 @@ pub struct RoundItems {
 pub(super) struct Loop {
     /// Calls accepted across the run's rounds.
     calls: u32,
-    /// This round's calls nothing answers, in call order, and whether each is ready.
-    open: Vec<(CallId, bool)>,
+    /// This round's calls, in call order.
+    open: Vec<Open>,
+    /// This round's calls went to the dispatcher; the round is stored once each is answered.
+    dispatched: bool,
     /// This round's native items, with their output index.
     items: Vec<(u32, Opaque)>,
     item_bytes: usize,
@@ -54,6 +61,7 @@ impl fmt::Debug for Loop {
         f.debug_struct("Loop")
             .field("calls", &self.calls)
             .field("open", &self.open.len())
+            .field("dispatched", &self.dispatched)
             .field("items", &self.items.len())
             .field("item_bytes", &self.item_bytes)
             .field("writing", &self.writing)
@@ -71,28 +79,60 @@ impl Loop {
         true
     }
 
-    /// A call nothing answers; false when the round already has it.
-    pub(super) fn open(&mut self, call: CallId) -> bool {
-        if self.open.iter().any(|(open, _)| *open == call) {
+    /// A call of the round; false when the round already has it.
+    pub(super) fn open(&mut self, call: CallId, name: ToolName) -> bool {
+        if self.open.iter().any(|open| open.call == call) {
             return false;
         }
-        self.open.push((call, false));
+        self.open.push(Open {
+            call,
+            name,
+            args: None,
+            output: None,
+        });
         true
     }
 
-    /// The call is open and not ready yet.
+    /// The call is open and its arguments aren't ready yet.
     pub(super) fn takes(&self, call: &CallId) -> bool {
-        self.open.iter().any(|(open, ready)| open == call && !ready)
+        self.open
+            .iter()
+            .any(|open| open.call == *call && open.args.is_none())
     }
 
-    pub(super) fn ready(&mut self, call: &CallId) {
-        if let Some((_, ready)) = self.open.iter_mut().find(|(open, _)| open == call) {
-            *ready = true;
+    pub(super) fn ready(&mut self, call: &CallId, args: String) {
+        if let Some(open) = self.open.iter_mut().find(|open| open.call == *call) {
+            open.args = Some(args);
         }
     }
 
     pub(super) fn all_ready(&self) -> bool {
-        self.open.iter().all(|(_, ready)| *ready)
+        self.open.iter().all(|open| open.args.is_some())
+    }
+
+    pub(super) fn dispatched(&self) -> bool {
+        self.dispatched
+    }
+
+    /// Forgets the round a voided build produced: its calls, answered or not, and its items.
+    fn drop_round(&mut self) {
+        self.open.clear();
+        self.dispatched = false;
+        self.items.clear();
+        self.item_bytes = 0;
+    }
+
+    /// Answers a dispatched call still waiting; false when none is.
+    pub(super) fn answer(&mut self, call: &CallId, output: ToolOutput) -> bool {
+        let waiting = self
+            .open
+            .iter_mut()
+            .find(|open| open.call == *call && open.output.is_none());
+        let Some(open) = waiting.filter(|_| self.dispatched) else {
+            return false;
+        };
+        open.output = Some(output);
+        true
     }
 
     /// The round made calls the loop still has to answer.
@@ -132,21 +172,88 @@ impl Coordinator {
             return self.fail(run, Failure::Budget, effects);
         }
         if !calling && current.tools.items.is_empty() {
-            let done = self.take(run)?;
-            self.end(done, RunEnd::Done, None, Notify::Shell, effects);
+            return self.complete(run, effects);
+        }
+        if current.connection.is_none() {
+            return self.fail(run, Failure::Engine, effects);
+        }
+        if calling && !current.tools.dispatched {
+            current.tools.dispatched = true;
+            // The engine is done with the round, so its calls run; a call never sees it finishing.
+            current.finishing = false;
+            let calls: Vec<_> = current
+                .tools
+                .open
+                .iter()
+                .map(|open| (open.call.clone(), open.name, open.args.clone()))
+                .collect();
+            for (call, name, args) in calls {
+                let caller = Caller::Model {
+                    run,
+                    call: call.clone(),
+                };
+                let args = args.unwrap_or_default();
+                let dispatch = self.tool_call(caller, name, args.as_bytes(), effects);
+                let current = self.current(run)?;
+                // A delete reached what the build rendered: the round is built again, so the
+                // response's calls, items and text are dropped, not stored.
+                // shortcut: steps a voided response drew stay, and its text stays on screen, until
+                // B10 offers draw to a model and the shell can retract a round.
+                if !current
+                    .build
+                    .as_ref()
+                    .is_some_and(super::admission::Build::admitted)
+                {
+                    current.tools.drop_round();
+                    current.unstored.clear();
+                    return Ok(());
+                }
+                if let Dispatch::Answered(output) = dispatch {
+                    current.tools.answer(&call, output);
+                }
+            }
+        }
+        self.store_round(run, effects)
+    }
+
+    /// Stores the current round once each of its calls is answered.
+    pub(super) fn store_round(
+        &mut self,
+        run: RunId,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let pending = self.pending_deletes();
+        let current = self.current(run)?;
+        if current.tools.open.iter().any(|open| open.output.is_none()) {
             return Ok(());
+        }
+        // A delete accepted while the calls were written reached what the build rendered: the
+        // calls stay settled in the ledger, but the response is dropped and the round built again.
+        if let Some(build) = current.build.as_ref() {
+            let voided = build.voided(build.sources());
+            if !voided.is_empty() {
+                let key = build.key();
+                current.tools.drop_round();
+                current.unstored.clear();
+                effects.push(Effect::CancelEngine { run });
+                self.rebuild(key, &voided, &pending, effects);
+                return Ok(());
+            }
         }
         let Some(connection) = current.connection else {
             return self.fail(run, Failure::Engine, effects);
         };
+        let round = current.build.as_ref().map_or(1, |build| build.key().round);
+        let calling = current.tools.calling();
         current.finishing = !calling;
         let mut items = std::mem::take(&mut current.tools.items);
         items.sort_by_key(|(index, _)| *index);
         current.tools.item_bytes = 0;
         let calls = std::mem::take(&mut current.tools.open)
             .into_iter()
-            .map(|(call, _)| call)
+            .filter_map(|open| Some((open.call, open.output?)))
             .collect();
+        current.tools.dispatched = false;
         current.tools.writing = Some((round, !calling));
         effects.push(Effect::Store(StoreOp::RoundItems(RoundItems {
             thread: current.thread,
@@ -178,8 +285,7 @@ impl Coordinator {
             return Ok(());
         }
         if last {
-            let done = self.take(run)?;
-            self.end(done, RunEnd::Done, None, Notify::Shell, effects);
+            self.complete(run, effects)?;
         } else {
             self.build(run, round + 1, effects);
         }

@@ -20,6 +20,7 @@ impl Presence {
             Err(error) => {
                 tracing::warn!(%error, "invalid scene stream; ending the connection");
                 self.end_scene_connection();
+                self.draw_changed(cx);
                 return;
             }
         };
@@ -34,6 +35,7 @@ impl Presence {
                     if !sent {
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.end_scene_connection();
+                        self.draw_changed(cx);
                         return;
                     }
                 }
@@ -50,6 +52,7 @@ impl Presence {
             }
         }
         self.scene_watchdog(cx);
+        self.draw_changed(cx);
     }
 
     fn scene_worker(

@@ -121,6 +121,12 @@ impl Presenter {
         let old = std::mem::replace(&mut scene.rest, step.after.clone());
         drop(Deferred::new(old, scene.retained));
         scene.retained = full_after;
+        scene.paint = scene
+            .ready
+            .iter()
+            .fold(scene.rest.paint_work(), |sum, ready| {
+                sum.max(ready.step.after.paint_work())
+            });
         scene.pending_consumption = None;
         self.returned.fetch_add(bytes, Ordering::Relaxed);
         let step = ConsumedStep {

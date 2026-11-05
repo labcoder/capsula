@@ -155,7 +155,8 @@ faces, clips near and guard planes in f64, projects, snaps and shades into reser
 Every source face shares one reciprocal-depth plane across its triangles. Camera defaults target
 the 3D bounds' centre; authored cameras can enter geometry, and clipping rather than a distance
 clamp handles that case. The near plane includes a world-coordinate precision floor. These scene
-primitives exist, but 3D admission and the shell host are still staged. Scene picking reads an
+primitives exist and scene admission charges 3D steps, but the brain refuses them at its ingress
+until the shell host lands. Scene picking reads an
 owned `DisplayedFrame`: ids, camera, sampled poses, geometry revision, solid-to-part handles and
 the frozen logical destination/DPI/exact integer raster dimensions. Each pointer axis maps
 independently; labelled geometry returns a part, unlabelled geometry blocks and background misses.

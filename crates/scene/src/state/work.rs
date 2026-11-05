@@ -6,10 +6,13 @@ use crate::{
     ErrorCode, FieldPath, Finite, Step, StepError, WireId,
     budget::Usage,
     deferred::Deferred,
+    display::{Contour, polyline_length},
+    geom::Vec2,
     layout::heap,
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
     record::{Anchor, Anim, Axis, AxisScale, ChartKind, Ease, Enter, KeyValue, Op, Point, Track},
+    three::{self, size::MeshError},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -70,6 +73,19 @@ pub(crate) struct Work {
     pub inherited_rotation: bool,
     pub enter: Option<Enter>,
     pub motion: BTreeMap<&'static str, Motion>,
+    /// Prim-unit length bound of a dashed stroke whose geometry the record fixes.
+    pub dash: Option<f64>,
+    pub solid: Option<SolidWork>,
+}
+
+/// A solid's authored placement, sized before any tessellation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SolidWork {
+    /// Length of the authored translation.
+    pub pos: f64,
+    pub scale: f64,
+    /// Largest local vertex distance from the solid's own origin.
+    pub reach: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -112,8 +128,8 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         enter: entrance(op),
         ..Work::default()
     };
-    let name = super::object::visual(op)
-        .expect("only visual operations get work metadata")
+    let name = super::object::model(op)
+        .expect("only model operations have work")
         .name;
     let fail = |field, code| StepError::in_step(&step.id, op_path(index, name).field(field), code);
     match op {
@@ -141,6 +157,7 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             let metrics =
                 path::walk(r.d.as_str(), |_, _| Ok(())).map_err(|code| fail("d", code))?;
             work.scale = r.scale.map_or(1.0, Finite::get);
+            work.dash = r.dash.then(|| metrics.length * f64::from(work.scale.abs()));
             work.extent = metrics.extent;
             work.path = Some(metrics);
         }
@@ -187,11 +204,46 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
             work.usage.marks = r.data.len();
         }
         Op::Node(_) | Op::Edge(_) => {}
-        Op::Anim(_) | Op::Mermaid(_) | Op::View3d(_) | Op::Solid(_) => {
-            unreachable!("only visual operations get work metadata")
+        Op::View3d(r) => {
+            work.usage.views = 1;
+            if let Some(b) = r.bounds {
+                work.extent = rect_extent(b).map_err(|code| fail("box", code))?;
+            }
+        }
+        Op::Solid(r) => solid_work(&mut work, r, fail)?,
+        Op::Anim(_) | Op::Mermaid(_) => {
+            unreachable!("only model operations get work metadata")
         }
     }
     Ok(work)
+}
+
+fn solid_work(
+    work: &mut Work,
+    r: &crate::record::Solid,
+    fail: impl Fn(&'static str, ErrorCode) -> StepError,
+) -> Result<(), StepError> {
+    let sized = |error| match error {
+        MeshError::Shape(shape) => fail(shape.field, shape.code),
+        MeshError::Degenerate(field) => fail(field, ErrorCode::Degenerate),
+        MeshError::Cancelled | MeshError::Full => {
+            unreachable!("sizing neither polls nor writes")
+        }
+    };
+    let triangles = three::size::triangles(r).map_err(sized)?;
+    work.usage.solids = 1;
+    work.usage.triangles = usize::try_from(triangles).expect("solid triangle counts fit usize");
+    work.solid = Some(SolidWork {
+        pos: r.pos.map_or(0.0, |p| {
+            p.iter()
+                .map(|v| f64::from(v.get()).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }),
+        scale: r.scale.map_or(1.0, |s| f64::from(s.get())),
+        reach: three::size::reach(r).map_err(sized)?,
+    });
+    Ok(())
 }
 
 fn fixed_segments(op: &Op) -> usize {
@@ -229,6 +281,7 @@ fn anchor_offset(anchor: &Anchor) -> f32 {
 }
 
 fn line_geometry(work: &mut Work, r: &crate::record::Line, head: crate::record::Head) {
+    work.dash = line_length(r).filter(|_| r.dash);
     work.offset = anchor_offset(&r.from).max(anchor_offset(&r.to));
     work.extent = work.offset;
     work.offset = 0.0;
@@ -252,7 +305,53 @@ fn line_geometry(work: &mut Work, r: &crate::record::Line, head: crate::record::
     }
 }
 
+/// From, vias or the bend control, and to: a bound on the stroke's length; `None` when an end
+/// is a reference, whose placement needs layout.
+fn line_length(r: &crate::record::Line) -> Option<f64> {
+    let (Anchor::At(a), Anchor::At(b)) = (&r.from, &r.to) else {
+        return None;
+    };
+    let point = |p: &[Finite; 2]| Vec2::new(p[0].get(), p[1].get());
+    let (a, b) = (point(a), point(b));
+    let mut points = vec![a];
+    let bend = r.bend.map(Finite::get);
+    if let Some(bend) = bend.filter(|bend| r.via.is_empty() && bend.abs() > 0.001) {
+        let bend = bend * 0.5;
+        points.push(Vec2::new(
+            a.x.midpoint(b.x) - (b.y - a.y) * bend,
+            a.y.midpoint(b.y) + (b.x - a.x) * bend,
+        ));
+    }
+    points.extend(r.via.iter().map(point));
+    points.push(b);
+    Some(polyline_length(&points, Contour::Open))
+}
+
+/// A dashed shape's outline length bound: rects and ellipses lie inside their box, so its
+/// perimeter bounds them; a polygon's own closed point sequence bounds itself.
+fn shape_length(r: &crate::record::Shape) -> f64 {
+    if r.kind == crate::record::ShapeKind::Polygon {
+        let points: Vec<_> = r
+            .points
+            .iter()
+            .map(|p| Vec2::new(p[0].get(), p[1].get()))
+            .collect();
+        return polyline_length(&points, Contour::Closed);
+    }
+    let [w, h] = r.bounds.map_or_else(
+        || {
+            r.size.map_or_else(
+                || [r.r.map_or(40.0, Finite::get) * 2.0; 2],
+                |size| [size[0].get(), size[1].get()],
+            )
+        },
+        |b| [b[2].get(), b[3].get()],
+    );
+    2.0 * (f64::from(w.abs()) + f64::from(h.abs()))
+}
+
 fn shape_geometry(work: &mut Work, r: &crate::record::Shape) -> Result<(), ErrorCode> {
+    work.dash = r.dash.then(|| shape_length(r));
     if let Some(b) = r.bounds {
         work.extent = work.extent.max(rect_extent(b)?);
     } else {
@@ -350,6 +449,20 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
             return Err(fail("repeat", ErrorCode::OutOfRange));
         }
     }
+    if anim.track == Track::Pos3 {
+        return Ok(Motion {
+            keys: anim.keys.len(),
+            min: [0.0; 2],
+            max: [pos3_reach(anim), 0.0],
+        });
+    }
+    if anim.track == Track::Rot3 {
+        return Ok(Motion {
+            keys: anim.keys.len(),
+            min: [0.0; 2],
+            max: [0.0; 2],
+        });
+    }
     let mut min = [f32::INFINITY; 2];
     let mut max = [f32::NEG_INFINITY; 2];
     for (_, value) in &*anim.keys {
@@ -383,6 +496,50 @@ pub(crate) fn motion(anim: &Anim, index: usize, step: &Step) -> Result<Motion, S
         min,
         max,
     })
+}
+
+/// Largest offset length a `pos3` track can sample, from rest through every key and, under a
+/// spring, each pair's overshoot in every direction it plays, rounded up so the f32 never
+/// understates it.
+fn pos3_reach(anim: &Anim) -> f32 {
+    let point = |value: &KeyValue| match value {
+        KeyValue::V3(v) => v.map(|c| f64::from(c.get())),
+        _ => unreachable!("pos3 keys were paired with vectors"),
+    };
+    let mut previous = [0.0; 3];
+    let mut reach = 0.0_f64;
+    let length = |p: [f64; 3]| p.iter().map(|c| c * c).sum::<f64>().sqrt();
+    for (_, value) in &*anim.keys {
+        let next = point(value);
+        reach = reach.max(length(next));
+        if anim.ease == Ease::Spring {
+            let k = f64::from(crate::motion::SPRING_OVERSHOOT);
+            reach = reach.max(length(std::array::from_fn(|d| {
+                next[d] + (next[d] - previous[d]) * k
+            })));
+            if anim.yoyo {
+                reach = reach.max(length(std::array::from_fn(|d| {
+                    previous[d] + (previous[d] - next[d]) * k
+                })));
+            }
+        }
+        previous = next;
+    }
+    round_up(reach)
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "narrowing is corrected upwards immediately"
+)]
+fn round_up(value: f64) -> f32 {
+    let narrow = value as f32;
+    if f64::from(narrow) < value {
+        narrow.next_up()
+    } else {
+        narrow
+    }
 }
 
 fn key_vector(value: &KeyValue) -> [f32; 2] {

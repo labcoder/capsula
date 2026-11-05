@@ -140,6 +140,116 @@ version: its launch policy and the facts its audit expects. Any other version is
   present. Server-managed policy from a Team or Enterprise organization can't be seen, so it's
   disclosed instead (`ServerManaged::Disclosed`).
 
+## Discovery and the lane
+
+`engines/claude_code/lane.rs` is the only code that starts `claude`. It runs one call at a time on
+its own thread; `runtime/claude.rs` asks it for work and turns the results into
+`ClaudeCodeView`.
+
+```mermaid
+sequenceDiagram
+    participant R as runtime (Claude)
+    participant L as lane thread
+    participant C as claude.exe
+    R->>L: Version (generation n)
+    Note over L: fence, find, guard, managed sources, owned folders
+    L->>C: --version
+    C-->>L: 2.1.306 (Claude Code)
+    L-->>R: Done(n, Version)
+    R->>L: Status (generation n)
+    Note over L: fence, the reviewed row's may_launch, owned folders
+    L->>C: auth status --json
+    C-->>L: loggedIn, configDirectory
+    L-->>R: Done(n, Status)
+```
+
+- **Finding.** Only `CLAUDE_CODE_PATHS` under the user's profile, never `PATH`. A path that isn't
+  a native `.exe`, or that runs through `node_modules`, is `Unsupported::Shim` before anything is
+  looked at. The version is `--version`'s first word, and it must have a reviewed row.
+- **Before every start.** The lane needs this brain's own lock on `claude-code.lock`, beside the
+  vault's, and takes it on its first call only while the account worker reports the vault lock
+  held. Before Version every managed-policy source must be absent; before Status the reviewed
+  row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and
+  held from the volume root. Then the whole `claude-code` folder is walked without following
+  anything. Every folder and file in it must pass the held-path checks (a trusted owner, and no
+  one untrusted may change it or its security), no one but the user and SYSTEM may read it, and
+  through an inheritable entry no one untrusted may read or change the security of what's made
+  in its folders. One that fails is refused, never re-secured, so Claude Code's own sign-in file
+  stays readable by the user and SYSTEM only. A refusal starts nothing; a policy or lock refusal
+  also makes no folder, but the walk runs after missing standard folders are made, so they stay. When another brain
+  holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
+- **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
+  as `configDirectory`, byte for byte; anything else fails closed.
+- **One job per process,** nested in the brain job. A call ends only when its root has exited, its
+  job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
+  empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`.
+- **Bounds.** The queue holds 4 jobs and refuses more without waiting. A job it refuses leaves
+  nothing out and shows `Unavailable` until a later op is taken. stdout is capped at 4 KiB for
+  Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
+  A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
+  read is retried.
+- **Time.** A call gets 10 seconds [guess] to exit, then it's ended. Ending it is bounded but
+  separate: up to 5 seconds for its job to be confirmed empty, then about a second for each pipe
+  to end. The lock stays held throughout, so a call can take up to about 17 seconds.
+- **The fence.** Each job carries the generation it was queued under, and a job from an older
+  generation does nothing. A call running when a newer generation starts is ended, and its
+  result is dropped before it's sent. Finds asked for while one runs coalesce into one more.
+- **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
+  running call's processes end, queued jobs are dropped, and the lock goes only once every job was
+  confirmed empty.
+- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect,
+  Cancel and Disconnect do nothing, and a signed-out install shows `Unsupported(SignInStore)`.
+  Everything under "Signing in and out" below is built and tested against the fake, and stays
+  dormant until the owner picks `FileWithDacl`. Under `Undecided`, a sign-in found in the owned
+  folder is shown but must never be used: C5a's question path checks the store, not only Ready.
+- **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
+  half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
+
+### Signing in and out
+
+```mermaid
+stateDiagram-v2
+    SignedOut --> SigningIn: Connect
+    SigningIn --> SignedOut: Cancel, then Status
+    SigningIn --> Ready: login ends, or Cancel after it saved a sign-in, then Status
+    Ready --> CleanupPending: Disconnect
+    SigningIn --> CleanupPending: Disconnect
+    CleanupPending --> SignedOut: folder and marker gone, then Version and Status
+    CleanupPending --> CleanupPending: a file is locked, or a reparse point or open folder is inside
+    SigningIn --> Unavailable: a call's processes can't be confirmed ended
+    Ready --> Unavailable: a call's processes can't be confirmed ended
+```
+
+- **Connect** runs `auth login` in a console the user answers, in its own job, for up to 5 minutes,
+  then a Status. A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
+  new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
+  bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
+  already saved one, the Status after it shows Ready, and only Disconnect signs out. A second
+  Cancel while the first's Status is out is ignored.
+- **Disconnect** holds the chain from the volume root, then makes `claude-code.deleting` beside the
+  folder as a new file, never truncating or following what's at that name; one an earlier
+  Disconnect left is taken only if it's a plain file with no other name that passes the folder
+  checks through its handle. It flushes the marker, runs `auth logout`, and deletes the folder,
+  then the marker. If the marker can't be made or taken, nothing is signed out or deleted and the
+  view is `CleanupPending`. A sign-out that exits nonzero, fails to start or is refused by policy
+  still ends in the deletion. One whose processes can't be confirmed ended leaves the lane stuck,
+  with the folder in place and the marker down. A second Disconnect while one is pending is
+  ignored; one the lane can't queue marks nothing and may be asked again.
+- **While the marker stands,** every call that would start `claude` first tries the deletion, and
+  if it can't finish, starts nothing and answers `CleanupPending`. A marker is taken only through
+  the same checks Disconnect uses, with the chain held, and removed through that handle; anything
+  else at its name asks for no deletion and starts nothing either. So a brain that stopped part
+  way finishes the deletion before its first discovery. A Find while it's pending retries the
+  deletion alone. With the off switch, only that deletion runs.
+- **The deletion** holds the chain from the volume root, then opens each entry in Kumochi's folder
+  without following it, checks it through that handle like a held folder or file, and deletes it
+  through that handle. Each folder stays open while its entries are listed through its handle, so its name can't be rebound
+  mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
+  target alone and the marker down.
+  The marker's name and the folder are constants, never a path from input.
+- shortcut: a pending deletion is retried at each start and each Find, not on a timer; add one if
+  locked files turn out to outlive a session.
+
 ## The audit
 
 `engines/claude_code/audit.rs` judges what C6's mapper parsed, in two parts, and returns an

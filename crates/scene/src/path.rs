@@ -20,6 +20,8 @@ pub(crate) struct PathWork {
     pub curvature: Arc<[f32]>,
     pub extent: f32,
     pub composed_scale: f32,
+    /// Control-polygon length with closing chords, which bounds every flattening's length.
+    pub length: f64,
 }
 impl PathWork {
     pub(crate) fn segments(&self, scale: f32) -> Result<usize, ErrorCode> {
@@ -70,6 +72,10 @@ pub(crate) fn walk(
     let mut lines = 0;
     let mut curvature = Vec::new();
     let mut extent = 0.0_f32;
+    let mut length = 0.0_f64;
+    let distance = |a: [f32; 2], b: [f32; 2]| {
+        (f64::from(b[0]) - f64::from(a[0])).hypot(f64::from(b[1]) - f64::from(a[1]))
+    };
     while let Some(byte) = tokens.peek() {
         let command = if byte.is_ascii_alphabetic() {
             tokens.position += 1;
@@ -106,6 +112,7 @@ pub(crate) fn walk(
             }
             Segment::Line(p) => {
                 include(p)?;
+                length += distance(pen, p);
                 pen = p;
                 lines += 1;
             }
@@ -113,6 +120,7 @@ pub(crate) fn walk(
                 include(c)?;
                 include(p)?;
                 curvature.push(second_difference(pen, c, p) * 0.25);
+                length += distance(pen, c) + distance(c, p);
                 pen = p;
             }
             Segment::Cubic([c0, c1, p]) => {
@@ -121,9 +129,11 @@ pub(crate) fn walk(
                 include(p)?;
                 curvature
                     .push(second_difference(pen, c0, c1).max(second_difference(c0, c1, p)) * 0.75);
+                length += distance(pen, c0) + distance(c0, c1) + distance(c1, p);
                 pen = p;
             }
             Segment::Close => {
+                length += distance(pen, start);
                 pen = start;
                 lines += 1;
             }
@@ -139,6 +149,7 @@ pub(crate) fn walk(
         curvature: curvature.into(),
         extent,
         composed_scale: 1.0,
+        length,
     })
 }
 

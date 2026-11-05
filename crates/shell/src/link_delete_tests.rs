@@ -17,6 +17,32 @@ fn handle() -> LinkHandle {
     }
 }
 
+#[test]
+fn quit_admission_is_single_use_for_a_connected_transport() {
+    let link = handle();
+    let name = format!(
+        r"\\.\pipe\{}-test-{}-settings-quit",
+        kumochi_protocol::constants::OBJECT_PREFIX,
+        std::process::id()
+    );
+    let (pipe, _peer) = crate::platform::test_pair(&name).expect("pipe pair");
+    let (control, queued) = bounded(4);
+    let (data, _data) = bounded(1);
+    *link.shared.outbox.lock().expect("outbox") = Some(super::Outbox {
+        generation: 1,
+        control,
+        data,
+        pipe: Arc::new(pipe),
+        submits: std::sync::atomic::AtomicU32::new(0),
+    });
+    assert!(link.begin_quit());
+    assert!(link.shared.tell_quit());
+    assert!(!link.begin_quit());
+    assert!(!link.begin_quit());
+    assert_eq!(queued.try_recv(), Ok(ControlToBrain::Quitting));
+    assert_eq!(queued.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
 /// Queues `handle`'s held deletes on connection `generation`.
 fn queue(
     handle: &LinkHandle,

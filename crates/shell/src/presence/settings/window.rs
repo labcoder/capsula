@@ -4,25 +4,68 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
 use kumochi_protocol::message::{AccountOp, AssistantName, ControlToBrain, MaxFrameRate};
 
-use super::settings_view::SettingsView;
-use super::{
+use super::super::{
     Foreground, OpenError, Presence, PresenceSurface, configure_surface, options, platform,
 };
-use crate::settings::Field;
+use super::SettingsView;
+use crate::settings::{Field, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
-pub(super) struct SettingsPanel {
-    pub(super) window: AnyWindowHandle,
-    pub(super) view: Entity<SettingsView>,
+pub(in crate::presence) struct SettingsPanel {
+    pub(in crate::presence) window: AnyWindowHandle,
+    pub(in crate::presence) view: Entity<SettingsView>,
     visible: bool,
     focused: bool,
-    pub(super) bounds: [i32; 4],
+    pub(in crate::presence) bounds: [i32; 4],
     previous: Option<Foreground>,
     activation: Option<Subscription>,
 }
 
 impl Presence {
-    pub(super) fn dismiss_account_confirmation(&self, cx: &mut Context<'_, Self>) -> bool {
+    pub(in crate::presence) fn save_taskbar(
+        &mut self,
+        choice: TaskbarChoice,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let (link, session) = (&self.link, &self.session);
+        let sent = self.settings.update(cx, |state, cx| {
+            let sent = state.send_taskbar(choice, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            if sent {
+                cx.notify();
+            }
+            sent
+        });
+        if sent {
+            self.sync_taskbar(cx);
+        }
+        sent
+    }
+
+    pub(in crate::presence) fn sync_taskbar(&mut self, cx: &mut Context<'_, Self>) {
+        let native = &mut self.native;
+        self.settings.update(cx, |state, cx| {
+            state.apply_taskbar(|choice| {
+                native
+                    .set_taskbar_button(choice)
+                    .err()
+                    .map(|_| match choice {
+                        TaskbarChoice::Shown => Text::TaskbarAddFailed,
+                        TaskbarChoice::Hidden => Text::TaskbarRemoveFailed,
+                    })
+            });
+            cx.notify();
+        });
+        self.refresh_dock(cx);
+    }
+
+    pub(in crate::presence) fn dismiss_account_confirmation(
+        &self,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         self.settings_panel.as_ref().is_some_and(|panel| {
             panel
                 .window
@@ -37,7 +80,7 @@ impl Presence {
                 .unwrap_or(false)
         })
     }
-    pub(super) fn account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let _sent = state.accounts.send(op, |op| {
@@ -48,7 +91,7 @@ impl Presence {
             cx.notify();
         });
     }
-    pub(super) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
         let previous = (self.error.clone(), self.refusal);
         self.error = self
             .settings
@@ -58,19 +101,22 @@ impl Presence {
         self.notices_changed(&previous, cx);
     }
 
-    pub(super) fn settings_open(&self) -> bool {
+    pub(in crate::presence) fn settings_open(&self) -> bool {
         self.settings_panel
             .as_ref()
             .is_some_and(|panel| panel.visible)
     }
 
-    pub(super) fn settings_focused(&self) -> bool {
+    pub(in crate::presence) fn settings_focused(&self) -> bool {
         self.settings_panel
             .as_ref()
             .is_some_and(|panel| panel.visible && panel.focused)
     }
 
-    pub(super) fn toggle_settings(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    pub(in crate::presence) fn toggle_settings(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         if self.settings_open() {
             return self.dismiss_settings(cx);
         }
@@ -80,7 +126,7 @@ impl Presence {
             self.settings_panel = Some(self.create_settings(cx)?);
         }
         self.pointer_settle = None;
-        self.set_panel(super::PanelVisibility::Hidden, cx)?;
+        self.set_panel(super::super::PanelVisibility::Hidden, cx)?;
         let area = platform::work_area()?;
         let panel = self.settings_panel.as_mut().expect("created above");
         let rem = panel
@@ -89,7 +135,8 @@ impl Presence {
             .map_err(|error| OpenError::Gpui(error.into()))?;
         panel.bounds = self.layout.anchored_panel(
             area,
-            super::threads::PANEL_REMS.map(|value| super::scaled(value * rem, self.scale)),
+            super::super::threads::PANEL_REMS
+                .map(|value| super::super::scaled(value * rem, self.scale)),
         );
         panel.visible = true;
         panel.view.update(cx, |view, cx| {
@@ -143,9 +190,9 @@ impl Presence {
                 platform::set_capture(
                     window,
                     if self.gesture.get().holding() {
-                        super::Capture::Excluded
+                        super::super::Capture::Excluded
                     } else {
-                        super::Capture::Allowed
+                        super::super::Capture::Allowed
                     },
                 )
             })
@@ -180,7 +227,10 @@ impl Presence {
         })
     }
 
-    pub(super) fn dismiss_settings(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    pub(in crate::presence) fn dismiss_settings(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         if let Some(field) = self
             .settings_panel
             .as_ref()
@@ -214,7 +264,7 @@ impl Presence {
         self.pointer_changed(cx)
     }
 
-    pub(super) fn cancel_settings_edit(
+    pub(in crate::presence) fn cancel_settings_edit(
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
@@ -231,7 +281,7 @@ impl Presence {
         Ok(())
     }
 
-    pub(super) fn rename_assistant(
+    pub(in crate::presence) fn rename_assistant(
         &mut self,
         name: AssistantName,
         cx: &mut Context<'_, Self>,
@@ -252,7 +302,11 @@ impl Presence {
         })
     }
 
-    pub(super) fn save_max_frame_rate(&mut self, rate: MaxFrameRate, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn save_max_frame_rate(
+        &mut self,
+        rate: MaxFrameRate,
+        cx: &mut Context<'_, Self>,
+    ) {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let sent = state.send_max_frame_rate(rate, |op| {
@@ -266,7 +320,11 @@ impl Presence {
         });
     }
 
-    pub(super) fn save_setting(&mut self, field: Field, cx: &mut Context<'_, Self>) -> bool {
+    pub(in crate::presence) fn save_setting(
+        &mut self,
+        field: Field,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let sent = state.save(field, |op| {

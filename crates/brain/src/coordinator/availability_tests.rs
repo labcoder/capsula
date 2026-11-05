@@ -334,7 +334,10 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
             connection: ConnectionTag(7),
             text: None,
             items: Vec::new(),
-            calls: vec![super::call()],
+            calls: vec![(
+                super::call(),
+                crate::dispatch::ToolOutput::Error(crate::dispatch::ToolError::Unknown)
+            )],
         }))]),
         "it gets the one unknown-tool result"
     );

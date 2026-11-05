@@ -67,3 +67,12 @@ the cap. They're short or occasional, so they're left until a profile shows them
 - the Settings scrollbar's fade;
 - the text caret, which notifies every 500 ms while an input has focus;
 - input overscroll.
+
+## The drawing overlay
+
+The dock and the drawing overlay are separate windows with separate loops. The dock's animation
+runs on presence's `FrameLoop`, as above. The overlay (`presence/overlay.rs`) has no loop yet:
+its drawings rest, so it repaints once when a drawing appears, changes or clears, and arms no
+`on_next_frame` callback. A resting drawing costs no frames. Moving drawings (B6) will ask a
+loop of their own for frames, paced by the same Max frame rate, only while a scene view says
+it is animating.

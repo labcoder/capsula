@@ -1127,3 +1127,170 @@ fn four_scenes_jointly_fill_every_global_work_cap() {
     assert_eq!(installed.usage(), budget.usage());
     assert_eq!(restored.len(), 4);
 }
+
+/// Dashed straight paths whose admission charges, floor(length / 10) + 2 per edge + 1, sum to
+/// exactly `charge`; each carries 3 to 4,003.
+fn dashed_filler(charge: usize) -> Vec<Value> {
+    const FULL: usize = 4_003;
+    let mut charges = vec![FULL; charge / FULL];
+    match charge % FULL {
+        0 => {}
+        rest @ (1 | 2) => {
+            charges
+                .pop()
+                .expect("a charge past 4,003 has a full path to split");
+            charges.extend([2_000, FULL + rest - 2_000]);
+        }
+        rest => charges.push(rest),
+    }
+    charges
+        .into_iter()
+        .enumerate()
+        .map(|(n, charge)| {
+            let end = 10 * i32::try_from(charge - 3).expect("bounded fixture") - 20_000;
+            json!({"path":{"id":format!("fill{n}"),"d":format!("M-20000 0 L{end} 0"),"dash":true}})
+        })
+        .collect()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one boundary table covers every explicit dashed producer"
+)]
+fn explicit_dashed_geometry_is_charged_before_layout_at_the_limit_and_one_over() {
+    use kumochi_scene::limits::MAX_GLOBAL_DASH_PIECES as MAX;
+    let zigzag: Vec<[f32; 2]> = (0..10_u8)
+        .map(|n| [f32::from(n), if n % 2 == 0 { 0.0 } else { 100.0 }])
+        .collect();
+    // Charges worked by hand: floor(length / 10) + 2 · segments + 1.
+    for (name, op, charge) in [
+        (
+            "path",
+            json!({"path":{"id":"x","d":"M0 0 L100 0","dash":true}}),
+            13,
+        ),
+        (
+            "closed path",
+            json!({"path":{"id":"x","d":"M0 0 L100 0 L100 100 Z","dash":true}}),
+            41,
+        ),
+        (
+            "curve",
+            json!({"path":{"id":"x","d":"M0 0 Q50 50 100 0","dash":true}}),
+            47,
+        ),
+        (
+            "scaled path",
+            json!({"path":{"id":"x","d":"M0 0 L100 0","scale":2,"dash":true}}),
+            23,
+        ),
+        (
+            "line",
+            json!({"line":{"id":"x","from":[0,0],"to":[100,0],"dash":true}}),
+            13,
+        ),
+        (
+            "line via",
+            json!({"line":{"id":"x","from":[0,0],"via":[[100,0]],"to":[100,100],"dash":true}}),
+            25,
+        ),
+        (
+            "arrow",
+            json!({"arrow":{"id":"x","from":[0,0],"to":[100,0],"dash":true}}),
+            19,
+        ),
+        (
+            "bent arrow",
+            json!({"arrow":{"id":"x","from":[0,0],"to":[52,0],"bend":0.75,"dash":true}}),
+            45,
+        ),
+        (
+            "rect",
+            json!({"shape":{"id":"x","kind":"rect","box":[0,0,100,60],"radius":10,"dash":true}}),
+            91,
+        ),
+        (
+            "ellipse",
+            json!({"shape":{"id":"x","kind":"ellipse","box":[0,0,100,60],"dash":true}}),
+            129,
+        ),
+        (
+            "circle",
+            json!({"shape":{"id":"x","kind":"circle","at":[0,0],"r":50,"dash":true}}),
+            137,
+        ),
+        // Its own closed sequence, 1,000.45 long, not its 9 × 100 box: a box charge is 42.
+        (
+            "zigzag polygon",
+            json!({"shape":{"id":"x","kind":"polygon","points":zigzag,"dash":true}}),
+            121,
+        ),
+    ] {
+        let mut state = scene("dashes");
+        let mut global = GlobalBudget::default();
+        let mut over = dashed_filler(MAX - charge + 1);
+        over.push(op.clone());
+        rejected(
+            &state,
+            &global,
+            json!({"id":"over","put":over}),
+            ErrorCode::OverBudget(Budget::DashPieces),
+        );
+        let mut at = dashed_filler(MAX - charge);
+        at.push(op);
+        put(&mut state, &mut global, at);
+        assert_eq!(
+            global.usage().dash_pieces,
+            MAX,
+            "{name} reaches the cap exactly"
+        );
+        rejected(
+            &state,
+            &global,
+            json!({"id":"more","put":[{"line":{"id":"more","from":[0,0],"to":[1,0],"dash":true}}]}),
+            ErrorCode::OverBudget(Budget::DashPieces),
+        );
+        put(
+            &mut state,
+            &mut global,
+            vec![json!({"line":{"id":"solid","from":[0,0],"to":[1,0]}})],
+        );
+        assert_eq!(
+            global.usage().dash_pieces,
+            MAX,
+            "{name}: a refusal charged nothing"
+        );
+    }
+}
+
+#[test]
+fn font_dependent_dashes_charge_nothing_until_layout() {
+    use kumochi_scene::limits::MAX_GLOBAL_DASH_PIECES as MAX;
+    let mut state = scene("refs");
+    let mut global = GlobalBudget::default();
+    let mut ops = dashed_filler(MAX);
+    ops.extend([
+        json!({"shape":{"id":"a","kind":"circle","at":[0,0],"r":10}}),
+        json!({"shape":{"id":"b","kind":"circle","at":[10000,0],"r":10}}),
+        json!({"line":{"id":"ref","from":{"ref":"a"},"to":{"ref":"b"},"dash":true}}),
+        json!({"diagram":{"id":"d","box":[0,0,400,300]}}),
+        json!({"node":{"id":"n0","in":"d","label":"A"}}),
+        json!({"node":{"id":"n1","in":"d","label":"B"}}),
+        json!({"edge":{"id":"e","in":"d","from":"n0","to":"n1","dash":true}}),
+    ]);
+    put(&mut state, &mut global, ops);
+    assert_eq!(global.usage().dash_pieces, MAX);
+}
+
+#[test]
+fn a_dashed_op_without_edges_charges_nothing() {
+    let mut state = scene("moves");
+    let mut global = GlobalBudget::default();
+    put(
+        &mut state,
+        &mut global,
+        vec![json!({"path":{"id":"moves","d":"M0 0 M5 5","dash":true}})],
+    );
+    assert_eq!(global.usage().dash_pieces, 0);
+}

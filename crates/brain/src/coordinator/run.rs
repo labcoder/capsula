@@ -79,10 +79,10 @@ impl Coordinator {
                     ready: false,
                 });
             }
-            // Every other call keeps nothing but its id, and gets the unknown-tool result.
-            TurnEvent::ToolCallStarted { call, .. } => {
+            // Every other call goes to the dispatcher when its round ends.
+            TurnEvent::ToolCallStarted { call, name } => {
                 if current.draw.as_ref().is_some_and(|draw| draw.call == call)
-                    || !current.tools.open(call)
+                    || !current.tools.open(call, name)
                 {
                     self.fail(run, Failure::Engine, effects)?;
                 }
@@ -91,8 +91,8 @@ impl Coordinator {
             TurnEvent::ToolArgsDelta { call, delta } => {
                 self.draw_delta(run, &call, &delta, effects)?;
             }
-            TurnEvent::ToolCallReady { call, .. } if current.tools.takes(&call) => {
-                current.tools.ready(&call);
+            TurnEvent::ToolCallReady { call, args } if current.tools.takes(&call) => {
+                current.tools.ready(&call, args);
             }
             TurnEvent::ToolCallReady { call, args } => {
                 self.draw_ready(run, &call, &args, effects)?;
@@ -159,6 +159,7 @@ impl Coordinator {
             }
             rest = tail;
         }
+        self.spoken_text(run, delta, effects);
         Ok(())
     }
 

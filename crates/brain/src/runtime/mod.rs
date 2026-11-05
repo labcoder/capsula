@@ -6,6 +6,7 @@
 //! writer is blocked on a shell that stopped reading.
 
 pub(crate) mod account;
+pub(crate) mod claude;
 mod connections;
 mod controls;
 mod data;
@@ -38,13 +39,15 @@ use crate::context::{ConnectionTag, Origin, RunSnapshot};
 #[cfg(any(test, debug_assertions))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
-    BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp,
+    BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp, Synthesized,
 };
 use crate::engines::responses::AccessAsk;
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
+use crate::voice::pump::Pump;
+use crate::voice::tts::{TtsError, TtsEvent};
 use account::Accounts;
 use controls::read_control;
 use data::{DataQueue, Owner};
@@ -167,6 +170,12 @@ pub(crate) struct Brain {
     /// When each granted send's deadline passes, in no order.
     send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
+    /// The one reader of TTS; none until spoken replies are installed (slice 7's PR 8).
+    pump: Option<Pump>,
+    /// The current run's drain stall timer: its run, epoch and deadline.
+    drain: Option<(RunId, u32, Instant)>,
+    /// When each revoked run's wait for the shell to go quiet ends.
+    quiet: Vec<(RunId, Instant)>,
     /// When owed writes are tried again.
     retry_at: Option<Instant>,
     /// Page completions belong only to the connection that requested them.
@@ -181,6 +190,8 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    /// Claude Code's connection; its calls run on its own lane.
+    claude: claude::Claude,
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
@@ -286,6 +297,9 @@ impl Brain {
             access,
             send_deadlines: Vec::new(),
             deadline: None,
+            pump: None,
+            drain: None,
+            quiet: Vec::new(),
             retry_at: None,
             epoch: 0,
             chunk_target: crate::drawing::CHUNK_TARGET,
@@ -293,6 +307,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
             #[cfg(test)]
@@ -312,6 +327,11 @@ impl Brain {
             .availability_changed(None)
             .expect("offline effects cannot fill a shell queue");
         Ok(brain)
+    }
+
+    /// Gives Claude Code's connection its lane, or its off switch.
+    pub(crate) fn attach_claude(&mut self, claude: claude::Claude) {
+        self.claude = claude;
     }
 
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
@@ -427,6 +447,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -468,6 +492,10 @@ impl Brain {
             }
         }
         self.drain_settings_by(deadline).await;
+        // Before the vault: no other brain may take Claude Code over while a call still runs.
+        if !self.claude.close(deadline).await {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+        }
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
@@ -491,6 +519,11 @@ impl Brain {
                 }
                 input = self.account.next() => {
                     let applied = self.account_input(input, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    continue;
+                }
+                done = self.claude.next() => {
+                    let applied = self.claude_done(done, None);
                     debug_assert!(applied.is_ok(), "applying without a shell can't fail");
                     continue;
                 }
@@ -638,6 +671,8 @@ impl Brain {
         };
         self.offline(Input::ShellLost);
         self.deadline = None;
+        self.drain = None;
+        self.quiet.clear();
         ended
     }
 
@@ -731,6 +766,12 @@ impl Brain {
                     }
                     continue;
                 }
+                done = self.claude.next() => {
+                    if self.claude_done(done, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 Some(ask) = self.access.recv() => {
                     if self.access_asked(ask, Some(&mut link)).is_err() {
                         return Ended::Lost;
@@ -747,6 +788,16 @@ impl Brain {
                     Input::Retry
                 }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
+                (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
+                () = sleep_until(self.drain.map(|(_, _, at)| at)) => {
+                    let (run, epoch, _) = self.drain.take().expect("the drain timer fired");
+                    Input::DrainTimeout { run, epoch }
+                }
+                () = sleep_until(self.quiet.iter().map(|(_, at)| *at).min()) => {
+                    let first = self.quiet.iter().enumerate().min_by_key(|(_, (_, at))| *at);
+                    let at = first.map(|(at, _)| at).expect("a quiet timer fired");
+                    Input::QuietTimeout { run: self.quiet.swap_remove(at).0 }
+                }
                 () = sleep_until(deadline.map(|(_, at)| at)) => {
                     self.deadline = None;
                     match deadline {
@@ -792,7 +843,8 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
-        link.control(&self.account.connections.connected())
+        let connected = self.account.connections.connected();
+        link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
@@ -1004,12 +1056,59 @@ impl Brain {
                     self.deadline = Some((run, Instant::now() + after));
                 }
                 Effect::Broken(reason) => broken = Some(reason),
+                speech @ (Effect::Speak { .. }
+                | Effect::Credit { .. }
+                | Effect::CancelSpeech { .. }
+                | Effect::RevokeSpeech { .. }
+                | Effect::ArmDrain { .. }
+                | Effect::ArmQuiet { .. }) => self.speech(speech),
             }
         }
         if let Some(reason) = broken.filter(|_| shell) {
             return Err(Ended::Broken(reason));
         }
         if full { Err(Ended::Lost) } else { Ok(()) }
+    }
+
+    /// A run's speech effect: the pump's work and its timers. With no pump, a Speak fails as
+    /// if TTS weren't loaded.
+    fn speech(&mut self, effect: Effect) {
+        match effect {
+            Effect::Speak {
+                run,
+                segment,
+                rate,
+                text,
+            } => {
+                if let Some(pump) = &mut self.pump {
+                    pump.speak(run, segment, rate, text.into_string());
+                } else {
+                    let made = Synthesized::Failed { run: true };
+                    let failed = self.inputs_tx.send(Input::Tts { run, segment, made });
+                    debug_assert!(failed.is_ok(), "the brain holds its own receiver");
+                }
+            }
+            Effect::Credit { run, samples } => {
+                if let Some(pump) = &mut self.pump {
+                    pump.credit(run, samples);
+                }
+            }
+            Effect::CancelSpeech { run } => {
+                if let Some(pump) = &mut self.pump {
+                    pump.cancel(run);
+                }
+            }
+            Effect::RevokeSpeech { run } => {
+                if let Some(pump) = &mut self.pump {
+                    pump.revoke(run);
+                }
+            }
+            Effect::ArmDrain { run, epoch, after } => {
+                self.drain = Some((run, epoch, Instant::now() + after));
+            }
+            Effect::ArmQuiet { run, after } => self.quiet.push((run, Instant::now() + after)),
+            _ => unreachable!("apply carries out every other effect"),
+        }
     }
 }
 
@@ -1225,6 +1324,32 @@ impl<'a, 't> Link<'a, 't> {
 
 fn window() -> usize {
     usize::try_from(DATA_WINDOW).expect("the window fits in usize")
+}
+
+/// The pump's next event, or never without a pump.
+async fn next_tts(pump: &mut Option<Pump>) -> (RunId, TtsEvent) {
+    match pump {
+        Some(pump) => pump.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// A TTS event as the coordinator takes it. A model that isn't loaded, or failed to load, can't
+/// speak the rest of the run either.
+fn tts_input(run: RunId, event: TtsEvent) -> Input {
+    let (segment, made) = match event {
+        TtsEvent::Pcm { segment, samples } => (segment, Synthesized::Audio(samples)),
+        TtsEvent::Done { segment, .. } => (segment, Synthesized::Done),
+        TtsEvent::Failed { segment, error } => {
+            let run = matches!(error, TtsError::NotLoaded | TtsError::Load);
+            (segment, Synthesized::Failed { run })
+        }
+    };
+    Input::Tts {
+        run,
+        segment: kumochi_protocol::message::SegmentId(segment),
+        made,
+    }
 }
 
 async fn sleep_until(at: Option<Instant>) {

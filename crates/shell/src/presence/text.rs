@@ -430,6 +430,21 @@ pub(super) struct TextView {
     events: Sender<PresenceEvent>,
 }
 
+impl TextView {
+    pub(super) fn restore(
+        &self,
+        text: kumochi_protocol::message::Content,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.input.read(cx).value().is_empty() {
+            self.input.update(cx, |input, cx| {
+                input.set_value(text.into_string(), window, cx);
+            });
+        }
+    }
+}
+
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
@@ -611,6 +626,29 @@ mod tests {
             cx.notify();
         });
         assert_eq!(drawn(cx, window), [false, false]);
+    }
+
+    #[gpui::test]
+    fn reconnect_restores_an_empty_composer_without_overwriting_a_new_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, view) = open(cx, None);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.restore("Exact draft: café ✓".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), "Exact draft: café ✓");
+                    view.input
+                        .update(cx, |input, cx| input.set_value("newer draft", window, cx));
+                    view.restore("older failed turn".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), "newer draft");
+                    view.input
+                        .update(cx, |input, cx| input.set_value(" ", window, cx));
+                    view.restore("older failed turn".into(), window, cx);
+                    assert_eq!(view.input.read(cx).value().as_ref(), " ");
+                });
+            })
+            .expect("live typing window");
     }
 
     #[test]

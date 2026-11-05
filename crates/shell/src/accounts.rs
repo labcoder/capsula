@@ -40,14 +40,23 @@ impl Accounts {
     }
 
     pub(crate) fn error(&mut self, error: &UserError) {
+        if matches!(
+            error.key(),
+            ErrorKey::AccountRefused | ErrorKey::SignInNeeded
+        ) && (!error.actions().contains(&Action::SignIn)
+            || self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.key() == ErrorKey::RevocationBacklog))
+        {
+            return;
+        }
         match error.key() {
             ErrorKey::SettingsRefused
             | ErrorKey::ConfigUnreadable
             | ErrorKey::UsageLimit
-            | ErrorKey::AccountRefused
             | ErrorKey::RequestRefused
             | ErrorKey::ResponseUnreadable
-            | ErrorKey::SignInNeeded
             | ErrorKey::ModelUnavailable
             // shortcut: the Claude connections' errors have no Accounts row until C7a shows them.
             | ErrorKey::AnthropicKeyRejected
@@ -76,6 +85,8 @@ impl Accounts {
             | ErrorKey::AccountMisconfigured
             | ErrorKey::SignOutNotDurable
             | ErrorKey::SessionEnded
+            | ErrorKey::AccountRefused
+            | ErrorKey::SignInNeeded
             | ErrorKey::RenewalUnconfirmed
             | ErrorKey::PlanUnavailable => {
                 self.error = Some(error.clone());
@@ -111,7 +122,19 @@ impl Accounts {
                 AccountOp::Retry,
             ) => true,
             (Some(AccountView::SignedIn { plan, recovery, .. }), op) => match op {
-                AccountOp::SignIn => *recovery == Some(AccountRecovery::SignInAgain),
+                AccountOp::SignIn => {
+                    *recovery == Some(AccountRecovery::SignInAgain)
+                        || self.error_action(Action::SignIn)
+                            && self.error.as_ref().is_some_and(|error| {
+                                matches!(
+                                    error.key(),
+                                    ErrorKey::AccountRefused
+                                        | ErrorKey::SignInNeeded
+                                        | ErrorKey::SessionEnded
+                                        | ErrorKey::RenewalUnconfirmed
+                                )
+                            })
+                }
                 AccountOp::EnablePlan => recovery.is_none() && *plan == PlanState::Declined,
                 AccountOp::Retry => {
                     *recovery == Some(AccountRecovery::Retry) || self.error_action(Action::Retry)

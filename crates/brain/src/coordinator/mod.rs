@@ -11,6 +11,7 @@
 
 mod admission;
 mod availability;
+mod calls;
 mod delete;
 mod drawing;
 mod inline;
@@ -18,6 +19,7 @@ mod job;
 mod lease;
 mod run;
 mod scenes;
+mod speech;
 mod store_op;
 #[cfg(test)]
 mod tests;
@@ -28,8 +30,8 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    Content, ControlToShell, DataToShell, Deleted, ModelChoice, PageOf, Phase, RunId, SceneId,
-    Step, ThreadId, ThreadOp, UserError,
+    Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice, OutputGeneration, PageOf,
+    Phase, RunId, SceneId, SegmentId, Step, ThreadId, ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -41,8 +43,8 @@ pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
+pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{StoreOp, SummaryText};
-pub(crate) use tools::UNKNOWN_TOOL;
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 
 /// A run's whole wall-clock budget [S3's total cap].
@@ -266,6 +268,72 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs can be answered changed.
     Engines(Availability),
+    /// A `CommitCall` finished.
+    CallCommitted {
+        /// The call.
+        key: crate::dispatch::LedgerKey,
+        /// Its write and ledger row committed.
+        committed: bool,
+    },
+    /// The shell's output device: its rate and generation.
+    AudioOutput {
+        /// The rate in Hz, already checked.
+        rate: u32,
+        /// The device's generation.
+        generation: OutputGeneration,
+    },
+    /// Spoken replies were loaded or unloaded; a run admitted while they're loaded, with an output
+    /// device, speaks its answer.
+    SpokenReplies {
+        /// They're loaded.
+        loaded: bool,
+    },
+    /// The pump forwarded what TTS made of `run`'s segment.
+    Tts {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// What TTS made.
+        made: Synthesized,
+    },
+    /// The shell played `sample` samples of `run`'s playing segment.
+    SpeechProgress {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// Samples of it played.
+        sample: u32,
+    },
+    /// The last of a segment's `samples` played.
+    SegmentPlayed {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// Its total samples.
+        samples: u32,
+    },
+    /// The shell's output for `run` went quiet after a Stop or a revoke.
+    SpeechStopped {
+        /// The run.
+        run: RunId,
+        /// Where playback stopped; none when none of the run's audio played.
+        cursor: Option<Cursor>,
+    },
+    /// `run`'s drain stall timer armed with `epoch` fired.
+    DrainTimeout {
+        /// The run.
+        run: RunId,
+        /// The timer's epoch; only the latest counts.
+        epoch: u32,
+    },
+    /// `run`'s speech was revoked [`QUIET_TIMEOUT`] ago.
+    QuietTimeout {
+        /// The run.
+        run: RunId,
+    },
 }
 
 /// Something for the systems around the coordinator to do, in order.
@@ -335,6 +403,51 @@ pub enum Effect {
     },
     /// The shell broke the protocol: end its connection.
     Broken(&'static str),
+    /// Hand TTS `run`'s segment, to be resampled to `rate`; the pump forwards its events as
+    /// [`Input::Tts`].
+    Speak {
+        /// The run.
+        run: RunId,
+        /// The segment.
+        segment: SegmentId,
+        /// The output rate.
+        rate: u32,
+        /// What to say.
+        text: Content,
+    },
+    /// Let the pump forward `samples` more of `run`'s audio.
+    Credit {
+        /// The run.
+        run: RunId,
+        /// How many samples.
+        samples: u64,
+    },
+    /// Stop `run`'s current Speak; its speech goes on.
+    CancelSpeech {
+        /// The run.
+        run: RunId,
+    },
+    /// Stop `run`'s speech for good.
+    RevokeSpeech {
+        /// The run.
+        run: RunId,
+    },
+    /// Report `DrainTimeout` for `run` and `epoch` after `after`, replacing an earlier one.
+    ArmDrain {
+        /// The run.
+        run: RunId,
+        /// The timer's epoch.
+        epoch: u32,
+        /// How long from now.
+        after: Duration,
+    },
+    /// Report `QuietTimeout` for `run` after `after`.
+    ArmQuiet {
+        /// The run.
+        run: RunId,
+        /// How long from now.
+        after: Duration,
+    },
 }
 
 /// The input named a run that isn't current, or an acknowledgement nothing is waiting for, so
@@ -386,12 +499,20 @@ struct Run {
     draw: Option<run::DrawArgs>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
+    /// The run's tool calls, one entry per key.
+    ledger: crate::dispatch::Ledger,
+    /// The Claude Code launch authorized to call tools for this run; C4b-2 sets it.
+    mcp: Option<crate::bridge::LaunchId>,
+    /// Calls answered on their write's acknowledgement, for the tool loop to take.
+    answered: Vec<(crate::dispatch::Caller, crate::dispatch::ToolOutput)>,
     /// The run's calls and the current round's native items.
     tools: tools::Loop,
     /// The engine's round completed while steps or its items' write were pending; the round
-    /// ends with the last of them.
+    /// ends with the last of them. A spoken run also stays here until its speech is final.
     finishing: bool,
     ending: Option<Ending>,
+    /// The run's speech, when it was admitted with spoken replies loaded and an output device.
+    reply: Option<crate::voice::reply::Reply>,
 }
 
 /// How an ended run is being written.
@@ -414,6 +535,11 @@ struct Ending {
     trimmed: bool,
     /// V1 durable scene frames must precede this interrupted run's final data frame.
     deferred_data: bool,
+    /// The run's speech was revoked, so the shell hears how it ended only once the outcome is
+    /// stored and the shell's output is quiet.
+    quieting: bool,
+    /// The store has the outcome.
+    stored: bool,
 }
 
 impl Run {
@@ -486,6 +612,10 @@ pub struct Coordinator {
     account: Option<u64>,
     /// The newest account generation that signed out.
     signed_out: Option<u64>,
+    /// The shell's output device on this connection: its rate and generation.
+    output: Option<(u32, OutputGeneration)>,
+    /// Spoken replies are loaded.
+    spoken: bool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -540,6 +670,8 @@ impl Coordinator {
             job: None,
             account: None,
             signed_out: None,
+            output: None,
+            spoken: false,
         }
     }
 
@@ -611,7 +743,12 @@ impl Coordinator {
                 self.late_stop(run, revealed, &mut effects)?;
             }
             Input::Stop { run, mut revealed } => {
-                let current = self.take(run)?;
+                let mut current = self.take(run)?;
+                speech::revoke(
+                    &mut current,
+                    crate::voice::reply::Revoker::Shell,
+                    &mut effects,
+                );
                 revealed.retain(|&index| index < current.acked);
                 revealed.sort_unstable();
                 revealed.dedup();
@@ -687,6 +824,11 @@ impl Coordinator {
                     let lost = RunEnd::Interrupted(Interruption::ShellLost);
                     self.end(current, lost, None, Notify::Nobody, &mut effects);
                 }
+                self.output = None;
+                let runs: Vec<_> = self.ending.iter().map(|run| run.id).collect();
+                for run in runs {
+                    self.release(run, &mut effects);
+                }
             }
             Input::Stalled { run } => {
                 let current = self.take(run)?;
@@ -721,6 +863,22 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
+            Input::CallCommitted {
+                key,
+                committed: true,
+            } => self.call_committed(&key, &mut effects)?,
+            Input::CallCommitted {
+                key,
+                committed: false,
+            } => self.call_failed(&key, &mut effects)?,
+            input @ (Input::AudioOutput { .. }
+            | Input::SpokenReplies { .. }
+            | Input::Tts { .. }
+            | Input::SpeechProgress { .. }
+            | Input::SegmentPlayed { .. }
+            | Input::SpeechStopped { .. }
+            | Input::DrainTimeout { .. }
+            | Input::QuietTimeout { .. }) => self.speech_input(input, &mut effects)?,
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
@@ -744,17 +902,47 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A run's outcome is stored: it leaves the ending list, and the shell hears Done.
+    /// A run's outcome is stored: it leaves the ending list, and the shell hears Done, unless its
+    /// revoked speech isn't quiet yet.
     fn run_stored(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
         let at = self.ending_at(run)?;
         let ending = self.ending[at]
             .ending
-            .as_ref()
+            .as_mut()
             .expect("an ending run has an Ending");
-        if !ending.written {
+        if !ending.written || ending.stored {
             return Err(Stale);
         }
+        ending.stored = true;
+        self.release(run, effects);
+        Ok(())
+    }
+
+    /// Lets a stored run go once the shell is quiet or gone, and tells the shell how it ended.
+    fn release(&mut self, run: RunId, effects: &mut Vec<Effect>) {
+        let Ok(at) = self.ending_at(run) else {
+            return;
+        };
+        let ended = &self.ending[at];
+        let ending = ended.ending.as_ref().expect("an ending run has an Ending");
+        let quiet = ending.notify == Notify::Nobody
+            || ended
+                .reply
+                .as_ref()
+                .is_none_or(crate::voice::reply::Reply::is_final);
+        if !ending.stored || !quiet {
+            return;
+        }
         let done = self.ending.swap_remove(at);
+        let ending = done.ending.as_ref().expect("an ending run has an Ending");
+        if ending.quieting && ending.notify == Notify::Shell {
+            let phase = if ending.failed {
+                Phase::Failed
+            } else {
+                terminal(ending.outcome)
+            };
+            told(&done, phase, effects);
+        }
         if let Some(Ending {
             outcome: RunEnd::Done,
             failed: false,
@@ -772,7 +960,6 @@ impl Coordinator {
         {
             told(&done, Phase::Done, effects);
         }
-        Ok(())
     }
 
     fn turn(
@@ -821,9 +1008,16 @@ impl Coordinator {
             compacted: None,
             draw: None,
             error: None,
+            ledger: crate::dispatch::Ledger::default(),
+            mcp: None,
+            answered: Vec::new(),
             tools: tools::Loop::default(),
             finishing: false,
             ending: None,
+            reply: self
+                .output
+                .filter(|_| self.spoken)
+                .map(|(rate, generation)| crate::voice::reply::Reply::new(run, rate, generation)),
         });
         self.begin_turns(effects);
         effects.push(Effect::Control(ControlToShell::RunState {
@@ -881,8 +1075,13 @@ impl Coordinator {
         let ended = &mut self.ending[at];
         let (id, thread) = (ended.id, ended.thread);
         let ending = ended.ending.as_mut().expect("an ending run has an Ending");
-        // A failed outcome was already told; any other ending now turns out failed.
+        if ending.stored {
+            return Err(Stale);
+        }
+        // A failed outcome was already told; any other ending now turns out failed. A quieting
+        // one tells it once it's released.
         if ending.notify == Notify::Shell
+            && !ending.quieting
             && !ending.failed
             && !matches!(ending.outcome, RunEnd::Failed(_))
         {
@@ -906,7 +1105,12 @@ impl Coordinator {
                 .scene
                 .zip(ending.revealed.take().filter(|_| ending.trimmed));
             let clear = ending.clear;
-            self.ending.swap_remove(at);
+            // shortcut: the store gave up, so a quieting run is told without waiting for quiet.
+            let tell = ending.quieting && ending.notify == Notify::Shell;
+            let gone = self.ending.swap_remove(at);
+            if tell {
+                told(&gone, Phase::Failed, effects);
+            }
             self.owe(clear, kept);
             return Ok(());
         }
@@ -934,6 +1138,9 @@ impl Coordinator {
         notify: Notify,
         effects: &mut Vec<Effect>,
     ) {
+        if outcome != RunEnd::Done {
+            speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
+        }
         self.drawing_closed(run.id, effects);
         if run.turn_stored && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
@@ -950,13 +1157,15 @@ impl Coordinator {
             effects.push(Effect::Revoke { run: run.id });
         }
         run.held.clear();
-        let deferred_data =
-            notify == Notify::Shell && outcome != RunEnd::Done && self.drawing.pending_for(run.id);
-        if notify == Notify::Shell && outcome != RunEnd::Done {
-            let phase = match outcome {
-                RunEnd::Interrupted(_) => Phase::Interrupted,
-                RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
-            };
+        let quieting = notify == Notify::Shell
+            && outcome != RunEnd::Done
+            && run.reply.as_ref().is_some_and(|reply| !reply.is_final());
+        let deferred_data = notify == Notify::Shell
+            && outcome != RunEnd::Done
+            && !quieting
+            && self.drawing.pending_for(run.id);
+        if notify == Notify::Shell && outcome != RunEnd::Done && !quieting {
+            let phase = terminal(outcome);
             if deferred_data {
                 effects.push(run_state(&run, phase));
             } else {
@@ -972,6 +1181,8 @@ impl Coordinator {
             clear: None,
             trimmed: false,
             deferred_data,
+            quieting,
+            stored: false,
         });
         let id = run.id;
         self.ending.push(run);
@@ -1057,6 +1268,14 @@ impl Coordinator {
         }
         let at = self.ending_at(run)?;
         Ok(&mut self.ending[at])
+    }
+}
+
+/// The phase that tells the shell a run ended other than `Done`.
+fn terminal(outcome: RunEnd) -> Phase {
+    match outcome {
+        RunEnd::Interrupted(_) => Phase::Interrupted,
+        RunEnd::Done | RunEnd::Failed(_) => Phase::Failed,
     }
 }
 

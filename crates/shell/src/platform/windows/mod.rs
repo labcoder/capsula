@@ -2,12 +2,15 @@
 
 mod folders;
 mod hit_mask;
+#[expect(dead_code, reason = "C2b-2's carry is the first caller")]
+mod host;
 mod keyboard;
 mod observer;
 mod overlay_input;
 mod pipe;
 mod presence;
 mod process;
+mod taskbar;
 
 pub(crate) use folders::data_dir;
 pub(crate) use hit_mask::MaskUpdate;

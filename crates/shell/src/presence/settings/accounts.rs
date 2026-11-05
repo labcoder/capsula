@@ -5,13 +5,14 @@ use gpui_kit::base::Link;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _};
 use gpui_kit::{
-    App, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div,
+    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Styled as _, Window, div,
 };
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
+    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
 };
 
-use super::settings_view::SettingsView;
+use super::SettingsView;
 use crate::accounts::Accounts;
 use crate::strings::{Strings, Text};
 
@@ -60,16 +61,21 @@ impl SettingsView {
                         cx,
                     ));
             }
-            Some(AccountView::SignedIn {
-                recovery: Some(AccountRecovery::SignInAgain),
-                ..
-            }) => {
-                actions = actions.child(self.account_button(
-                    "account-sign-in-again",
-                    Text::AccountSignInAgain,
-                    AccountOp::SignIn,
-                    cx,
-                ));
+            Some(AccountView::SignedIn { recovery, .. })
+                if *recovery == Some(AccountRecovery::SignInAgain)
+                    || state
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.actions().contains(&Action::SignIn)) =>
+            {
+                actions = actions
+                    .debug_selector(|| "account-sign-in-recovery".into())
+                    .child(self.account_button(
+                        "account-sign-in-again",
+                        Text::AccountSignInAgain,
+                        AccountOp::SignIn,
+                        cx,
+                    ));
             }
             Some(AccountView::SignedIn {
                 plan: PlanState::Declined,
@@ -206,7 +212,11 @@ impl SettingsView {
             )
     }
 
-    pub(super) fn confirm_sign_out(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn confirm_sign_out(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if window.has_active_dialog(cx) {
             return;
         }

@@ -169,9 +169,16 @@ pub const FOCUS_INPUT_MARKER: usize = 0x4350_5346;
 /// startup record), it asks the shell for one dock repaint with no input. `WM_APP + 0x10`.
 pub const OBSERVER_REPAINT_MESSAGE: u32 = 0x8010;
 
-/// Kumochi's own Claude Code configuration folder (`CLAUDE_CONFIG_DIR`), in the [`DATA_DIR`]
-/// folder under `%LOCALAPPDATA%`. Claude Code keeps its sign-in there; Kumochi never opens it.
+/// Kumochi's own Claude Code folder, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`: its
+/// `config` folder is `CLAUDE_CONFIG_DIR`, where Claude Code keeps its sign-in and Kumochi never
+/// looks, beside the profile, application data, temporary and working folders it's given.
 pub const CLAUDE_CODE_DIR: &str = "claude-code";
+/// The lock a brain holds, beside [`CLAUDE_CODE_DIR`], for as long as any `claude` it started
+/// may still be running, so no other brain starts one against the same folder.
+pub const CLAUDE_CODE_LOCK: &str = "claude-code.lock";
+/// The marker a Disconnect writes, beside [`CLAUDE_CODE_DIR`], before it signs out; while it
+/// stands, the folder is deleted before any `claude` starts.
+pub const CLAUDE_CODE_DELETING: &str = "claude-code.deleting";
 /// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
 /// `%LOCALAPPDATA%`.
 pub const ENGINE_DIR: &str = "engine";
@@ -192,6 +199,15 @@ pub fn anthropic_key_target(service: &str) -> String {
 #[must_use]
 pub fn anthropic_staging_target(service: &str) -> String {
     format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}")
+}
+
+/// The path segment that sets write-once credential generations apart from every legacy name.
+pub const CREDENTIAL_GENERATION_SEGMENT: &str = "gen";
+
+/// The exact name of chunk `index` of one write-once credential generation.
+#[must_use]
+pub fn generation_target(service: &str, kind: &str, generation: &str, index: usize) -> String {
+    format!("{service}/{CREDENTIAL_GENERATION_SEGMENT}/{kind}/{generation}/{index}")
 }
 /// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
 pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
@@ -218,7 +234,32 @@ mod identity_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{BRAIN_LOG, SCREEN_LOG, SHELL_LOG, SPEECH_LOG};
+    use super::{
+        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, SCREEN_LOG, SHELL_LOG,
+        SPEECH_LOG, account_targets, generation_target,
+    };
+
+    #[test]
+    fn generation_names_never_overlap_a_legacy_name() {
+        let prefix = format!("{CREDENTIAL_SERVICE}/{CREDENTIAL_GENERATION_SEGMENT}/");
+        let legacy: Vec<String> = account_targets(CREDENTIAL_SERVICE).collect();
+        assert_eq!(legacy.len(), 262, "every legacy name is counted");
+        for name in &legacy {
+            assert!(
+                !name.starts_with(&prefix),
+                "a legacy name is in the generation space"
+            );
+        }
+        let name = generation_target(CREDENTIAL_SERVICE, "chatgpt", &"0".repeat(32), 24);
+        assert!(
+            name.starts_with(&prefix),
+            "generation names use the segment"
+        );
+        assert!(
+            !legacy.contains(&name),
+            "a generation name is a legacy name"
+        );
+    }
 
     #[test]
     fn log_prefixes_dont_overlap() {

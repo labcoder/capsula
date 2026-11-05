@@ -27,6 +27,12 @@ const FRAME: u32 = 40;
 #[path = "measure_tests.rs"]
 mod measurements;
 
+#[path = "cap_measure_tests.rs"]
+pub(crate) mod cap_measurements;
+
+#[path = "frame_tests.rs"]
+mod frames;
+
 #[path = "retirement_tests.rs"]
 mod retirement;
 
@@ -38,6 +44,9 @@ mod consumption;
 
 #[path = "admit_tests.rs"]
 mod admission;
+
+#[path = "paint_tests.rs"]
+mod paint_work;
 
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]

@@ -24,6 +24,12 @@ pub(crate) enum Update {
     Unsolicited,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskbarChoice {
+    Hidden,
+    Shown,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Draft {
     Reset,
@@ -70,13 +76,16 @@ enum Slot {
     /// The frame rate has no draft; the rate is kept so a quick second choice compares to it.
     FrameRate(MaxFrameRate),
     Dock(DockPosition),
+    Taskbar(TaskbarChoice),
 }
 
 impl Slot {
     fn same_setting(self, other: Self) -> bool {
         match (self, other) {
             (Self::Name(one), Self::Name(other)) => one == other,
-            (Self::FrameRate(_), Self::FrameRate(_)) | (Self::Dock(_), Self::Dock(_)) => true,
+            (Self::FrameRate(_), Self::FrameRate(_))
+            | (Self::Dock(_), Self::Dock(_))
+            | (Self::Taskbar(_), Self::Taskbar(_)) => true,
             _ => false,
         }
     }
@@ -84,7 +93,7 @@ impl Slot {
     fn field(self) -> Option<Field> {
         match self {
             Self::Name(field) => Some(field),
-            Self::FrameRate(_) | Self::Dock(_) => None,
+            Self::FrameRate(_) | Self::Dock(_) | Self::Taskbar(_) => None,
         }
     }
 }
@@ -113,6 +122,7 @@ impl DockIntent {
 #[derive(Default)]
 pub(crate) struct Settings {
     pub(crate) accounts: crate::accounts::Accounts,
+    pub(crate) native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,
     notice_slot: Option<Slot>,
@@ -333,7 +343,7 @@ impl Settings {
             .rev()
             .find_map(|pending| match pending.slot {
                 Slot::FrameRate(rate) => Some(rate),
-                Slot::Name(_) | Slot::Dock(_) => None,
+                Slot::Name(_) | Slot::Dock(_) | Slot::Taskbar(_) => None,
             });
         queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
     }
@@ -354,6 +364,46 @@ impl Settings {
         }
         self.pending.push_back(Pending {
             slot: Slot::FrameRate(rate),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
+    pub(crate) fn taskbar_choice(&self) -> Option<TaskbarChoice> {
+        let view = self.view.as_ref()?;
+        self.pending
+            .iter()
+            .rev()
+            .find_map(|pending| match (pending.slot, pending.failed) {
+                (Slot::Taskbar(choice), false) => Some(choice),
+                _ => None,
+            })
+            .or(Some(if view.show_in_taskbar {
+                TaskbarChoice::Shown
+            } else {
+                TaskbarChoice::Hidden
+            }))
+    }
+
+    pub(crate) fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> Option<Text>) {
+        if let Some(choice) = self.taskbar_choice() {
+            self.native_taskbar_notice = apply(choice);
+        }
+    }
+
+    pub(crate) fn send_taskbar(
+        &mut self,
+        choice: TaskbarChoice,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self.taskbar_choice().is_none_or(|newest| newest == choice)
+            || !send(SettingsOp::SetTaskbar(choice == TaskbarChoice::Shown))
+        {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::Taskbar(choice),
             failed: false,
             reset_draft: false,
         });
@@ -429,6 +479,9 @@ fn settings_error(key: ErrorKey) -> bool {
 
 #[cfg(test)]
 mod position_tests;
+
+#[cfg(test)]
+mod taskbar_tests;
 
 #[cfg(test)]
 mod session_tests;

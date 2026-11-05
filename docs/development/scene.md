@@ -58,9 +58,10 @@ Screen/capture anchors are absent, not ignored.
 
 ### 3D records
 
-The decoder accepts the following records, but admission refuses every `view3d`,
-`solid`, `pos3` track and `rot3` track as `Unsupported` at `put[i]` until slice 5's
-3D admission lands. No 3D objects commit, lay out or animate yet. `pos3` and `rot3`
+Scene admission validates and charges the following records (see 3D admission). Until shell
+views can prepare them, the brain's one drawing ingress calls `refuse_three_dimensional`, which
+refuses the first `view3d`, `solid`, `pos3` track or `rot3` track as `Unsupported` at `put[i]`
+(`shortcut:`, removed in slice 5 PR 6). `pos3` and `rot3`
 use three-component keys; existing tracks retain their existing key types.
 
 | Record | Fields and decode bounds |
@@ -92,13 +93,13 @@ then checks counts and radius relations:
 | `cylinder` | Required `r`, `h`. |
 | `cone` | Required `r`, `h`; optional `r2` defaults to zero. |
 | `torus` | Required `r`, `r2`, with 0.001 ≤ `r2` < `r`. |
-| `extrude` | Required `points` (3..=128), `depth`. |
+| `extrude` | Required `points` (3..=64), `depth`. |
 | `lathe` | Required `points` (2..=512), with nonnegative radii in the first component. |
 | `tube` | Required `path` (2..=512), `r2` ≥ 0.001. |
 
 Empty and omitted lists are equivalent: a required empty list is `MissingField`,
 and an unused empty list is accepted. Non-empty unused lists are `UnknownField`.
-All lists decode at most 512 points; extrude counts above 128 are
+All lists decode at most 512 points; extrude counts above 64 are
 `OverBudget(PathPoints)`. Degeneracy checks belong to tessellation sizing.
 The new enum tags are append-only; changing these positional postcard structs
 later requires an explicit wire-version decision, not rewritten goldens.
@@ -108,7 +109,7 @@ later requires an explicit wire-version decision, not rewritten goldens.
 `three::size::triangles` validates one decoded solid and returns its candidate
 triangle capacity without allocating. This count does not depend on world transforms.
 Triangle generation is a separate module; sizing alone does not establish world-space
-representability. Admission still refuses 3D until its later slice lands.
+representability. Admission charges this count (see 3D admission).
 
 Let n be `segments` (default 24), k the retained outline count, p the retained
 profile count and q the retained path count:
@@ -121,13 +122,13 @@ profile count and q the retained path count:
 | cone, top zero | 2n − 2 | 4 / 94 |
 | cone, top positive | 4n − 4 | 8 / 188 |
 | torus | 2n² | 18 / 4,608 |
-| extrude | 4k − 4 | 508 at k = 128 |
+| extrude | 4k − 4 | 252 at k = 64 |
 | lathe, open | 2n(p − 1) | 24,000 at n = 48, p = 251; 49,056 at p = 512 |
 | tube, capped | 2n(q − 1) + 2(n − 2) | 49,148 at n = 48, q = 512 |
 
 Sphere levels are L = 0 at n = 3–5, 1 at 6–11, 2 at 12–23 and 3 at 24–48.
 Capacity counts use saturating u32 arithmetic; decoded bounds keep the largest
-count at 49,148. Counts over the future per-view triangle budget remain legal here.
+count at 49,148. Sizing allows counts over the triangle budget; admission refuses them.
 Lathe axis bands include candidates with coincident vertices, not just nonzero triangles.
 
 The shared numeric policy is `three::REL = 1e-6` and
@@ -149,6 +150,42 @@ tangent dot product strictly below `−1 + REL` is refused. These failures are t
 `MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
 original typed field and code. `ErrorCode::Degenerate` is appended for the later
 admission boundary, which alone will convert these errors into sanitized paths.
+
+### 3D admission
+
+A `view3d` is a root object and at most one lives in a scene, a pending removal included.
+A `solid` names its view with `in`, and `attach` names an earlier solid (lower revision, or
+the same revision and a lower slot) in the same view; attachment counts toward depth 16 and a
+removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
+`pos3` and `rot3`; a view owns no `color`; 2D tracks and `ref` anchors to 3D objects are
+refused. Admission sizes each solid with `three::size::triangles` and `three::size::reach`
+(the farthest local vertex from the solid's origin) and never tessellates: that runs off
+the admission path. Outline checks do run here, and they grow with the square of the point
+count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
+profile with a lathe, or split a detailed shape into several extrudes.
+
+| Budget | Limit | Error |
+|---|---|---|
+| Views | 1 per scene | `OverBudget(Views)` |
+| Solids | 160 per scene | `OverBudget(Solids)` |
+| Triangles | 24,000 per scene and across visible scenes | `OverBudget(Triangles)` |
+| Moving view | 6,000 triangles in a view with any `pos3` or `rot3` track | `OverBudget(MovingTriangles)` |
+
+Like 2D charges, these recompute from the after, pending and changed versions, so a removed
+solid releases its triangles only at retirement and a refusal moves no counter.
+
+**Coordinate bound.** 3D admission refuses a solid unless the sum of its chain's translation
+lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its
+`pos3` envelope, both multiplied by the ancestors' composed scale; summing lengths ignores
+cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is refused. The
+`pos3` envelope is the largest key length plus, for `spring`, the overshoot
+`|b − a| × SPRING_OVERSHOOT` per key pair (both directions with `yoyo`), taken over every
+charged version of the solid, so a delayed replacement cannot hide an earlier envelope.
+Rotation preserves lengths and adds nothing. Non-finite compositions fail with
+`TransformOverflow`, the bound with `OutOfRange`.
+
+**Stop.** A 3D object never re-roots: after a cut it survives only when its view and its whole
+attachment chain survive.
 
 ### 3D tessellation
 
@@ -551,6 +588,16 @@ the same walker and subdivision function when producing vertices. Procedural cur
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
 segment reservations in `path.rs`; generated output must stay within them.
 
+Dashed strokes whose geometry the record fixes charge `dash_pieces` at admission:
+floor(length / 10) + 2 per segment + 1, with 6-unit dashes and 4-unit gaps in prim units
+(`display::DASH`), so the count never depends on pose or display. The length bound is a
+path's control polygon times its `scale`, a line's from, vias or bend control and to, a rect's
+or ellipse's box perimeter 2(w + h), and a polygon's own closed point sequence, never its box.
+The extra piece covers f32 rounding of prepared points and applies only when there is an edge,
+so an op without one, such as a path of only moves, charges 0. A line with a `ref` end and a diagram
+edge charge 0, because their geometry needs fonts; preparation counts them exactly (Paint work
+below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
+
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
 Composed scales must be normal positive floats and at most 64, even when layout has
@@ -573,17 +620,21 @@ Prepared residency remains the preparation layer's separate limit.
 | Table | 8 columns × 40 rows | 4,000 cells |
 | Chart | 8 series × 500 points, 40 categories | 20,000 marks |
 | Path | 512 points, 4,096 flattened segments | 20,000 segments |
+| Dash pieces | Explicit geometry preflighted; generated geometry counted at preparation | 512 |
+| Fill vertices | Points plus crossing pairs, at most 21,845 per build | 512 |
+| Bordered-rect outline points | Rounded fallback at maximum admitted scale | 512 |
 | Motion | 256 tracks, 32 keys/track, 60 s/track and after last activation | — |
 | Object graph | Depth 16 | — |
 | Coordinates | Finite, absolute value ≤20,000 after composition | — |
 | Prepared residency | Charged at preparation, independent of admission | 64 MiB |
 | Decoded images | Reserved for capture/image support | 64 MiB |
 | Visible scenes | — | 4 |
+| 3D | 1 view, 160 solids, 24,000 triangles; 6,000 in a moving view | 24,000 triangles |
 
 `limits.rs` also reserves architecture §4.4's slice-5 constants: 160 solids,
 24,000 triangles per scene/globally and 48 curved segments. Views are drawn by
-the depth-buffered raster (3D raster above), so there are no ordering budgets. The 3D records exist (see Records), but admission refuses them as `Unsupported`
-and no 3D geometry is built yet.
+the depth-buffered raster (3D raster above), so there are no ordering budgets. 3D admission
+charges them (see 3D admission).
 
 ## Preparation
 
@@ -600,6 +651,69 @@ used by the host painter. It is fallible and must return deterministic finite,
 nonnegative dimensions for the same text/style/wrapping inputs. Preparation calls it
 in deterministic order and rejects failed or invalid measurements atomically. No
 painter is implemented here.
+
+### Paint work
+
+Preparation counts each new or replaced item's `display::PaintWork` once, when its primitives
+change, and `LayoutState::paint_work` sums them in O(objects) for the shell's guard. None of
+the counts depends on display, pose or reveal, and sums saturate.
+
+- Dashed lines count `dash_pieces`: an edge of length l meets at most floor(l / 10) + 2 dashes
+  at any flow phase or reveal.
+- Fills count points plus `crossings`. Crossings count intersecting prim-space edge pairs,
+  touching and collinear fold-backs included, with a relative 1e-6 slack. Preparation sweeps
+  padded edge boxes before testing orientations; exact meetings and near-edge touches remain
+  counted, while distant segments whose extended lines alone meet don't. Non-finite points
+  force an over-budget count. The painter tessellates
+  in prim coordinates before transforming the completed triangles, so f32 world-coordinate
+  rounding cannot introduce uncounted tessellation work. Numeric ceiling fixtures check lyon's
+  vertex-count assumptions; any build error fails loudly rather than dropping a primitive.
+- Every `Prim::Rect` is charged as the painter's path fallback, which rotation and partial
+  reveals trigger: `corner_segments(radius · 64)` pieces per corner, the largest admitted
+  composed scale, and 4(n + 1) + 1 points. Filled rects add them to the fill counts, bordered
+  rects to the outline counts. The painter must refuse a pose that needs more pieces.
+
+D1 uses GPUI's native source-over blending per triangle, not isolated item opacity. A translucent
+item draws darker where its own triangles overlap, including self-crossing strokes, some sharp
+joins and merged chunks. Merging chunks gives one path and draw order; it does not isolate their
+alpha. The visual fixture includes a translucent self-crossing stroke for design review. Isolated
+opacity is a post-D1 follow-up (OSC-234), to revisit before D1 ships if that review marks the
+overlaps as weak. There is no union pass or extra paint charge for isolation.
+
+A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
+`OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
+`OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
+outline budgets, which are measured on Rez.
+
+The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
+across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
+boxes cost 436 fill and outline points, leaving room for labels and dashed connectors;
+labels remain subject to the existing text and object limits. A drawing beyond the limits
+fails explicitly through the scene's residency failure or recovery clear, without simplifying
+its geometry. Before counting crossings, preparation refuses any one generated fill with
+more than 512 points, which cannot fit even without a crossing.
+
+D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
+reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.
+The diagnostic painter measurements alone do not establish full preparation or text-shaping
+latency. The final locked native preparation fixture measures real admission, preparation
+with host font shaping, and installation separately and together, with unique text and
+content-free count/timing output. It excludes queue delay and compositor presentation.
+
+The shell's `presence::paint_paths` builds bounded prim-space geometry, then transforms its
+finished triangles. `presence::overlay` paints every sampled scene in stable scene/item order,
+using native quads for upright complete rectangles and paths for rotated or revealed geometry.
+Labels use the preparation font and stay upright at their transformed anchors (OSC-217).
+Geometry builds before any of its item's primitives paint; a geometry or label failure clears
+the scene instead of silently skipping it. The overlay is transparent and click-through, covers
+only the primary display from logical origin, and holds Esc only while shown.
+
+Presenter samples outside paint into its four reserved frames. The paint callback borrows the
+cache and frames immutably, records observations/failure flags through UI-thread cells, and
+defers any failure back to Presenter
+after releasing the borrow. Replacement invalidates old observations; removal/disconnect
+retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
+animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
 
 ### Motion and the host clock
 
@@ -917,8 +1031,8 @@ copies, plus the result's full index, because every result holds its own copy of
 maps, the display/removal/glide vectors at capacity, and the ticket's compiled record
 and private facts. Motion maps are shared between prefixes and copied only when an
 explicit track or generated glide changes them. `LayoutState::resident_bytes()` charges everything a retained layout holds,
-counting each shared allocation once by pointer. So the retained layout plus the
-queued results make up the scene's residency, and a recovered layout charges exactly
+counting each shared allocation once by pointer. So the resting layout, its view and reserved
+frame, and the queued results make up the scene's residency, and a recovered layout charges exactly
 what the live one did. Source copies are counted field by field for each record
 type: each string's bytes and each sequence's elements at their own size, which
 matches what they allocate because cloned records have exact capacities. The index
@@ -1184,6 +1298,7 @@ until the next handoff, with four scenes and eight prepared positions each. This
 the storage allowance on native shaping, not production activation, paint latency or RSS.
 On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged peaks of
 54,823,602 bytes for the Unicode fixture and 52,430,246 for ASCII, below 67,108,864.
+That binary was built before the final main merge; these are not exact-final-head native results.
 These are allowance checks, not before/after performance comparisons or heap bounds.
 
 Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
@@ -1195,6 +1310,8 @@ and `StepShown`. While the scene's admission is in the lane, including its worke
 a valid consumption request returns Busy and records one pending request without changing
 semantic state, residency or window positions.
 Returning the read offers a wake/retry point before the next admission for that scene.
+Test-only consumption still keeps the previous view. B6 must replace that view and its charge
+atomically with the consumed rest before introducing a production caller.
 Both fresh arrivals and already-held commits wait behind the pending request, even when
 the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must

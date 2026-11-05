@@ -122,6 +122,18 @@ impl Presence {
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
+        if let Some(restore) = applied.restore
+            && let Some(text) = &self.text
+            && text
+                .window
+                .update(cx, |_, window, cx| {
+                    text.view
+                        .update(cx, |view, cx| view.restore(restore, window, cx));
+                })
+                .is_err()
+        {
+            tracing::warn!("can't restore the submitted draft");
+        }
         if let Some(error) = notice {
             self.show_error(&error, cx);
         }
@@ -278,6 +290,7 @@ impl Presence {
             state.set_settings(view);
             cx.notify();
         });
+        self.sync_taskbar(cx);
         if let Err(error) =
             self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
         {
@@ -293,6 +306,7 @@ impl Presence {
             cx.notify();
         });
         self.sync_settings_notice(cx);
+        self.sync_taskbar(cx);
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
@@ -373,6 +387,7 @@ impl Presence {
                 });
             }
         }
+        self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
         // Listening keeps its label until the gesture ends.

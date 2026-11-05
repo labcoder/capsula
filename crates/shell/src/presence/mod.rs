@@ -3,7 +3,6 @@
 
 #[cfg(debug_assertions)]
 mod accounts_fixture;
-mod accounts_view;
 mod deletes;
 pub(crate) mod diagnostics;
 pub(crate) mod drag;
@@ -19,15 +18,21 @@ mod line;
 mod link;
 mod messages;
 pub(crate) mod observer;
+mod overlay;
+#[cfg(test)]
+mod overlay_fixture;
 mod overlay_input;
 mod paint;
+mod paint_paths;
+#[cfg(test)]
+mod paint_work_fixture;
 mod panels;
+mod perch;
 mod position;
 mod pull_dock;
 mod pull_picture;
 mod pulling;
 mod settings;
-mod settings_view;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -129,6 +134,8 @@ struct Presence {
     pull_dock: pull_dock::PullDock,
     /// The one source of animation frames.
     frames: FrameLoop,
+    /// The drawing overlay, once a drawing first had something to paint.
+    overlay: Option<overlay::Overlay>,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -255,9 +262,14 @@ impl Presence {
             self.kumo
                 .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
         }
-        let notice = self.settings.read(cx).dock_notice().filter(|notice| {
-            *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
-        });
+        let notice = self
+            .settings
+            .read(cx)
+            .dock_notice()
+            .filter(|notice| {
+                *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
+            })
+            .or(self.settings.read(cx).native_taskbar_notice);
         self.panel.update(cx, |panel, cx| {
             if panel.notice != notice {
                 panel.notice = notice;
@@ -324,7 +336,8 @@ impl Presence {
         let text = self.text.as_ref().map(|text| text.window);
         let threads = self.thread_panel.as_ref().map(|panel| panel.window);
         let settings = self.settings_panel.as_ref().map(|panel| panel.window);
-        for window in [Some(self.panel_window), text, threads, settings]
+        let drawing = self.overlay.as_ref().map(|overlay| overlay.window);
+        for window in [Some(self.panel_window), text, threads, settings, drawing]
             .into_iter()
             .flatten()
         {
@@ -352,13 +365,12 @@ impl Presence {
     fn activity(
         runs: &Runs,
         panel: EscapePanel,
-        _presenter: &crate::presenter::Presenter,
+        presenter: &crate::presenter::Presenter,
     ) -> Activity {
-        // shortcut: B5 adds painted v1 scenes to global Esc activity; mirrored scenes aren't visible.
         Activity {
             working: runs.working(),
             speaking: false,
-            drawing: runs.drawing() && matches!(panel, EscapePanel::Open),
+            drawing: (runs.drawing() && matches!(panel, EscapePanel::Open)) || presenter.drawn(),
             pulling: false,
         }
     }
@@ -863,6 +875,7 @@ pub(crate) fn open(
             kumo: kumo.clone(),
             pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
+            overlay: None,
         }
     });
     owner.update(cx, |this, cx| {
@@ -926,8 +939,10 @@ fn listen(
         while let Ok(event) = event_changes.recv().await {
             let result = this.update(cx, |this: &mut Presence, cx| {
                 match event {
+                    PresenceEvent::ShowStatus => this.set_panel(PanelVisibility::Visible, cx)?,
                     // Hover opens the peek; a press does nothing until C2a's pull starts there.
-                    PresenceEvent::DockPressed { .. } => {}
+                    // shortcut: no host watch is armed until C2b-2's carry, which handles these.
+                    PresenceEvent::DockPressed { .. } | PresenceEvent::HostChanged { .. } => {}
                     PresenceEvent::PointerChanged { entered_qpc } => {
                         this.pointer_moved(entered_qpc, cx)?;
                     }

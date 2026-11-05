@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use super::{duplex, patient_brain_with};
 use crate::context::InputItem;
-use crate::coordinator::{SendKey, UNKNOWN_TOOL};
+use crate::coordinator::SendKey;
 use crate::engines::{
     CallId, Engine, Finish, Opaque, Round, RunRequest, SendGate, ToolName, TurnEvent,
 };
@@ -118,7 +118,7 @@ async fn a_called_round_is_stored_and_the_next_round_replays_it() {
         *result,
         InputItem::FunctionOutput {
             call: CallId::new("c1").expect("short"),
-            output: UNKNOWN_TOOL.to_owned(),
+            output: r#"{"error":"unknown tool"}"#.to_owned(),
         }
     );
     assert_eq!(inputs.recv().await, None, "no third round");

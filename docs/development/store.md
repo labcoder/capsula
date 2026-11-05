@@ -25,12 +25,13 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 | `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. A deleted task's summaries go in the deletion's second transaction, and the purge clears their leftover copies like the events'. Version 4 |
+| `tool_calls` | The tool-call ledger ([tools](tools.md)): one row per committed call, keyed by run, `route` (`model`, or `mcp:` and the launch id) and the caller's id, with the tool, a SHA-256 of the parsed arguments and the tagged result, capped at 65,536 bytes (not characters). Written in the same transaction as the call's own write, and only while the run's thread is live. A history result holds references, never text, and nothing here is indexed. A deleted task's rows go in the deletion's second transaction. Version 5 |
 
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
 `sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
 user turn (a new thread when there is one, the run, and the user's text) is one transaction.
 
-Later slices add assets, sends, the tool ledger, actions and cleanup jobs, each as a
+Later slices add assets, sends, actions and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
 
@@ -224,7 +225,7 @@ sequenceDiagram
   S->>DB: tx 1: state=deleting, deletion_generation+1
   Note over S: hidden from lists and search, takes no new runs or events
   S->>S: stop the thread's producers (later slices)
-  S->>DB: tx 2: delete events (and FTS rows), runs, summaries, thread; purge_pending=1
+  S->>DB: tx 2: delete events (and FTS rows), tool_calls, runs, summaries, thread; purge_pending=1
   Note over S: no live thread's run active, no op for 200 ms
   S->>H: copy
   H->>DB: read-only: VACUUM INTO kumochi.db.purge-snapshot
@@ -238,8 +239,8 @@ sequenceDiagram
   H-->>S: removed: purge done
 ```
 
-The foreign keys have no cascade, so the second transaction names every table (`events`, `runs`,
-the thread's own `summaries`, `threads`) and fails if it misses one, rather than leaving rows
+The foreign keys have no cascade, so the second transaction names every table (`events`, `tool_calls`,
+`runs`, the thread's own `summaries`, `threads`) and fails if it misses one, rather than leaving rows
 behind. Deleting the rows isn't enough on its own, as the
 CAPS-22 review found, because two kinds of copy survive secure-delete:
 

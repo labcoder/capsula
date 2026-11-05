@@ -6,6 +6,9 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
+mod calls;
+#[cfg(test)]
+mod calls_tests;
 pub(crate) mod context;
 mod drawing;
 mod pages;
@@ -82,6 +85,10 @@ pub enum StoreError {
     /// A drawing write or recovery failed; no database or drawing content is exposed.
     #[error("can't store or recover the drawing")]
     Drawing,
+
+    /// A tool call's write failed; no database or call content is exposed.
+    #[error("can't store the tool call")]
+    Call,
 
     /// A swap's reopen failed, or the store's thread ended, so the file is closed to reads.
     #[error("the store's file isn't open")]
@@ -616,6 +623,7 @@ impl Store {
     fn remove(&mut self, thread: i64) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE thread = ?1", params![thread])?;
+        tx.execute("DELETE FROM tool_calls WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM summaries WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;
