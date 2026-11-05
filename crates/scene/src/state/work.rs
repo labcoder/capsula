@@ -129,7 +129,7 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         ..Work::default()
     };
     let name = super::object::model(op)
-        .expect("only model operations get work metadata")
+        .expect("only model operations have work")
         .name;
     let fail = |field, code| StepError::in_step(&step.id, op_path(index, name).field(field), code);
     match op {
