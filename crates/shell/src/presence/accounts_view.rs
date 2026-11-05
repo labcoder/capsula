@@ -1,9 +1,12 @@
 //! Accounts composes the brain's snapshot; controls only request operations.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Link;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _};
-use gpui_kit::{App, Context, IntoElement, ParentElement as _, Styled as _, Window, div};
+use gpui_kit::{
+    App, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div,
+};
 use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
 };
@@ -131,13 +134,6 @@ impl SettingsView {
         if state.view.is_none() && model.view().is_none() {
             status = Text::AccountOffline;
         }
-        let identity = match &state.view {
-            Some(AccountView::SignedIn { email, .. }) => Some(email.as_ref().map_or_else(
-                || strings.get(Text::AccountIdentity),
-                |email| email.as_str().to_owned(),
-            )),
-            _ => None,
-        };
         let duplicate = state.error.as_ref().is_some_and(|error| {
             matches!(
                 (error.key(), &state.view),
@@ -166,21 +162,23 @@ impl SettingsView {
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(div().child(strings.get(Text::AccountProvider)))
-            .children(identity.map(|identity| div().text_sm().child(identity)))
-            .child(div().text_sm().child(strings.get(status)))
-            .children(
-                lines
-                    .into_iter()
-                    .map(|text| div().text_sm().child(strings.get(text))),
-            )
-            .children(state.error.as_ref().filter(|_| !duplicate).map(|error| {
+            .gap_6()
+            .min_w_0()
+            .child(account_header(state, cx))
+            .child(
                 div()
                     .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(strings.error(error))
-            }))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(strings.get(status)),
+            )
+            .children(lines.into_iter().map(|text| account_notice(text, cx)))
+            .children(
+                state
+                    .error
+                    .as_ref()
+                    .filter(|_| !duplicate)
+                    .map(|error| account_error(error, cx)),
+            )
             .children(state.send_failed.then(|| {
                 div()
                     .text_sm()
@@ -190,12 +188,19 @@ impl SettingsView {
             .child(self.account_actions(cx))
             .children(
                 matches!(state.view, Some(AccountView::SignedIn { .. })).then(|| {
-                    Button::new("account-sign-out")
-                        .outline()
-                        .label(strings.get(Text::AccountSignOut))
-                        .disabled(!state.allows(AccountOp::SignOut))
-                        .on_click(
-                            cx.listener(|view, _, window, cx| view.confirm_sign_out(window, cx)),
+                    div()
+                        .flex()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .pt_4()
+                        .child(
+                            Button::new("account-sign-out")
+                                .outline()
+                                .label(strings.get(Text::AccountSignOut))
+                                .disabled(!state.allows(AccountOp::SignOut))
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.confirm_sign_out(window, cx);
+                                })),
                         )
                 }),
             )
@@ -247,6 +252,130 @@ impl SettingsView {
     }
 }
 
+fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
+    let strings = cx.global::<Strings>();
+    let identity = match &state.view {
+        Some(AccountView::SignedIn { email, .. }) => Some(email.as_ref().map_or_else(
+            || strings.get(Text::AccountIdentity),
+            |email| email.as_str().to_owned(),
+        )),
+        _ => None,
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .p_2()
+                .rounded_md()
+                .bg(cx.theme().muted)
+                .text_lg()
+                .child(IconName::Bot),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(strings.get(Text::AccountProvider)),
+                )
+                .children(identity.map(|identity| {
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(identity)
+                })),
+        )
+}
+
+fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> impl IntoElement {
+    let strings = cx.global::<Strings>();
+    if error.key() == ErrorKey::RevocationBacklog {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .max_w(gpui_kit::rems(36.))
+            .text_sm()
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().danger)
+                    .child(strings.get(Text::AccountBacklogLead)),
+            )
+            .children(
+                [
+                    Text::AccountBacklogRetry,
+                    Text::AccountBacklogExpiry,
+                    Text::AccountBacklogRecovery,
+                ]
+                .map(|text| {
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(strings.get(text))
+                }),
+            )
+    } else {
+        div()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(strings.error(error))
+    }
+}
+
+fn account_notice(text: Text, cx: &App) -> impl IntoElement {
+    let strings = cx.global::<Strings>();
+    let mut notice = div().flex().flex_col().gap_2().text_sm();
+    if matches!(text, Text::AccountCleanupRefused | Text::AccountNotDurable) {
+        notice = notice
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(strings.get(Text::AccountLocal)),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().danger)
+                    .child(strings.get(text)),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(if text == Text::AccountCleanupRefused {
+                        Text::AccountCleanupRefusedHelp
+                    } else {
+                        Text::AccountNotDurableHelp
+                    })),
+            );
+    } else if matches!(
+        text,
+        Text::AccountRevocationPending | Text::AccountRevocationUnconfirmed
+    ) {
+        notice = notice
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(strings.get(Text::AccountRemote)),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(text)),
+            );
+    } else {
+        notice = notice
+            .text_color(cx.theme().muted_foreground)
+            .child(strings.get(text));
+    }
+    notice
+}
+
 fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
     let mut lines = Vec::new();
     let status = match &state.view {
@@ -256,10 +385,10 @@ fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
         }) => {
             if *revocation_unconfirmed {
                 lines.push(Text::AccountRevocationUnconfirmed);
-                Text::AccountSignedOut
             } else {
-                Text::AccountUsePlan
+                lines.push(Text::AccountUsePlan);
             }
+            Text::AccountSignedOut
         }
         Some(AccountView::SigningIn) => {
             lines.push(Text::AccountReplaceHelp);
@@ -276,7 +405,11 @@ fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
                 Cleanup::NotDurable => Text::AccountNotDurable,
             });
             lines.extend(cleanup_notice(view));
-            Text::AccountSigningOut
+            if *cleanup == Cleanup::Running {
+                Text::AccountSigningOut
+            } else {
+                Text::AccountSignOutNeedsRetry
+            }
         }
         Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
             Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
@@ -348,7 +481,17 @@ mod tests {
             assert_eq!(cleanup_notice(&view), notice, "{view:?}");
             let mut state = Accounts::default();
             assert!(state.receive(Some(7), 7, view));
-            assert_eq!(account_status(&state), (Text::AccountSigningOut, lines));
+            assert_eq!(
+                account_status(&state),
+                (
+                    if cleanup == Cleanup::Running {
+                        Text::AccountSigningOut
+                    } else {
+                        Text::AccountSignOutNeedsRetry
+                    },
+                    lines
+                )
+            );
         }
     }
 }
