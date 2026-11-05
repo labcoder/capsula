@@ -508,13 +508,30 @@ fn recovery_checks_its_view_and_frame_at_the_cap() {
 #[test]
 fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
     for over in [0, 1] {
-        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+        let (_reference, _, job) = recovering(vec![(LIVE, rect("r"))]);
+        let reference = job.run(&mut Shaper);
+        let Completion::Recovered { scenes, .. } = &reference else {
+            panic!("a one-object reference");
+        };
+        let (state, rest) = scenes[0].1.as_ref().expect("the reference rest");
+        let picture = scenes[0].2
+            + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
+            + kumochi_scene::Frame::new().resident_bytes()
+            + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
+            + 2 * size_of::<usize>();
+        let pair = super::step(
+            r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
+        );
+        let (mut presenter, now, job) = recovering(vec![(LIVE, pair)]);
         presenter
             .completed(job.run(&mut Shaper), now)
             .expect("recovered rest");
-        let picture = presenter.residency();
+        assert!(
+            presenter.residency() > picture,
+            "the cut removes one object's storage"
+        );
         presenter.stop(RUN, now).expect("a stop at rest");
-        let cut = presenter.scenes[&LIVE].cut_now();
+        let cut = super::kept(LIVE).cut;
         let revision = presenter.scenes[&LIVE].state.view().revision();
         let returned = MAX_RESIDENT_BYTES - picture + over;
         presenter.returned.store(returned, Ordering::Relaxed);
