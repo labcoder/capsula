@@ -22,6 +22,9 @@ use std::sync::atomic::AtomicBool;
 #[path = "support/allocation.rs"]
 mod allocation;
 
+#[path = "support/picking.rs"]
+mod picking;
+
 const SQUARE: [Vec3; 4] = [
     Vec3::new(-1.0, -1.0, 0.0),
     Vec3::new(1.0, -1.0, 0.0),

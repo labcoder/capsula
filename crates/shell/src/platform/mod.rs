@@ -1,5 +1,6 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
+pub(crate) mod credential;
 pub(crate) mod input;
 
 #[cfg(windows)]

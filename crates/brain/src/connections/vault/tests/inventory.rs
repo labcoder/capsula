@@ -38,6 +38,19 @@ fn inventory_covers_every_vault_write_and_delete_target() {
         assert!(!vault.save(record, &bytes).expect("chunk storage bound"));
         vault.erase(record).expect("erase storage-bound slot");
     }
+    let staged = kumochi_protocol::constants::anthropic_staging_target(&service);
+    store
+        .set(
+            &staged,
+            &Secret::new(Zeroizing::new(b"sk-ant-api-inventory-fake-key".to_vec())),
+        )
+        .expect("fake staging");
+    vault
+        .anthropic(crate::connections::anthropic::KeyOp::Adopt)
+        .expect("adopt fake key");
+    vault
+        .anthropic(crate::connections::anthropic::KeyOp::Remove)
+        .expect("remove fake key");
     let inventory: BTreeSet<_> = account_targets(&service).collect();
     let state = store.0.lock().expect("fake lock");
     let mut written = BTreeSet::new();
@@ -58,8 +71,10 @@ fn inventory_covers_every_vault_write_and_delete_target() {
             "target outside the inventory: {target}"
         );
     }
-    assert_eq!(written.len(), 182);
-    assert_eq!(deleted.len(), 259);
+    assert_eq!(written.len(), 184);
+    assert_eq!(deleted.len(), 261);
+    assert!(written.contains(&format!("anthropic-key.{service}")));
+    assert!(written.contains(&format!("anthropic-key-staged.{service}")));
     assert!(written.contains(&format!("{service}/chatgpt/0/63")));
     assert!(written.contains(&format!("{service}/revoke/1/24")));
     assert!(!deleted.contains(&format!("{service}/host")));
