@@ -74,7 +74,7 @@ impl<M: TextMeasure> TextMeasure for Timed<M> {
 #[test]
 fn the_native_preparation_fixture_fills_every_paint_cap_and_shapes_every_label() {
     for extra in [0, 40] {
-        let mut state = kumochi_scene::SceneState::begin(super::header().begin).expect("header");
+        let state = kumochi_scene::SceneState::begin(super::header().begin).expect("header");
         drop(
             state
                 .admit(&drawing(0, extra), &kumochi_scene::GlobalBudget::default())
