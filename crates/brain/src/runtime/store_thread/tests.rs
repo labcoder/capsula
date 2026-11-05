@@ -297,6 +297,165 @@ async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
 }
 
 #[tokio::test]
+async fn a_held_model_write_answers_only_after_release() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    let scratch = Scratch::new("model-held");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let id = ThreadId(1);
+    store
+        .begin_turn(id, Some("task"), RunId(1), "ask")
+        .expect("turn");
+    let choice = ModelChoice {
+        model: ModelSlug::new("held-model").expect("valid"),
+        effort: Effort::Max,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let (observed, mut seen) = mpsc::unbounded_channel();
+    let (gates, held) = std_mpsc::channel();
+    let (release, wait) = std_mpsc::channel();
+    gates
+        .send(super::Gate {
+            matches: |op| matches!(op, StoreOp::SetModel { .. }),
+            release: wait,
+        })
+        .expect("gate");
+    let worker = StoreThread::spawn(
+        store,
+        acks,
+        Schedule {
+            observed: Some(observed),
+            gates: Some(held),
+            ..Schedule::default()
+        },
+    )
+    .expect("worker");
+    let op = StoreOp::SetModel {
+        thread: id,
+        choice: choice.clone(),
+    };
+    assert!(worker.send(op.clone()));
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, seen.recv())
+            .await
+            .expect("started in time"),
+        Some(crate::runtime::Seen::StoreOpStarted(op))
+    );
+    assert_eq!(replies.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    release.send(()).expect("released");
+    assert_eq!(
+        reply(&mut replies).await,
+        Input::ModelSet {
+            thread: id,
+            choice: choice.clone(),
+            applied: true,
+        }
+    );
+    worker.close().await.expect("closed");
+    let store = Store::open(&scratch.db()).expect("reopen");
+    let (rows, _) = store.pages().thread_page(None, 50).expect("page");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.id, row.choice.clone()))
+            .collect::<Vec<_>>(),
+        [(id, Some(choice))]
+    );
+    assert_eq!(
+        replies.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+
+    let scratch = Scratch::new("model-failed");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    for id in 1..=2 {
+        store
+            .begin_turn(ThreadId(id), Some("task"), RunId(id), "ask")
+            .expect("turn");
+    }
+    store
+        .conn_for_tests()
+        .execute_batch(
+            "CREATE TRIGGER refuse_model BEFORE UPDATE OF model ON threads WHEN old.id = 1
+         BEGIN SELECT RAISE(ABORT, 'MODEL_ERROR_SENTINEL'); END;",
+        )
+        .expect("trigger");
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let captured = crate::test_support::Captured::default();
+    let _logs = captured.install();
+    let mut purger = Purger::new(Schedule::default(), &store);
+    let failed = ModelChoice {
+        model: ModelSlug::new("failed-model").expect("valid"),
+        effort: Effort::Low,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let later = ModelChoice {
+        model: ModelSlug::new("later-model").expect("valid"),
+        effort: Effort::High,
+        connection: ConnectionKind::ChatGpt,
+    };
+    for (id, choice) in [(1, failed.clone()), (2, later.clone())] {
+        super::serve_op(
+            &mut store,
+            &mut purger,
+            &acks,
+            StoreOp::SetModel {
+                thread: ThreadId(id),
+                choice,
+            },
+        );
+    }
+    assert_eq!(
+        reply(&mut replies).await,
+        Input::ModelSet {
+            thread: ThreadId(1),
+            choice: failed,
+            applied: false,
+        }
+    );
+    assert_eq!(
+        reply(&mut replies).await,
+        Input::ModelSet {
+            thread: ThreadId(2),
+            choice: later.clone(),
+            applied: true,
+        }
+    );
+    let logs = captured.text();
+    assert!(logs.contains("a model choice wasn't stored"));
+    assert!(!logs.contains("MODEL_ERROR_SENTINEL"));
+    assert!(!logs.contains(&format!("{:?}", b"MODEL_ERROR_SENTINEL")));
+    drop(acks);
+    drop(purger);
+    drop(store);
+    let store = Store::open(&scratch.db()).expect("reopen");
+    let (rows, _) = store.pages().thread_page(None, 50).expect("page");
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.id == ThreadId(1))
+            .expect("failed row")
+            .choice,
+        None
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.id == ThreadId(2))
+            .expect("later row")
+            .choice,
+        Some(later)
+    );
+    assert_eq!(
+        replies.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+}
+
+#[tokio::test]
 async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_can() {
     let scratch = Scratch::new("unavailable");
     let mut store = owing(&scratch);

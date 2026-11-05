@@ -123,7 +123,7 @@ pub enum StoreOp {
         /// The model that wrote it; `None` when the engine took none.
         model: Option<String>,
     },
-    /// Store a live thread's model and effort. Nothing answers it.
+    /// Store a live thread's model and effort; `ModelSet` answers the result.
     SetModel {
         /// The thread.
         thread: ThreadId,
@@ -168,9 +168,9 @@ impl StoreOp {
         }
     }
 
-    /// Answers an operation that couldn't reach the store; `None` for one nothing waits on.
-    pub fn failed(&self) -> Option<Input> {
-        Some(match self {
+    /// Answers an operation that couldn't reach the store.
+    pub fn failed(&self) -> Input {
+        match self {
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),
@@ -218,7 +218,11 @@ impl StoreOp {
                 outcome: Deleted::NotHidden,
                 last_run: None,
             },
-            Self::SetModel { .. } => return None,
-        })
+            Self::SetModel { thread, choice } => Input::ModelSet {
+                thread: *thread,
+                choice: choice.clone(),
+                applied: false,
+            },
+        }
     }
 }
