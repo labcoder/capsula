@@ -901,7 +901,6 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::ThreadModelSet { .. })) => {}
             Ok(Some(ControlToShell::Error(error))) => {
                 if events
                     .send_blocking(LinkEvent::Error { generation, error })
@@ -925,7 +924,8 @@ fn watch(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
                 | ControlToShell::Connections(_)
-                | ControlToShell::SpeechRevoked { .. },
+                | ControlToShell::SpeechRevoked { .. }
+                | ControlToShell::ThreadModelSet { .. },
             )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {
