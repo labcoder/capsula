@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::constants::{CREDENTIAL_SERVICE, account_targets};
+use kumochi_protocol::constants::{CREDENTIAL_SERVICE, account_targets, anthropic_staging_target};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
@@ -437,14 +437,37 @@ impl<S: CredentialStore> Vault<S> {
         }
     }
 
-    /// Deletes the 262 names earlier builds wrote, never reading one. Every open runs it, so a
-    /// refused delete waits for the next open and no first-run state is kept.
-    fn sweep_legacy(&self) {
+    /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in a
+    /// later open than an earlier one; a refused delete waits for the next open. The shell
+    /// still stages pastes at its legacy name, so every open deletes that one.
+    fn sweep_legacy(&mut self) {
+        match self.authority.legacy_owed() {
+            Ok(true) => {}
+            Ok(false) => {
+                // shortcut: the shell stages pastes at the legacy name until C7 stages them
+                // through the authority; C7 ends this delete.
+                if self
+                    .store
+                    .delete(&anthropic_staging_target(&self.service))
+                    .is_err()
+                {
+                    tracing::warn!("a staged key paste wasn't deleted");
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "earlier credential names weren't checked for cleanup");
+                return;
+            }
+        }
         let refused = account_targets(&self.service)
             .filter(|name| self.store.delete(name).is_err())
             .count();
         if refused > 0 {
             tracing::warn!(refused, "earlier credential names weren't all deleted");
+        }
+        if let Err(error) = self.authority.legacy_deleted(refused) {
+            tracing::warn!(%error, "an earlier credential cleanup wasn't recorded");
         }
     }
 

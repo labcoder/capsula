@@ -119,7 +119,7 @@ fn a_refused_legacy_delete_waits_for_the_next_open() {
             .expect("legacy name");
     }
     store.0.lock().expect("fake lock").refusing = true;
-    let mut sorted = legacy.clone();
+    let mut sorted = legacy;
     sorted.sort();
     drop(open(&store, &service, &path));
     assert_eq!(store.names(), sorted, "every refused name is still there");
@@ -129,5 +129,41 @@ fn a_refused_legacy_delete_waits_for_the_next_open() {
         store.names(),
         Vec::<String>::new(),
         "the next open deletes them"
+    );
+}
+
+/// After a clean pass in a later open, the legacy names are left alone, except the staging
+/// name the shell still writes, which every open deletes.
+#[test]
+fn legacy_cleanup_stops_after_a_clean_pass_in_a_later_open() {
+    let (_scratch, path, service, store) = setup("vault-legacy-done");
+    let active = anthropic_key_target(&service);
+    let staged = anthropic_staging_target(&service);
+    let plant = |name: &String| {
+        store
+            .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
+            .expect("legacy name");
+    };
+    drop(open(&store, &service, &path));
+    plant(&active);
+    drop(open(&store, &service, &path));
+    assert_eq!(
+        store.names(),
+        Vec::<String>::new(),
+        "the second open still deletes"
+    );
+    plant(&active);
+    plant(&staged);
+    store.0.lock().expect("fake lock").mutations.clear();
+    drop(open(&store, &service, &path));
+    assert_eq!(
+        store.names(),
+        vec![active],
+        "a finished cleanup leaves the rest alone"
+    );
+    let mutations = store.0.lock().expect("fake lock").mutations.clone();
+    assert!(
+        matches!(mutations.as_slice(), [Mutation::Delete(name)] if *name == staged),
+        "{mutations:?}"
     );
 }

@@ -642,12 +642,63 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
     ));
     setup
         .raw()
-        .execute_batch("PRAGMA user_version = 2")
+        .execute_batch("PRAGMA user_version = 3")
         .expect("newer");
     assert!(matches!(
         Authority::open(&setup.path(), &setup.lock),
         Err(AuthorityError::NewerSchema)
     ));
+}
+
+/// A version 1 file gains the legacy cleanup's columns, still owed, and keeps its rows.
+#[test]
+fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
+    let setup = Setup::new("auth-migrate");
+    let mut authority = setup.open();
+    setup.save(&mut authority, Kind::Host, &secret(1, 10));
+    drop(authority);
+    setup
+        .raw()
+        .execute_batch(
+            "ALTER TABLE control DROP COLUMN legacy_done;
+             ALTER TABLE control DROP COLUMN legacy_deleted_in;
+             PRAGMA user_version = 1;",
+        )
+        .expect("a version 1 file");
+    let authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    assert!(
+        authority
+            .current(Kind::Host)
+            .expect("head")
+            .active
+            .is_some()
+    );
+    let version: i64 = setup
+        .raw()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 2);
+}
+
+/// The legacy cleanup ends only after a clean pass in a later open than an earlier pass.
+#[test]
+fn the_legacy_cleanup_ends_after_a_clean_pass_in_a_later_open() {
+    let setup = Setup::new("auth-legacy");
+    let mut authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    authority.legacy_deleted(0).expect("first clean pass");
+    assert!(authority.legacy_owed().expect("one open isn't enough"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(1).expect("a refused pass");
+    assert!(authority.legacy_owed().expect("a refusal never ends it"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("a later clean pass");
+    assert!(!authority.legacy_owed().expect("done"));
+    drop(authority);
+    assert!(!setup.open().legacy_owed().expect("done for good"));
 }
 
 #[test]

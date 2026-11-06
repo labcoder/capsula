@@ -21,11 +21,11 @@ use io::Verified;
 /// The authority's file in the data folder; not the history store, so no purge touches it.
 pub(crate) const FILE: &str = "credentials.db";
 /// The newest schema this build knows; a newer file is refused, never downgraded.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 /// The sign-out marker's JSON bound, as the vault had it.
 const MARKER_BYTES: usize = 200;
 
-/// Version 1. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
+/// Version 2. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
 const SCHEMA: &str = "
 CREATE TABLE heads (
     kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic')),
@@ -48,8 +48,16 @@ CREATE INDEX removed ON generations (state) WHERE state = 'removed';
 CREATE TABLE control (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     lifetime INTEGER NOT NULL CHECK (lifetime >= 0),
-    marker TEXT NOT NULL
+    marker TEXT NOT NULL,
+    legacy_deleted_in INTEGER,
+    legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1))
 ) STRICT;
+";
+/// Version 1 to 2: the legacy cleanup's progress.
+const LEGACY: &str = "
+ALTER TABLE control ADD COLUMN legacy_deleted_in INTEGER;
+ALTER TABLE control ADD COLUMN legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1));
+PRAGMA user_version = 2;
 ";
 
 /// Why the authority refused; no name, generation or secret is carried.
@@ -285,8 +293,9 @@ impl Authority {
                     "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
                     [marker_json(SignOutMarker::default())?],
                 )?;
-                tx.execute_batch("PRAGMA user_version = 1")?;
+                tx.execute_batch("PRAGMA user_version = 2")?;
             }
+            1 => tx.execute_batch(LEGACY)?,
             VERSION => {}
             newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
             _ => return Err(AuthorityError::Corrupt),
@@ -449,6 +458,39 @@ impl Authority {
     /// Fails on a SQLite failure, a missing control row or an oversized marker.
     pub(crate) fn set_marker(&mut self, marker: SignOutMarker) -> Result<(), AuthorityError> {
         write_marker(&self.conn, marker)
+    }
+
+    /// Whether the names earlier builds wrote still need deleting.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure or a missing control row.
+    pub(crate) fn legacy_owed(&self) -> Result<bool, AuthorityError> {
+        let done: i64 = self
+            .conn
+            .query_row("SELECT legacy_done FROM control WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(AuthorityError::Corrupt)?;
+        Ok(done == 0)
+    }
+
+    /// Records this open's legacy pass and how many of its deletes were refused. A clean pass
+    /// in a later open than an earlier pass ends the cleanup, as a clean sweep in a later open
+    /// ends a generation's.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure.
+    pub(crate) fn legacy_deleted(&mut self, refused: usize) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "UPDATE control SET legacy_done = (?1 = 0 AND legacy_deleted_in IS NOT NULL),
+             legacy_deleted_in = ?2 WHERE id = 1",
+            params![
+                i64::try_from(refused).map_err(|_| AuthorityError::Bounds)?,
+                self.lifetime
+            ],
+        )?;
+        Ok(())
     }
 
     /// At most `limit` Removed generations this open hasn't swept yet, so a pass is bounded

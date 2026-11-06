@@ -13,12 +13,19 @@ The saved key is the [credential authority](#credential-authority)'s `anthropic`
 reads its current generation, and Remove commits the removal first, then sweeps the names, so a
 removed key is never read again even while Credential Manager still serves it. The shell still
 stages a paste at keyring's `anthropic-key-staged.{service}` target, but the brain doesn't adopt
-it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed), and the next open deletes
-the staged entry with the other legacy names. C7 stages a paste through the authority instead. Neither that name nor the old
-`anthropic-key.{service}` record is read. All work runs on the credential worker under the
+it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed), and every open deletes
+the staged entry. C7 stages a paste through the authority instead. Neither that name nor the
+old `anthropic-key.{service}` record is read. All work runs on the credential worker under the
 vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
-read is blocked runs after it, and the stale Check's result is dropped by its generation. A
-cancelled waiter never interrupts an in-flight call.
+read is blocked runs after it, and the runtime generation guard drops the stale Check's reply.
+A cancelled waiter never interrupts an in-flight call.
+
+A failed key removal remains pending in this brain process; Check/Retry and a staged-key
+notification retry Remove and never reload or adopt a key. Unconfirmed is not confirmation of
+removal. Until the removal transaction commits, quitting or restarting loses that in-memory
+intent and the next startup may load and check the still-current key; retry removal until it
+succeeds. A paste received while removal is pending remains staged and is not automatically
+adopted.
 
 The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
 `Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
@@ -44,9 +51,11 @@ The vault writes only write-once generation names, `<service>/gen/<kind>/<genera
 bounded `account_targets(service)` inventory name what earlier builds wrote: host, sign-out
 marker, chatgpt/revoke manifests, and each record's two slots of 64 chunks, plus the active and
 staged Anthropic targets in their dot form. These are 262 exact targets, not a service-prefix
-match. The vault never reads or writes them; the shell still writes the staging name. Every
-open deletes all 262 by exact name before its first sweep; a refused delete waits for the next
-open, and no first-run state is kept. Anyone signed in on an earlier build sees Signed out and
+match. The vault never reads or writes them; the shell still writes the staging name. Opens
+delete all 262 by exact name before their first sweep, and a refused delete waits for the next
+open. The pass repeats at each open until a clean pass in a later open than an earlier one
+ends it, recorded in credentials.db's `control` row; after that each open deletes only the
+staging name, until C7 stages pastes through the authority. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
@@ -608,7 +617,7 @@ misses is untested. The shell's `keyring` read of the instance capability needs 
 own: a failed read fails that handshake, and the link tries the whole handshake again every
 50 ms for 10 s. A native Credential Manager call that never returns holds the credentials thread, so later
 credential work and shutdown wait behind it. Removal stays safe, because jobs run in order and
-the authority drops stale results, but nothing bounds that wait.
+the runtime generation guard drops stale worker replies, but nothing bounds that wait.
 `Worker::system` is the only way outside tests to
 reach the real store: `Vault::open` is private to `connections`, and `WindowsCredentialStore`
 to the crate.
