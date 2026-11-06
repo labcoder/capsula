@@ -48,6 +48,8 @@ pub(super) struct Connections {
     read: Option<JoinHandle<()>>,
     loading: bool,
     /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
+    // shortcut: the pending fence is process-local, so a restart before the removal commits can
+    // reload the key; a durable pending intent is needed only if removal must survive that exit.
     removing: bool,
 }
 

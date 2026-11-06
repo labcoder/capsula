@@ -770,6 +770,24 @@ fn kept(scene: SceneId) -> SceneCut {
 }
 
 #[test]
+fn a_cut_past_the_rest_s_bound_still_clears_the_scene() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    drop(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("the first step"));
+    drop(commit(&mut presenter, LIVE, 1, rect("b"), now).expect("the second step"));
+    let revealed = [(1, 0), (2, 0)]
+        .map(|(revision, slot)| Handle::new(revision, slot).expect("a committed object"))
+        .to_vec();
+    let cut = StopCut {
+        activated: 2,
+        revealed: Bounded::new(revealed).expect("two handles"),
+    };
+    let effects = acknowledge(&mut presenter, LIVE, 2, cut, now).expect("a cut the brain applied");
+    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert!(presenter.scenes.is_empty());
+}
+
+#[test]
 fn live_frames_wait_for_recovery_and_then_apply_in_arrival_order() {
     let recovered = SceneId(10);
     let (mut presenter, now, job) = recovering(vec![(recovered, rect("r"))]);

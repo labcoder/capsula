@@ -64,14 +64,7 @@ impl VaultError {
     pub fn is_damage(&self) -> bool {
         matches!(
             self,
-            Self::Unreadable
-                | Self::Bounds
-                | Self::Store(
-                    CredentialStoreError::MissingChunk
-                        | CredentialStoreError::InvalidChunkLength
-                        | CredentialStoreError::InvalidChunkCount
-                        | CredentialStoreError::InvalidBlob,
-                )
+            Self::Unreadable | Self::Bounds | Self::Store(CredentialStoreError::InvalidBlob)
         )
     }
 }

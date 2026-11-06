@@ -1,7 +1,7 @@
 //! 3D admission: views, solids, attachments, budgets and transform bounds.
 use kumochi_scene::{
     Admission, BindingError, Budget, Committed, ErrorCode, GlobalBudget, Handle, Record,
-    SceneBinding, SceneState, Step, StopCut, StopOutcome, WireId,
+    SceneBinding, SceneEvent, SceneState, Step, StopCut, StopOutcome, WireId,
     deferred::Deferred,
     parse_record,
     record::Op,
@@ -412,6 +412,87 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
         at(ErrorCode::OutOfRange, "put")
     );
 
+    let from_rest = |ease: &str| {
+        put(
+            "a",
+            &[
+                view("v"),
+                cube("s", ""),
+                format!(
+                    r#"{{"anim":{{"target":"s","track":"pos3","keys":[[500,[14600,0,0]]],"ease":"{ease}"}}}}"#
+                ),
+            ],
+        )
+    };
+    state
+        .admit(&step(&from_rest("linear")), &global)
+        .expect("14,601.7");
+    assert_eq!(
+        refused(&state, &global, &from_rest("spring")),
+        at(ErrorCode::OutOfRange, "put")
+    );
+}
+
+#[test]
+fn a_yoyo_spring_bound_includes_the_reverse_overshoot() {
+    let (state, global) = (scene(), GlobalBudget::default());
+    let swing = |ease: &str, yoyo: bool| {
+        put(
+            "a",
+            &[
+                view("v"),
+                cube("s", ""),
+                format!(
+                    r#"{{"anim":{{"target":"s","track":"pos3","keys":[[0,[14000,0,0]],[1000,[-2000,0,0]]],"ease":"{ease}","repeat":1,"yoyo":{yoyo}}}}}"#
+                ),
+            ],
+        )
+    };
+    state
+        .admit(&step(&swing("spring", false)), &global)
+        .expect("19,264.3 forward");
+    state
+        .admit(&step(&swing("linear", true)), &global)
+        .expect("14,001.7 both ways");
+    assert_eq!(
+        refused(&state, &global, &swing("spring", true)),
+        at(ErrorCode::OutOfRange, "put")
+    );
+}
+
+#[test]
+fn a_replaced_spring_track_bounds_its_view_until_retirement() {
+    let (mut state, mut global) = (scene(), GlobalBudget::default());
+    commit(
+        &mut state,
+        &mut global,
+        &put(
+            "a",
+            &[
+                view("v"),
+                cube("s", ""),
+                track("s", "pos3", [14_000.0, 0.0, 0.0], "spring"),
+            ],
+        ),
+    );
+    let replaced = commit(
+        &mut state,
+        &mut global,
+        &put("b", &[track("s", "pos3", [1.0, 0.0, 0.0], "linear")]),
+    );
+    let child = put("c", &[cube("c", r#","attach":"s","pos":[3000,0,0]"#)]);
+    assert_eq!(
+        refused(&state, &global, &child),
+        at(ErrorCode::OutOfRange, "put")
+    );
+    state
+        .retire(replaced.index, &mut global)
+        .expect("committed step");
+    commit(&mut state, &mut global, &child);
+}
+
+#[test]
+fn a_track_replaced_in_the_same_step_keeps_its_old_spring_envelope() {
     let (mut state, mut global) = (scene(), GlobalBudget::default());
     commit(
         &mut state,
@@ -436,6 +517,32 @@ fn a_pos3_spring_bound_includes_its_overshoot() {
         refused(&state, &global, &replace),
         at(ErrorCode::OutOfRange, "put")
     );
+}
+
+#[test]
+fn a_view_box_needs_a_positive_width_and_height() {
+    let (state, global) = (scene(), GlobalBudget::default());
+    let boxed = |bounds: &str| {
+        put(
+            "a",
+            &[format!(r#"{{"view3d":{{"id":"v","box":[{bounds}]}}}}"#)],
+        )
+    };
+    state
+        .admit(&step(&boxed("0,0,1,1")), &global)
+        .expect("a one-unit view");
+    for (bounds, path) in [
+        ("0,0,0,10", "put[0].view3d.box[2]"),
+        ("0,0,-1,10", "put[0].view3d.box[2]"),
+        ("0,0,10,0", "put[0].view3d.box[3]"),
+        ("0,0,10,-1", "put[0].view3d.box[3]"),
+    ] {
+        assert_eq!(
+            refused(&state, &global, &boxed(bounds)),
+            at(ErrorCode::OutOfRange, path),
+            "{bounds}"
+        );
+    }
 }
 
 #[test]
@@ -695,20 +802,125 @@ fn info_is_bounded_and_redacted_like_other_text() {
         r#"{{"id":"x","set":[{{"target":"s","info":"{marker}{}"}}]}}"#,
         &long[..long.len() - 2 * marker.len()]
     ));
-    let debug = format!("{parsed:?}");
-    assert!(!debug.contains(marker));
-    assert!(
-        !debug
-            .as_bytes()
-            .windows(marker.len())
-            .any(|w| w == marker.as_bytes())
-    );
+    let decimal = format!("{:?}", marker.as_bytes());
+    for debug in [format!("{parsed:?}"), format!("{:?}", parsed.set[0])] {
+        assert!(!debug.contains(marker), "{debug}");
+        assert!(!debug.contains(decimal.trim_matches(['[', ']'])), "{debug}");
+    }
     let over = format!(
         r#"{{"step":{{"id":"x","set":[{{"target":"s","info":"{}"}}]}}}}"#,
         "é".repeat(401)
     );
     let error = parse_record(over.as_bytes()).expect_err("401 characters");
     assert_eq!(error.code, ErrorCode::TooLong);
+}
+
+#[test]
+fn set_info_keeps_its_utf8_text_through_a_stored_replay() {
+    let (mut state, mut global) = (scene(), GlobalBudget::default());
+    commit(
+        &mut state,
+        &mut global,
+        &put("a", &[view("v"), cube("s", "")]),
+    );
+    commit(
+        &mut state,
+        &mut global,
+        r#"{"id":"b","set":[{"target":"s","info":"é½中"}]}"#,
+    );
+    let stored = serde_json::to_vec(state.recovery_log()).expect("serializable log");
+    let log: Vec<SceneEvent> = serde_json::from_slice(&stored).expect("stored log");
+    let replayed = SceneState::replay(header(), &log).expect("replay");
+    assert_eq!(replayed.usage(), state.usage());
+    let infos: Vec<&str> = replayed
+        .recovery_log()
+        .iter()
+        .filter_map(|event| match event {
+            SceneEvent::Step { step, .. } => step
+                .set
+                .first()?
+                .info
+                .as_ref()
+                .map(kumochi_scene::Text::as_str),
+            SceneEvent::Stop(_) => None,
+        })
+        .collect();
+    assert_eq!(infos, ["é½中"]);
+}
+
+/// `tests/mesh_size.rs`'s maximum outline: 64 retained perimeter points, 252 triangles.
+fn compact(name: &str) -> String {
+    let points: Vec<String> = (0..16)
+        .map(|i| format!("[{i},0]"))
+        .chain((0..16).map(|i| format!("[16,{i}]")))
+        .chain((0..16).map(|i| format!("[{},16]", 16 - i)))
+        .chain((0..16).map(|i| format!("[0,{}]", 16 - i)))
+        .collect();
+    format!(
+        r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
+        points.join(",")
+    )
+}
+
+#[test]
+fn a_step_admits_at_most_2304_extrude_outline_points() {
+    let ops = |count: usize| {
+        let mut ops = vec![view("v")];
+        ops.extend((0..count).map(|i| compact(&format!("e{i}"))));
+        put("a", &ops)
+    };
+    let record = |count| format!(r#"{{"step":{}}}"#, ops(count));
+    assert_eq!(record(63).len(), 32_358);
+    assert_eq!(record(64).len(), 32_871);
+    assert_eq!(
+        parse_record(record(64).as_bytes())
+            .expect_err("over 32 KiB")
+            .code,
+        ErrorCode::TooLong
+    );
+    let (mut state, mut global) = (scene(), GlobalBudget::default());
+    assert_eq!(
+        refused(&state, &global, &ops(63)),
+        over(Budget::OutlinePoints)
+    );
+    assert_eq!(
+        refused(&state, &global, &ops(37)),
+        over(Budget::OutlinePoints)
+    );
+    commit(&mut state, &mut global, &ops(36));
+    let more: Vec<String> = (36..72).map(|i| compact(&format!("e{i}"))).collect();
+    commit(&mut state, &mut global, &put("b", &more));
+    assert_eq!(
+        (state.usage().solids, state.usage().triangles),
+        (72, 18_144)
+    );
+}
+
+#[test]
+fn a_step_of_2305_extrude_outline_points_is_refused() {
+    let extrude = |name: &str, points: &[String]| {
+        format!(
+            r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
+            points.join(",")
+        )
+    };
+    let round: Vec<String> = (0..62)
+        .map(|i| {
+            let angle = f64::from(i) * std::f64::consts::TAU / 62.0;
+            format!("[{:.0},{:.0}]", 1000.0 * angle.cos(), 1000.0 * angle.sin())
+        })
+        .collect();
+    let triangle = ["[0,0]".to_owned(), "[16,0]".to_owned(), "[0,16]".to_owned()];
+    let mut ops = vec![view("v")];
+    ops.extend((0..35).map(|i| compact(&format!("e{i}"))));
+    ops.push(extrude("r", &round));
+    ops.push(extrude("t", &triangle));
+    assert_eq!(35 * 64 + round.len() + triangle.len(), 2_305);
+    let (state, global) = (scene(), GlobalBudget::default());
+    assert_eq!(
+        refused(&state, &global, &put("a", &ops)),
+        over(Budget::OutlinePoints)
+    );
 }
 
 fn polygon(name: &str) -> String {
@@ -727,22 +939,27 @@ fn polygon(name: &str) -> String {
 #[test]
 #[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_admit() {
+    use kumochi_scene::limits::MAX_STEP_OUTLINE_POINTS;
     use std::{hint::black_box, time::Instant};
 
-    let extrudes = |first: Option<String>| {
+    let extrudes = |outline: fn(&str) -> String, first: Option<String>| {
         let mut ops: Vec<String> = first.into_iter().collect();
         let mut count = 0;
         loop {
-            ops.push(polygon(&format!("e{count}")));
-            if format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024 {
+            ops.push(outline(&format!("e{count}")));
+            if count == MAX_STEP_OUTLINE_POINTS / 64
+                || format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024
+            {
                 ops.pop();
                 return (count, step(&put("a", &ops)));
             }
             count += 1;
         }
     };
-    let (count, largest) = extrudes(Some(view("v")));
-    let (_, late) = extrudes(None);
+    let (count, largest) = extrudes(polygon, Some(view("v")));
+    let (_, late) = extrudes(polygon, None);
+    let (compact_count, compact_largest) = extrudes(compact, Some(view("v")));
+    let (_, compact_late) = extrudes(compact, None);
     let mut full = (scene(), GlobalBudget::default());
     commit(
         &mut full.0,
@@ -752,13 +969,27 @@ fn measure_admit() {
     let mut boxes = vec![view("v")];
     boxes.extend((0..160).map(|i| cube(&format!("s{i}"), "")));
     let empty = (scene(), GlobalBudget::default());
-    println!("largest legal step: {count} extrudes of 64 points");
+    println!(
+        "largest legal steps: {count} round and {compact_count} compact extrudes of 64 points"
+    );
     for (workload, (state, global), step, refused) in [
         ("largest-legal-extrude-step", &empty, largest, None),
         (
             "extrude-step-refused-late",
             &full,
             late,
+            Some(ErrorCode::OverBudget(Budget::Triangles)),
+        ),
+        (
+            "largest-compact-extrude-step",
+            &empty,
+            compact_largest,
+            None,
+        ),
+        (
+            "compact-step-refused-late",
+            &full,
+            compact_late,
             Some(ErrorCode::OverBudget(Budget::Triangles)),
         ),
         ("160-small-solids", &empty, step(&put("a", &boxes)), None),

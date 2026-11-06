@@ -180,7 +180,7 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 5
+            known: 6
         })
     ));
 }
