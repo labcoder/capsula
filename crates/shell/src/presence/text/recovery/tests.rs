@@ -278,7 +278,7 @@ fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_chan
     cx.run_until_parked();
     let notified = Rc::new(Cell::new(0));
     let _watch = cx.update(|cx| {
-        let notified = notified.clone();
+        let notified = Rc::clone(&notified);
         cx.observe(&view, move |_, _| notified.set(notified.get() + 1))
     });
     cx.simulate_input(window, "n");
@@ -304,15 +304,22 @@ fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_chan
 
 #[gpui::test]
 fn keyboard_retry_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
-    keyboard_recovery_returns_composer(true, cx);
+    keyboard_recovery_returns_composer(RecoveryControl::Retry, cx);
 }
 
 #[gpui::test]
 fn keyboard_dismiss_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
-    keyboard_recovery_returns_composer(false, cx);
+    keyboard_recovery_returns_composer(RecoveryControl::Dismiss, cx);
 }
 
-fn keyboard_recovery_returns_composer(retry: bool, cx: &mut TestAppContext) {
+#[derive(Clone, Copy)]
+enum RecoveryControl {
+    Retry,
+    Dismiss,
+}
+
+fn keyboard_recovery_returns_composer(control: RecoveryControl, cx: &mut TestAppContext) {
+    let retry = matches!(control, RecoveryControl::Retry);
     let (owner, data, control) = ready(cx);
     draft(&owner, "keyboard retry", cx);
     owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
