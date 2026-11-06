@@ -2,7 +2,9 @@
 //! the body, and the drop decision on `Released`. How it fits: docs/development/kumo.md,
 //! "The carry".
 
-use gpui_kit::{Context, SharedString};
+use std::time::{Duration, Instant};
+
+use gpui_kit::{Context, SharedString, Task};
 
 use super::drag::{End, Generation};
 use super::perch::{Check, Drop, Extents, Placement, Targeting, WindowTarget, drop_target};
@@ -18,21 +20,29 @@ const EXTENTS: Extents = Extents {
     card: [380, 124],
 };
 
+/// The least time between two candidate reads under a moving pointer. A pointer that comes
+/// to rest inside it gets one trailing read at its end.
+const READ_INTERVAL: Duration = Duration::from_millis(50);
+
 /// What Presence holds of a carry. It has no `Debug`, since the label is screen text.
 #[derive(Default)]
 pub(super) struct Carry {
     candidates: Candidates,
     /// The armed generation's watch, and its drop label.
     watch: Option<(WatchGen, HostWatch, SharedString)>,
+    /// The trailing read, waiting for `Candidates::due`.
+    trailing: Option<Task<()>>,
 }
 
 /// The carry's candidate reads, apart from the watch they ask for.
 #[derive(Default)]
 struct Candidates {
     targeting: Targeting,
-    /// Where the pointer was at the last read; a host event for the watched generation
-    /// clears it, so the next frame reads again under a still pointer.
-    read_at: Option<[i32; 2]>,
+    /// Where the pointer was at the last read, and when; a host event for the watched
+    /// generation clears it, so the next frame reads again under a still pointer.
+    read_at: Option<([i32; 2], Instant)>,
+    /// When a move that the interval held back is read.
+    due: Option<Instant>,
     /// The watched generation's title as last read.
     title: Option<(WatchGen, Label)>,
 }
@@ -49,12 +59,14 @@ enum Sample {
 }
 
 impl Candidates {
-    /// The read for one frame of `drag` with the pointer at `point`. `query` runs only when
-    /// the pointer moved or a host event made the last read stale.
+    /// The read for one frame of `drag` with the pointer at `point` at `now`. `query` runs
+    /// only when a host event made the last read stale, or the pointer moved and
+    /// `READ_INTERVAL` has passed since the last read; a move held back sets `due`.
     fn sample(
         &mut self,
         drag: Generation,
         point: [i32; 2],
+        now: Instant,
         query: impl FnOnce([i32; 2]) -> Option<WindowTarget>,
     ) -> Sample {
         if !self.targeting.carries(drag) {
@@ -62,9 +74,18 @@ impl Candidates {
             self.read_at = None;
             self.title = None;
         }
-        if self.read_at.replace(point) == Some(point) {
-            return Sample::Same;
+        if let Some((at, when)) = self.read_at {
+            if at == point {
+                self.due = None;
+                return Sample::Same;
+            }
+            if now < when + READ_INTERVAL {
+                self.due = Some(when + READ_INTERVAL);
+                return Sample::Same;
+            }
         }
+        self.read_at = Some((point, now));
+        self.due = None;
         let target = query(point);
         if let Some((id, w)) = self.targeting.candidate(drag, target.as_ref())
             && let Some(target) = target
@@ -85,23 +106,30 @@ impl Candidates {
     /// A queued event: a host event for the watched generation makes the last read stale.
     fn event(&mut self, event: &PresenceEvent) {
         if let PresenceEvent::HostChanged { w, .. } = *event
-            && self.title.is_some_and(|(watched, _)| watched == w)
+            && self.targeting.watching() == Some(w)
         {
-            self.read_at = None;
+            self.stale();
         }
         deliver(&mut self.targeting, event);
+    }
+
+    /// The next sample reads, whatever the pointer and the interval say.
+    fn stale(&mut self) {
+        self.read_at = None;
     }
 
     fn end(&mut self) {
         self.targeting.end();
         self.read_at = None;
+        self.due = None;
         self.title = None;
     }
 }
 
 impl Presence {
     /// One pull frame: once the neck has snapped, the window under the pointer is the
-    /// candidate.
+    /// candidate. A move the interval held back gets a trailing read at its deadline, so the
+    /// label settles under a resting pointer even when no frame follows.
     pub(super) fn follow_carry(&mut self, cx: &mut Context<'_, Self>) {
         let Some(drag) = self.kumo.read(cx).carrying() else {
             return;
@@ -113,7 +141,29 @@ impl Presence {
                 return;
             }
         };
-        match self.carry.candidates.sample(drag, point, query) {
+        self.read_carry(drag, point, cx);
+        if let Some(due) = self.carry.candidates.due
+            && self.carry.trailing.is_none()
+        {
+            self.carry.trailing = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(due.saturating_duration_since(Instant::now()))
+                    .await;
+                let _gone = this.update(cx, |this, cx| {
+                    this.carry.trailing = None;
+                    this.follow_carry(cx);
+                });
+            }));
+        }
+    }
+
+    /// The candidate read for `drag` with the pointer at `point`, and what it asks for.
+    fn read_carry(&mut self, drag: Generation, point: [i32; 2], cx: &mut Context<'_, Self>) {
+        match self
+            .carry
+            .candidates
+            .sample(drag, point, Instant::now(), query)
+        {
             Sample::Same => {}
             Sample::Arm(id, w, title) => {
                 self.carry.watch = None;
@@ -153,6 +203,8 @@ impl Presence {
             _ => None,
         };
         if let Some(at) = at {
+            self.carry.candidates.stale();
+            self.read_carry(drag, at, cx);
             let from = self
                 .dock
                 .read(cx)
@@ -177,6 +229,7 @@ impl Presence {
 
     /// No carry: nothing is watched and no label shows.
     pub(super) fn end_carry(&mut self, cx: &mut Context<'_, Self>) {
+        self.carry.trailing = None;
         self.carry.candidates.end();
         self.sync_carry(cx);
     }
@@ -265,7 +318,10 @@ fn decide<S>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidates, EXTENTS, Sample, decide, deliver, label};
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    use super::{Candidates, EXTENTS, READ_INTERVAL, Sample, decide, deliver, label};
     use crate::platform::PresenceEvent;
     use crate::platform::host::{HostChange, Label, PhysicalRect, WatchGen};
     use crate::presence::perch::target_fixtures::{HOST, OTHER, drag, host};
@@ -387,27 +443,31 @@ mod tests {
         }
     }
 
-    /// A carry in drag 1 watching `HOST` titled Alpha under `STILL`.
-    fn watching() -> (Candidates, WatchGen) {
+    /// A carry in drag 1 watching `HOST` titled Alpha under `STILL`, read at the instant
+    /// it returns.
+    fn watching() -> (Candidates, WatchGen, Instant) {
         let mut candidates = Candidates::default();
         let alpha = titled(HOST, "Alpha");
-        let Sample::Arm(id, w, title) = candidates.sample(drag(1), STILL, |_| Some(alpha)) else {
+        let t0 = Instant::now();
+        let Sample::Arm(id, w, title) = candidates.sample(drag(1), STILL, t0, |_| Some(alpha))
+        else {
             panic!("the first read arms");
         };
         assert_eq!((id, title), (HOST, alpha.label));
-        (candidates, w)
+        (candidates, w, t0)
     }
 
     #[test]
     fn a_new_title_relabels_the_same_watch_and_an_empty_one_gets_the_fixed_copy() {
         let strings = Strings::english();
-        let (mut candidates, w) = watching();
+        let (mut candidates, w, mut now) = watching();
         let [alpha, beta, empty] = ["Alpha", "Beta", ""].map(|title| titled(HOST, title));
         assert_eq!(label(&strings, &alpha.label).as_ref(), "Drop on Alpha");
         let mut at = STILL;
         let mut read = |candidates: &mut Candidates, target: WindowTarget| {
             at[0] += 1;
-            candidates.sample(drag(1), at, |_| Some(target))
+            now += READ_INTERVAL;
+            candidates.sample(drag(1), at, now, |_| Some(target))
         };
         assert_eq!(
             read(&mut candidates, alpha),
@@ -428,13 +488,13 @@ mod tests {
 
     #[test]
     fn a_still_pointer_reads_again_only_after_its_own_host_changes() {
-        let (mut candidates, w) = watching();
+        let (mut candidates, w, t0) = watching();
         let unread =
             |_: [i32; 2]| -> Option<WindowTarget> { panic!("no read under a still pointer") };
-        assert_eq!(candidates.sample(drag(1), STILL, unread), Sample::Same);
+        assert_eq!(candidates.sample(drag(1), STILL, t0, unread), Sample::Same);
         candidates.event(&moved(WatchGen(w.0 + 1)));
         assert_eq!(
-            candidates.sample(drag(1), STILL, unread),
+            candidates.sample(drag(1), STILL, t0, unread),
             Sample::Same,
             "another generation's event"
         );
@@ -444,21 +504,87 @@ mod tests {
             Some(w),
             "a move alone keeps it"
         );
-        assert_eq!(candidates.sample(drag(1), STILL, |_| None), Sample::Same);
+        assert_eq!(
+            candidates.sample(drag(1), STILL, t0, |_| None),
+            Sample::Same
+        );
         assert_eq!(
             candidates.targeting.watching(),
             None,
             "moved away from the pointer"
         );
+        candidates.event(&moved(w));
+        assert_eq!(
+            candidates.sample(drag(1), STILL, t0, unread),
+            Sample::Same,
+            "a late event for the candidate it left"
+        );
     }
 
     #[test]
     fn a_host_gone_under_a_still_pointer_arms_the_window_now_under_it() {
-        let (mut candidates, w) = watching();
+        let (mut candidates, w, t0) = watching();
         candidates.event(&gone(w));
         assert_eq!(candidates.targeting.watching(), None);
         let beneath = titled(OTHER, "Beneath");
-        let sample = candidates.sample(drag(1), STILL, |_| Some(beneath));
+        let sample = candidates.sample(drag(1), STILL, t0, |_| Some(beneath));
         assert_eq!(sample, Sample::Arm(OTHER, WatchGen(w.0 + 1), beneath.label));
+    }
+
+    #[test]
+    fn a_move_inside_the_interval_then_rest_reads_once_at_the_deadline() {
+        let (mut candidates, _, t0) = watching();
+        let reads = Cell::new(0);
+        let beta = titled(HOST, "Beta");
+        let read = |_: [i32; 2]| {
+            reads.set(reads.get() + 1);
+            Some(beta)
+        };
+        let rest = [STILL[0] + 5, STILL[1]];
+        let ms = |ms| t0 + Duration::from_millis(ms);
+        assert_eq!(candidates.sample(drag(1), rest, ms(10), read), Sample::Same);
+        assert_eq!(
+            (reads.get(), candidates.due),
+            (0, Some(t0 + READ_INTERVAL)),
+            "held back to the deadline"
+        );
+        assert_eq!(
+            candidates.sample(drag(1), rest, t0 + READ_INTERVAL, read),
+            Sample::Retitle(beta.label),
+            "the label settles under the resting pointer"
+        );
+        assert_eq!((reads.get(), candidates.due), (1, None));
+        assert_eq!(
+            candidates.sample(drag(1), rest, ms(200), read),
+            Sample::Same
+        );
+        assert_eq!(reads.get(), 1, "exactly one read");
+    }
+
+    #[test]
+    fn a_stale_read_runs_at_once_inside_the_interval() {
+        let (mut candidates, _, t0) = watching();
+        let reads = Cell::new(0);
+        let read = |_: [i32; 2]| {
+            reads.set(reads.get() + 1);
+            Some(titled(OTHER, "Beneath"))
+        };
+        let released = [STILL[0] + 9, STILL[1]];
+        let soon = t0 + Duration::from_millis(5);
+        assert_eq!(
+            candidates.sample(drag(1), released, soon, read),
+            Sample::Same
+        );
+        assert_eq!(reads.get(), 0, "held back");
+        candidates.stale();
+        assert!(matches!(
+            candidates.sample(drag(1), released, soon, read),
+            Sample::Arm(OTHER, ..)
+        ));
+        assert_eq!(
+            (reads.get(), candidates.due),
+            (1, None),
+            "the release reads now"
+        );
     }
 }
