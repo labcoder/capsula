@@ -34,10 +34,7 @@ impl Coordinator {
             }));
             return;
         };
-        self.turn(turn, Some(thread), text, effects);
-        if let Some(run) = self.current_run() {
-            effects.push(Effect::Control(ControlToShell::Focus { run, thread }));
-        }
+        self.turn(turn, Some(thread), text, true, effects);
     }
 }
 

@@ -1001,11 +1001,13 @@ impl Coordinator {
         }
     }
 
+    /// Starts this turn's run; `focus` tells the shell to follow it before anything can end it.
     fn turn(
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
         text: Content,
+        focus: bool,
         effects: &mut Vec<Effect>,
     ) {
         self.cancel_job(effects);
@@ -1070,6 +1072,9 @@ impl Coordinator {
             run,
             after: WALL_CLOCK,
         });
+        if focus {
+            effects.push(Effect::Control(ControlToShell::Focus { run, thread }));
+        }
         // The turn is kept, but nothing answers it.
         if let Availability::Unavailable(reason) = &self.availability {
             let reason = reason.clone();

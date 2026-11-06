@@ -126,6 +126,38 @@ fn an_ask_starts_a_run_in_the_scenes_thread_with_the_parts_text_and_the_shell_fo
     );
 }
 
+/// A valid ask while signed out fails at once, but the shell is told to follow its run first,
+/// so the failure shows in the scene's thread.
+#[test]
+fn a_signed_out_ask_is_focused_before_it_fails() {
+    let scratch = Scratch::new("ask-signed-out");
+    let (mut core, scene) = drawn(&scratch);
+    core.handle(Input::Engines(Availability::Unavailable(sign_in_needed())))
+        .expect("never stale");
+    let effects = core.handle(ask(scene, handle(1))).expect("not stale");
+    let focus = effects.iter().position(|effect| {
+        *effect
+            == Effect::Control(ControlToShell::Focus {
+                run: ASKED,
+                thread: T,
+            })
+    });
+    let failed = effects.iter().position(|effect| {
+        matches!(
+            effect,
+            Effect::Control(ControlToShell::RunState {
+                run: ASKED,
+                phase: Phase::Failed,
+                ..
+            })
+        )
+    });
+    assert!(
+        matches!((focus, failed), (Some(focus), Some(failed)) if focus < failed),
+        "{effects:?}"
+    );
+}
+
 #[test]
 fn an_ask_replaces_the_current_run_in_another_thread_and_focuses_its_own() {
     let scratch = Scratch::new("ask-replaces");

@@ -102,8 +102,8 @@ Otherwise the ask becomes the turn text from `ask-about-part`, `ask-about-part-i
 `ask-about-part-alt` in `locales/en/brain.ftl`, which quote the drawing's own text as
 descriptive data. It runs in the scene's thread, never the shell's selected one, as a typed
 turn would: it replaces the current run, uses that thread's model and history, and gets the
-builder's local-time suffix. The brain then sends `Focus { run, thread }` so the shell
-follows it. A delete, a sign-out or a newer turn that cuts the run before its turn is stored,
+builder's local-time suffix. Right after its first state, and before the immediate failure of
+an ask sent while signed out, the brain sends `Focus { run, thread }` so the shell follows it. A delete, a sign-out or a newer turn that cuts the run before its turn is stored,
 while its build is held, or before its send is granted leaves it nothing to send. A granted
 send follows the lease contract.
 
