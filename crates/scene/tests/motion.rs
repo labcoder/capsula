@@ -180,9 +180,9 @@ fn retained_history(
 }
 
 #[test]
-fn a_frame_accounts_for_both_reserved_buffers() {
+fn a_frame_accounts_for_its_reserved_item_world_and_pose_buffers() {
     let (frame, [allocations, _], [allocated, _]) = allocation::usage(Frame::new);
-    assert_eq!(allocations, 2);
+    assert_eq!(allocations, 3);
     assert_eq!(frame.resident_bytes(), allocated);
     let ((), _, [_, released]) = allocation::usage(|| drop(frame));
     assert_eq!(released, allocated);

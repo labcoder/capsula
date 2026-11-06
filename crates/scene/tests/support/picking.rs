@@ -34,11 +34,7 @@ fn display(
     quality: Quality,
     parts: Vec<Option<Handle>>,
 ) -> DisplayedFrame {
-    let count = solids
-        .iter()
-        .flat_map(|s| s.faces)
-        .map(|f| f.triangles.len())
-        .sum();
+    let count = solids.iter().map(|s| s.triangles.len()).sum();
     let mut out = build(solids, &cam, mapping.texels(), count);
     let (_, ids) = image(&mut out, mapping.texels(), quality);
     let mut state = state(mapping, parts);
