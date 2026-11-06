@@ -310,6 +310,7 @@ impl Pages<'_> {
                         "user" => PageEventKind::User,
                         "assistant_text" => PageEventKind::AssistantText,
                         "scene_step" => PageEventKind::SceneStep,
+                        "task_deleted" => PageEventKind::TaskDeleted,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
                     Ok(PageEvent {

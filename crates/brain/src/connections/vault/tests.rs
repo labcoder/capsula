@@ -16,6 +16,7 @@ mod anthropic;
 mod bounds;
 mod inventory;
 mod marker;
+mod staging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Record {
