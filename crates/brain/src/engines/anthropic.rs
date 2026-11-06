@@ -64,7 +64,7 @@ impl fmt::Debug for Mapper {
             .field("bytes", &self.bytes)
             .field("broken", &self.broken)
             .field("terminal", &self.terminal)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -114,11 +114,12 @@ impl Mapper {
         if exact
             && self.final_usage
             && let Some(whole) = self.usage
-        {
-            && self.queue(TurnEvent::Usage(Usage {
-                whole,
-                first_request: Some(whole),
-            })).is_err()
+            && self
+                .queue(TurnEvent::Usage(Usage {
+                    whole,
+                    first_request: Some(whole),
+                }))
+                .is_err()
         {
             finish = Finish::Failed(EngineFailure::Anthropic(Failure::Protocol));
         }
@@ -182,7 +183,8 @@ impl Mapper {
     fn start(&mut self, index: u32, v: &Value) -> Result<(), ()> {
         if self.usage.is_none()
             || self.blocks.len() == ITEMS
-            || self.blocks.iter().any(|(i, _)| *i == index) {
+            || self.blocks.iter().any(|(i, _)| *i == index)
+        {
             return Err(());
         }
         let block = match text(&v["type"])? {

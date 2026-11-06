@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{BYTES, Block, Bounded, ITEMS, Mapper, NAME};
+use super::{BYTES, Block, Bounded, ITEMS, Mapper};
 use crate::{
     connections::{
         anthropic::{error::Failure, sse_map::Reader},
@@ -9,15 +9,30 @@ use crate::{
     engines::{CallId, EngineFailure, Finish, Opaque, Tokens, ToolName, TurnEvent, Usage},
 };
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "fixture builders take temporary JSON values"
+)]
 fn send(mapper: &mut Mapper, value: Value) {
     let wire = format!("data: {value}\n\n");
-    let result = Reader::default().feed(wire.as_bytes(), &mut |event| mapper.event(event));
-    match result {
-        Ok(progress) => assert_eq!(progress, Progress::More),
-        Err(failure) => assert_eq!(format!("{failure:?}"), "Exhausted"),
-    }
+    let result = crate::connections::model::sse::Reader::default()
+        .feed(wire.as_bytes(), &mut |event| mapper.event(event));
+    assert_eq!(result, Ok(Progress::More));
 }
 
+fn started() -> Mapper {
+    let mut mapper = Mapper::default();
+    send(
+        &mut mapper,
+        json!({"type":"message_start", "message":{"usage":{}}}),
+    );
+    mapper
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "fixture builders take temporary JSON values"
+)]
 fn start(mapper: &mut Mapper, index: u32, block: Value) {
     send(
         mapper,
@@ -25,6 +40,10 @@ fn start(mapper: &mut Mapper, index: u32, block: Value) {
     );
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "fixture builders take temporary JSON values"
+)]
 fn delta(mapper: &mut Mapper, index: u32, delta: Value) {
     send(
         mapper,
@@ -56,7 +75,7 @@ fn protocol(mapper: &mut Mapper) {
 
 #[test]
 fn interleaved_blocks_keep_exact_call_and_private_thinking_events() {
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"text", "text":"hi"}));
     start(
         &mut m,
@@ -134,7 +153,7 @@ fn interleaved_blocks_keep_exact_call_and_private_thinking_events() {
 
 #[test]
 fn no_fragments_use_the_start_object_and_fallback_is_skipped() {
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"fallback", "data":"ignored"}));
     stop(&mut m, 0);
     start(
@@ -169,13 +188,13 @@ fn invalid_block_transitions_fail_sticky() {
         json!({"type":"content_block_delta", "index":"0", "delta":{"type":"text_delta", "text":"bad"}}),
         json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":false}}),
     ] {
-        let mut m = Mapper::default();
+        let mut m = started();
         start(&mut m, 0, json!({"type":"text", "text":""}));
         assert_eq!(m.take(), vec![TurnEvent::TextDelta(String::new())]);
         send(&mut m, bad);
         protocol(&mut m);
     }
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"fallback"}));
     stop(&mut m, 0);
     delta(&mut m, 0, json!({"type":"future_delta", "data":"bad"}));
@@ -185,7 +204,7 @@ fn invalid_block_transitions_fail_sticky() {
 #[test]
 fn duplicate_ids_and_invalid_arguments_never_become_ready() {
     for args in ["", "{", "[]", "{} trailing", "null"] {
-        let mut m = Mapper::default();
+        let mut m = started();
         start(
             &mut m,
             0,
@@ -212,7 +231,7 @@ fn duplicate_ids_and_invalid_arguments_never_become_ready() {
         stop(&mut m, 0);
         protocol(&mut m);
     }
-    let mut m = Mapper::default();
+    let mut m = started();
     start(
         &mut m,
         0,
@@ -242,7 +261,7 @@ fn duplicate_ids_and_invalid_arguments_never_become_ready() {
 
 #[test]
 fn missing_signature_and_open_blocks_refuse_completion() {
-    let mut m = Mapper::default();
+    let mut m = started();
     start(
         &mut m,
         0,
@@ -250,7 +269,7 @@ fn missing_signature_and_open_blocks_refuse_completion() {
     );
     stop(&mut m, 0);
     protocol(&mut m);
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"fallback"}));
     protocol(&mut m);
 }
@@ -271,12 +290,13 @@ fn literal_final_usage_precedes_exhaustion_and_eof_has_none() {
         &mut m,
         json!({"type":"message_delta", "delta":{}, "usage":{"output_tokens":4}}),
     );
-    send(
-        &mut m,
-        json!({"type":"message_delta", "delta":{"stop_reason":"max_tokens"}, "usage":{"output_tokens":9}}),
+    let result = Reader::default().feed(
+        b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":9}}\n\n",
+        &mut |event| m.event(event),
     );
+    assert_eq!(result, Err(Failure::Exhausted));
     assert_eq!(
-        m.finish(Err(Failure::Exhausted)),
+        m.finish(result),
         Some(Finish::Failed(EngineFailure::Anthropic(Failure::Exhausted)))
     );
     let whole = Tokens {
@@ -309,7 +329,7 @@ fn bad_usage_counts_fail_instead_of_clamping_or_resetting() {
         json!(-1),
         json!(1.5),
         json!("4"),
-        json!(4294967296_u64),
+        json!(4_294_967_296_u64),
         Value::Null,
     ] {
         let mut m = Mapper::default();
@@ -324,7 +344,7 @@ fn bad_usage_counts_fail_instead_of_clamping_or_resetting() {
 
 #[test]
 fn item_name_id_and_byte_bounds_are_exact() {
-    let mut m = Mapper::default();
+    let mut m = started();
     for index in 0..64 {
         start(&mut m, index, json!({"type":"fallback"}));
         stop(&mut m, index);
@@ -333,13 +353,13 @@ fn item_name_id_and_byte_bounds_are_exact() {
     start(&mut m, 64, json!({"type":"fallback"}));
     protocol(&mut m);
     for (id, name, good) in [
-        ("i".repeat(64), "n".repeat(NAME), true),
+        ("i".repeat(64), "n".repeat(64), true),
         ("i".repeat(65), "n".into(), false),
         (String::new(), "n".into(), false),
         ("é".into(), "n".into(), false),
-        ("i".into(), "n".repeat(NAME + 1), false),
+        ("i".into(), "n".repeat(65), false),
     ] {
-        let mut m = Mapper::default();
+        let mut m = started();
         start(
             &mut m,
             0,
@@ -347,12 +367,12 @@ fn item_name_id_and_byte_bounds_are_exact() {
         );
         assert_eq!(m.broken, !good);
     }
-    let mut m = Mapper::default();
+    let mut m = started();
     assert_eq!(
-        m.start(0, &json!({"type":"text", "text":"x".repeat(BYTES)})),
+        m.start(0, &json!({"type":"text", "text":"x".repeat(1_048_576)})),
         Ok(())
     );
-    assert_eq!(m.bytes, BYTES);
+    assert_eq!(m.bytes, 1_048_576);
     assert_eq!(
         m.delta(0, &json!({"type":"text_delta", "text":"!"})),
         Err(())
@@ -363,7 +383,7 @@ fn item_name_id_and_byte_bounds_are_exact() {
 #[test]
 fn opaque_limit_and_debug_redaction_cover_the_outer_carriers() {
     for extra in [0, 1] {
-        let mut m = Mapper::default();
+        let mut m = started();
         let overhead = b"{\"data\":\"\",\"type\":\"redacted_thinking\"}".len();
         let data = "x".repeat(Opaque::MAX - overhead + extra);
         assert_eq!(
@@ -384,7 +404,7 @@ fn opaque_limit_and_debug_redaction_cover_the_outer_carriers() {
         }
     }
     let marker = "sensitive-sentinel";
-    let mut m = Mapper::default();
+    let mut m = started();
     start(
         &mut m,
         0,
@@ -392,9 +412,13 @@ fn opaque_limit_and_debug_redaction_cover_the_outer_carriers() {
     );
     stop(&mut m, 0);
     let debug = format!(
-        "{m:?} {:?} {:?} {:?} {:?}",
+        "{m:?} {:?} {:?} {:?} {:?} {:?}",
         m.events,
         Block::RedactedThinking(marker.into()),
+        Block::Thinking {
+            text: marker.into(),
+            signature: marker.into()
+        },
         Bounded {
             bytes: marker.as_bytes().to_vec(),
             cap: 100
@@ -413,7 +437,7 @@ fn opaque_limit_and_debug_redaction_cover_the_outer_carriers() {
 
 #[test]
 fn queue_ownership_is_released_and_retained_arguments_are_charged() {
-    let mut m = Mapper::default();
+    let mut m = started();
     assert_eq!(
         m.start(0, &json!({"type":"text", "text":"x".repeat(BYTES)})),
         Ok(())
@@ -425,7 +449,7 @@ fn queue_ownership_is_released_and_retained_arguments_are_charged() {
         Ok(())
     );
     assert_eq!(m.take(), vec![TurnEvent::TextDelta("next".into())]);
-    let mut m = Mapper::default();
+    let mut m = started();
     start(
         &mut m,
         0,
@@ -497,11 +521,11 @@ fn mistyped_starts_and_duplicate_stops_fail_closed() {
         json!({"type":"redacted_thinking", "data":42}),
         json!({"type":5}),
     ] {
-        let mut m = Mapper::default();
+        let mut m = started();
         start(&mut m, 0, block);
         protocol(&mut m);
     }
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"fallback"}));
     stop(&mut m, 0);
     stop(&mut m, 0);
@@ -510,7 +534,7 @@ fn mistyped_starts_and_duplicate_stops_fail_closed() {
 
 #[test]
 fn failure_is_sticky_before_finish_and_the_queue_has_a_hard_item_cap() {
-    let mut m = Mapper::default();
+    let mut m = started();
     delta(&mut m, 0, json!({"type":"text_delta", "text":"unknown"}));
     start(
         &mut m,
@@ -519,7 +543,7 @@ fn failure_is_sticky_before_finish_and_the_queue_has_a_hard_item_cap() {
     );
     assert_eq!(m.take(), vec![]);
     protocol(&mut m);
-    let mut m = Mapper::default();
+    let mut m = started();
     start(&mut m, 0, json!({"type":"text", "text":"a"}));
     for _ in 1..ITEMS {
         delta(&mut m, 0, json!({"type":"text_delta", "text":"a"}));
@@ -532,4 +556,99 @@ fn failure_is_sticky_before_finish_and_the_queue_has_a_hard_item_cap() {
     );
     assert_eq!(m.take(), vec![TurnEvent::TextDelta("a".into()); ITEMS]);
     protocol(&mut m);
+}
+
+#[test]
+fn blocks_and_completion_require_message_start() {
+    for block in [
+        json!({"type":"text", "text":"must not escape"}),
+        json!({"type":"tool_use", "id":"a", "name":"draw", "input":{}}),
+        json!({"type":"thinking", "thinking":"private", "signature":"sig"}),
+        json!({"type":"redacted_thinking", "data":"private"}),
+        json!({"type":"fallback"}),
+    ] {
+        let mut m = Mapper::default();
+        start(&mut m, 0, block);
+        send(
+            &mut m,
+            json!({"type":"message_start", "message":{"usage":{}}}),
+        );
+        assert_eq!(m.take(), vec![]);
+        protocol(&mut m);
+    }
+    protocol(&mut Mapper::default());
+    let mut m = started();
+    assert_eq!(m.finish(Ok(Progress::Completed)), Some(Finish::Completed));
+    assert_eq!(m.take(), vec![]);
+}
+
+#[test]
+fn optional_deltas_preserve_the_final_usage_marker_and_latest_literal_counts() {
+    let mut m = Mapper::default();
+    usage_start(&mut m);
+    send(
+        &mut m,
+        json!({"type":"message_delta", "usage":{"output_tokens":4}}),
+    );
+    send(
+        &mut m,
+        json!({"type":"message_delta", "delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":9}}),
+    );
+    send(
+        &mut m,
+        json!({"type":"message_delta", "delta":{"stop_reason":null}, "usage":{"output_tokens":10}}),
+    );
+    send(
+        &mut m,
+        json!({"type":"message_delta", "usage":{"output_tokens":12}}),
+    );
+    assert_eq!(m.finish(Ok(Progress::Completed)), Some(Finish::Completed));
+    let whole = Tokens {
+        input: 11,
+        output: 12,
+        cache_read: 22,
+        cache_write: 33,
+    };
+    assert_eq!(
+        m.take(),
+        vec![TurnEvent::Usage(Usage {
+            whole,
+            first_request: Some(whole)
+        })]
+    );
+    assert_eq!(m.finish(Ok(Progress::Completed)), None);
+}
+
+#[test]
+fn final_usage_obeys_the_same_queue_limit_as_content() {
+    for count in [ITEMS - 1, ITEMS] {
+        let mut m = started();
+        start(&mut m, 0, json!({"type":"text", "text":"a"}));
+        for _ in 1..count {
+            delta(&mut m, 0, json!({"type":"text_delta", "text":"a"}));
+        }
+        stop(&mut m, 0);
+        send(
+            &mut m,
+            json!({"type":"message_delta", "delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":7}}),
+        );
+        let mut expected = vec![TurnEvent::TextDelta("a".into()); count];
+        let ending = if count == ITEMS - 1 {
+            let whole = Tokens {
+                output: 7,
+                ..Tokens::default()
+            };
+            expected.push(TurnEvent::Usage(Usage {
+                whole,
+                first_request: Some(whole),
+            }));
+            Finish::Completed
+        } else {
+            Finish::Failed(EngineFailure::Anthropic(Failure::Protocol))
+        };
+        assert_eq!(m.finish(Ok(Progress::Completed)), Some(ending));
+        assert_eq!(m.take(), expected);
+        assert_eq!(m.finish(Ok(Progress::Completed)), None);
+        assert_eq!(m.take(), vec![]);
+    }
 }

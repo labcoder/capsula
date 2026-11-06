@@ -10,14 +10,17 @@
 
 #[cfg_attr(
     not(test),
+    expect(dead_code, reason = "A3b activates the Anthropic mapper")
+)]
+pub(crate) mod anthropic;
+#[cfg_attr(
+    not(test),
     expect(dead_code, reason = "the claude engine (slice 8's C5b) drives it")
 )]
 pub(crate) mod claude_code;
 #[cfg(any(test, debug_assertions))]
 pub(crate) mod fixture;
 pub(crate) mod responses;
-#[cfg_attr(not(test), expect(dead_code, reason = "A3b activates the Anthropic mapper"))]
-pub(crate) mod anthropic;
 
 use std::fmt;
 use std::future::Future;

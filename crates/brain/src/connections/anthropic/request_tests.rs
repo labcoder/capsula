@@ -47,11 +47,17 @@ fn rejects_missing_mistyped_and_unsupported_fields() {
     for key in ["model", "messages", "stream", "max_tokens"] {
         let mut value = request();
         value.as_object_mut().unwrap().remove(key);
-        refused(&value);
+        assert!(
+            matches!(MessagesBody::new(&value), Err(Failure::Request)),
+            "missing field: {key}"
+        );
         value[key] = Value::Null;
-        refused(&value);
+        assert!(
+            matches!(MessagesBody::new(&value), Err(Failure::Request)),
+            "null field: {key}"
+        );
     }
-    for (key, bad) in [
+    for (case, (key, bad)) in [
         ("model", json!("Bad Model")),
         ("model", json!("")),
         ("messages", json!([])),
@@ -76,10 +82,16 @@ fn rejects_missing_mistyped_and_unsupported_fields() {
         ("system", json!([])),
         ("tools", json!({})),
         ("tools", json!([false])),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let mut value = request();
         value[key] = bad;
-        assert!(matches!(MessagesBody::new(&value), Err(Failure::Request)), "invalid envelope field: {key}");
+        assert!(
+            matches!(MessagesBody::new(&value), Err(Failure::Request)),
+            "invalid envelope case {case}, field {key}"
+        );
     }
     refused(&json!([]));
 }
@@ -93,9 +105,18 @@ fn accepts_only_client_tools() {
             value["tools"][0]["type"] = discriminator;
         }
         let body = MessagesBody::new(&value).expect("client tool");
-        assert_eq!(serde_json::from_slice::<Value>(body.bytes()).unwrap(), value);
+        assert_eq!(
+            serde_json::from_slice::<Value>(body.bytes()).unwrap(),
+            value
+        );
     }
-    for discriminator in [json!("web_search_20250305"), json!("bash_20250124"), json!(""), json!(null), json!(1)] {
+    for discriminator in [
+        json!("web_search_20250305"),
+        json!("bash_20250124"),
+        json!(""),
+        json!(null),
+        json!(1),
+    ] {
         let mut value = request();
         value["tools"] = json!([{"type":discriminator,"name":"draw"}]);
         refused(&value);

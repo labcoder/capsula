@@ -69,6 +69,27 @@ fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
             Some(failed(ErrorKey::ResponseUnreadable, Action::Retry)),
         ),
         (
+            Finish::Failed(EngineFailure::Anthropic(
+                crate::connections::anthropic::error::Failure::Exhausted,
+            )),
+            Some(Effect::Control(ControlToShell::RunState {
+                run: R,
+                thread: T,
+                phase: Phase::Failed,
+                error: Some(
+                    UserError::new(ErrorKey::AnthropicAnswerLimit, Vec::new(), Vec::new())
+                        .expect("no actions"),
+                ),
+                origin: None,
+            })),
+        ),
+        (
+            Finish::Failed(EngineFailure::Anthropic(
+                crate::connections::anthropic::error::Failure::Truncated,
+            )),
+            Some(failed(ErrorKey::AnthropicUnreachable, Action::Retry)),
+        ),
+        (
             Finish::Failed(EngineFailure::Access(None)),
             Some(failed(ErrorKey::SignInNeeded, Action::SignIn)),
         ),

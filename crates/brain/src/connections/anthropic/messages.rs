@@ -113,10 +113,12 @@ pub async fn stream<C: AnthropicConnect, L>(
         let capacity_by = Instant::now() + BACKPRESSURE;
         let taken = timeout_at(content_by.min(capacity_by), out.taken())
             .await
-            .map_err(|_| if content_by <= capacity_by {
-                Failure::Transport
-            } else {
-                Failure::BackpressureTimeout
+            .map_err(|_| {
+                if content_by <= capacity_by {
+                    Failure::Transport
+                } else {
+                    Failure::BackpressureTimeout
+                }
             })?;
         if taken == ControlFlow::Break(()) {
             return Err(Failure::Protocol);

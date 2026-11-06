@@ -67,9 +67,11 @@ impl MessagesBody {
             .get("tools")
             .map(|value| value.as_array().ok_or(Failure::Request))
             .transpose()?;
-        if tools.is_some_and(|tools| tools.iter().any(|tool| {
-            tool.get("type").is_some_and(|kind| kind != "custom")
-        })) {
+        if tools.is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool.get("type").is_some_and(|kind| kind != "custom"))
+        }) {
             return Err(Failure::Request);
         }
         if system.is_some_and(Vec::is_empty) {
@@ -95,7 +97,7 @@ impl MessagesBody {
         if breakpoints != 1 {
             return Err(Failure::Request);
         }
-        let bytes = encode(request, MAX_REQUEST_BYTES).map_err(|_| Failure::Request)?;
+        let bytes = encode(request, MAX_REQUEST_BYTES).map_err(|()| Failure::Request)?;
         Ok(Self(Secret::new(bytes)))
     }
 
@@ -105,7 +107,10 @@ impl MessagesBody {
 }
 
 pub(super) fn encode(value: &Value, limit: usize) -> Result<Zeroizing<Vec<u8>>, ()> {
-    struct Counter { length: usize, limit: usize }
+    struct Counter {
+        length: usize,
+        limit: usize,
+    }
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             if bytes.len() > self.limit - self.length {
@@ -114,14 +119,18 @@ pub(super) fn encode(value: &Value, limit: usize) -> Result<Zeroizing<Vec<u8>>, 
             self.length += bytes.len();
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
     let mut counter = Counter { length: 0, limit };
     serde_json::to_writer(&mut counter, value).map_err(|_| ())?;
     let mut bytes = Zeroizing::new(vec![0; counter.length]);
     let mut output = bytes.as_mut_slice();
     serde_json::to_writer(&mut output, value).map_err(|_| ())?;
-    if !output.is_empty() { return Err(()); }
+    if !output.is_empty() {
+        return Err(());
+    }
     Ok(bytes)
 }
 

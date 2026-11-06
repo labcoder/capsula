@@ -119,7 +119,10 @@ fn refusal_and_exhaustion_fail_before_a_valid_terminal_can_rescue_them() {
         bytes.extend(ending("end_turn"));
         let mut forwarded = Vec::new();
         let error = reader.feed(&bytes, &mut |event| forwarded.push(event.value().clone()));
-        assert_eq!(forwarded, [json!({"type":"message_delta","delta":{"stop_reason":reason}})]);
+        assert_eq!(
+            forwarded,
+            [json!({"type":"message_delta","delta":{"stop_reason":reason}})]
+        );
         if reason == "refusal" {
             assert!(matches!(error, Err(Failure::Refused)));
             assert!(matches!(reader.finish(), Err(Failure::Refused)));

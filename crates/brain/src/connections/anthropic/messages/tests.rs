@@ -525,7 +525,12 @@ async fn pings_reset_byte_idle_but_cannot_keep_an_empty_stream_alive() {
         assert!(poll(call.as_mut()).is_pending());
     }
     tokio::time::advance(Duration::from_secs(49)).await;
-    harness.state.lock().expect("peer state").response.extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
+    harness
+        .state
+        .lock()
+        .expect("peer state")
+        .response
+        .extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
     assert!(poll(call.as_mut()).is_pending());
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(matches!(
@@ -586,6 +591,67 @@ async fn real_content_resets_content_idle_without_a_total_stream_deadline() {
             "message_stop"
         ]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn content_expiry_during_capacity_wait_is_transport_not_backpressure() {
+    let harness = Harness::new(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec(),
+    );
+    let run = Budget::default();
+    let live = Budget::default();
+    let mut call = Box::pin(harness.call(&run, &live));
+    assert!(poll(call.as_mut()).is_pending());
+    for _ in 0..11 {
+        tokio::time::advance(Duration::from_secs(50)).await;
+        harness
+            .state
+            .lock()
+            .expect("peer state")
+            .response
+            .extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
+        assert!(poll(call.as_mut()).is_pending());
+    }
+    tokio::time::advance(Duration::from_secs(49)).await;
+    {
+        let mut state = harness.state.lock().expect("peer state");
+        state.block_out = true;
+        state
+            .response
+            .extend(chunk(b"data: {\"type\":\"ping\"}\n\n"));
+    }
+    assert!(poll(call.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(poll(call.as_mut()), Poll::Ready(Err(Failure::Transport)));
+    assert_eq!(harness.state.lock().expect("peer state").closes, [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failing_delta_waits_for_delivery_before_returning_its_failure() {
+    for (reason, failure) in [
+        ("max_tokens", Failure::Exhausted),
+        ("refusal", Failure::Refused),
+    ] {
+        let wire = format!(
+            "data: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{}}}}}}\n\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{reason}\"}},\"usage\":{{\"output_tokens\":2048}}}}\n\n"
+        );
+        let harness = Harness::new(response(200, wire.as_bytes()));
+        harness.state.lock().expect("peer state").block_out = true;
+        let run = Budget::default();
+        let live = Budget::default();
+        let mut call = Box::pin(harness.call(&run, &live));
+        assert!(poll(call.as_mut()).is_pending());
+        assert_eq!(
+            harness.state.lock().expect("peer state").events,
+            ["message_start", "message_delta"]
+        );
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(poll(call.as_mut()).is_pending());
+        harness.state.lock().expect("peer state").block_out = false;
+        assert_eq!(poll(call.as_mut()), Poll::Ready(Err(failure)));
+        assert_eq!(harness.state.lock().expect("peer state").closes, [1]);
+    }
 }
 
 #[tokio::test]
