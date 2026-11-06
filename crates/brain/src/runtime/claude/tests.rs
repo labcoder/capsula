@@ -53,11 +53,11 @@ async fn found(name: &str, mode: &str, sign_in: SignInStore) -> ClaudeCodeView {
 #[tokio::test]
 async fn a_found_install_shows_by_its_sign_in_and_the_store() {
     assert_eq!(
-        found("view-undecided", "out", SIGN_IN).await,
+        found("view-undecided", "out", SignInStore::Undecided).await,
         ClaudeCodeView::Unsupported(Unsupported::SignInStore)
     );
     assert_eq!(
-        found("view-file", "out", SignInStore::FileWithDacl).await,
+        found("view-shipped", "out", SIGN_IN).await,
         ClaudeCodeView::SignedOut { version: V }
     );
     assert_eq!(found("view-in", "in", SIGN_IN).await, READY);
@@ -84,8 +84,7 @@ async fn finds_asked_for_while_one_runs_coalesce_into_one_more() {
 }
 
 #[tokio::test]
-async fn under_the_shipped_gate_connect_has_no_effect() {
-    assert_eq!(SIGN_IN, SignInStore::Undecided, "the gate under test ships");
+async fn under_the_undecided_gate_connect_has_no_effect() {
     let scratch = Scratch::new("claude-connect");
     let mut brain = test_support::brain(&scratch, "");
     let base = Base::new("connect");
@@ -99,7 +98,11 @@ async fn under_the_shipped_gate_connect_has_no_effect() {
         }),
     );
     let lane = Lane::start(host).expect("lane");
-    brain.attach_claude(Claude::new(Some(lane), SIGN_IN, ClaudeCodeView::NotFound));
+    brain.attach_claude(Claude::new(
+        Some(lane),
+        SignInStore::Undecided,
+        ClaudeCodeView::NotFound,
+    ));
     let before = brain.connections_frame();
     for op in [
         ConnectionOp::ConnectClaudeCode,

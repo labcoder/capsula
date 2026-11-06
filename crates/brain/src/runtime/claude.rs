@@ -10,18 +10,22 @@ use super::{Brain, Full, Link};
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
 
-/// Where Claude Code's sign-in may be kept, which owner call 1 decides.
+/// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SignInStore {
     /// Not decided: Connect does nothing and a signed-out install shows as unsupported.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the off position, kept under test")
+    )]
     Undecided,
     /// Claude Code's own file in Kumochi's owner-only folder (option a). Only it lets Connect,
     /// Cancel and Disconnect do anything.
     FileWithDacl,
 }
 
-/// What the shipped brain allows until the owner answers call 1.
-pub(crate) const SIGN_IN: SignInStore = SignInStore::Undecided;
+/// What the shipped brain allows: the owner chose option a for call 1 (2026-11-05).
+pub(crate) const SIGN_IN: SignInStore = SignInStore::FileWithDacl;
 
 /// The connection's state; the lane does the work.
 #[derive(Debug)]
