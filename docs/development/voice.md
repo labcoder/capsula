@@ -30,9 +30,10 @@ nothing downloads them.
 
 `brain::voice::download::Downloader` installs one part from the pinned manifest. Its caller
 supplies the models folder under `platform::data_dir`. Construction makes no request, and
-startup never resumes anything automatically. `InstallVoice`, `RemoveVoice` and
-`CancelVoiceInstall` are still refused (see [settings](settings.md#config-keys)); what start-up
-does with parts already installed is in [The installer](#the-installer).
+startup never resumes anything automatically. Its only caller is the installer's one fetch,
+through the `download::Fetch` seam, which makes a `Downloader` for each fetch, so start-up builds
+none. Installing, cancelling and start-up are in [The installer](#the-installer); `RemoveVoice`
+is still refused (see [settings](settings.md#config-keys)).
 
 The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
@@ -215,10 +216,12 @@ sequenceDiagram
 ## The installer
 
 `brain::voice::installer::Installer` holds one entry per part: what `config.toml` says about it
-(absent, installed, or a removal whose folder couldn't be deleted), its phase, and how many
-automatic reloads it has left. It does no I/O. Each method returns the load the runtime starts,
-and every load uses a fresh ask from one counter, which the handles' reports carry back. A
-report for any other ask than the part's current one changes nothing.
+(absent, installed or removing), its phase, its current token, and how many automatic reloads it
+has left. It does no I/O. Each method returns the effects the runtime carries out: start the
+fetch, cancel it, load, unload, or queue the Activate write. Tokens come from one counter, and
+every completion comes back with the token it started with: a fetch's result, a handle's report
+(the token is its ask), or a write's result. A completion for any other token than the part's
+current one changes nothing.
 
 At brain start, with no network, after unfinished removals:
 
@@ -229,6 +232,10 @@ At brain start, with no network, after unfinished removals:
    loads; one that fails is `Failed { VoiceCorrupt, installed: true }` and doesn't load.
    shortcut: a corrupt file of the right size still loads until an install re-hashes it.
 3. A removal whose folder couldn't be deleted is `Failed { VoiceStorage, installed: false }`.
+   One whose folder is gone shows `NotInstalled` while its `RemoveDone` write is in flight, and
+   stays removing until that write commits. If the write fails, the part is
+   `Failed { VoiceStorage, installed: false }` too, and nothing installs it until the next start
+   finishes the removal.
 
 ```mermaid
 stateDiagram-v2
@@ -244,9 +251,52 @@ stateDiagram-v2
 ```
 
 A loss of the current model, whether idle or during a decode, starts one automatic reload with a
-new ask; a second loss in the session is `Failed { VoiceLoad }`. A late report for an older ask,
-such as a loss from a worker the reload replaced, is dropped. `installed` in every `Failed` comes
-from one place: the part is durably installed.
+new ask; a second loss is `Failed { VoiceLoad }`. The allowance is one per install, and one per
+session for a part loaded at start. A late report for an older ask, such as a loss from a worker
+the reload replaced, is dropped. `installed` in every `Failed` comes from one place: the part is
+durably installed.
+
+### Install and cancel
+
+`InstallVoice` and `CancelVoiceInstall` write nothing themselves. Each is answered accepted, in
+queue order, with the current settings, and progress follows as `Voice`.
+
+1. An install of a part that isn't installed, or that failed, takes a new token and fetches. One
+   fetch runs at a time, so an install while another fetch runs, even a cancelled one that hasn't
+   ended yet, shows `Verifying` and waits its turn.
+2. The fetch shows `Verifying` while it hashes files already on disk, and
+   `Downloading { done, total }` once it requests bytes. A failed fetch is `Failed` with its key
+   (`VoiceNoSpace`, `VoiceDownload`, `VoiceCorrupt` or `VoiceStorage`), and nothing is written.
+3. A fetched part loads. A load that fails, or a fresh install lost twice while loading, is
+   `Failed { VoiceLoad, installed: false }`, with nothing written.
+4. A loaded part stays `Loading` while the Activate write adds it to `installed`. The first
+   spoken replies install turns `talk_back` on in the same write, unless the file already has a
+   `talk_back` key, so a choice made during the install wins. The part is `Ready` only once the
+   write commits. A refused write unloads it: `Failed { SettingsRefused, installed: false }`.
+5. A retry of an installed part (`Failed` with `installed: true`) fetches, which re-hashes its
+   files, then loads, and is `Ready` with no write.
+
+Cancel sends every install that's waiting, fetching or loading back to where it was, with its
+files kept, so the next install resumes. A cancelled load's late success is dropped and sends
+nothing, because the handle already freed it. A commit in flight isn't cancelled. An install
+during a removal's `RemoveDone` write starts once that write commits. Installs keep going while
+no shell is connected.
+
+```mermaid
+stateDiagram-v2
+  NotInstalled --> Verifying: InstallVoice
+  Failed --> Verifying: InstallVoice
+  Verifying --> Downloading: bytes requested
+  Verifying --> Loading: fetched
+  Downloading --> Loading: fetched
+  Verifying --> Failed: fetch failed
+  Downloading --> Failed: fetch failed
+  Loading --> Ready: loaded and written
+  Loading --> Failed: load failed or write refused
+  Verifying --> NotInstalled: cancel
+  Downloading --> NotInstalled: cancel
+  Loading --> NotInstalled: cancel before the write
+```
 
 The brain sends `ControlToShell::Voice` with both parts' `PartState` once per connection, after
 `Account` and before `Scenes`, and again on each change. Reports that came while no shell was

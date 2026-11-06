@@ -224,7 +224,8 @@ fn start_voice(
     let tts = TtsHandle::spawn(runtime, tts_reports)
         .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "spoken replies can't start"))
         .ok();
-    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard]);
+    let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
+    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
 }
 
 /// The account system on the real credential store, browser, clock and network, and the fact that

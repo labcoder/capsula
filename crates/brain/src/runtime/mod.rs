@@ -536,6 +536,12 @@ impl Brain {
                     debug_assert!(answered.is_ok(), "answering without a shell can't fail");
                     continue;
                 }
+                event = voice::next(&mut self.voice) => {
+                    let applied = self.voice_event(event, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    self.pump_settings_offline();
+                    continue;
+                }
             };
             self.offline(input);
         }
@@ -793,8 +799,10 @@ impl Brain {
                 }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
                 (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
-                (part, report) = voice::next(&mut self.voice) => {
-                    if self.voice_reported(part, report, Some(&mut link)).is_err() {
+                event = voice::next(&mut self.voice) => {
+                    if self.voice_event(event, Some(&mut link)).is_err()
+                        || self.pump_settings(Some(&mut link)).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;

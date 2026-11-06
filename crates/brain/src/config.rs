@@ -264,6 +264,31 @@ impl Config {
         Ok(Pending { path, table, view })
     }
 
+    /// Stages `part`'s install: it joins `installed`, and every other name stays. The first
+    /// spoken replies install also turns talk-back on, unless the user already chose.
+    ///
+    /// # Errors
+    /// As [`Config::stage`].
+    pub(crate) fn stage_activate(&self, part: VoicePart) -> Result<Pending, ConfigError> {
+        let (path, mut table) = self.editable()?;
+        let voice = voice_mut(&mut table);
+        if part == VoicePart::SpokenReplies && !voice.contains_key(TALK_BACK) {
+            voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
+        }
+        let names = voice
+            .entry(INSTALLED)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !names.is_array() {
+            *names = Value::Array(Vec::new());
+        }
+        let names = names.as_array_mut().expect("installed holds an array");
+        if !names.iter().any(|name| name.as_str() == Some(part.dir())) {
+            names.push(Value::String(part.dir().to_owned()));
+        }
+        let view = view_of(&table, self.view.main_thread);
+        Ok(Pending { path, table, view })
+    }
+
     /// The file's path and a copy of its table to change.
     fn editable(&self) -> Result<(PathBuf, Table), ConfigError> {
         let table = match &self.table {
