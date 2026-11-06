@@ -259,6 +259,59 @@ stateDiagram-v2
 - shortcut: a pending deletion is retried at each start and each Find, not on a timer; add one if
   locked files turn out to outlive a session.
 
+## Launches
+
+`engines/claude_code/supervisor.rs` runs a question: a `claude -p ...` process in its own run job,
+with its own owner-only folder `claude-code\engine\<32 hex>\{work,tmp}` and its own bridge pipe
+(`work\mcp.json` names the brain exe and `--mcp-bridge <hex>`, no secret). A launch is a second
+kind of item in the lane's queue, so it shares the lane's lock, checks and stuck state, and runs
+one at a time. Nothing in production starts one yet; C5b's engine is the first caller.
+
+- **Admission.** `Claude::launch` admits only while the view is `Ready`, `SIGN_IN` is
+  `FileWithDacl`, the lane finds and isn't cleaning, and the lifetime is at most `MAX_LAUNCH`
+  (150 s). The deadline is fixed there. A full lane queue (`LANE_QUEUE`, 4) is `Busy`; the core
+  only ever `try_send`s.
+- **The lease.** The run holds a `RunLease`; revoking or dropping it ends the launch. One atomic
+  word decides stdin: the pump admits each chunk by compare-exchange `Open → Writing` before its
+  write, and `revoke()` swaps `Open → Revoked` (`Idle`: no write admitted after that instant,
+  none in flight) or `Writing → RevokedWriting` (`WriteInFlight`: that one write settles before
+  the folder is deleted). `revoke()` fails the gate and wakes stdin, and never waits.
+- **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks of at most `CHUNK`
+  (64 KiB). stdout never parks in a blocking send: on a full channel it retries every `POLL`, and
+  once the round lets go it drops what it reads until EOF. stderr is drained and dropped.
+- **Who revokes.** Stop or Esc (the lease drops with the round), a finished run, Disconnect
+  (before its logout), a settled view that isn't `Ready` (`Finding` and rounds in progress never
+  revoke), deleting the launch's thread, and closing the lane.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued: Claude::launch fixes the deadline
+    Queued --> Ended: revoked, expired or closing at dequeue (no spawn)
+    Queued --> Starting: its turn
+    Starting --> Stopping: a step fails after the listener or the job exists
+    Starting --> Ended: a step fails before either exists
+    Starting --> Live: pipes sent
+    Live --> Stopping: revoked, closing, deadline, or the process exited
+    Stopping --> Stuck: job not confirmed empty, or a pump didn't end
+    Stopping --> Settled: job empty and all three pumps ended
+    Settled --> FolderLeft: deletion failed (swept later, under the lock)
+    Settled --> Ended: folder deleted (Done)
+```
+
+Stopping always goes in this order: revoke, abort the listener, terminate the run job and confirm
+it empty, then wait up to `PIPE_GRACE` for each pump. A failed termination or a pump that doesn't
+end is `Stuck`: the lane goes stuck, keeps the lock and the folder, and refuses the next call.
+Only a settled launch drops its folder's handles and deletes it.
+
+**The folder is the crash record.** Every launch process sits in the kill-on-close brain job, so a
+crash leaves only files under `engine\`, which is reserved for launch folders. `settle()` takes
+the account lock first on every call, then pins the chain to `engine\` with `hold_chain` and
+deletes each leftover with `remove_tree`, so a second lane or brain never sweeps a live launch,
+and a reparse point anywhere on the way is refused rather than followed. A leftover that won't
+delete doesn't fail the call.
+- shortcut: a locked leftover is retried only before each lane call and at brain start, not on a
+  timer, so it can stay for an idle session; add a timer if that turns out to matter.
+
 ## The audit
 
 `engines/claude_code/audit.rs` judges what C6's mapper parsed, in two parts, and returns an
