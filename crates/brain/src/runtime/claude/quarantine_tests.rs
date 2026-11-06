@@ -63,8 +63,8 @@ impl Found {
     async fn settle(&mut self) -> ClaudeCodeView {
         tokio::time::timeout(Duration::from_secs(30), async {
             while self.claude.out.is_some() {
-                let done = self.claude.next().await;
-                self.claude.done(done);
+                let wake = self.claude.next().await;
+                self.claude.wake(wake);
             }
         })
         .await
