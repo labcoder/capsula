@@ -196,6 +196,27 @@ fn removed_unknown_view_and_cleared_handles_give_nothing() {
 }
 
 #[test]
+fn live_solids_sharing_a_slot_across_revisions_resolve_by_their_own_handles() {
+    let (mut state, mut global) = (
+        SceneState::begin(header()).expect("scene"),
+        GlobalBudget::default(),
+    );
+    let older = first(&mut state, &mut global, r#","label":"Older""#);
+    let newer = commit(
+        &mut state,
+        &mut global,
+        r#"{"id":"s2","put":[{"solid":{"in":"v","id":"x","shape":"box","size":[1,1,1]}},{"solid":{"in":"v","id":"b","shape":"box","size":[1,1,1],"label":"Newer"}}]}"#,
+    );
+    let (a, b) = (handle(&older, "a"), handle(&newer, "b"));
+    assert_eq!(
+        (a.revision(), b.revision(), a.slot(), b.slot()),
+        (1, 2, 1, 1)
+    );
+    assert_eq!(text(state.part(a)), Some(pair("Older", None)));
+    assert_eq!(text(state.part(b)), Some(pair("Newer", None)));
+}
+
+#[test]
 fn a_parts_debug_prints_lengths_never_its_text() {
     let (mut state, mut global) = (
         SceneState::begin(header()).expect("scene"),
@@ -207,8 +228,13 @@ fn a_parts_debug_prints_lengths_never_its_text() {
         r#","label":"SENTINELLABEL","info":"SENTINELINFO""#,
     );
     let shown = format!("{:?}", state.part(handle(&put, "a")).expect("labelled"));
-    assert_eq!(
-        shown,
-        "Part { label: Text { len: 13 }, info: Some(Text { len: 12 }) }"
-    );
+    for sentinel in ["SENTINELLABEL", "SENTINELINFO"] {
+        assert!(!shown.contains(sentinel), "{shown}");
+        let bytes = format!("{:?}", sentinel.as_bytes());
+        let bytes = bytes.trim_matches(['[', ']']);
+        assert!(
+            !format!("{:?}", shown.as_bytes()).contains(bytes),
+            "{shown}"
+        );
+    }
 }

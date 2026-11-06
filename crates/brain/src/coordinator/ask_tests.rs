@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::Handle;
 
-use super::{R, T, WALL_CLOCK, built, state};
+use super::{R, T, WALL_CLOCK, built, start_engine, state};
 use crate::coordinator::availability::sign_in_needed;
 use crate::coordinator::{
     Availability, BuildKey, Coordinator, Effect, Input, SendKey, Stale, StoreOp,
@@ -307,8 +307,11 @@ fn a_cut_at_each_stage_before_the_grant_leaves_the_ask_nothing_to_send() {
                 attempt = build.key.attempt;
             }
             if matches!(stage, Stage::Started) {
-                let effects = core.handle(built(ASKED, attempt, &[T])).expect("current");
-                assert!(advances(&Ok(effects)), "{stage:?}");
+                assert_eq!(
+                    core.handle(built(ASKED, attempt, &[T])),
+                    Ok(vec![start_engine(ASKED, T, attempt)]),
+                    "{stage:?}"
+                );
             }
             let after = core.turns_read;
             let effects = core.handle(match cut {
