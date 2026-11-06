@@ -39,14 +39,6 @@ impl Preparation {
     }
 }
 
-impl Preparation {
-    /// Cached bytes this ticket retains: its source, compiled input and sizing facts, not the
-    /// rest of its scene. Shared allocations count once per ticket for queue attribution.
-    pub fn attributed_bytes(&self) -> usize {
-        self.retained_bytes
-    }
-}
-
 impl SceneState {
     /// Estimated bytes this state owns, for attributing a discarded scene to the dropper's
     /// queue: objects, undo records, identifiers and the step log. Not a heap bound. Constant
