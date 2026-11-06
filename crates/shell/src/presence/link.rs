@@ -100,9 +100,8 @@ impl Presence {
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }
-                LinkEvent::KeyStage { generation, reply } => {
-                    drop((generation, reply));
-                }
+                // shortcut: C7a-2b's Accounts paste consumer handles these replies.
+                LinkEvent::KeyStage { generation, reply } => drop((generation, reply)),
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session
