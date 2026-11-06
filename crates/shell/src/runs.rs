@@ -709,7 +709,6 @@ impl Runs {
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed
-                && !submitted.answering
                 && run > self.fence
                 && submitted.revision == self.revision
                 && submitted.thread == Some(thread)
