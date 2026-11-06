@@ -338,6 +338,11 @@ mod tests {
             targeting.first_check(drag(1), Some(&host(HOST, 0))),
             Check::Return
         );
+        assert_eq!(
+            targeting.candidate(drag(1), Some(&host(HOST, 0))),
+            Some((HOST, WatchGen(w.0 + 1))),
+            "the recreated window is watched afresh"
+        );
         // At the first drain instead.
         let (mut targeting, w) = armed();
         let gone = move |t: &mut Targeting| t.host_changed(w, HostChange::Gone);
@@ -387,6 +392,11 @@ mod tests {
             Drop::Ready(..)
         ));
         moved(&mut targeting);
+        assert_eq!(
+            targeting.second_check(Some(&host(HOST, 100)), [418, 144], KUMO),
+            Drop::Return,
+            "the second move isn't placed again"
+        );
         assert_eq!(
             targeting.publish(drag(1), w),
             None,
@@ -469,6 +479,14 @@ mod tests {
             panic!("ready");
         };
         assert_eq!(placement, PERCH);
+        assert_eq!(targeting.publish(drag(2), w), None, "another carry's publish");
+        assert_eq!(targeting.publish(drag(1), w), None, "and it used w up");
+        let (mut targeting, _) = armed();
+        targeting.first_check(drag(1), Some(&host(HOST, 0)));
+        let Drop::Ready(_, w) = targeting.second_check(Some(&host(HOST, 0)), [418, 144], KUMO)
+        else {
+            panic!("ready");
+        };
         targeting.end();
         targeting.begin(drag(2));
         assert_eq!(targeting.publish(drag(1), w), None);
