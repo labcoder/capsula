@@ -6,7 +6,7 @@
 use super::{
     Transform,
     camera::{Camera, Light},
-    mesh::{MeshScratch, build_local},
+    mesh::{MeshScratch, build_local, narrowed},
     size::{MeshError, triangles},
 };
 use crate::{
@@ -389,7 +389,7 @@ fn build(
 }
 
 /// Merges exactly equal vertices, gives each source face its triangle run, and checks the stored
-/// mesh at rest the way the frame stage reads it: three distinct indices and a nonzero f64 normal.
+/// mesh at rest: three distinct indices, and the world build's own narrowed nonzero-area check.
 fn index(out: &[[[f64; 3]; 3]], groups: &[u8], rest: &Transform) -> Result<SolidMesh, MeshError> {
     let mut seen = HashMap::with_capacity(out.len());
     let mut vertices = Vec::new();
@@ -424,19 +424,14 @@ fn index(out: &[[[f64; 3]; 3]], groups: &[u8], rest: &Transform) -> Result<Solid
         triangles: triangles.into_boxed_slice(),
         faces,
     };
-    let world = |i: u32| rest.apply(mesh.vertices[usize::try_from(i).expect("u32 fits usize")]);
     for &[a, b, c] in &*mesh.triangles {
-        let [first, second, third] = [a, b, c].map(world);
-        let [e1, e2] =
-            [second, third].map(|p| std::array::from_fn::<f64, 3, _>(|d| p[d] - first[d]));
-        let normal = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-        if a == b || b == c || a == c || normal.iter().all(|&n| n == 0.0) {
+        if a == b || b == c || a == c {
             return Err(MeshError::Degenerate("pos"));
         }
+        narrowed(
+            rest,
+            [a, b, c].map(|i| mesh.vertices[usize::try_from(i).expect("u32 fits usize")]),
+        )?;
     }
     Ok(mesh)
 }

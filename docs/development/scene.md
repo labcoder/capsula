@@ -754,8 +754,11 @@ authored scale reaches the world once, through the rest transform. `SolidMesh` s
 points, and `Transform::apply` at rest gives exactly the value `build` narrows and checks, so
 every mesh `build` accepts prepares with the same triangles; f32 offsets from one origin can't
 promise that far from it. This doubles vertex bytes over f32. Before publishing `Built`,
-preparation checks the stored mesh at rest as the frame stage reads it: three distinct indices
-and a nonzero f64 normal per triangle; a failure is a typed `Mesh::Failed`. Two triangles share a face only where their four
+preparation checks the stored mesh at rest: three distinct indices per triangle, then
+`mesh::narrowed`, the very check `build` applies to each triangle's narrowed f32 world points.
+Collinear f64 points can narrow to a real triangle, so an unrounded f64 check would refuse meshes
+`build` accepts. A failure is a typed `Mesh::Failed`. The frame stage (6b) must take its face
+normals from those same narrowed rest points. Two triangles share a face only where their four
 vertices are coplanar by construction: box and extrude sides, revolved and torus bands, and tube
 bands between rings that are exact translations. A bent tube band is two one-triangle faces. A solid whose
 record is unchanged reuses its mesh `Arc`, so a colour set only resolves the theme RGB again.

@@ -853,3 +853,199 @@ fn a_set_colour_survives_a_later_rebuild_of_its_view() {
         built(geometry(&first.after), 0)
     ));
 }
+
+#[test]
+fn each_prepared_mesh_matches_its_world_build_at_the_f32_boundary() {
+    // CAPS-194's chain: the extrusion's caps are collinear in unrounded f64 but not once narrowed,
+    // as the world build checks them, so an f64 veto failed the whole view.
+    let solid = |id: &str, fields: Value| {
+        let mut solid = json!({"in":"v","id":id});
+        solid
+            .as_object_mut()
+            .expect("object")
+            .extend(fields.as_object().expect("object").clone());
+        json!({ "solid": solid })
+    };
+    let boxed = |id: &str, attach: Option<&str>, pos: Value, scale: f64| {
+        let mut fields = json!({"shape":"box","size":[1,1,1],"pos":pos,"scale":scale});
+        if let Some(parent) = attach {
+            fields["attach"] = json!(parent);
+        }
+        solid(id, fields)
+    };
+    let (mut scene, mut budget) = scene();
+    let prepared = opening(
+        &mut scene,
+        &mut budget,
+        json!({"id":"a","put":[
+            view(),
+            boxed("p0", None, json!([10, 10.000_000_953_674_316, 0]), 0.5),
+            boxed("p1", Some("p0"), json!([0.000_000_953_674_316_406_25, 0.000_000_953_674_316_406_25, 0]), 0.001),
+            boxed("p2", Some("p1"), json!([0, 0, 0]), 0.001),
+            boxed("p3", Some("p2"), json!([0, 0, 0]), 0.001),
+            boxed("p4", Some("p3"), json!([0, 0, 0]), 0.001),
+            solid("s", json!({"shape":"extrude","attach":"p4","scale":0.001,"points":[[-4,-4],[0,0.001],[4,4]],"depth":1})),
+        ]}),
+    );
+    let geometry = geometry(&prepared.after);
+    let mut scratch = MeshScratch::new();
+    let outcomes: Vec<Outcome> = geometry
+        .solids
+        .iter()
+        .map(|prepared| {
+            let Op::Solid(record) = &*prepared.source else {
+                panic!("a solid record");
+            };
+            let mut world = Vec::with_capacity(
+                usize::try_from(triangles(record).expect("valid count")).expect("bounded"),
+            );
+            let built = build(
+                record,
+                &prepared.rest,
+                0,
+                &mut world,
+                &AtomicBool::new(false),
+                &mut scratch,
+            )
+            .map(|built| usize::try_from(built.written).expect("bounded"));
+            let mesh = match &prepared.mesh {
+                Mesh::Built(mesh) => Ok(mesh.triangles.len()),
+                Mesh::Failed(error) => Err(*error),
+            };
+            (prepared.id.as_str().to_owned(), built, mesh)
+        })
+        .collect();
+    let expected = [
+        ("p0", Ok(12)),
+        ("p1", Ok(12)),
+        ("p2", Ok(12)),
+        ("p3", Ok(12)),
+        ("p4", Ok(12)),
+        ("s", Ok(8)),
+    ];
+    for ((id, built, mesh), (want_id, want)) in outcomes.iter().zip(expected) {
+        assert_eq!(id, want_id);
+        assert_eq!(*built, want, "{id}: world build");
+        assert_eq!(*mesh, want, "{id}: prepared mesh");
+    }
+    assert_eq!(outcomes.len(), 6);
+    assert!(!geometry.failed);
+}
+
+type Outcome = (String, Result<usize, MeshError>, Result<usize, MeshError>);
+
+fn rgbs(layout: &LayoutState) -> Vec<(String, [u8; 3])> {
+    geometry(layout)
+        .solids
+        .iter()
+        .map(|solid| (solid.id.as_str().to_owned(), solid.rgb))
+        .collect()
+}
+
+fn named(pairs: &[(&str, [u8; 3])]) -> Vec<(String, [u8; 3])> {
+    pairs
+        .iter()
+        .map(|(id, rgb)| ((*id).to_owned(), *rgb))
+        .collect()
+}
+
+/// The full charge of a fresh scene that puts the same solids with the same colours.
+fn fresh(put: &Value) -> usize {
+    let (mut scene, mut budget) = scene();
+    opening(&mut scene, &mut budget, json!({"id":"a","put":put}))
+        .after
+        .resident_bytes()
+}
+
+#[test]
+fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
+    let (grey, dark) = ([0x88, 0x88, 0x88], [0x44, 0x44, 0x44]);
+    let (red, blue, green) = ([0xff, 0, 0], [0, 0, 0xff], [0, 0xff, 0]);
+    let u = |color: &str| cube("u", &json!({"pos":[4,0,0],"color":color}));
+    let (mut scene, mut budget) = scene();
+    let first = opening(
+        &mut scene,
+        &mut budget,
+        json!({"id":"a","put":[view(), cube("s", &json!({"color":"#888888"})), u("#444444")]}),
+    );
+    assert_eq!(rgbs(&first.after), named(&[("s", grey), ("u", dark)]));
+    let shaded = next(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"b","set":[{"target":"s","color":"#ff0000"}]}),
+    );
+    scene.retire(1, &mut budget).expect("retire the recolour");
+    drop(first);
+    let reds = named(&[("s", red), ("u", dark)]);
+    let red_charge = fresh(&json!([
+        view(),
+        cube("s", &json!({"color":"#ff0000"})),
+        u("#444444")
+    ]));
+    assert_eq!(rgbs(&shaded.after), reds);
+    assert_eq!(shaded.after.resident_bytes(), red_charge);
+
+    let blued = next(
+        &mut scene,
+        &mut budget,
+        &shaded.after,
+        json!({"id":"c","set":[{"target":"s","color":"#0000ff"}]}),
+    );
+    assert_eq!(rgbs(&blued.after), named(&[("s", blue), ("u", dark)]));
+    let held = geometry(&shaded.after);
+    let revealed = vec![held.handle, held.solids[0].handle, held.solids[1].handle];
+    scene
+        .stop(
+            &StopCut {
+                activated: 2,
+                revealed: Bounded::new(revealed).expect("bounded cut"),
+            },
+            &mut budget,
+        )
+        .expect("valid cut");
+    drop(blued);
+    let tip = shaded.after.cut(&scene).expect("cut");
+    assert_eq!(rgbs(&tip), reds, "the stopped blue never activated");
+    assert_eq!(tip.resident_bytes(), red_charge);
+
+    let (_, recovered) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure,
+        &AtomicBool::new(false),
+    )
+    .expect("recovery");
+    assert_eq!(rgbs(&recovered), reds);
+    assert_eq!(recovered.resident_bytes(), red_charge);
+
+    let removed = next(
+        &mut scene,
+        &mut budget,
+        &tip,
+        json!({"id":"d","remove":["u"]}),
+    );
+    assert_eq!(rgbs(&removed.after), named(&[("s", red)]));
+    assert_eq!(
+        removed.after.resident_bytes(),
+        fresh(&json!([view(), cube("s", &json!({"color":"#ff0000"}))]))
+    );
+
+    let rebuilt = next(
+        &mut scene,
+        &mut budget,
+        &removed.after,
+        json!({"id":"e","set":[{"target":"s","color":"#00ff00"}],"put":[cube("w", &json!({"pos":[8,0,0],"color":"#444444"}))]}),
+    );
+    assert_eq!(rgbs(&rebuilt.after), named(&[("s", green), ("w", dark)]));
+    assert_eq!(
+        rebuilt.after.resident_bytes(),
+        fresh(&json!([
+            view(),
+            cube("s", &json!({"color":"#00ff00"})),
+            cube("w", &json!({"pos":[8,0,0],"color":"#444444"}))
+        ]))
+    );
+}

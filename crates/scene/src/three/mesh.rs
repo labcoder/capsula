@@ -5,6 +5,7 @@ use super::{
     size::{MeshError, Retained, area_cutoff, orient, radius, triangles},
 };
 use crate::{
+    geom::Vec3,
     limits::{MAX_CURVED_SEGMENTS, MAX_PATH_POINTS},
     record::{Geometry, Segments, Solid},
 };
@@ -58,6 +59,22 @@ impl MeshScratch {
             faces: vec![[0; 3]; 1280].into_boxed_slice(),
         }
     }
+}
+
+/// Narrows a triangle to world f32 and refuses it when the narrowed points have zero area: the one
+/// check the world build and the prepared mesh share, so both accept exactly the same triangles.
+pub(super) fn narrowed(world: &Transform, v: [Point; 3]) -> Result<[Vec3; 3], MeshError> {
+    let world = [
+        world.point64(v[0])?,
+        world.point64(v[1])?,
+        world.point64(v[2])?,
+    ];
+    let p = world.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
+    let normal = cross(subtract(p[1], p[0]), subtract(p[2], p[0]));
+    if dot(normal, normal).to_bits() == 0 {
+        return Err(MeshError::Degenerate("pos"));
+    }
+    Ok(world)
 }
 
 /// Bit-for-bit equality: a construction fact, not a tolerance.
@@ -222,16 +239,7 @@ impl Emitter<'_> {
             }
             return Err(MeshError::Degenerate(self.field));
         }
-        let world = [
-            self.world.point64(v[0])?,
-            self.world.point64(v[1])?,
-            self.world.point64(v[2])?,
-        ];
-        let p = world.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
-        let normal = cross(subtract(p[1], p[0]), subtract(p[2], p[0]));
-        if dot(normal, normal).to_bits() == 0 {
-            return Err(MeshError::Degenerate("pos"));
-        }
+        let world = narrowed(self.world, v)?;
         match &mut self.sink {
             Sink::World(out) => out.push(Triangle {
                 v: world,
