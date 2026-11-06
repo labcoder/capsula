@@ -217,6 +217,35 @@ fn caps_are_exact_and_utf8_safe_after_mask_filtering() {
 }
 
 #[test]
+fn byte_cap_accumulates_across_words() {
+    let set = masks(Completeness::Complete);
+    for (lengths, kept, truncated) in [
+        (vec![16_384, 16_384], vec![16_384, 16_384], false),
+        (vec![16_384, 16_384, 1], vec![16_384, 16_384], true),
+        (vec![16_384, 16_385], vec![16_384, 16_384], true),
+    ] {
+        let output = run(
+            lengths
+                .into_iter()
+                .map(|len| word(&"x".repeat(len), [0.0, 0.0, 1.0, 1.0]))
+                .collect(),
+            &set,
+            rect([-10, -20], [8, 4]),
+            100,
+        );
+        assert_eq!(
+            output
+                .words
+                .iter()
+                .map(|word| word.text.len())
+                .collect::<Vec<_>>(),
+            kept
+        );
+        assert_eq!(output.truncated, truncated);
+    }
+}
+
+#[test]
 fn sanitized_region_is_only_source_and_masks_are_exactly_clipped() {
     struct Inspect;
     impl Engine for Inspect {
