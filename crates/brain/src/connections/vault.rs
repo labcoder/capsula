@@ -437,8 +437,8 @@ impl<S: CredentialStore> Vault<S> {
         }
     }
 
-    /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in a
-    /// later open than an earlier one; a refused delete waits for the next open. The shell
+    /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in any
+    /// open after the first one ends it; a refused delete waits for the next open. The shell
     /// still stages pastes at its legacy name, so every open deletes that one.
     fn sweep_legacy(&mut self) {
         match self.authority.legacy_owed() {

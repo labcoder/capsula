@@ -53,8 +53,8 @@ marker, chatgpt/revoke manifests, and each record's two slots of 64 chunks, plus
 staged Anthropic targets in their dot form. These are 262 exact targets, not a service-prefix
 match. The vault never reads or writes them; the shell still writes the staging name. Opens
 delete all 262 by exact name before their first sweep, and a refused delete waits for the next
-open. The pass repeats at each open until a clean pass in a later open than an earlier one
-ends it, recorded in credentials.db's `control` row; after that each open deletes only the
+open. The pass repeats at each open until a clean pass in any open after the first one ends
+it, recorded in credentials.db's `control` row; after that each open deletes only the
 staging name, until C7 stages pastes through the authority. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
 
@@ -640,13 +640,6 @@ Account targets belong under `CREDENTIAL_SERVICE` (`Kumochi Dev` in debug builds
 `INSTANCE_SERVICE`. A caller supplies the full target; the store doesn't rewrite it or
 enumerate credentials. Secret bytes are held as `Secret<Zeroizing<Vec<u8>>>`; temporary
 copies are bounded and wiped, and debug/error output contains no credential data.
-
-The legacy chunk helpers, which the vault no longer calls, use 2,000-byte chunks, below Windows' `CRED_MAX_CREDENTIAL_BLOB_SIZE`
-(2,560 bytes), and at most 64 chunks (128,000 bytes). Given a base target
-`<service>/<record>/<slot>`, they use exactly `<base>/0` through `<base>/<count-1>`.
-An empty value uses one empty chunk. Reads require an explicit bounded count, all chunks,
-and full-length nonfinal chunks. Deletes are idempotent and attempt every specified name,
-reporting the first failure. Only `ERROR_NOT_FOUND` means absence.
 
 The credentials thread is the production caller. Callers must run these synchronous operations
 off the core loop and retain the vault, including its session lock, until all blocking work

@@ -476,15 +476,15 @@ impl Authority {
     }
 
     /// Records this open's legacy pass and how many of its deletes were refused. A clean pass
-    /// in a later open than an earlier pass ends the cleanup, as a clean sweep in a later open
-    /// ends a generation's.
+    /// in any open after the first pass's open ends the cleanup, as a clean sweep in a later
+    /// open ends a generation's; a second pass in the same open never does.
     ///
     /// # Errors
     /// Fails on a SQLite failure.
     pub(crate) fn legacy_deleted(&mut self, refused: usize) -> Result<(), AuthorityError> {
         self.conn.execute(
-            "UPDATE control SET legacy_done = (?1 = 0 AND legacy_deleted_in IS NOT NULL),
-             legacy_deleted_in = ?2 WHERE id = 1",
+            "UPDATE control SET legacy_done = (?1 = 0 AND legacy_deleted_in IS NOT NULL
+             AND legacy_deleted_in < ?2), legacy_deleted_in = ?2 WHERE id = 1",
             params![
                 i64::try_from(refused).map_err(|_| AuthorityError::Bounds)?,
                 self.lifetime
