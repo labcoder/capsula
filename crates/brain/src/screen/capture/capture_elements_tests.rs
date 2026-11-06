@@ -7,6 +7,68 @@ use crate::screen::{Availability, ElementTarget};
 use kumochi_protocol::geometry::WindowRef;
 
 #[test]
+fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() {
+    use crate::screen::elements::{ElementPlatform, SourceError};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    #[derive(Clone)]
+    struct Configured(Arc<AtomicU32>);
+    impl ElementPlatform for Configured {
+        fn set_shell_pid(&mut self, pid: u32) {
+            self.0.store(pid, Ordering::Relaxed);
+        }
+        fn foreground(&mut self) -> Option<TopWindow> {
+            Some(TopWindow {
+                window: WindowRef(7),
+                pid: 8,
+                rect: rect([4, 3]).0,
+            })
+        }
+        fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
+            Ok(pid == self.0.load(Ordering::Relaxed))
+        }
+    }
+    let mut rig = Rig::new([4, 3], 7);
+    let platform = Configured(Arc::new(AtomicU32::new(0)));
+    rig.screen.reader = Some(Ok(Box::new(
+        crate::screen::reader::ThreadedReader::new(
+            || {
+                let mut source = crate::screen::elements::tests::FakeSource::flat(1);
+                source.nodes[0].rect = rect([4, 3]).0;
+                source.nodes[0].name = "connected_shell_name_sentinel".into();
+                Ok(source)
+            },
+            platform,
+        )
+        .unwrap(),
+    )));
+    let now = rig.start;
+    assert_eq!(
+        rig.screen.capture(
+            &ticket(1).for_shell(8),
+            &rect([4, 3]),
+            Exclusion::KumochiWindows,
+            now,
+            &|| now,
+            (|| Err(9), || Err(9))
+        ),
+        Ok(meta(1, [4, 3], 0))
+    );
+    let walked = rig
+        .screen
+        .elements(CaptureId(10), ElementTarget::Foreground, &|| now)
+        .unwrap();
+    assert_eq!(
+        walked.tree.availability,
+        Availability::Unavailable(crate::screen::Unavailable::Excluded)
+    );
+    assert_eq!(walked.tree.elements.len(), 0);
+    assert_eq!(
+        rig.screen.masks.lock().unwrap().completeness(),
+        crate::screen::mask::Completeness::Unknown(crate::screen::Unavailable::Excluded)
+    );
+}
+
+#[test]
 fn ticket_expiry_binds_even_while_the_frame_is_younger_than_250ms() {
     for (elapsed, expected) in [
         (
@@ -40,6 +102,28 @@ fn ticket_expiry_binds_even_while_the_frame_is_younger_than_250ms() {
             Some(Failure::Refused(Refusal::Reused))
         );
     }
+}
+
+#[test]
+fn missing_reader_and_frame_metadata_have_distinct_faults() {
+    let mut rig = Rig::new([4, 3], 7);
+    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
+    rig.screen.reader = None;
+    assert_eq!(
+        rig.screen
+            .elements(CaptureId(10), ElementTarget::Foreground, &|| rig.start)
+            .err(),
+        Some(Failure::Fault(-1))
+    );
+
+    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
+    rig.screen.frame.invalidate();
+    assert_eq!(
+        rig.screen
+            .elements(CaptureId(20), ElementTarget::Foreground, &|| rig.start)
+            .err(),
+        Some(Failure::Fault(-2))
+    );
 }
 
 #[test]

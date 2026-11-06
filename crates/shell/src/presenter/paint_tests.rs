@@ -222,7 +222,7 @@ fn consuming_a_removal_releases_the_previous_rest_work() {
         "the old rest can still paint"
     );
     let consumed = presenter
-        .consume_ready(LIVE, 1, now)
+        .consume_ready(LIVE, 1, now, 0, 0)
         .expect("consume removal");
     consumed.effects.expect("remaining work resumes");
     assert_eq!(presenter.paint_work().dash_pieces, 0);
@@ -265,12 +265,12 @@ fn ready_states_reserve_componentwise_maxima_until_the_old_rest_is_replaced() {
     };
     assert_eq!(presenter.paint_work(), both);
     let consumed = presenter
-        .consume_ready(LIVE, 0, now)
+        .consume_ready(LIVE, 0, now, 0, 0)
         .expect("first consumption");
     consumed.effects.expect("resume after first");
     assert_eq!(presenter.paint_work(), both, "the dashed rest still paints");
     let consumed = presenter
-        .consume_ready(LIVE, 1, now)
+        .consume_ready(LIVE, 1, now, 0, 0)
         .expect("second consumption");
     consumed.effects.expect("resume after second");
     assert_eq!(

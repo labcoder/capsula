@@ -15,6 +15,7 @@ use crate::{
     mermaid::{self, Expansion},
     record::{SolidShape, Start, Track},
     text::Bounded,
+    three::view::ViewUpdate,
 };
 pub use binding::{BindingError, SceneBinding, SceneRead};
 use object::Object;
@@ -131,10 +132,13 @@ struct Candidate {
     changed: Vec<(WireId, Object)>,
     /// Composed scales of new and resized paths, which preparation flattens.
     path_scales: BTreeMap<Handle, f32>,
+    /// Every view the step changes, composed once here for preparation.
+    views: Vec<ViewUpdate>,
     /// `map_bytes(&after)`, accumulated while admission built it.
     after_bytes: usize,
     /// What commit adds to `SceneState::history_bytes`.
     history_bytes: usize,
+    preparation_bytes: usize,
 }
 impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -170,6 +174,9 @@ pub struct Preparation {
     pub(crate) extras: Arc<BTreeMap<usize, mermaid::Extra>>,
     pub(crate) path_scales: BTreeMap<Handle, f32>,
     pub(crate) canvas_size: Option<[f32; 2]>,
+    /// Views this step changes; only preparation reads them.
+    pub(crate) views: Vec<ViewUpdate>,
+    retained_bytes: usize,
 }
 impl fmt::Debug for Preparation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -240,19 +247,31 @@ impl SceneState {
                 .get(&ticket.revision)
                 .is_some_and(|step| step.kept)
     }
+    /// Every 2D object layout places, with its parent's handle.
     pub(crate) fn preparation_objects(
         &self,
     ) -> impl Iterator<Item = (&WireId, Handle, Option<Handle>)> {
-        self.objects.iter().map(|(id, object)| {
-            (
-                id,
-                object.handle,
-                object
-                    .parent
-                    .as_ref()
-                    .map(|parent| self.objects[parent].handle),
-            )
-        })
+        self.objects
+            .iter()
+            .filter(|(_, object)| !object.kind.three_dimensional())
+            .map(|(id, object)| {
+                (
+                    id,
+                    object.handle,
+                    object
+                        .parent
+                        .as_ref()
+                        .map(|parent| self.objects[parent].handle),
+                )
+            })
+    }
+    /// Handles of every 3D view and solid, which a cut keeps prepared.
+    pub(crate) fn preparation_three(&self) -> BTreeSet<Handle> {
+        self.objects
+            .values()
+            .filter(|object| object.kind.three_dimensional())
+            .map(|object| object.handle)
+            .collect()
     }
     /// Creates an empty scene from a typed header with positive canvas dimensions.
     /// # Errors
@@ -593,6 +612,7 @@ impl SceneState {
             .map(|(id, object)| retire::owned((id, object)))
             .sum::<usize>();
         retire::attribute(&mut after, owned);
+        let views = three::view_updates(step, &self.objects, &after);
         let removed_bytes = records_bytes(&removed);
         let mut removed = Deferred::new(removed, removed_bytes);
         for object in after
@@ -617,7 +637,7 @@ impl SceneState {
                             .map(|_| id)
                     })
                     .collect();
-                let path_scales = after
+                let path_scales: BTreeMap<Handle, f32> = after
                     .iter()
                     .filter_map(|(id, object)| {
                         let path = object.work.path.as_ref()?;
@@ -626,6 +646,12 @@ impl SceneState {
                     })
                     .collect();
                 Candidate {
+                    preparation_bytes: 2 * heap::ARC_HEADER
+                        + heap::step_bytes(original)
+                        + heap::compiled_bytes(original, &expansion.run)
+                        + heap::extras_bytes(std::iter::empty(), [&expansion.extras])
+                        + heap::btree::<Handle, f32>(path_scales.len())
+                        + retire::views_bytes(&views),
                     after_bytes: heap::btree::<WireId, Object>(after.len()) + owned,
                     history_bytes: original.id.as_str().len()
                         + ids
@@ -641,6 +667,7 @@ impl SceneState {
                     removed,
                     changed,
                     path_scales,
+                    views,
                 }
             })
             .map(Box::new);
@@ -700,8 +727,10 @@ impl SceneState {
             removed,
             changed,
             path_scales,
+            views,
             after_bytes,
             history_bytes,
+            preparation_bytes,
         } = *local.candidate.into_inner();
         let preparation = Preparation {
             owner: Arc::clone(&self.identity),
@@ -712,6 +741,8 @@ impl SceneState {
             extras,
             path_scales,
             canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
+            views,
+            retained_bytes: preparation_bytes,
         };
         self.step_ids.insert(step.id.clone(), revision);
         self.steps.insert(

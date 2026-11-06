@@ -1,4 +1,8 @@
-//! Consumption of a scene's oldest prepared step, for the activation owner B6 adds.
+//! Activation of a scene's oldest prepared step, for the activation owner B6d adds.
+//!
+//! One call stages the head against the scene's view, checks the whole post-transition charge,
+//! then retires the semantic step and installs the rest, the view and a fresh frame epoch
+//! together. A refusal changes nothing, and anything staged for it goes to the dropper.
 
 use std::{
     sync::{
@@ -17,7 +21,7 @@ use super::{Broken, Effect, Out, Presenter, Ready};
 /// request.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6's activation owner is the production caller")
+    expect(dead_code, reason = "B6d's activation owner is the production caller")
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConsumeError {
@@ -29,7 +33,9 @@ pub(crate) enum ConsumeError {
     OutOfOrder,
     /// No step is prepared yet.
     NotReady,
-    /// Its layout as the rest, with this owner's charge, would pass the prepared allowance.
+    /// The head was not prepared on the scene's current semantic state, rest and view.
+    Stale,
+    /// Its rest and activated view, with this owner's charge, would pass the prepared allowance.
     Residency,
     /// The scene's admission is out. The request is kept, and `Effect::ConsumptionReady` names
     /// it once the admission is in; the scene admits nothing more until it is served or halts.
@@ -39,7 +45,7 @@ pub(crate) enum ConsumeError {
 /// A consumed step, charged against the prepared allowance until its owner drops it.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6's activation owner is the production caller")
+    expect(dead_code, reason = "B6d's activation owner is the production caller")
 )]
 #[derive(Debug)]
 pub(crate) struct ConsumedStep {
@@ -50,7 +56,7 @@ pub(crate) struct ConsumedStep {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6's activation owner is the production caller")
+    expect(dead_code, reason = "B6d's activation owner is the production caller")
 )]
 impl ConsumedStep {
     pub(crate) fn step(&self) -> &PreparedStep {
@@ -66,7 +72,7 @@ impl Drop for ConsumedStep {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6's activation owner is the production caller")
+    expect(dead_code, reason = "B6d's activation owner is the production caller")
 )]
 #[derive(Debug)]
 pub(crate) struct Consumed {
@@ -76,19 +82,23 @@ pub(crate) struct Consumed {
 }
 
 impl Presenter {
-    /// Consumes the scene's oldest prepared step, which must be `expected_index`: its removals
-    /// retire, its layout becomes the rest, its window position frees and held frames resume.
+    /// Activates the scene's oldest prepared step, which must be `expected_index`, at
+    /// `scene_time` over a narration segment of `segment_ms`: its removals retire, its layout
+    /// becomes the rest, its activated view replaces the old one in a new frame epoch, its
+    /// window position frees and held frames resume.
     /// # Errors
     /// [`ConsumeError`], with nothing changed.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6's activation owner is the production caller")
+        expect(dead_code, reason = "B6d's activation owner is the production caller")
     )]
     pub(crate) fn consume_ready(
         &mut self,
         id: SceneId,
         expected_index: u32,
         now: Instant,
+        scene_time: u64,
+        segment_ms: u64,
     ) -> Result<Consumed, ConsumeError> {
         let busy = self.lane.as_ref().is_some_and(|lane| lane.scene == id);
         let total = self.residency();
@@ -104,10 +114,23 @@ impl Presenter {
             scene.pending_consumption = Some(expected_index);
             return Err(ConsumeError::Busy);
         }
+        head.step
+            .validate(scene.state.view(), &scene.rest)
+            .map_err(|_| ConsumeError::Stale)?;
+        let activation = scene
+            .view
+            .prepare_activation(&head.step, scene_time, segment_ms)
+            .map_err(|_| ConsumeError::Stale)?;
         let bytes = head.step.attribution();
+        let view_bytes = activation.resident_bytes();
+        let outgoing = scene
+            .retained
+            .saturating_add(scene.view_bytes)
+            .saturating_add(head.step.resident_bytes);
         let after = total
-            .saturating_sub(scene.retained.saturating_add(head.step.resident_bytes))
+            .saturating_sub(outgoing)
             .saturating_add(head.full_after)
+            .saturating_add(view_bytes)
             .saturating_add(bytes);
         if after > MAX_RESIDENT_BYTES {
             return Err(ConsumeError::Residency);
@@ -117,10 +140,13 @@ impl Presenter {
             .retire(expected_index, &mut self.global)
             .expect("a prepared step was committed under this budget, and no admission reads it");
         let Ready { step, full_after } = scene.ready.pop_front().expect("the head was just read");
-        // shortcut: test-only consumption keeps its old view; replace and charge it atomically when B6 wires activation
         let old = std::mem::replace(&mut scene.rest, step.after.clone());
         drop(Deferred::new(old, scene.retained));
         scene.retained = full_after;
+        self.frames
+            .borrow_mut()
+            .activate(id, &mut scene.view, activation);
+        scene.view_bytes = view_bytes;
         scene.paint = scene
             .ready
             .iter()

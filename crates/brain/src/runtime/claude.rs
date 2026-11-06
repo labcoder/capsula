@@ -130,11 +130,19 @@ impl Claude {
             self.again = true;
             return;
         }
-        self.begin(match (self.finds, self.cleaning) {
-            (false, _) => Work::Cleanup,
-            (true, true) => Work::Disconnect { logout: false },
-            (true, false) => Work::Version,
-        });
+        match (self.finds, self.cleaning) {
+            (false, _) => {
+                self.begin(Work::Cleanup);
+            }
+            (true, true) => {
+                self.begin(Work::Disconnect { logout: false });
+            }
+            (true, false) => {
+                if self.begin(Work::Version) && !matches!(self.view, ClaudeCodeView::Ready { .. }) {
+                    self.view = ClaudeCodeView::Finding;
+                }
+            }
+        }
     }
 
     /// One of Claude Code's ops; every one is answered with the view.

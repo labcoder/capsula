@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_brain::platform::Job;
-use kumochi_brain::screen::{RequestBody, ScreenError, ScreenSupervisor, WorkerLost};
+use kumochi_brain::screen::{Generation, RequestBody, ScreenError, ScreenSupervisor};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -76,12 +76,12 @@ async fn environment_crash_fixture() {
             tokio::task::yield_now().await;
         }
     });
-    for _ in 0..3 {
+    for dead in 0..3 {
         assert_eq!(
             screen.request(RequestBody::Ping).await,
             Err(ScreenError::WorkerLost)
         );
-        assert_eq!(losses.recv().await.expect("worker loss"), WorkerLost);
+        assert_eq!(losses.recv().await.expect("worker loss"), Generation(dead));
     }
     assert_eq!(
         screen.request(RequestBody::Ping).await,
@@ -111,11 +111,11 @@ async fn exit_at_launch_fixture() {
         .expect("supervisor");
     let mut losses = screen.lost();
     let mut at = Vec::new();
-    for _ in 0..5 {
+    for dead in 0..5 {
         let loss = tokio::time::timeout(PATIENCE, losses.recv()).await;
         assert_eq!(
             loss.expect("lost with nothing pending").expect("loss"),
-            WorkerLost
+            Generation(dead)
         );
         at.push(std::time::Instant::now());
     }

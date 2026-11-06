@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Context, IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _,
-    StyledImage as _, WeakEntity, Window, canvas, div, img, px,
+    App, Context, IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, SharedString,
+    Styled as _, StyledImage as _, WeakEntity, Window, canvas, div, img, px,
 };
 
 use super::diagnostics::{self, PendingPaint};
@@ -22,6 +22,8 @@ use crate::platform::{PresenceError, PresenceNative, ROW_SPANS, RowSpans};
 
 /// The line's size, in logical pixels.
 const LINE: [f32; 2] = [56.0, 3.0];
+/// The widest the drop label gets, in logical pixels; a longer title is cut short.
+const LABEL_WIDTH: f32 = 320.0;
 /// How far above and below the line the pointer still finds it, in logical pixels.
 const TRIGGER: f32 = 8.0;
 /// Failed attempts in a row before a placement stops retrying; a new position choice starts a
@@ -510,6 +512,8 @@ pub(super) struct Dock {
     /// `pull` changed, to an accepted picture or to none as a pull lets go, and hasn't been
     /// rendered since.
     pub(super) undrawn: bool,
+    /// The drop label under a carried body: screen text, drawn and never logged.
+    pub(super) label: Option<SharedString>,
 }
 
 impl Dock {
@@ -525,6 +529,7 @@ impl Dock {
             retired: Vec::with_capacity(3),
             aged: Vec::with_capacity(3),
             undrawn: false,
+            label: None,
         }
     }
 }
@@ -582,12 +587,36 @@ impl Render for Dock {
                 .h(logical(quad.height, scale))
                 .object_fit(ObjectFit::Fill)
         });
+        let body = self
+            .pull
+            .as_ref()
+            .and_then(|picture| picture.images[2].as_ref());
+        let label = self.label.clone().zip(body).map(|(text, (quad, _))| {
+            div()
+                .absolute()
+                .left(logical(quad.x + quad.width / 2 - origin_x, scale) - px(LABEL_WIDTH / 2.0))
+                .top(logical(quad.y + quad.height - origin_y, scale) + px(4.0))
+                .w(px(LABEL_WIDTH))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px_2()
+                        .rounded_md()
+                        .bg(cx.theme().popover.opacity(0.85))
+                        .text_color(cx.theme().popover_foreground)
+                        .text_sm()
+                        .truncate()
+                        .child(text),
+                )
+        });
         div()
             .size_full()
             .relative()
             .child(Stamp(Surface::Dock, self.drawn))
             .children(line)
             .children(pulled)
+            .children(label)
             // After the frame's stamp, so the paint qpc it logs falls inside that frame.
             .children(marker)
     }
