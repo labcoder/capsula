@@ -180,6 +180,8 @@ pub struct ResponseMeta {
     pub date_s: Option<u64>,
     /// Retry delay in seconds, using a valid Date for HTTP-date values.
     pub retry_after_s: Option<u64>,
+    /// Whether any Retry-After header arrived, even when its advice was unusable.
+    pub retry_after_present: bool,
     /// Remaining requests in the current rate window.
     pub rate_remaining: Option<u64>,
     /// Rate-window reset as nonnegative Unix seconds.
@@ -200,6 +202,7 @@ impl ResponseMeta {
         Self {
             date_s,
             retry_after_s,
+            retry_after_present: headers.contains_key("retry-after"),
             rate_remaining: single("x-ratelimit-remaining", 20).and_then(decimal),
             rate_reset_s: single("x-ratelimit-reset", 20).and_then(decimal),
         }
@@ -366,14 +369,6 @@ impl Client {
         endpoint: &GitHubEndpoint,
         url: &str,
     ) -> Result<reqwest::RequestBuilder, HttpError> {
-        let deadline = if matches!(
-            endpoint,
-            GitHubEndpoint::CreateIssue { .. } | GitHubEndpoint::Issues { .. }
-        ) {
-            30
-        } else {
-            15
-        };
         let request = match endpoint {
             GitHubEndpoint::DeviceCode { client_id } => {
                 self.0.post(url).form(&[("client_id", client_id.as_str())])
@@ -391,7 +386,7 @@ impl Client {
                     bearer(token.expose().as_str())?,
                 )
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.expose().to_vec()),
+                .body(body.expose().as_bytes().to_vec()),
             GitHubEndpoint::User { token }
             | GitHubEndpoint::Installations { token, .. }
             | GitHubEndpoint::Repositories { token, .. }
@@ -404,7 +399,7 @@ impl Client {
             reqwest::header::USER_AGENT,
             kumochi_protocol::constants::HTTP_USER_AGENT,
         )
-        .timeout(Duration::from_secs(deadline));
+        .timeout(endpoint.deadline());
         if matches!(
             endpoint,
             GitHubEndpoint::DeviceCode { .. } | GitHubEndpoint::AccessToken { .. }

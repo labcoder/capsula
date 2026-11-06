@@ -418,6 +418,10 @@ impl ThreadsView {
             None
         };
         let owner = self.owner.clone();
+        let assistant = state.settings.as_ref().map_or(
+            kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME.to_owned(),
+            |settings| settings.assistant_name.as_str().to_owned(),
+        );
         let button = Button::new("delete-thread")
             .small()
             .danger()
@@ -427,7 +431,7 @@ impl ThreadsView {
                 let owner = owner.clone();
                 let strings = cx.global::<Strings>();
                 let title = strings.get(Text::DeleteThreadTitle).into();
-                let body = strings.get(Text::DeleteThreadBody).into();
+                let body = strings.delete_body(&assistant).into();
                 let cancel = strings.get(Text::DeleteThreadCancel).into();
                 let confirm = strings.get(Text::DeleteThread).into();
                 let _focus = crate::confirmation::open(

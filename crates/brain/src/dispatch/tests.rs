@@ -13,6 +13,8 @@ use crate::engines::{CallId, ToolName};
 
 const R: RunId = RunId(10);
 const T: ThreadId = ThreadId(4);
+const KUMO: ThreadId = ThreadId(1);
+const FRESH: ThreadId = ThreadId(12);
 const L1: LaunchId = LaunchId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
 const L2: LaunchId = LaunchId(2);
 const MARKER: &str = "zqxplantedmarker";
@@ -90,6 +92,8 @@ const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::Recall];
 fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> {
     RunCtx {
         thread: T,
+        main: KUMO,
+        fresh: FRESH,
         reach,
         offered: OFFERED,
         mcp,
@@ -201,10 +205,10 @@ fn a_duplicate_while_running_joins_and_after_the_ack_gets_the_stored_output() {
     );
     assert_eq!(
         ledger.committed(&first.key),
-        vec![
+        Some(vec![
             (model("c1"), text("probed hi")),
             (model("c1"), text("probed hi"))
-        ],
+        ]),
         "the first caller and the one that joined"
     );
     assert_step(
@@ -218,7 +222,7 @@ fn a_duplicate_while_running_joins_and_after_the_ack_gets_the_stored_output() {
     );
     assert_eq!(
         ledger.committed(&first.key),
-        [],
+        None,
         "a second ack answers nobody"
     );
 }
@@ -280,7 +284,7 @@ fn another_tool_under_the_same_key_is_refused_and_leaves_the_first_call() {
     assert_step(&kumo(&mut ledger), &error(ToolError::Reused));
     assert_eq!(
         ledger.committed(&first.key),
-        [(model("c1"), text("probed hi"))]
+        Some(vec![(model("c1"), text("probed hi"))])
     );
     assert_step(&kumo(&mut ledger), &error(ToolError::Reused));
 }
@@ -352,7 +356,10 @@ fn malformed_duplicates_never_change_a_running_or_finished_call() {
         ),
         &Step::Join,
     );
-    assert_eq!(ledger.committed(&first.key).len(), 2);
+    assert_eq!(
+        ledger.committed(&first.key).map(|answers| answers.len()),
+        Some(2)
+    );
     for args in malformed {
         assert_step(
             &send(&mut ledger, model("c1"), ToolName::Probe, args),
@@ -480,9 +487,12 @@ fn history_is_kumo_only_and_model_only() {
             .map(|schema| schema.name)
             .collect()
     };
-    assert_eq!(names(Origin::Kumo, Route::Model), ["probe", "recall"]);
+    assert_eq!(
+        names(Origin::Kumo, Route::Model),
+        ["create_task", "focus", "probe", "recall"]
+    );
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
-    assert_eq!(names(Origin::Task(T), Route::Model), ["probe"]);
+    assert_eq!(names(Origin::Task(T), Route::Model), ["focus", "probe"]);
 }
 
 #[test]
@@ -500,6 +510,8 @@ fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
     let unoffered = call(
         &mut RunCtx {
             thread: T,
+            main: KUMO,
+            fresh: FRESH,
             reach: Origin::Task(T),
             offered: &[],
             mcp: None,
@@ -614,7 +626,8 @@ fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
             "{:?}",
             crate::coordinator::Input::CallCommitted {
                 key: sent.key,
-                committed: true
+                outcome: super::Committed::Done,
+                then: None,
             }
         ),
         format!("{:?}", Dispatch::Answered(text(MARKER))),

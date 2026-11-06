@@ -372,6 +372,10 @@ pub(crate) const DRAW: &str = "draw";
 pub enum ToolName {
     /// Draws on the overlay.
     Draw,
+    /// Moves the user's typed input to a task, or back to Kumo.
+    Focus,
+    /// Creates an empty task.
+    CreateTask,
     /// A name Kumochi doesn't offer.
     Unknown,
     /// The dispatcher's test tool that writes.

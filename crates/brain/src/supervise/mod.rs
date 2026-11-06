@@ -3,8 +3,8 @@
 //!
 //! A supervisor is one tokio task that owns its worker process, the pending requests, the request
 //! ids and the loss history. Two std threads per worker own the pipe ends. A loss terminates the
-//! worker, fails everything pending, broadcasts [`WorkerLost`] and respawns, backing off after the
-//! second loss in a minute.
+//! worker, fails everything pending, broadcasts its [`Generation`] and respawns, backing off after
+//! the second loss in a minute.
 
 mod wire;
 
@@ -49,12 +49,17 @@ pub(crate) trait Kind: 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerLost;
 
-type Answer<K> = oneshot::Sender<Result<<K as Kind>::Reply, WorkerLost>>;
+/// One worker process of a supervisor: the first is 0 and each respawn the next. A reply and a
+/// loss name theirs, so a loss can be matched to the work it ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Generation(pub u64);
+
+type Answer<K> = oneshot::Sender<Result<(<K as Kind>::Reply, Generation), WorkerLost>>;
 
 /// Requests and loss notifications; dropping the last handle stops the worker.
 pub(crate) struct Handle<K: Kind> {
     commands: mpsc::Sender<Command<K>>,
-    losses: broadcast::Sender<WorkerLost>,
+    losses: broadcast::Sender<Generation>,
 }
 
 impl<K: Kind> Clone for Handle<K> {
@@ -82,12 +87,13 @@ struct Command<K: Kind> {
 
 impl<K: Kind> Handle<K> {
     /// Submits one request, answered by `until` or not at all. `until` is absolute: it covers
-    /// queueing, a respawn in progress and every chunk. A full queue or backoff fails fast.
+    /// queueing, a respawn in progress and every chunk. A full queue or backoff fails fast. The
+    /// reply comes with the generation of the worker that sent it.
     pub(crate) async fn request(
         &self,
         body: K::Request,
         until: Instant,
-    ) -> Result<K::Reply, WorkerLost> {
+    ) -> Result<(K::Reply, Generation), WorkerLost> {
         let (answer, reply) = oneshot::channel();
         self.commands
             .try_send(Command {
@@ -102,8 +108,9 @@ impl<K: Kind> Handle<K> {
             .unwrap_or(Err(WorkerLost))
     }
 
-    /// Subscribes before issuing work, so a lost generation can't be missed.
-    pub(crate) fn lost(&self) -> broadcast::Receiver<WorkerLost> {
+    /// Subscribes before issuing work, so a lost generation can't be missed. Each loss names the
+    /// generation that ended, after every request it held has been answered.
+    pub(crate) fn lost(&self) -> broadcast::Receiver<Generation> {
         self.losses.subscribe()
     }
 }
@@ -227,7 +234,7 @@ struct Pending<K: Kind> {
     assembly: Assembly,
 }
 
-fn complete<K: Kind>(answer: Answer<K>, reply: Result<K::Reply, WorkerLost>) {
+fn complete<K: Kind>(answer: Answer<K>, reply: Result<(K::Reply, Generation), WorkerLost>) {
     if answer.send(reply).is_err() {
         tracing::debug!(kind = K::NAME, "requester cancelled");
     }
@@ -238,13 +245,14 @@ fn complete<K: Kind>(answer: Answer<K>, reply: Result<K::Reply, WorkerLost>) {
 fn accept<K: Kind>(
     pending: &mut BTreeMap<u64, Pending<K>>,
     reply: Frame,
+    generation: Generation,
 ) -> Result<(), WorkerLost> {
     let id = reply.id;
     let item = pending.get_mut(&id).ok_or(WorkerLost)?;
     if let Some(bytes) = item.assembly.push(reply)? {
         let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost)?;
         let item = pending.remove(&id).ok_or(WorkerLost)?;
-        complete::<K>(item.answer, Ok(body));
+        complete::<K>(item.answer, Ok((body, generation)));
     }
     Ok(())
 }
@@ -270,8 +278,9 @@ async fn run<K: Kind>(
     jobs: Arc<Job>,
     mut worker: Worker<K>,
     mut commands: mpsc::Receiver<Command<K>>,
-    losses: broadcast::Sender<WorkerLost>,
+    losses: broadcast::Sender<Generation>,
 ) {
+    let mut generation = Generation(0);
     let mut history = VecDeque::new();
     let mut pending: BTreeMap<u64, Pending<K>> = BTreeMap::new();
     let mut id = 0_u64;
@@ -285,7 +294,7 @@ async fn run<K: Kind>(
             biased;
             () = tokio::time::sleep_until(until), if !pending.is_empty() => Some(LossReason::Deadline),
             reply = worker.reads.recv() => match reply.flatten() {
-                Some(reply) => accept(&mut pending, reply).err().map(|_| LossReason::Malformed),
+                Some(reply) => accept(&mut pending, reply, generation).err().map(|_| LossReason::Malformed),
                 None => Some(LossReason::Ended),
             },
             command = commands.recv() => {
@@ -307,7 +316,7 @@ async fn run<K: Kind>(
         while let Ok(command) = commands.try_recv() {
             complete::<K>(command.answer, Err(WorkerLost));
         }
-        if losses.send(WorkerLost).is_err() {
+        if losses.send(generation).is_err() {
             tracing::debug!(kind = K::NAME, "worker lost without watchers");
         }
         // Every handle is gone, so a respawn would only land in a closing job.
@@ -337,6 +346,7 @@ async fn run<K: Kind>(
                         "worker respawned"
                     );
                     worker = next;
+                    generation = Generation(generation.0 + 1);
                     break;
                 }
                 Ok(Err(error)) => {

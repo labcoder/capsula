@@ -2,6 +2,7 @@
 //! and a held write that never holds up Stop.
 
 use std::fs::File;
+use std::os::windows::fs::OpenOptionsExt as _;
 
 use tokio::time::Instant;
 
@@ -12,12 +13,15 @@ use kumochi_protocol::message::{
     SettingsView, ThreadId, UserName,
 };
 use kumochi_protocol::tap;
+use kumochi_protocol::voice::VoicePart;
 use tokio::io::AsyncRead;
 
 use super::{Ended, Shell, duplex};
 use crate::context::{Origin, RunSnapshot};
 use crate::coordinator::{BuildContext, BuildKey};
 use crate::ipc;
+use crate::platform::set_dacl;
+use crate::platform::sherpa::tests::{TrustedScratch, set_junction};
 use crate::runtime::CLOSE_WAIT;
 use crate::runtime::Seen;
 use crate::runtime::settings::Gate;
@@ -157,6 +161,65 @@ async fn a_held_write_never_holds_up_stop_and_the_changes_behind_it_wait() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(scratch.config().view().assistant_name.as_str(), "Cirrus");
+}
+
+#[tokio::test]
+async fn voice_installer_ops_are_refused_in_order_with_the_changes_around_them() {
+    let scratch = Scratch::new("settings-voice-dormant");
+    let mut brain = test_support::brain(&scratch, "0 text a\n5000 text never");
+    let release = brain.hold_config_write();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.settled().await;
+        shell.scenes().await;
+        shell.send(&rename("Nimbus")).await;
+        shell
+            .send(&op(SettingsOp::InstallVoice(VoicePart::SpokenReplies)))
+            .await;
+        shell.send(&op(SettingsOp::SetTalkBack(true))).await;
+        shell
+            .send(&op(SettingsOp::RemoveVoice(VoicePart::SpeechInput)))
+            .await;
+        shell.send(&op(SettingsOp::CancelVoiceInstall)).await;
+        // The run's answer means the brain has read every change above.
+        shell.submit("go").await;
+        let (run, thinking) = shell.state().await;
+        assert_eq!(thinking, Phase::Thinking);
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        shell.stop(run).await;
+        assert_eq!(shell.state().await, (run, Phase::Interrupted));
+        assert!(
+            shell.views.is_empty(),
+            "nothing answered past the held write"
+        );
+        release
+            .send(Gate::Write)
+            .expect("the write waits on the gate");
+        assert_eq!(shell.answer().await.assistant_name.as_str(), "Nimbus");
+        assert_eq!(shell.error().await, ErrorKey::VoiceUnavailable);
+        let refused = shell.answer().await;
+        assert_eq!(refused.assistant_name.as_str(), "Nimbus");
+        assert!(!refused.talk_back);
+        assert!(shell.answer().await.talk_back);
+        for _ in 0..2 {
+            assert_eq!(shell.error().await, ErrorKey::VoiceUnavailable);
+            assert!(shell.answer().await.talk_back);
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert!(scratch.config().view().talk_back);
+    let text = std::fs::read_to_string(scratch.db().with_file_name(CONFIG_FILE)).expect("readable");
+    let saved: toml::Table = text.parse().expect("parses");
+    assert!(
+        !saved["voice"]
+            .as_table()
+            .expect("a table")
+            .contains_key("installed")
+    );
 }
 
 #[tokio::test]
@@ -555,4 +618,137 @@ async fn a_rename_reaches_the_next_run_and_never_a_running_ones_rebuild() {
         "Cirrus",
         "the next run takes the rename"
     );
+}
+
+#[tokio::test]
+async fn a_junction_on_the_way_to_a_part_deletes_nothing_outside_it() {
+    let scratch = Scratch::new("voice-removal-junction");
+    let root = TrustedScratch::new("voice-removal-junction");
+    let path = seeded(&scratch, "[\"speech-input\"]");
+    let outside = root.0.join("outside");
+    let sentinel = outside.join(VoicePart::SpeechInput.dir()).join("keep.txt");
+    std::fs::create_dir_all(sentinel.parent().expect("a parent")).expect("the outside folder");
+    std::fs::write(&sentinel, [1]).expect("the sentinel");
+    let models = root.0.join("models");
+    std::fs::create_dir(&models).expect("models folder");
+    set_junction(&models, &outside).expect("models redirected outside");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(sentinel.is_file(), "nothing behind the junction is deleted");
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["speech-input".into()])
+    );
+    assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
+}
+
+#[tokio::test]
+async fn a_models_folder_others_can_change_deletes_nothing() {
+    let scratch = Scratch::new("voice-removal-unsafe");
+    let root = TrustedScratch::new("voice-removal-unsafe");
+    let path = seeded(&scratch, "[\"speech-input\"]");
+    let models = root.0.join("models");
+    let model = models.join(VoicePart::SpeechInput.dir()).join("model.onnx");
+    std::fs::create_dir_all(model.parent().expect("a parent")).expect("the part's folder");
+    std::fs::write(&model, [1]).expect("a model file");
+    set_dacl(&models, |user| {
+        format!("D:P(A;OICI;FA;;;{user})(A;;FA;;;WD)")
+    });
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(
+        model.is_file(),
+        "a folder everyone may change isn't trusted"
+    );
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["speech-input".into()])
+    );
+    assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
+}
+
+#[tokio::test]
+async fn a_missing_models_folder_counts_as_deleted() {
+    let scratch = Scratch::new("voice-removal-no-models");
+    let root = TrustedScratch::new("voice-removal-no-models");
+    let path = seeded(&scratch, "[\"speech-input\"]");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&root.0.join("models"));
+    brain.drain_settings().await;
+    assert_eq!(removing_on_disk(&path), toml::Value::Array(Vec::new()));
+    assert_eq!(brain.config.removing(), []);
+}
+
+/// Start-up recovery's config writes, read back from the file.
+fn removing_on_disk(path: &std::path::Path) -> toml::Value {
+    let saved: toml::Table = std::fs::read_to_string(path)
+        .expect("readable")
+        .parse()
+        .expect("parses");
+    saved["voice"]["removing"].clone()
+}
+
+fn seeded(scratch: &Scratch, removing: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    let path = scratch.dir().join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        format!("[voice]\ninstalled = [\"speech-input\"]\nremoving = {removing}\n"),
+    )
+    .expect("seeded");
+    path
+}
+
+#[tokio::test]
+async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
+    let scratch = Scratch::new("voice-removals");
+    let root = TrustedScratch::new("voice-removals");
+    let path = seeded(
+        &scratch,
+        "[\"speech-input\", \"later-part\", \"spoken-replies\"]",
+    );
+    let models = root.0.join("models");
+    let spoken = models.join(VoicePart::SpokenReplies.dir());
+    std::fs::create_dir_all(spoken.join("voices")).expect("a part left mid-delete");
+    std::fs::write(spoken.join("voices").join("juniper.bin"), [1, 2, 3]).expect("a model file");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(!spoken.exists(), "the folder is deleted");
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["later-part".into()]),
+        "a folder already gone counts as deleted, and an unknown name stays"
+    );
+    assert_eq!(brain.config.removing(), []);
+    assert!(models.exists(), "only the parts' folders go");
+}
+
+#[tokio::test]
+async fn a_part_that_cant_be_deleted_stays_listed_for_the_next_start() {
+    let scratch = Scratch::new("voice-removal-stuck");
+    let root = TrustedScratch::new("voice-removal-stuck");
+    let path = seeded(&scratch, "[\"speech-input\"]");
+    let models = root.0.join("models");
+    let part = models.join(VoicePart::SpeechInput.dir());
+    std::fs::create_dir_all(&part).expect("the part's folder");
+    let stuck = part.join("model.onnx");
+    std::fs::write(&stuck, [1]).expect("a model file");
+    // Opened without sharing, so nothing else can open it to delete it.
+    let _open = std::fs::File::options()
+        .read(true)
+        .share_mode(0)
+        .open(&stuck)
+        .expect("held open");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(stuck.is_file());
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["speech-input".into()])
+    );
+    assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
 }

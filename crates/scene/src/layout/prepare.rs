@@ -1,6 +1,6 @@
 use super::{
-    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
-    SurfaceGeometry, compound, edge_labels, edges, heap, nodes,
+    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, PreparedView, RecoveryError,
+    SceneRecovery, SurfaceGeometry, compound, edge_labels, edges, heap, nodes,
     primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
@@ -8,12 +8,13 @@ use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, PaintWork, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    record::{Anchor, Change, Enter, Track},
+    record::{Anchor, Change, Color, Enter, Track},
     state::{object, work},
     theme::Theme,
+    three::{mesh::MeshScratch, size::MeshError, view::tessellate_view},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem::size_of,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -37,6 +38,7 @@ pub fn prepare(
         before,
         surface,
         theme,
+        paint_cap,
     } = input;
     let viewport = surface.viewport(ticket.canvas_size)?;
     let mut build = Build {
@@ -53,6 +55,19 @@ pub fn prepare(
             .extras
             .insert(ticket.revision, Arc::clone(&ticket.extras));
     }
+    // 3D targets never enter the 2D maps; the ticket's view updates carry them.
+    let three: HashMap<&WireId, usize> = ticket
+        .run
+        .put
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, op)| match op {
+            Op::View3d(view) => Some((&view.id, slot)),
+            Op::Solid(solid) => Some((&solid.id, slot)),
+            _ => None,
+        })
+        .collect();
+    let is_three = |id: &WireId| three.contains_key(id) || before.is_three(id).is_some();
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
     let mut tables = false;
@@ -66,7 +81,12 @@ pub fn prepare(
             order.push(visual.id.clone());
         }
     }
-    for change in &*ticket.run.set {
+    for change in ticket
+        .run
+        .set
+        .iter()
+        .filter(|change| !is_three(&change.target))
+    {
         let (handle, source) = if let Some((handle, source)) = sources.get(&change.target) {
             (*handle, Arc::clone(source))
         } else {
@@ -94,7 +114,11 @@ pub fn prepare(
     }
     let mut removed = Vec::new();
     for id in &*ticket.run.remove {
-        if let Some(old) = after.objects.remove(id) {
+        if let Some(&slot) = three.get(id) {
+            removed.push(Handle::new(ticket.revision, slot)?);
+        } else if let Some(handle) = before.is_three(id) {
+            removed.push(handle);
+        } else if let Some(old) = after.objects.remove(id) {
             tables |= matches!(&*old.source, Op::Row(_));
             charts |= matches!(&*old.source, Op::Series(_));
             after.handles.remove(&old.item.handle);
@@ -116,7 +140,7 @@ pub fn prepare(
         .run
         .set
         .iter()
-        .filter(|change| change.color.is_some())
+        .filter(|change| change.color.is_some() && !is_three(&change.target))
     {
         rests
             .entry(change.target.clone())
@@ -126,7 +150,9 @@ pub fn prepare(
     let mut motions = BTreeMap::new();
     let mut explicit_pos = BTreeSet::new();
     for (slot, op) in ticket.run.put.iter().enumerate() {
-        if let Op::Anim(anim) = op {
+        if let Op::Anim(anim) = op
+            && !is_three(&anim.target)
+        {
             rests
                 .entry(anim.target.clone())
                 .or_insert_with(Rest::default)
@@ -299,12 +325,19 @@ pub fn prepare(
             return Err(PrepareError::OverResidency);
         }
     }
+    // A capped scene whose own work passes its cap can never be admitted: stop counting there.
+    let mut total = PaintWork::default();
     for (id, object) in &mut after.objects {
-        object.work = match before.objects.get(id) {
-            Some(old) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => old.work,
-            _ => PaintWork::of(&object.item.primitives),
+        object.work = match (before.objects.get(id), paint_cap) {
+            (Some(old), _) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => {
+                old.work
+            }
+            (_, None) => PaintWork::of(&object.item.primitives),
+            (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap)
+                .ok_or(PrepareError::OverResidency)?,
         };
-        if !object.work.fits_builds() {
+        total = total + object.work;
+        if !object.work.fits_builds() || paint_cap.is_some_and(|cap| !total.fits(cap)) {
             return Err(PrepareError::OverResidency);
         }
     }
@@ -313,6 +346,77 @@ pub fn prepare(
         after.objects = BTreeMap::new();
         after.handles = BTreeMap::new();
     }
+    let colors: HashMap<&WireId, Color> = ticket
+        .run
+        .set
+        .iter()
+        .filter(|change| is_three(&change.target))
+        .filter_map(|change| change.color.map(|color| (&change.target, color)))
+        .collect();
+    let mut views = Vec::with_capacity(ticket.views.len());
+    let mut scratch = None;
+    for update in &ticket.views {
+        build.check_cancel()?;
+        let Some(input) = &update.input else {
+            after.views.remove(&update.id);
+            continue;
+        };
+        let geometry = tessellate_view(
+            input,
+            before.views.get(&update.id).map(|view| &**view),
+            &colors,
+            &theme,
+            cancel,
+            scratch.get_or_insert_with(MeshScratch::new),
+        )
+        .map_err(|error| match error {
+            MeshError::Cancelled => PrepareError::Cancelled,
+            _ => PrepareError::OverResidency,
+        })?;
+        let geometry = Arc::new(geometry);
+        after.views.insert(update.id.clone(), Arc::clone(&geometry));
+        views.push(PreparedView {
+            view: input.handle,
+            geometry,
+        });
+    }
+    let scratch_bytes = scratch.as_ref().map_or(0, MeshScratch::bytes);
+    if !colors.is_empty() {
+        // A colour-only view keeps its inputs, so it reshades the predecessor's geometry.
+        for (id, old) in &before.views {
+            if ticket.views.iter().any(|update| update.id == *id)
+                || !old
+                    .solids
+                    .iter()
+                    .any(|solid| colors.contains_key(&solid.id))
+            {
+                continue;
+            }
+            build.check_cancel()?;
+            let geometry = Arc::new(old.recolored(&colors, &theme));
+            after.views.insert(id.clone(), Arc::clone(&geometry));
+            views.push(PreparedView {
+                view: old.handle,
+                geometry,
+            });
+        }
+    }
+    if after.views.is_empty() {
+        // As for the 2D maps: the last removal leaves a root leaf the index charge doesn't count.
+        after.views = BTreeMap::new();
+    }
+    let view_bytes: usize = views
+        .iter()
+        .map(|view| {
+            let id = after
+                .views
+                .iter()
+                .find(|(_, geometry)| Arc::ptr_eq(geometry, &view.geometry))
+                .map(|(id, _)| id);
+            view.geometry
+                .marginal_bytes(id.and_then(|id| before.views.get(id)).map(|old| &**old))
+        })
+        .sum();
     let mut items: Vec<_> = after
         .objects
         .iter()
@@ -338,7 +442,9 @@ pub fn prepare(
         + after.index_bytes()
         + items.capacity() * size_of::<Item>()
         + removed.capacity() * size_of::<Handle>()
-        + glides.capacity() * size_of::<Glide>();
+        + glides.capacity() * size_of::<Glide>()
+        + views.capacity() * size_of::<PreparedView>()
+        + view_bytes;
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
     }
@@ -347,13 +453,16 @@ pub fn prepare(
     build.check_cancel()?;
     // Only preparation reads the sizing facts, so the held result keeps none.
     ticket.path_scales.clear();
+    ticket.views = Vec::new();
     Ok(PreparedStep {
         index: ticket.revision - 1,
         display: DisplayList { items },
         removed,
         glides,
+        views,
         after,
         resident_bytes,
+        scratch_bytes,
         ticket,
         base: Arc::clone(&before.version),
         theme,
@@ -361,6 +470,7 @@ pub fn prepare(
 }
 
 /// Rebuilds semantic state and layout together, skipping preparations later cuts drop.
+/// Each step prepares under `paint_cap` when one is given, as [`PrepareInput::with_paint_cap`].
 /// # Errors
 /// A failed kept preparation identifies its revision; invalid semantic input uses zero.
 pub fn recover(
@@ -370,6 +480,7 @@ pub fn recover(
     theme: &Arc<Theme>,
     measure: &mut dyn TextMeasure,
     cancel: &AtomicBool,
+    paint_cap: Option<PaintWork>,
 ) -> Result<(SceneState, LayoutState), RecoveryError> {
     if log.len() > crate::limits::MAX_STEPS * 2 {
         return Err(crate::StepError::new(ErrorCode::TooLong).into());
@@ -403,7 +514,8 @@ pub fn recover(
                             surface,
                             Arc::clone(theme),
                         )
-                        .map_err(|(error, _)| error)?;
+                        .map_err(|(error, _)| error)?
+                        .with_paint_cap(paint_cap);
                         let prepared = prepare(input, measure, cancel)?;
                         prepared.validate(scene, before)?;
                         Ok::<_, PrepareError>(prepared.after)
@@ -439,13 +551,21 @@ pub fn recover_all(
     theme: &Arc<Theme>,
     measure: &mut dyn TextMeasure,
     cancel: &AtomicBool,
+    paint_cap: Option<PaintWork>,
 ) -> (Vec<SceneRecovery>, GlobalBudget) {
     let mut global = GlobalBudget::default();
     let results = sources
         .iter()
         .map(|(header, log)| -> Result<_, RecoveryError> {
-            let (mut scene, layout) =
-                recover((*header).clone(), log, surface, theme, measure, cancel)?;
+            let (mut scene, layout) = recover(
+                (*header).clone(),
+                log,
+                surface,
+                theme,
+                measure,
+                cancel,
+                paint_cap,
+            )?;
             scene.bind(&mut global)?;
             Ok((scene, layout))
         })
@@ -670,6 +790,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
                 references: parent.iter().cloned().collect(),
                 parent,
                 work,
+                three: None,
             },
         );
     }

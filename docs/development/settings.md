@@ -11,6 +11,18 @@ directory.
 
 ## Shell editor
 
+Accounts also composes Claude Code through `presence/settings/claude.rs`. The plain
+`claude_accounts.rs` reducer owns only session-fenced snapshots, pending commands and whether
+the Connect guidance is expanded. A new connection must supply its snapshot before commands
+are enabled; a stale generation cannot change the row. An enqueue never changes the displayed
+connection state. A failed send stays visible until an explicit successful retry.
+
+The first Connect action expands the managed-policy notice and manual sign-in guidance without
+sending an operation. Only the second action sends Connect. Discovery's authoritative `Finding`
+state removes that action until a settled SignedOut snapshot arrives. Disconnect uses the shared
+Cancel-first confirmation and rechecks the session and allowed operation when confirmed.
+No login URL, code or credential contents reach the shell. See [Claude Code](claude-code.md).
+
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General** and **Accounts**.
 `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
@@ -28,7 +40,7 @@ value without sending it. The user-name field maps blank input to `None`.
 
 Every accepted field operation, including an inline assistant rename from Tasks, enters one
 FIFO. Only `answer: true` consumes its head and clears that field's saving state. The preceding
-settings error (`SettingsRefused` or `ConfigUnreadable`) belongs to that head; any other
+settings error (`SettingsRefused`, `ConfigUnreadable` or `VoiceUnavailable`) belongs to that head; any other
 `UserError` is a general brain notice and never fails a pending save. `answer: false` updates
 saved values but never completes an operation. Errors remain after the refused answer. An answer to another field cannot erase
 them. A successful retry of the field that produced the dock notice clears that notice and
@@ -184,6 +196,32 @@ than growing the window with the text. The existing Settings content region owns
 | `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
 | `show_in_taskbar` | boolean | `false` |
+| `[voice] talk_back` | boolean | `false` |
+| `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
+
+**Voice settings** live in a `[voice]` table. `SetTalkBack` and `SetSttUnload` save
+`talk_back` and `stt_unload` through the same queue and atomic save as every other change, and
+`SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
+as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
+a table replaces it with a table. Every other key in the table survives each write, including
+`installed` and `removing`, which the voice installer will own. Both list parts by their folder
+names, `speech-input` and `spoken-replies`.
+
+`removing` names a removal that hasn't finished. At start-up, before anything is served, the
+brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a
+write that takes the part out of `removing`, under epoch 0 like the default model. Every
+folder from the drive's root down to `models` stays open while the part is deleted, and the
+deletion never follows a reparse point: a junction or link on the way, or a folder another
+account could change, deletes nothing and leaves the part listed. A folder
+that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
+start tries again. An unknown name is never deleted, and stays in the list.
+
+`InstallVoice`, `RemoveVoice` and `CancelVoiceInstall` already travel, but this build refuses
+them until the installer lands: each is staged in queue order like any change, then refused with
+`Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. The refusal comes
+after the config read, so while `config.toml` is unreadable they're answered `ConfigUnreadable`
+like every other change. `VoiceView` and
+`PartState` exist in `crates/protocol`, and nothing sends them yet.
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
@@ -223,7 +261,8 @@ sequenceDiagram
   Changes that arrive meanwhile wait and are applied in order.
 - Each change gets exactly one `Settings` with `answer: true` back, in order, while the
   connection that sent it lasts. A refused or failed change gets an `Error` first
-  (`ConfigUnreadable` for a bad file, otherwise `SettingsRefused`), then the unchanged view, so
+  (`ConfigUnreadable` for a bad file, `VoiceUnavailable` for an installer op, otherwise
+  `SettingsRefused`), then the unchanged view, so
   the shell's field goes back to what's saved. An `Error` only ever comes just before an
   `answer: true` view. A `Settings` with `answer: false` answers nothing: it's
   the connection's first frame, or the settled settings after a change another connection sent.

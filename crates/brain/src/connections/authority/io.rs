@@ -136,6 +136,48 @@ pub(crate) fn read(
     Ok(Secret::new(bytes))
 }
 
+/// Reads staged chunks without authorizing them; the caller must still validate and CAS.
+///
+/// # Errors
+/// Unsettled for a missing or wrong-length chunk, Store for a refused read.
+pub(crate) fn read_pending(
+    store: &dyn CredentialStore,
+    service: &str,
+    plan: &WritePlan,
+) -> Result<SecretBytes, AuthorityError> {
+    read_pending_within(store, service, plan, SETTLE, &System)
+}
+
+pub(super) fn read_pending_within(
+    store: &dyn CredentialStore,
+    service: &str,
+    plan: &WritePlan,
+    settle: Duration,
+    clock: &dyn Clock,
+) -> Result<SecretBytes, AuthorityError> {
+    let deadline = clock.now() + settle;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(plan.layout.bytes()));
+    for index in 0..plan.layout.chunks() {
+        let name = target(service, plan.kind, plan.generation, index);
+        loop {
+            let found = store.get(&name)?;
+            let now = clock.now();
+            if now >= deadline {
+                return Err(AuthorityError::Unsettled);
+            }
+            if let Some(found) = found {
+                if found.expose().len() != plan.layout.chunk_len(index) {
+                    return Err(AuthorityError::Unsettled);
+                }
+                bytes.extend_from_slice(found.expose());
+                break;
+            }
+            clock.sleep(POLL.min(deadline - now));
+        }
+    }
+    Ok(Secret::new(bytes))
+}
+
 /// Deletes a retired generation's names, then reads each once.
 pub(crate) fn sweep(store: &dyn CredentialStore, service: &str, retired: &Retired) -> Observed {
     let names: Vec<String> = (0..retired.layout.chunks())

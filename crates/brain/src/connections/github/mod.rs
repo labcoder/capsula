@@ -1,7 +1,11 @@
 //! Closed GitHub destinations and checked transient credentials; no account state lives here.
 
+pub mod api;
+pub mod issues;
+
 use std::fmt;
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -164,7 +168,7 @@ pub enum GitHubEndpoint {
         /// The checked owner/repository destination.
         repo: RepoName,
         /// Serialized title/body, wiped when this endpoint drops.
-        body: Secret<Zeroizing<Vec<u8>>>,
+        body: Secret<issues::IssuePayload>,
     },
     /// Read one bounded issue page for exact-match lookup.
     Issues {
@@ -252,6 +256,13 @@ impl GitHubEndpoint {
             Self::User { .. } => 64 * 1024,
             _ => super::http_client::MAX_BODY_BYTES,
         }
+    }
+
+    pub(super) fn deadline(&self) -> Duration {
+        Duration::from_secs(match self {
+            Self::CreateIssue { .. } | Self::Issues { .. } => 30,
+            _ => 15,
+        })
     }
 }
 
