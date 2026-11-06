@@ -14,6 +14,28 @@ impl Candidate {
             + self.history_bytes
             + self.created.capacity() * size_of::<(WireId, Handle)>()
             + heap::btree::<Handle, f32>(self.path_scales.len())
+            + views_bytes(&self.views)
+    }
+}
+
+/// A ticket's view updates: the vector, ids and inputs, not the sources objects share.
+pub(crate) fn views_bytes(views: &Vec<crate::three::view::ViewUpdate>) -> usize {
+    views.capacity() * size_of::<crate::three::view::ViewUpdate>()
+        + views
+            .iter()
+            .map(|update| {
+                update.id.as_str().len()
+                    + update.input.as_ref().map_or(0, |input| input.owned_bytes())
+            })
+            .sum::<usize>()
+}
+
+impl Preparation {
+    /// Cached bytes this ticket retains: its source, compiled input, view updates and sizing
+    /// facts, not the rest of its scene. Shared allocations count once per ticket for queue
+    /// attribution.
+    pub fn attributed_bytes(&self) -> usize {
+        self.retained_bytes
     }
 }
 
@@ -80,6 +102,10 @@ pub(super) fn owned((id, object): (&WireId, &Object)) -> usize {
         + object.work.data.as_ref().map_or(0, |_| {
             heap::ARC_HEADER + object.work.usage.marks * size_of::<Point>()
         })
+        + object
+            .three
+            .as_ref()
+            .map_or(0, |three| heap::source_bytes(three))
 }
 
 /// Estimated bytes of a semantic object map, for queue attribution rather than a bound.

@@ -2,8 +2,10 @@
 //! the size and SHA-256 it must have. The brain downloads and checks against this table, and
 //! `cargo xtask voice-assets` links dev copies from it; nothing else lists these files.
 
-/// One of the two parts a user installs separately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+/// One of the two parts a user installs separately. Append only: the tags travel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VoicePart {
     /// Parakeet TDT 0.6B v3 (int8), speech to text.
     SpeechInput,

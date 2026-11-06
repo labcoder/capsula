@@ -18,6 +18,12 @@ use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::platform::{self, SessionLock};
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "layer 5b wires authority paste staging")
+)]
+pub(crate) mod staging;
+
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
 
@@ -49,6 +55,7 @@ pub struct Vault<S: CredentialStore> {
     authority: Authority,
     store: S,
     service: String,
+    paste: Option<authority::WritePlan>,
     _session: SessionLock,
 }
 
@@ -67,6 +74,7 @@ impl<S: CredentialStore> Vault<S> {
         use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
         match op {
             KeyOp::Remove => {
+                self.paste = None;
                 self.remove(&[Kind::AnthropicKey], None)?;
                 Ok(None)
             }
@@ -98,6 +106,7 @@ impl<S: CredentialStore> Vault<S> {
             authority,
             store,
             service: service.to_owned(),
+            paste: None,
             _session: session,
         };
         vault.sweep_legacy();
@@ -396,6 +405,16 @@ impl<S: CredentialStore> Vault<S> {
         marker: Option<SignOutMarker>,
     ) -> Result<(), VaultError> {
         let revision = self.authority.current(kind)?.revision;
+        self.write_expected(kind, revision, bytes, marker)
+    }
+
+    fn write_expected(
+        &mut self,
+        kind: Kind,
+        revision: u64,
+        bytes: &SecretBytes,
+        marker: Option<SignOutMarker>,
+    ) -> Result<(), VaultError> {
         let plan = self.authority.begin(kind, revision, bytes.expose().len())?;
         let verified = generation::write(&self.store, &self.service, plan, bytes)?;
         self.authority.activate(verified, marker)?;

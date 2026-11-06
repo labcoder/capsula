@@ -9,6 +9,13 @@ use gpui_kit::{MouseButton, Pixels, Point};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Generation(u64);
 
+#[cfg(test)]
+impl Generation {
+    pub(crate) fn new(n: u64) -> Self {
+        Self(n)
+    }
+}
+
 /// How a drag ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum End {

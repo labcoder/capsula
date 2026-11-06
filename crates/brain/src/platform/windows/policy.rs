@@ -126,19 +126,6 @@ pub fn system_env() -> io::Result<Vec<(OsString, OsString)>> {
     ])
 }
 
-/// The program Claude Code's `auth login` opens its sign-in page with. A second `explorer.exe`
-/// hands the URL to the running shell, which opens the default browser in the user's own
-/// environment, so the browser never inherits the launch's owned folders.
-///
-/// # Errors
-/// When the OS doesn't give the Windows folder.
-pub fn login_browser() -> io::Result<OsString> {
-    // SAFETY: `buf` holds `len` writable units for the duration of each call.
-    let mut path = folder(|buf, len| unsafe { GetSystemWindowsDirectoryW(buf, len) })?;
-    path.push(r"\explorer.exe");
-    Ok(path)
-}
-
 /// Calls `read` with a growing buffer until the folder fits.
 fn folder(read: impl Fn(*mut u16, u32) -> u32) -> io::Result<OsString> {
     let mut buf = vec![0_u16; 261];

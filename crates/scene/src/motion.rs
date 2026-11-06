@@ -866,6 +866,7 @@ impl SceneView {
             .iter()
             .zip(finished)
             .filter_map(|(node, done)| done.then_some(node.handle))
+            .chain(self.layout.three_handles())
             .collect();
         handles.sort_unstable();
         handles
