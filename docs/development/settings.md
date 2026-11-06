@@ -28,7 +28,7 @@ value without sending it. The user-name field maps blank input to `None`.
 
 Every accepted field operation, including an inline assistant rename from Tasks, enters one
 FIFO. Only `answer: true` consumes its head and clears that field's saving state. The preceding
-settings error (`SettingsRefused` or `ConfigUnreadable`) belongs to that head; any other
+settings error (`SettingsRefused`, `ConfigUnreadable` or `VoiceUnavailable`) belongs to that head; any other
 `UserError` is a general brain notice and never fails a pending save. `answer: false` updates
 saved values but never completes an operation. Errors remain after the refused answer. An answer to another field cannot erase
 them. A successful retry of the field that produced the dock notice clears that notice and
@@ -192,7 +192,17 @@ than growing the window with the text. The existing Settings content region owns
 `SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
 as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
 a table replaces it with a table. Every other key in the table survives each write, including
-`installed` and `removing`, which the voice installer will own.
+`installed` and `removing`, which the voice installer will own. Both list parts by their folder
+names, `speech-input` and `spoken-replies`.
+
+`removing` names a removal that hasn't finished. At start-up, before anything is served, the
+brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a
+write that takes the part out of `removing`, under epoch 0 like the default model. Every
+folder from the drive's root down to `models` stays open while the part is deleted, and the
+deletion never follows a reparse point: a junction or link on the way, or a folder another
+account could change, deletes nothing and leaves the part listed. A folder
+that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
+start tries again. An unknown name is never deleted, and stays in the list.
 
 `InstallVoice`, `RemoveVoice` and `CancelVoiceInstall` already travel, but this build refuses
 them until the installer lands: each is staged in queue order like any change, then refused with
@@ -239,7 +249,8 @@ sequenceDiagram
   Changes that arrive meanwhile wait and are applied in order.
 - Each change gets exactly one `Settings` with `answer: true` back, in order, while the
   connection that sent it lasts. A refused or failed change gets an `Error` first
-  (`ConfigUnreadable` for a bad file, otherwise `SettingsRefused`), then the unchanged view, so
+  (`ConfigUnreadable` for a bad file, `VoiceUnavailable` for an installer op, otherwise
+  `SettingsRefused`), then the unchanged view, so
   the shell's field goes back to what's saved. An `Error` only ever comes just before an
   `answer: true` view. A `Settings` with `answer: false` answers nothing: it's
   the connection's first frame, or the settled settings after a change another connection sent.
