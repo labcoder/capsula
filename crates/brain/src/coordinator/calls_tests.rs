@@ -509,7 +509,7 @@ const NEW_TASK: &[u8] = br#"{"title":"Trip plan","focus":true}"#;
 const QUIET_TASK: &[u8] = br#"{"title":"Trip plan","focus":false}"#;
 const CREATED: ThreadId = ThreadId(4);
 
-/// Sends a create_task call, returning what it came to and, when it sent a write, the id it
+/// Sends a `create_task` call, returning what it came to and, when it sent a write, the id it
 /// reserved and the follow-up it carries.
 fn creating(
     core: &mut Coordinator,
@@ -529,6 +529,10 @@ fn creating(
     (dispatch, write)
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the tool's own focus argument"
+)]
 fn created(caller: &Caller, focus: bool) -> Input {
     Input::CallCommitted {
         key: caller.key(),

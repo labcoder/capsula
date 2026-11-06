@@ -335,7 +335,7 @@ fn a_reservation_with_no_row_behind_it_survives_a_purge_and_a_reopen() {
         .query_row("SELECT max(id) FROM threads", [], |row| row.get(0))
         .expect("max");
     assert!(u64::try_from(max).expect("positive") < reserved.0);
-    super::tests::purge(&mut store);
+    assert_eq!(super::tests::purge(&mut store), crate::store::Swap::Done);
     drop(store);
     let (mut store, high) = reopened(&scratch);
     assert_eq!(high, reserved);
