@@ -325,6 +325,8 @@ pub enum EngineFailure {
     TurnCap,
     /// Claude Code's stdout broke its rules.
     ClaudeStream(ClaudeStreamFailure),
+    /// Claude Code refused or failed the question for a reason the shell names.
+    Claude(UserError),
 }
 
 /// How Claude Code's stdout broke its rules.
