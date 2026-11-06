@@ -6,3 +6,4 @@ pub(crate) mod install;
 pub(crate) mod lane;
 pub(crate) mod policy;
 pub(crate) mod stream;
+pub(crate) mod supervisor;

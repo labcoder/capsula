@@ -2,13 +2,19 @@
 //! A1 owns the Anthropic key's half of the view; every Connections frame is put together from
 //! both at the moment it's sent.
 
+use std::sync::Arc;
+
 use kumochi_protocol::message::{
-    ClaudeCodeView, ConnectionOp, ConnectionsView, ControlToShell, Unsupported,
+    ClaudeCodeView, ConnectionOp, ConnectionsView, ControlToShell, ThreadId, Unsupported,
 };
 
 use super::{Brain, Full, Link};
+use crate::coordinator::StoreOp;
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
+use crate::engines::claude_code::supervisor::{
+    self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
+};
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +48,8 @@ pub(crate) struct Claude {
     again: bool,
     /// A Disconnect is still to finish.
     cleaning: bool,
+    /// The launches admitted, by thread, until each one's teardown is over.
+    launches: Vec<(ThreadId, Arc<Control>)>,
 }
 
 impl Default for Claude {
@@ -62,6 +70,7 @@ impl Claude {
             out: None,
             again: false,
             cleaning: false,
+            launches: Vec::new(),
         }
     }
 
@@ -107,6 +116,7 @@ impl Claude {
         self.out = admitted.then_some(work);
         if !admitted {
             self.view = ClaudeCodeView::Unavailable;
+            self.revoke_all();
         }
         admitted
     }
@@ -160,6 +170,9 @@ impl Claude {
             }
             // A Disconnect the lane can't take leaves nothing marked, so it may be asked again.
             ConnectionOp::DisconnectClaudeCode if signs_in && self.finds && !self.cleaning => {
+                // Before the Disconnect is queued, so the lane ends every launch before it signs
+                // out.
+                self.revoke_all();
                 self.cleaning = self.begin(Work::Disconnect { logout: true });
                 if self.cleaning {
                     self.view = ClaudeCodeView::CleanupPending;
@@ -207,7 +220,70 @@ impl Claude {
         if std::mem::take(&mut self.again) {
             self.find();
         }
+        // A settled view that isn't Ready ends every launch; one still being found doesn't.
+        if self.out.is_none() && !matches!(self.view, ClaudeCodeView::Ready { .. }) {
+            self.revoke_all();
+        }
         true
+    }
+
+    /// Queues a question launch behind whatever the lane is doing. Its deadline is fixed now.
+    ///
+    /// # Errors
+    /// [`LaunchRefused::NotReady`] unless Claude Code is Ready under the decided sign-in store,
+    /// on, and no Disconnect is pending; [`LaunchRefused::Lifetime`] over [`MAX_LAUNCH`];
+    /// [`LaunchRefused::Busy`] when the lane's queue is full. Nothing is queued then.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b's engine is the first caller")
+    )]
+    pub(crate) fn launch(&mut self, question: Question) -> Result<Launch, LaunchRefused> {
+        self.launches.retain(|(_, control)| !control.is_ended());
+        let ready = matches!(self.view, ClaudeCodeView::Ready { .. })
+            && self.sign_in == SignInStore::FileWithDacl
+            && self.finds
+            && !self.cleaning;
+        let lane = self
+            .lane
+            .as_ref()
+            .filter(|_| ready)
+            .ok_or(LaunchRefused::NotReady)?;
+        if question.lifetime > MAX_LAUNCH {
+            return Err(LaunchRefused::Lifetime);
+        }
+        let thread = question.thread;
+        let (start, launch) = supervisor::admit(question);
+        let control = start.control();
+        if !lane.launch(start) {
+            return Err(LaunchRefused::Busy);
+        }
+        self.launches.push((thread, control));
+        Ok(launch)
+    }
+
+    /// Revokes every launch; each one's teardown runs on the lane before its next call.
+    fn revoke_all(&mut self) {
+        for (_, control) in self.launches.drain(..) {
+            control.withdraw();
+        }
+    }
+
+    /// Revokes a thread's launches as `op` deletes it, before the store sees it.
+    pub(crate) fn deleting(&mut self, op: &StoreOp) {
+        if let StoreOp::Delete { thread } = op {
+            self.revoke_thread(*thread);
+        }
+    }
+
+    /// Revokes `thread`'s launches.
+    fn revoke_thread(&mut self, thread: ThreadId) {
+        self.launches.retain(|(held, control)| {
+            if *held != thread {
+                return true;
+            }
+            control.withdraw();
+            false
+        });
     }
 
     pub(crate) async fn next(&mut self) -> Done {

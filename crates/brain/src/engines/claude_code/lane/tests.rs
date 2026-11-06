@@ -46,7 +46,8 @@ pub(crate) const V: ClaudeVersion = ClaudeVersion {
 /// Modes: `out` and `in` (signed out or in), `hang`, `version:N` (`--version` prints exactly N
 /// bytes), `status:N` (the status JSON padded to N bytes), `stderr:N` (N bytes of stderr first),
 /// `exit:N` (status exits N), `linger:PATH` (leaves a grandchild holding PATH and stdout),
-/// `loginhang` (`auth login` never ends) and `logoutfail` (`auth logout` exits 3). Whatever the
+/// `loginhang` (`auth login` never ends) and `logoutfail` (`auth logout` exits 3). A question
+/// (`-p`) runs as [`question`] says. Whatever the
 /// mode, `auth login` leaves a sign-in in the config folder, which `auth status` then reports and
 /// `auth logout` removes, noting whether the Disconnect marker was down.
 pub(crate) fn fake(args: Vec<OsString>) -> i32 {
@@ -74,6 +75,9 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         }
         "linger" => linger(Path::new(value)),
         _ => {}
+    }
+    if rest.first().is_some_and(|word| word == "-p") {
+        return question(kind);
     }
     let mut stdout = std::io::stdout();
     if rest.first().is_none_or(|word| word != "auth") {
@@ -123,6 +127,55 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
     }
 }
 
+/// The test's base folder, two above `CLAUDE_CONFIG_DIR`, wherever the start's working folder is.
+fn base_dir() -> PathBuf {
+    let config = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").expect("the lane sets it"));
+    config
+        .ancestors()
+        .nth(2)
+        .expect("the config folder is two below the base")
+        .to_owned()
+}
+
+/// A question: `echo` copies stdin to stdout and logs each read's length to `echo.log`,
+/// `deaf` never reads stdin, `flood` writes stdout until it can't, and any other mode exits.
+fn question(kind: &str) -> i32 {
+    match kind {
+        "echo" => {
+            let mut buffer = vec![0; 64 * 1024];
+            let mut stdin = std::io::stdin();
+            let mut stdout = std::io::stdout();
+            loop {
+                let read = stdin.read(&mut buffer).unwrap_or(0);
+                if read == 0 {
+                    return 0;
+                }
+                let mut log = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(base_dir().join("echo.log"))
+                    .expect("the base folder is writable");
+                writeln!(log, "{read}").expect("log");
+                if stdout
+                    .write_all(&buffer[..read])
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+                {
+                    return 0;
+                }
+            }
+        }
+        "deaf" => std::thread::sleep(Duration::from_secs(60)),
+        "flood" => {
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut stdout = std::io::stdout();
+            while stdout.write_all(&chunk).is_ok() {}
+        }
+        _ => {}
+    }
+    0
+}
+
 fn record(args: &[String]) {
     let env: Vec<String> = std::env::vars_os()
         .map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
@@ -130,8 +183,8 @@ fn record(args: &[String]) {
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("../../starts.log")
-        .expect("the working folder is writable");
+        .open(base_dir().join("starts.log"))
+        .expect("the base folder is writable");
     writeln!(log, "{}\t{}", args.join(" "), env.join("\u{1f}")).expect("log");
 }
 
@@ -265,6 +318,8 @@ pub(crate) fn host_finding(
         brain_job: Arc::new(Job::new().expect("brain job")),
         console: Stdio::Null,
         terminate: Job::terminate,
+        brain_exe: std::env::current_exe().expect("the test binary"),
+        runtime: tokio::runtime::Handle::current(),
     };
     (host, switches)
 }
@@ -1195,7 +1250,6 @@ async fn a_marker_that_cant_be_written_signs_nothing_out_and_deletes_nothing() {
     assert!(base.owned().join("config").exists());
     assert_no_recovery(&base, &base.owned().join("config")).await;
 }
-
 #[tokio::test]
 async fn a_newer_generation_ends_a_running_sign_in() {
     let base = Base::new("login-fenced");
