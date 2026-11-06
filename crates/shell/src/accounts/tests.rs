@@ -520,6 +520,32 @@ fn provider_sign_in_actions_survive_an_unchanged_signed_in_snapshot() {
 }
 
 #[test]
+fn sign_in_recovery_offer_uses_the_same_typed_policy_as_admission() {
+    for key in [
+        ErrorKey::AccountRefused,
+        ErrorKey::SignInNeeded,
+        ErrorKey::SessionEnded,
+        ErrorKey::RenewalUnconfirmed,
+    ] {
+        let mut accounts = Accounts::default();
+        receive(&mut accounts, signed_in(PlanState::Declined, None));
+        accounts.error(&error(key, vec![Action::SignIn]));
+        assert!(accounts.sign_in_again(), "{key:?}");
+        assert!(accounts.allows(AccountOp::SignIn), "{key:?}");
+        assert!(accounts.send(AccountOp::SignIn, |_| true));
+        accounts.error(&error(key, vec![Action::SignIn]));
+        assert!(accounts.sign_in_again());
+        assert!(!accounts.allows(AccountOp::SignIn));
+    }
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, signed_in(PlanState::Declined, None));
+    accounts.error(&error(ErrorKey::PlanUnavailable, vec![Action::SignIn]));
+    assert!(!accounts.sign_in_again());
+    assert!(!accounts.allows(AccountOp::SignIn));
+    assert!(accounts.allows(AccountOp::EnablePlan));
+}
+
+#[test]
 fn sign_in_actions_never_bypass_waiting_or_revocation_backlog() {
     let mut accounts = Accounts::default();
     receive(&mut accounts, signed_in(PlanState::Enabled, None));

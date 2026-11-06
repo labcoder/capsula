@@ -150,6 +150,15 @@ impl Presence {
             self.stop_run(stop, cx);
         }
         self.grant(applied.credit);
+        if phase == Phase::Done
+            && applied.visible
+            && self
+                .runs
+                .shown()
+                .is_some_and(|shown| shown.run == run && shown.done)
+        {
+            self.chat.update(cx, |state, _| state.settled(thread, run));
+        }
         for model in [&self.threads, &self.chat] {
             model.update(cx, |state, cx| {
                 state.run_state(thread);
@@ -243,15 +252,9 @@ impl Presence {
             .is_some_and(|session| session.generation() == generation)
         {
             let credit = match message {
-                message @ (DataToShell::ThreadList { .. }
-                | DataToShell::Page { .. }
-                | DataToShell::PageFailed { .. }) => {
-                    let request = match &message {
-                        DataToShell::ThreadList { request, .. }
-                        | DataToShell::Page { request, .. }
-                        | DataToShell::PageFailed { request } => *request,
-                        _ => unreachable!("the match above selects page replies"),
-                    };
+                message @ (DataToShell::ThreadList { request, .. }
+                | DataToShell::Page { request, .. }
+                | DataToShell::PageFailed { request }) => {
                     let model = if self.chat.read(cx).owns_request(request) {
                         &self.chat
                     } else {

@@ -38,6 +38,10 @@ pub(crate) enum Text {
     PerchUntitled,
 
     // Turns
+    ChatLiveCut,
+    ChatEmpty,
+    ChatLoading,
+    ChatHistoryFailed,
     TurnBusy,
     TurnOffline,
     TurnTooLong,
@@ -208,6 +212,10 @@ impl Text {
         PerchUntitled,
 
         // Turns
+        ChatLiveCut,
+        ChatEmpty,
+        ChatLoading,
+        ChatHistoryFailed,
         TurnBusy,
         TurnOffline,
         TurnTooLong,
@@ -380,6 +388,10 @@ impl Text {
             Self::PerchUntitled => "carry-perch-untitled",
 
             // Turns
+            Self::ChatLiveCut => "chat-live-cut",
+            Self::ChatEmpty => "chat-empty",
+            Self::ChatLoading => "chat-loading",
+            Self::ChatHistoryFailed => "chat-history-failed",
             Self::TurnBusy => "turn-busy",
             Self::TurnOffline => "turn-offline",
             Self::TurnTooLong => "turn-too-long",
