@@ -8,6 +8,9 @@ use crate::voice::reply::Heard;
 /// The run's stored point: segment, sample and text, each NULL when unknown.
 type Stored = (Option<i64>, Option<i64>, Option<i64>);
 
+/// A `tool_calls` row, in column order.
+type Call = (i64, i64, String, String, String, Vec<u8>, String, i64);
+
 fn point(conn: &Connection, run: RunId) -> Stored {
     conn.query_row(
         "SELECT heard_segment, heard_sample, heard_text FROM runs WHERE id = ?1",
@@ -102,7 +105,6 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
         .collect::<Result<_, _>>()
         .expect("rowids");
     assert_eq!(hits, [9], "the index still finds it");
-    type Call = (i64, i64, String, String, String, Vec<u8>, String, i64);
     let call: Call = store
         .conn
         .query_row(
