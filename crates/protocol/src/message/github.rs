@@ -10,6 +10,9 @@ use super::Cleanup;
 /// The most repositories advertised in one connection view (guess).
 pub const MAX_GITHUB_REPOS: usize = 200;
 
+/// The only page where a GitHub device challenge may be entered.
+pub const VERIFICATION_URI: &str = "https://github.com/login/device";
+
 /// A content-free refusal of a GitHub or issue wire value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("invalid github or issue value")]
@@ -124,7 +127,7 @@ pub enum GitHubView {
     /// No usable connection, even if credential cleanup failed.
     SignedOut {
         /// Whether local credential removal completed.
-        cleanup: Cleanup,
+        cleanup: Option<Cleanup>,
     },
     /// The initial device-code request is pending.
     Requesting,

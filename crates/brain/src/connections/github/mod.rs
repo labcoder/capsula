@@ -1,6 +1,7 @@
 //! Closed GitHub destinations and checked transient credentials; no account state lives here.
 
 pub mod api;
+pub mod device;
 
 use std::fmt;
 use std::ops::RangeInclusive;

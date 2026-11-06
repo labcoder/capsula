@@ -91,3 +91,36 @@ Timeout, transport loss, redirects, malformed success and unexpected non-4xx
 statuses remain uncertain. Hand-written Debug never prints credentials, user
 codes, logins, repository names or provider text. Issue posting and matching are
 a later `github/issues.rs` layer and add no caller here.
+
+## Device sign-in machine
+
+The sans-I/O device machine owns one attempt and one connection generation.
+It emits work rather than starting requests, timers, browser launches or
+credential jobs. The runtime adapter supplies completions with their original
+attempt/generation stamp. A changed stamp, expired deadline or terminal state
+makes a late completion inert. Sign out advances the shared generation before
+emitting cancellation and serialized removal, so token consumers can fence
+their final dispatch. A queued save is never cancelled by dropping its result
+receiver: removal must drain behind it. Cancel or expiry during a save also
+queues removal, because that write may already have passed its fence check.
+
+The first poll waits the code reply's interval. Each pending reply schedules
+another wait; slow_down increases the interval by five seconds, takes the larger
+of that and the reply's interval, and caps it at 900 seconds. The attempt ends
+at its expiry even when a poll or identity read is outstanding. The API accepts
+device error bodies on 200 and RFC 8628's 400; only 200 can yield a bearer.
+Unknown codes and malformed replies end the attempt. Expiring token shapes
+remain unsupported. No retry wait is derived from REST rate metadata.
+
+The approving identity is read before saving. Only a successful save produces
+Connected. Startup checks a loaded bearer with the same user endpoint; a 401
+drops it and shows NeedsSignIn. Cleanup outcomes remain signed out, including
+a failed durable removal. A clean SignedOut view has no cleanup warning.
+Repository defaults are displayed and accepted only by exact membership in the
+fetched list, preserving GitHub's spelling.
+
+The verification page is the protocol's VERIFICATION_URI constant. The API
+checks the reply against it; neither the view nor a brain effect carries a
+provider-supplied URL. The shell's connection UI opens the constant with GPUI's
+open_url, guarded against fixture runs. The machine and protocol are separate
+from the runtime credential adapter and the connection UI.

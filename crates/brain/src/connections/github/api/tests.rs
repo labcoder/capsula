@@ -462,7 +462,11 @@ async fn token_reply_maps_only_closed_codes_and_checks_the_bearer() {
         let reply = poll_device_token(&Script::json(&json!({"error":wire})), "client", &code())
             .await
             .unwrap();
-        let TokenReply::Error(kind) = reply else {
+        let TokenReply::Error {
+            code: kind,
+            interval_s: None,
+        } = reply
+        else {
             panic!("closed polling refusal")
         };
         assert_eq!(kind, expected);
@@ -873,11 +877,11 @@ async fn all_calls_preserve_closed_transport_errors_and_refused_status_metadata(
         };
         for status in [201, 301, 400, 401, 403, 429, 500] {
             let http = Script::new(Ok(response(status, SENTINEL.as_bytes().to_vec(), meta)));
-            assert_eq!(
-                invoke(&http, call).await,
-                Err(ApiError::Refused { status, meta }),
-                "{call:?}"
-            );
+            let expected = match (call, status) {
+                (Call::Token, 400) => ApiError::Response,
+                _ => ApiError::Refused { status, meta },
+            };
+            assert_eq!(invoke(&http, call).await, Err(expected), "{call:?}");
         }
         for status in [403, 429] {
             let http = Script::new(Ok(response(status, vec![b' '; cap(call) + 1], meta)));
@@ -1095,7 +1099,11 @@ async fn foreign_reply_text_and_request_ids_never_enter_errors_debug_or_logs() {
     )
     .await
     .unwrap();
-    let TokenReply::Error(error) = reply else {
+    let TokenReply::Error {
+        code: error,
+        interval_s: None,
+    } = reply
+    else {
         panic!("closed provider code")
     };
     assert_eq!(error, TokenError::Other);
@@ -1110,4 +1118,73 @@ async fn foreign_reply_text_and_request_ids_never_enter_errors_debug_or_logs() {
     let logs = captured.text();
     assert!(logs.contains("p2b1-capture-control"));
     assert_redacted(&logs);
+}
+
+#[tokio::test]
+async fn device_errors_accept_only_200_or_400_and_tokens_require_200() {
+    for status in [200, 400] {
+        for (interval, expected) in [(None, None), (Some(1), Some(1)), (Some(900), Some(900))] {
+            let mut body = json!({"error":"slow_down"});
+            if let Some(interval) = interval {
+                body["interval"] = json!(interval);
+            }
+            let http = Script::new(Ok(response(
+                status,
+                serde_json::to_vec(&body).unwrap(),
+                ResponseMeta::default(),
+            )));
+            let TokenReply::Error { code, interval_s } =
+                poll_device_token(&http, "client", &code()).await.unwrap()
+            else {
+                panic!("error reply")
+            };
+            assert_eq!(code, TokenError::SlowDown);
+            assert_eq!(interval_s, expected);
+        }
+        for invalid in [
+            json!(0),
+            json!(901),
+            json!(-1),
+            json!(1.5),
+            json!("5"),
+            Value::Null,
+            json!(65536),
+        ] {
+            let http = Script::new(Ok(response(
+                status,
+                serde_json::to_vec(&json!({"error":"slow_down", "interval":invalid})).unwrap(),
+                ResponseMeta::default(),
+            )));
+            assert_eq!(
+                poll_device_token(&http, "client", &code())
+                    .await
+                    .unwrap_err(),
+                ApiError::Response
+            );
+        }
+    }
+    let body = serde_json::to_vec(&bearer()).unwrap();
+    let http = Script::new(Ok(response(400, body, ResponseMeta::default())));
+    assert_eq!(
+        poll_device_token(&http, "client", &code())
+            .await
+            .unwrap_err(),
+        ApiError::Response
+    );
+    for status in [201, 401, 403, 429, 500] {
+        let http = Script::new(Ok(response(
+            status,
+            br#"{"error":"authorization_pending"}"#.to_vec(),
+            ResponseMeta::default(),
+        )));
+        assert_eq!(
+            poll_device_token(&http, "client", &code())
+                .await
+                .unwrap_err(),
+            ApiError::Refused {
+                status,
+                meta: ResponseMeta::default()
+            }
+        );
+    }
 }

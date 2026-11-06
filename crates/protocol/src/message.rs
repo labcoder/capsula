@@ -36,6 +36,7 @@ pub use error::{
 };
 pub use github::{
     GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+    VERIFICATION_URI,
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
