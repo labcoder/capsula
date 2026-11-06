@@ -492,7 +492,7 @@ fn oversized_event_cuts_encoded_utf8_and_advances_past_the_cut_event() {
     };
     assert!(text.is_char_boundary(bytes));
     assert_eq!(bytes, 15053);
-    let expected=json!({"quoted_history":[{"task":2,"title":"B","events":[{"event":10,"speaker":"user","text":&text[..15053]}],"cut":true,"next":30,"note":CUT}],"note":null,"duplicate_titles":false,"truncated":false}).to_string();
+    let expected=json!({"quoted_history":[{"task":2,"events":[{"event":10,"speaker":"user","text":&text[..15053]}],"cut":true,"next":30,"note":CUT,"title":"B"}],"note":null,"duplicate_titles":false,"truncated":false}).to_string();
     let actual = Snapshot::begin(&store.conn)
         .unwrap()
         .render_recall(Origin::Kumo, &selected, &mut BTreeSet::new())
