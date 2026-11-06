@@ -12,6 +12,7 @@ use kumochi_protocol::message::{
     SettingsView, ThreadId, UserName,
 };
 use kumochi_protocol::tap;
+use kumochi_protocol::voice::VoicePart;
 use tokio::io::AsyncRead;
 
 use super::{Ended, Shell, duplex};
@@ -157,6 +158,65 @@ async fn a_held_write_never_holds_up_stop_and_the_changes_behind_it_wait() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(scratch.config().view().assistant_name.as_str(), "Cirrus");
+}
+
+#[tokio::test]
+async fn voice_installer_ops_are_refused_in_order_with_the_changes_around_them() {
+    let scratch = Scratch::new("settings-voice-dormant");
+    let mut brain = test_support::brain(&scratch, "0 text a\n5000 text never");
+    let release = brain.hold_config_write();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.settled().await;
+        shell.scenes().await;
+        shell.send(&rename("Nimbus")).await;
+        shell
+            .send(&op(SettingsOp::InstallVoice(VoicePart::SpokenReplies)))
+            .await;
+        shell.send(&op(SettingsOp::SetTalkBack(true))).await;
+        shell
+            .send(&op(SettingsOp::RemoveVoice(VoicePart::SpeechInput)))
+            .await;
+        shell.send(&op(SettingsOp::CancelVoiceInstall)).await;
+        // The run's answer means the brain has read every change above.
+        shell.submit("go").await;
+        let (run, thinking) = shell.state().await;
+        assert_eq!(thinking, Phase::Thinking);
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        shell.stop(run).await;
+        assert_eq!(shell.state().await, (run, Phase::Interrupted));
+        assert!(
+            shell.views.is_empty(),
+            "nothing answered past the held write"
+        );
+        release
+            .send(Gate::Write)
+            .expect("the write waits on the gate");
+        assert_eq!(shell.answer().await.assistant_name.as_str(), "Nimbus");
+        assert_eq!(shell.error().await, ErrorKey::VoiceUnavailable);
+        let refused = shell.answer().await;
+        assert_eq!(refused.assistant_name.as_str(), "Nimbus");
+        assert!(!refused.talk_back);
+        assert!(shell.answer().await.talk_back);
+        for _ in 0..2 {
+            assert_eq!(shell.error().await, ErrorKey::VoiceUnavailable);
+            assert!(shell.answer().await.talk_back);
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert!(scratch.config().view().talk_back);
+    let text = std::fs::read_to_string(scratch.db().with_file_name(CONFIG_FILE)).expect("readable");
+    let saved: toml::Table = text.parse().expect("parses");
+    assert!(
+        !saved["voice"]
+            .as_table()
+            .expect("a table")
+            .contains_key("installed")
+    );
 }
 
 #[tokio::test]
