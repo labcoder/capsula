@@ -520,13 +520,10 @@ impl Claude {
     }
 
     /// Forgets the launches whose teardown is over, unless an attempt's report that still counts
-    /// is to come.
+    /// is to come; one from an older generation still counts for an audit failure.
     fn prune(&mut self) {
-        let generation = self.generation;
-        self.launches.retain(|held| {
-            !held.control.is_ended()
-                || (held.due && !held.replaced && held.generation == generation)
-        });
+        self.launches
+            .retain(|held| !held.control.is_ended() || (held.due && !held.replaced));
     }
 
     /// One of the attempts' notes; true when the view may have changed.
@@ -564,16 +561,19 @@ impl Claude {
             return false;
         };
         held.due = false;
-        if held.replaced || held.generation != generation {
+        if held.replaced {
             return false;
         }
-        let version = held.version;
+        let (version, current) = (held.version, held.generation == generation);
         match outcome {
+            // An audit failure is evidence about the version, whatever generation it ran under.
             launch::Outcome::Audit(reason) => {
                 self.audit_failed(version, reason);
                 true
             }
-            launch::Outcome::SignedOut if matches!(self.view, ClaudeCodeView::Ready { .. }) => {
+            launch::Outcome::SignedOut
+                if current && matches!(self.view, ClaudeCodeView::Ready { .. }) =>
+            {
                 self.view = ClaudeCodeView::SignedOut { version };
                 self.revoke_all();
                 true

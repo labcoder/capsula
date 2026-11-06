@@ -1011,3 +1011,64 @@ async fn an_unanswered_ask_ends_at_the_question_deadline() {
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
     rig.close().await;
 }
+
+/// C5B1B2-H1, a held grant: a find while the round waits for its ask leaves the launch alone
+/// (C5a's S21), so the grant seeds it; the post-seed audit failure that follows, from a launch of
+/// an older generation, still quarantines the version.
+#[tokio::test]
+async fn a_failure_after_a_grant_held_across_a_find_still_quarantines() {
+    let script = synthetic_signed_in().init(|init| init["tools"] = json!(["mcp__kumochi__ping"]));
+    let mut rig = Rig::new("question-find-held-grant", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let ask = rig.drive(played.inputs.recv()).await;
+    assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    engines::answer(&played.asks, played.key, played.lease());
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Tools)]
+    );
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::AuditFailed(AuditFailed::Tools)
+    );
+    rig.settle().await;
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+    rig.close().await;
+}
+
+/// C5B1B2-H1, a late failure after the seed: the post-seed audit failed before the find, and its
+/// report reaches the core after it. It still quarantines the version.
+#[tokio::test]
+async fn a_post_seed_failure_reported_after_a_find_still_quarantines() {
+    let script = synthetic_signed_in().init(|init| init["tools"] = json!(["mcp__kumochi__ping"]));
+    let mut rig = Rig::new("question-find-late-failure", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, control) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    timeout(WAIT, played.asked(lease)).await.expect("asked");
+    assert_eq!(
+        timeout(WAIT, played.events()).await.expect("ended"),
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    until("the launch's teardown", || control.is_ended()).await;
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Tools)]
+    );
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::AuditFailed(AuditFailed::Tools)
+    );
+    rig.settle().await;
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+    rig.close().await;
+}

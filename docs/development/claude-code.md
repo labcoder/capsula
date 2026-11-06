@@ -416,8 +416,9 @@ attempts. Nothing in production asks a question yet: C5b-2's engine selection is
   the post-seed failures. If nobody reports, the guard's drop sends `Clean`. The core keeps an
   attempt's entry until both its teardown has ended and its report has arrived, so the order the
   two reach the core doesn't matter. An audit failure quarantines its version, and a sign-out shows
-  `SignedOut`. A report from an attempt that was replaced, or from an older generation, changes
-  nothing. A seeded launch's `analytics_disabled`, init's value over initialize's, sets
+  `SignedOut`. A report from an attempt that was replaced changes nothing. A find leaves
+  launches alone, so an attempt can outlive its generation; its audit failure still quarantines
+  the version, and its sign-out changes nothing. A seeded launch's `analytics_disabled`, init's value over initialize's, sets
   `analytics_on` only while the view is `Ready` at the attempt's generation.
 
 ```mermaid
