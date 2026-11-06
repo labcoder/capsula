@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use super::{Ended, PATIENCE, Shell, duplex};
 use crate::engines::claude_code::lane::Lane;
 use crate::engines::claude_code::lane::tests::{Base, host, soon};
-use crate::runtime::claude::tests::{READY, brain_with_a_staged_key};
+use crate::runtime::claude::tests::{READY, brain_with_a_saved_key};
 use crate::runtime::claude::{Claude, SignInStore};
 use crate::tap::Tap;
 use crate::test_support::Scratch;
@@ -61,7 +61,7 @@ async fn until<S: AsyncRead + AsyncWrite>(
 #[tokio::test]
 async fn every_connections_frame_sent_carries_both_current_halves() {
     let scratch = Scratch::new("claude-publish");
-    let mut brain = brain_with_a_staged_key(&scratch);
+    let mut brain = brain_with_a_saved_key(&scratch);
     let base = Base::new("publish");
     let (host, _switches) = host(&base, "in");
     let lane = Lane::start(host).expect("lane");

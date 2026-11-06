@@ -1,7 +1,7 @@
 use super::*;
 use crate::connections::records::{
     MAX_EMAIL_BYTES, MAX_EXCHANGES, MAX_ID_BYTES, MAX_REFRESH_BYTES, MAX_SCOPE_BYTES,
-    MAX_TOKEN_BYTES, entry_fits,
+    MAX_TOKEN_BYTES, Record, entry_fits,
 };
 
 #[test]
@@ -134,7 +134,17 @@ fn an_account_of_exactly_48_kib_serialized_is_saved_and_one_byte_more_is_refused
         SaveResult::NotCommitted(VaultError::Bounds)
     ));
     assert!(store.names().is_empty(), "refused before any write");
-    committed(vault.save_account(&Secret::new(exact)));
+    let exact = Secret::new(exact);
+    committed(vault.save_account(&exact));
+    assert_eq!(
+        current_names(&vault).len(),
+        25,
+        "a full record spans 25 chunks"
+    );
+    assert!(
+        vault.load_account().expect("read").expect("saved").expose() == exact.expose(),
+        "all 25 chunks read back whole"
+    );
 }
 
 #[test]
@@ -213,52 +223,68 @@ fn a_full_list_of_entries_at_the_entry_bound_is_saved() {
     committed(vault.save_revocations(&Secret::new(RevocationList { entries })));
 }
 
+/// A damaged current generation is an error, even with an older generation's bytes back.
 #[test]
-fn malformed_manifests_and_partial_records_never_fall_back_to_an_old_slot() {
+fn a_damaged_current_generation_never_falls_back_to_an_older_one() {
     let (_scratch, path, service, store) = setup("malformed-vault");
     let mut vault = open(&store, &service, &path);
     committed(vault.save_account(&account("old")));
-    for manifest in [
-        r#"{"slot":2,"chunks":1}"#,
-        r#"{"slot":0,"chunks":0}"#,
-        r#"{"slot":0,"chunks":26}"#,
-        r#"{"slot":0,"chunks":18446744073709551615}"#,
-    ] {
-        store
-            .set(
-                &format!("{service}/chatgpt"),
-                &Secret::new(Zeroizing::new(manifest.as_bytes().to_vec())),
-            )
-            .expect("corrupt test manifest");
-        assert!(
-            matches!(vault.load_account(), Err(VaultError::Unreadable)),
-            "manifest is validated before loading chunks"
-        );
-    }
-    store
-        .set(
-            &format!("{service}/chatgpt"),
-            &Secret::new(Zeroizing::new(br#"{"slot":1,"chunks":1}"#.to_vec())),
-        )
-        .expect("missing active chunk");
-    assert!(
-        matches!(
-            vault.load_account(),
-            Err(VaultError::Store(CredentialStoreError::MissingChunk))
-        ),
-        "no old-slot fallback"
-    );
-    store
-        .set(
-            &format!("{service}/chatgpt/1/0"),
-            &Secret::new(Zeroizing::new(b"secret-test-sentinel-not-json".to_vec())),
-        )
-        .expect("bad JSON");
+    let old = store.snapshot();
+    committed(vault.save_account(&account("new")));
+    store.rollback(&old, &old.keys().cloned().collect::<Vec<_>>());
+    let names = current_names(&vault);
+    let first = names[0].clone();
+    let clean = store.snapshot();
+    let mut damaged = store.snapshot();
+    let length = damaged[&first].expose().len();
+    let sentinel = b"secret-test-sentinel-not-json"
+        .iter()
+        .copied()
+        .cycle()
+        .take(length)
+        .collect();
+    damaged.insert(first.clone(), Secret::new(Zeroizing::new(sentinel)));
+    store.rollback(&damaged, std::slice::from_ref(&first));
     let error = vault.load_account().expect_err("malformed account");
     assert_eq!(format!("{error:?}"), "Unreadable");
     assert!(
         !format!("{error}").contains("secret-test-sentinel"),
         "serde diagnostics never escape"
+    );
+    let mut short = store.snapshot();
+    short.insert(
+        first.clone(),
+        Secret::new(Zeroizing::new(vec![b'{'; length - 1])),
+    );
+    store.rollback(&short, std::slice::from_ref(&first));
+    assert!(
+        matches!(
+            vault.load_account(),
+            Err(VaultError::Store(CredentialStoreError::Unsettled))
+        ),
+        "a chunk one byte short is unsettled"
+    );
+    store.rollback(&clean, &names);
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("a clean current generation")
+            .expect("the account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("new@example.invalid"),
+        "the restored generation reads, so only the missing chunk fails next"
+    );
+    let last = names.last().expect("a chunk").clone();
+    store.rollback(&BTreeMap::new(), std::slice::from_ref(&last));
+    assert!(
+        matches!(
+            vault.load_account(),
+            Err(VaultError::Store(CredentialStoreError::Unsettled))
+        ),
+        "a missing chunk is unsettled, with no older generation to fall back to"
     );
 }
 
