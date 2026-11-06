@@ -80,7 +80,7 @@ pub(crate) enum Revoker {
 /// How far the user heard: the segment, its samples played, and the byte offset in the answer
 /// text where heard speech ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Heard {
+pub struct Heard {
     pub segment: SegmentId,
     pub sample: u32,
     pub text: usize,

@@ -634,6 +634,19 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             );
             purger.op_arrived(store);
         }
+        StoreOp::Heard { run, heard } => {
+            purger.op_arriving();
+            // shortcut: failure leaves unknown; add bounded retry ownership if a future consumer
+            // requires stronger durability.
+            if store
+                .reconnect()
+                .and_then(|()| store.heard(run, heard))
+                .is_err()
+            {
+                tracing::warn!("a heard point wasn't stored");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,

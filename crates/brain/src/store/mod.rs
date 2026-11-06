@@ -11,6 +11,9 @@ mod calls;
 mod calls_tests;
 pub(crate) mod context;
 mod drawing;
+mod heard;
+#[cfg(test)]
+mod heard_tests;
 mod pages;
 mod purge;
 mod rounds;
