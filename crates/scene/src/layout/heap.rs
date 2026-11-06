@@ -130,6 +130,11 @@ pub(crate) fn extras_bytes<'a>(
 
 /// Heap bytes an operation owns: each string's bytes and each sequence's elements at their
 /// own size. Exact for layout copies, because cloned records have exact capacities.
+/// One shared record copy with its `Arc` header.
+pub(crate) fn source_bytes(op: &Op) -> usize {
+    ARC_HEADER + size_of::<Op>() + op_bytes(op)
+}
+
 fn op_bytes(op: &Op) -> usize {
     let ids = object::visual(op).map_or(0, |visual| {
         visual.id.as_str().len() + visual.parent.map_or(0, |parent| parent.as_str().len())
@@ -317,6 +322,7 @@ mod tests {
                 kind: Kind::Shape,
                 parent: None,
                 references: Box::default(),
+                three: None,
             };
             (id(i), object)
         });

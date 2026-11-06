@@ -40,6 +40,14 @@ impl Default for MeshScratch {
     }
 }
 impl MeshScratch {
+    /// Bytes the reserved buffers hold.
+    pub fn bytes(&self) -> usize {
+        size_of_val(&*self.keys)
+            + size_of_val(&*self.tangents)
+            + size_of_val(&*self.frames)
+            + size_of_val(&*self.vertices)
+            + size_of_val(&*self.faces)
+    }
     /// Reserves all buffers once at the decoded shape and subdivision limits.
     pub fn new() -> Self {
         Self {
@@ -148,6 +156,8 @@ fn sift(keys: &mut [[u32; 4]], mut root: usize, cancel: &AtomicBool) -> Result<(
 
 struct Emitter<'a> {
     world: &'a Transform,
+    /// Output in the solid's own unscaled space, checked at `world`, with one group per source face.
+    local: Option<&'a mut Vec<u8>>,
     out: &'a mut Vec<Triangle>,
     cancel: &'a AtomicBool,
     part: u16,
@@ -164,6 +174,21 @@ enum Face {
 
 impl Emitter<'_> {
     fn triangle(&mut self, v: [Point; 3], face: Face) -> Result<(), MeshError> {
+        let before = self.built.written;
+        self.emit(v, face)?;
+        self.group(before);
+        Ok(())
+    }
+    fn group(&mut self, before: u32) {
+        if let Some(groups) = &mut self.local
+            && self.built.written > before
+        {
+            groups.push(
+                u8::try_from(self.built.written - before).expect("a source face emits at most two"),
+            );
+        }
+    }
+    fn emit(&mut self, v: [Point; 3], face: Face) -> Result<(), MeshError> {
         poll(self.cancel)?;
         let normal = cross(subtract(v[1], v[0]), subtract(v[2], v[0]));
         if dot(normal, normal) < 4.0 * self.cutoff * self.cutoff {
@@ -176,6 +201,7 @@ impl Emitter<'_> {
             }
             return Err(MeshError::Degenerate(self.field));
         }
+        let local = v;
         let v = [
             self.world.point64(v[0])?,
             self.world.point64(v[1])?,
@@ -186,13 +212,25 @@ impl Emitter<'_> {
         if dot(normal, normal).to_bits() == 0 {
             return Err(MeshError::Degenerate("pos"));
         }
+        let v = if self.local.is_some() {
+            [
+                IDENTITY.point64(local[0])?,
+                IDENTITY.point64(local[1])?,
+                IDENTITY.point64(local[2])?,
+            ]
+        } else {
+            v
+        };
         self.out.push(Triangle { v, part: self.part });
         self.built.written += 1;
         Ok(())
     }
     fn quad(&mut self, v: [Point; 4], face: Face) -> Result<(), MeshError> {
-        self.triangle([v[0], v[1], v[2]], face)?;
-        self.triangle([v[0], v[2], v[3]], face)
+        let before = self.built.written;
+        self.emit([v[0], v[1], v[2]], face)?;
+        self.emit([v[0], v[2], v[3]], face)?;
+        self.group(before);
+        Ok(())
     }
 }
 
@@ -204,13 +242,48 @@ impl Emitter<'_> {
 /// # Errors
 /// Rejects invalid geometry, insufficient spare capacity, cancellation, sub-cutoff source faces,
 /// non-finite world vertices, collapsed world faces or distinct local vertices that narrow together.
+pub fn build(
+    solid: &Solid,
+    world: &Transform,
+    part: u16,
+    out: &mut Vec<Triangle>,
+    cancel: &AtomicBool,
+    scratch: &mut MeshScratch,
+) -> Result<Built, MeshError> {
+    emit(solid, world, None, part, out, cancel, scratch)
+}
+
+/// Like [`build`], with every check at the complete rest transform `rest`, but appends the
+/// solid's canonical unscaled vertices and one entry per source face to `groups`: how many of
+/// the appended triangles that face emitted. On failure, truncate both to their saved lengths.
+/// # Errors
+/// As [`build`].
+pub fn build_local(
+    solid: &Solid,
+    rest: &Transform,
+    part: u16,
+    out: &mut Vec<Triangle>,
+    groups: &mut Vec<u8>,
+    cancel: &AtomicBool,
+    scratch: &mut MeshScratch,
+) -> Result<Built, MeshError> {
+    emit(solid, rest, Some(groups), part, out, cancel, scratch)
+}
+
+const IDENTITY: Transform = Transform([
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+]);
+
 #[expect(
     clippy::too_many_lines,
     reason = "one dispatch keeps each shape's canonical vertex expression beside its topology"
 )]
-pub fn build(
+fn emit(
     solid: &Solid,
     world: &Transform,
+    local: Option<&mut Vec<u8>>,
     part: u16,
     out: &mut Vec<Triangle>,
     cancel: &AtomicBool,
@@ -240,6 +313,7 @@ pub fn build(
     };
     let mut emit = Emitter {
         world,
+        local,
         out,
         cancel,
         part,
@@ -608,6 +682,7 @@ mod tests {
             let mut out = Vec::with_capacity(2);
             let mut emit = Emitter {
                 world: &world,
+                local: None,
                 out: &mut out,
                 cancel: &cancel,
                 part: 1,
@@ -626,6 +701,7 @@ mod tests {
         let mut out = Vec::with_capacity(2);
         let mut emit = Emitter {
             world: &world,
+            local: None,
             out: &mut out,
             cancel: &cancel,
             part: 1,

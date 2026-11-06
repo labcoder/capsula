@@ -4,7 +4,7 @@ use kumochi_scene::{
     record::{Segments, Solid},
     three::{
         Transform, Triangle,
-        mesh::{Built, MeshScratch, build},
+        mesh::{Built, MeshScratch, build, build_local},
         size::{MeshError, triangles},
     },
 };
@@ -581,5 +581,70 @@ fn maximum_point_counts_are_sized_without_allocating() {
     assert_eq!(
         triangles(&solid("lathe", json!({"points":profile,"segments":48}))),
         Ok(24000)
+    );
+}
+
+#[test]
+fn local_and_world_builds_agree_at_the_composed_rest() {
+    let parent = Transform::local([10.0, 0.0, 0.0], [0.0; 3], 2.0);
+    let rest = Transform::local([1.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5).then(&parent);
+    let far = Transform::local([0.0; 3], [0.0; 3], 0.001).then(&Transform::local(
+        [19998.0, 0.0, 0.0],
+        [0.0; 3],
+        1.0,
+    ));
+    let cases = [
+        (solid("box", json!({"size":[1,2,3]})), &rest),
+        (solid("sphere", json!({"r":1,"segments":12})), &rest),
+        (solid("cylinder", json!({"r":1,"h":2,"segments":12})), &rest),
+        (solid("cone", json!({"r":1,"h":2,"segments":12})), &rest),
+        (solid("torus", json!({"r":2,"r2":0.5,"segments":12})), &rest),
+        (
+            solid("lathe", json!({"points":[[0,-1],[1,0],[0,1]],"segments":8})),
+            &rest,
+        ),
+        (
+            solid(
+                "extrude",
+                json!({"points":[[0,0],[1,0],[1,1],[0,1]],"depth":1}),
+            ),
+            &rest,
+        ),
+        (solid("box", json!({"size":[1,1,1]})), &far),
+    ];
+    let mut scratch = MeshScratch::new();
+    for (shape, world) in cases {
+        let count = usize::try_from(triangles(&shape).expect("valid count")).expect("bounded");
+        let (mut a, mut b, mut groups) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::new(),
+        );
+        let cancel = AtomicBool::new(false);
+        let expected = build(&shape, world, 0, &mut a, &cancel, &mut scratch);
+        let local = build_local(&shape, world, 0, &mut b, &mut groups, &cancel, &mut scratch);
+        assert_eq!(local, expected, "{:?}", shape.shape);
+        if let Ok(built) = expected {
+            assert_eq!(b.len(), a.len());
+            assert_eq!(
+                groups.iter().map(|&n| u32::from(n)).sum::<u32>(),
+                built.written
+            );
+        }
+    }
+    let mut out = Vec::with_capacity(12);
+    let alone = build_local(
+        &solid("box", json!({"size":[1,1,1]})),
+        &Transform::local([0.0; 3], [0.0; 3], 0.001),
+        0,
+        &mut out,
+        &mut Vec::new(),
+        &AtomicBool::new(false),
+        &mut scratch,
+    );
+    assert_eq!(
+        alone.map(|built| built.written),
+        Ok(12),
+        "only the parent collapses it"
     );
 }

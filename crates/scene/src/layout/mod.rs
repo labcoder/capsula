@@ -110,6 +110,15 @@ impl PrepareInput {
     }
 }
 
+/// One 3D view a step prepared, published whole.
+#[derive(Debug, Clone)]
+pub struct PreparedView {
+    /// The view's identity.
+    pub view: crate::Handle,
+    /// Its solids; empty and `failed` when any solid failed at rest.
+    pub geometry: Arc<crate::three::view::ViewGeometry>,
+}
+
 /// One generated position owner; A7 samples its start at activation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glide {
@@ -130,6 +139,8 @@ pub struct PreparedStep {
     pub removed: Vec<crate::Handle>,
     /// At most one generated position glide per diagram.
     pub glides: Vec<Glide>,
+    /// New or replaced 3D views; a removed view's handle is in `removed`.
+    pub views: Vec<PreparedView>,
     /// Immutable state to retain if this step activates.
     pub after: LayoutState,
     /// Requested bytes this result adds to its predecessor: new geometry, source copies and
@@ -137,6 +148,8 @@ pub struct PreparedStep {
     /// compiled record and private facts. Allocations shared with the predecessor are not
     /// counted again.
     pub resident_bytes: usize,
+    /// Temporary mesh scratch the worker allocated, never published or retained.
+    pub scratch_bytes: usize,
     ticket: Preparation,
     base: Arc<()>,
     theme: Arc<Theme>,

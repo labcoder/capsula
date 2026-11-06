@@ -4,8 +4,19 @@
 //! stricter than the coordinate cube; rotations preserve lengths and need no envelope.
 
 use super::object::{Kind, Object};
-use crate::{ErrorCode, Handle, WireId, limits::MAX_COORD};
-use std::collections::BTreeMap;
+use crate::{
+    ErrorCode, Handle, Op, Step, WireId,
+    limits::MAX_COORD,
+    record::Color,
+    three::{
+        Transform,
+        view::{SolidInput, ViewInput, ViewUpdate},
+    },
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Copy)]
 struct Placement {
@@ -73,6 +84,101 @@ fn check(parent: Placement, offset: f64, scale: f64, reach: f64) -> Result<Place
         return Err(ErrorCode::OutOfRange);
     }
     Ok(Placement { origin, scale })
+}
+
+/// A 3D object's shared record and its latest authored colour.
+#[derive(Clone)]
+pub(crate) struct Source {
+    pub op: Arc<Op>,
+    pub color: Option<Color>,
+}
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Source(..)")
+    }
+}
+
+/// The views a step changes, each composed from `after` or marked removed.
+pub(super) fn view_updates(
+    step: &Step,
+    before: &BTreeMap<WireId, Object>,
+    after: &BTreeMap<WireId, Object>,
+) -> Vec<ViewUpdate> {
+    let view_of = |object: &Object, id: &WireId| match object.kind {
+        Kind::View3d => Some(id.clone()),
+        Kind::Solid => object.parent.clone(),
+        _ => None,
+    };
+    let mut views = BTreeSet::new();
+    for op in &*step.put {
+        match op {
+            Op::View3d(view) => _ = views.insert(view.id.clone()),
+            Op::Solid(solid) => _ = views.insert(solid.parent.clone()),
+            _ => {}
+        }
+    }
+    for id in &*step.remove {
+        views.extend(before.get(id).and_then(|object| view_of(object, id)));
+    }
+    for change in step.set.iter().filter(|change| change.color.is_some()) {
+        views.extend(
+            after
+                .get(&change.target)
+                .filter(|object| object.kind == Kind::Solid)
+                .and_then(|object| object.parent.clone()),
+        );
+    }
+    views
+        .into_iter()
+        .map(|id| ViewUpdate {
+            input: after
+                .get(&id)
+                .map(|view| Arc::new(view_input(&id, view, after))),
+            id,
+        })
+        .collect()
+}
+
+fn view_input(id: &WireId, view: &Object, after: &BTreeMap<WireId, Object>) -> ViewInput {
+    let mut members: Vec<(&WireId, &Object)> = after
+        .iter()
+        .filter(|(_, object)| object.kind == Kind::Solid && object.parent.as_ref() == Some(id))
+        .collect();
+    members.sort_by_key(|(_, object)| object.handle);
+    let mut solids: Vec<SolidInput> = Vec::with_capacity(members.len());
+    for (solid_id, object) in members {
+        let source = object.three.as_ref().expect("solids carry their source");
+        let Op::Solid(record) = &*source.op else {
+            unreachable!("a solid's source is its solid record");
+        };
+        let get = |v: Option<[crate::Finite; 3]>| v.map_or([0.0; 3], |v| v.map(crate::Finite::get));
+        let local = Transform::local(
+            get(record.pos),
+            get(record.rot),
+            record.scale.map_or(1.0, crate::record::Size::get),
+        );
+        let parent = record.attach.as_ref().map(|attach| {
+            solids
+                .iter()
+                .position(|solid| solid.id == *attach)
+                .expect("an attachment names an earlier solid in the same view")
+        });
+        let rest = parent.map_or(local, |p| local.then(&solids[p].rest));
+        solids.push(SolidInput {
+            id: solid_id.clone(),
+            handle: object.handle,
+            source: Arc::clone(&source.op),
+            color: source.color.or(record.color),
+            parent: parent.map(|p| u16::try_from(p).expect("a view holds at most 160 solids")),
+            local,
+            rest,
+        });
+    }
+    ViewInput {
+        handle: view.handle,
+        source: Arc::clone(&view.three.as_ref().expect("views carry their source").op),
+        solids: solids.into_boxed_slice(),
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use super::{
-    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, RecoveryError, SceneRecovery,
-    SurfaceGeometry, compound, edge_labels, edges, heap, nodes,
+    Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, PreparedView, RecoveryError,
+    SceneRecovery, SurfaceGeometry, compound, edge_labels, edges, heap, nodes,
     primitives::{Build, invariant, layout_error, rect},
     state::{Placed, Rest},
 };
@@ -11,6 +11,7 @@ use crate::{
     record::{Anchor, Change, Enter, Track},
     state::{object, work},
     theme::Theme,
+    three::{mesh::MeshScratch, size::MeshError, view::tessellate_view},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -53,6 +54,18 @@ pub fn prepare(
             .extras
             .insert(ticket.revision, Arc::clone(&ticket.extras));
     }
+    // 3D targets never enter the 2D maps; the ticket's view updates carry them.
+    let three: HashSet<&WireId> = ticket
+        .run
+        .put
+        .iter()
+        .filter_map(|op| match op {
+            Op::View3d(view) => Some(&view.id),
+            Op::Solid(solid) => Some(&solid.id),
+            _ => None,
+        })
+        .collect();
+    let is_three = |id: &WireId| three.contains(id) || before.is_three(id).is_some();
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
     let mut tables = false;
@@ -66,7 +79,12 @@ pub fn prepare(
             order.push(visual.id.clone());
         }
     }
-    for change in &*ticket.run.set {
+    for change in ticket
+        .run
+        .set
+        .iter()
+        .filter(|change| !is_three(&change.target))
+    {
         let (handle, source) = if let Some((handle, source)) = sources.get(&change.target) {
             (*handle, Arc::clone(source))
         } else {
@@ -94,7 +112,9 @@ pub fn prepare(
     }
     let mut removed = Vec::new();
     for id in &*ticket.run.remove {
-        if let Some(old) = after.objects.remove(id) {
+        if let Some(handle) = before.is_three(id) {
+            removed.push(handle);
+        } else if let Some(old) = after.objects.remove(id) {
             tables |= matches!(&*old.source, Op::Row(_));
             charts |= matches!(&*old.source, Op::Series(_));
             after.handles.remove(&old.item.handle);
@@ -116,7 +136,7 @@ pub fn prepare(
         .run
         .set
         .iter()
-        .filter(|change| change.color.is_some())
+        .filter(|change| change.color.is_some() && !is_three(&change.target))
     {
         rests
             .entry(change.target.clone())
@@ -126,7 +146,9 @@ pub fn prepare(
     let mut motions = BTreeMap::new();
     let mut explicit_pos = BTreeSet::new();
     for (slot, op) in ticket.run.put.iter().enumerate() {
-        if let Op::Anim(anim) = op {
+        if let Op::Anim(anim) = op
+            && !is_three(&anim.target)
+        {
             rests
                 .entry(anim.target.clone())
                 .or_insert_with(Rest::default)
@@ -313,6 +335,52 @@ pub fn prepare(
         after.objects = BTreeMap::new();
         after.handles = BTreeMap::new();
     }
+    let mut views = Vec::with_capacity(ticket.views.len());
+    let mut scratch_bytes = 0;
+    if ticket.views.iter().any(|update| update.input.is_some()) {
+        let mut scratch = MeshScratch::new();
+        scratch_bytes = scratch.bytes();
+        for update in &ticket.views {
+            build.check_cancel()?;
+            let Some(input) = &update.input else {
+                after.views.remove(&update.id);
+                continue;
+            };
+            let geometry = tessellate_view(
+                input,
+                before.views.get(&update.id).map(|view| &**view),
+                &theme,
+                cancel,
+                &mut scratch,
+            )
+            .map_err(|error| match error {
+                MeshError::Cancelled => PrepareError::Cancelled,
+                _ => PrepareError::OverResidency,
+            })?;
+            let geometry = Arc::new(geometry);
+            after.views.insert(update.id.clone(), Arc::clone(&geometry));
+            views.push(PreparedView {
+                view: input.handle,
+                geometry,
+            });
+        }
+    } else {
+        for update in &ticket.views {
+            after.views.remove(&update.id);
+        }
+    }
+    let view_bytes: usize = views
+        .iter()
+        .map(|view| {
+            let id = after
+                .views
+                .iter()
+                .find(|(_, geometry)| Arc::ptr_eq(geometry, &view.geometry))
+                .map(|(id, _)| id);
+            view.geometry
+                .marginal_bytes(id.and_then(|id| before.views.get(id)).map(|old| &**old))
+        })
+        .sum();
     let mut items: Vec<_> = after
         .objects
         .iter()
@@ -338,7 +406,9 @@ pub fn prepare(
         + after.index_bytes()
         + items.capacity() * size_of::<Item>()
         + removed.capacity() * size_of::<Handle>()
-        + glides.capacity() * size_of::<Glide>();
+        + glides.capacity() * size_of::<Glide>()
+        + views.capacity() * size_of::<PreparedView>()
+        + view_bytes;
     if resident_bytes > crate::limits::MAX_RESIDENT_BYTES {
         return Err(PrepareError::OverResidency);
     }
@@ -347,13 +417,16 @@ pub fn prepare(
     build.check_cancel()?;
     // Only preparation reads the sizing facts, so the held result keeps none.
     ticket.path_scales.clear();
+    ticket.views.clear();
     Ok(PreparedStep {
         index: ticket.revision - 1,
         display: DisplayList { items },
         removed,
         glides,
+        views,
         after,
         resident_bytes,
+        scratch_bytes,
         ticket,
         base: Arc::clone(&before.version),
         theme,
@@ -670,6 +743,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
                 references: parent.iter().cloned().collect(),
                 parent,
                 work,
+                three: None,
             },
         );
     }

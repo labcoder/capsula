@@ -6,6 +6,7 @@ pub mod mesh;
 pub mod pick;
 pub mod raster;
 pub mod size;
+pub mod view;
 
 use crate::geom::Vec3;
 

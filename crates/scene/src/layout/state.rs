@@ -7,6 +7,7 @@ use crate::{
     mermaid::Extra,
     record::{Direction, KeyValue, Rgb, Track},
     theme::Theme,
+    three::view::ViewGeometry,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -116,6 +117,8 @@ pub struct LayoutState {
     pub(super) handles: BTreeMap<Handle, WireId>,
     /// Private compiled facts, shared per revision that created them.
     pub(super) extras: BTreeMap<u32, Arc<BTreeMap<usize, Extra>>>,
+    /// Prepared 3D views by view id.
+    pub(super) views: BTreeMap<WireId, Arc<ViewGeometry>>,
 }
 impl fmt::Debug for LayoutState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -136,7 +139,25 @@ impl LayoutState {
             objects: BTreeMap::new(),
             handles: BTreeMap::new(),
             extras: BTreeMap::new(),
+            views: BTreeMap::new(),
         }
+    }
+    /// Prepared 3D views by view id.
+    pub fn views(&self) -> &BTreeMap<WireId, Arc<ViewGeometry>> {
+        &self.views
+    }
+    /// Whether `id` names a prepared 3D view or solid.
+    pub(super) fn is_three(&self, id: &WireId) -> Option<Handle> {
+        self.views.iter().find_map(|(view, geometry)| {
+            if view == id {
+                return Some(geometry.handle);
+            }
+            geometry
+                .solids
+                .iter()
+                .find(|solid| solid.id == *id)
+                .map(|solid| solid.handle)
+        })
     }
     /// The private facts the step that created `handle` compiled for it.
     pub(super) fn extra(&self, handle: Handle) -> Option<&Extra> {
@@ -191,6 +212,11 @@ impl LayoutState {
             + super::chart::retained_bytes(self)
             + heap::shared_bytes(std::iter::empty(), self.objects.values())
             + heap::extras_bytes(std::iter::empty(), self.extras.values())
+            + self
+                .views
+                .values()
+                .map(|view| view.full_bytes())
+                .sum::<usize>()
             + self.index_bytes()
     }
     /// The index every prepared result holds its own copy of: both B-trees at their node bound,
@@ -200,6 +226,8 @@ impl LayoutState {
         heap::btree::<WireId, Placed>(self.objects.len())
             + heap::btree::<Handle, WireId>(self.handles.len())
             + heap::btree::<u32, Arc<BTreeMap<usize, Extra>>>(self.extras.len())
+            + heap::btree::<WireId, Arc<ViewGeometry>>(self.views.len())
+            + self.views.keys().map(|id| id.as_str().len()).sum::<usize>()
             + 2 * ids
             + heap::ARC_HEADER
     }
@@ -211,7 +239,20 @@ impl LayoutState {
     }
     /// Every placed handle in order: what a Stop at rest reveals, without building a view.
     pub fn revealed_at_rest(&self) -> Vec<Handle> {
-        self.handles.keys().copied().collect()
+        let mut handles: Vec<Handle> = self
+            .handles
+            .keys()
+            .copied()
+            .chain(self.three_handles())
+            .collect();
+        handles.sort_unstable();
+        handles
+    }
+    /// Every prepared 3D view and solid; nothing moves them before slice 5's motion sampling.
+    pub(crate) fn three_handles(&self) -> impl Iterator<Item = Handle> {
+        self.views.values().flat_map(|view| {
+            std::iter::once(view.handle).chain(view.solids.iter().map(|solid| solid.handle))
+        })
     }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {
@@ -321,6 +362,14 @@ impl LayoutState {
                 .collect(),
             objects,
             extras: self.extras.clone(),
+            views: {
+                let three = scene.preparation_three();
+                self.views
+                    .iter()
+                    .filter(|(_, view)| three.contains(&view.handle))
+                    .map(|(id, view)| (id.clone(), Arc::new(view.retain(|h| three.contains(&h)))))
+                    .collect()
+            },
         });
         after.prune_extras();
         for object in after.objects.values() {
