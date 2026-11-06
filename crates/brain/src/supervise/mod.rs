@@ -2,8 +2,8 @@
 //! `kumochid --speech`. See `docs/development/processes.md`.
 //!
 //! A supervisor is one tokio task that owns its worker process, the pending requests, the request
-//! ids and the loss history. Two std threads per worker own the pipe ends. A loss terminates the
-//! worker, fails everything pending, broadcasts its [`Generation`] and respawns, backing off after
+//! ids and the loss history. Two std threads per worker own the pipe ends. A loss fails everything
+//! pending, requests worker termination, broadcasts its [`Generation`] and respawns, backing off after
 //! the second loss in a minute. A request gets one reply, or a bounded stream of them ending in the
 //! kind's terminal reply.
 
@@ -103,7 +103,7 @@ struct Command<K: Kind> {
 
 /// Where a request's whole replies go.
 enum Destination<K: Kind> {
-    /// `request`: the terminal reply only.
+    /// `request`: one terminal reply; an intermediate reply is malformed.
     Single(Answer<K>),
     /// `request_stream`: every reply, while its reader keeps up.
     Stream(mpsc::Sender<(K::Reply, Generation)>),
@@ -122,10 +122,13 @@ impl<K: Kind> Destination<K> {
     }
 
     /// Hands on one whole reply and says whether it was the terminal one.
-    fn deliver(&mut self, reply: K::Reply, generation: Generation) -> bool {
+    fn deliver(&mut self, reply: K::Reply, generation: Generation) -> Result<bool, WorkerLost> {
         let terminal = K::is_terminal(&reply);
+        if matches!(self, Self::Single(_)) && !terminal {
+            return Err(WorkerLost);
+        }
         match std::mem::replace(self, Self::Discard) {
-            Self::Single(answer) if terminal => complete::<K>(answer, Ok((reply, generation))),
+            Self::Single(answer) => complete::<K>(answer, Ok((reply, generation))),
             Self::Stream(stages) => {
                 if stages.try_send((reply, generation)).is_ok() {
                     *self = Self::Stream(stages);
@@ -135,7 +138,7 @@ impl<K: Kind> Destination<K> {
             }
             kept => *self = kept,
         }
-        terminal
+        Ok(terminal)
     }
 
     /// A stream's reader sees its sender close as the loss.
@@ -407,7 +410,7 @@ fn accept<K: Kind>(
     };
     item.messages = item.messages.checked_sub(1).ok_or(WorkerLost)?;
     let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost)?;
-    if item.answer.deliver(body, generation) {
+    if item.answer.deliver(body, generation)? {
         pending.remove(&id);
     }
     Ok(())

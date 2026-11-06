@@ -32,23 +32,25 @@ worker can therefore make the brain hold up to 16 × 4 MiB of partial replies, p
 256 KiB frames, for at most one deadline.
 
 A request can also be streamed (`request_stream`): the worker sends several whole replies under
-one id, and the kind's `is_terminal` reply ends it. A plain request keeps only its terminal reply,
-and every reply of today's screen and speech kinds is terminal, so they get one reply as before.
+one id, and the kind's `is_terminal` reply ends it. A plain request requires one terminal reply;
+an intermediate reply to it is a protocol break. Every reply of today's screen and speech kinds
+is terminal, so they get one reply as before.
 A request takes at most 16 messages. A stream also takes at most 12 MiB of serialized replies in
 total, counted on every chunk before it is stored, partial messages included; a plain request
 keeps its kind's cap. Going over either bound loses the worker, and so does any reply after the
 terminal one, whose id is no longer pending. A stream queues 4 whole replies for its reader
-[guess]. A reader that
-closes or falls behind ends only its stream, which then reports `WorkerLost` after the replies
-already queued: the supervisor keeps the id and discards its replies until the terminal one or the
-deadline, so an Esc never loses the worker. No reply extends the stream's absolute deadline. A
-loss ends each stream after the replies it had already queued. Dropping a stream doesn't tell the
+[guess]. A reader that falls behind gets `WorkerLost` after the replies already queued: the
+supervisor keeps the id and discards its replies until the terminal one or the
+deadline. Closing a stream does not itself lose the worker, but its deadline still can.
+No reply extends the stream's absolute deadline. A loss ends each stream after the replies it had
+already queued. Dropping a stream doesn't tell the
 worker yet; the screen kind sends its Drop control with the capture streams that come next.
 A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies for one deadline.
 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
-A loss terminates the worker, fails all pending operations, then broadcasts its `Generation`: the
+A loss fails all pending operations, requests worker termination, then broadcasts its `Generation`: the
 first worker is 0 and each respawn the next, and every reply names the generation that sent it.
+`WorkerLost` alone is not confirmation that the native process exited.
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new

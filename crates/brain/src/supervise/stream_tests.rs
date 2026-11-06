@@ -140,15 +140,19 @@ async fn stages_arrive_in_order_and_only_the_terminal_ends_the_stream() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_single_request_keeps_only_its_terminal_reply() {
+async fn a_single_request_refuses_an_intermediate_reply() {
     let fake = fake();
     let worker = async {
         let (id, _) = fake.request().await;
         fake.reply(id, "stage 1").await;
-        fake.reply(id, "pong").await;
     };
     let (reply, ()) = tokio::join!(fake.handle.request(vec![], far()), worker);
-    assert_eq!(reply, Ok(("pong".to_owned(), SERVED)));
+    assert_eq!(reply, Err(WorkerLost));
+    assert_eq!(
+        fake.served.await.expect("served"),
+        Some(LossReason::Malformed)
+    );
+    assert_eq!(fake.handle.request(vec![2], far()).await, Err(WorkerLost));
 }
 
 #[tokio::test(start_paused = true)]
@@ -193,6 +197,12 @@ async fn a_stream_that_falls_behind_ends_without_losing_the_worker() {
     }
     assert_eq!(stream.next().await, Some(Err(WorkerLost)), "the fifth");
     assert_eq!(stream.next().await, None);
+    let worker = async {
+        assert_eq!(fake.request().await, (2, vec![2]));
+        fake.reply(2, "pong").await;
+    };
+    let (reply, ()) = tokio::join!(fake.handle.request(vec![2], far()), worker);
+    assert_eq!(reply, Ok(("pong".to_owned(), SERVED)));
 }
 
 #[test]
