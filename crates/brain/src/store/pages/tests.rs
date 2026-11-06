@@ -635,7 +635,7 @@ fn kumos_page_shows_a_deleted_tasks_note_beside_its_messages() {
     let (rows, before) = store.pages().events_page(main, None, 50).expect("page");
     let rows: Vec<_> = rows
         .iter()
-        .map(|row| (row.run, row.kind.clone(), row.text.as_str()))
+        .map(|row| (row.run, row.kind, row.text.as_str()))
         .collect();
     assert_eq!(
         rows,
