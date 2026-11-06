@@ -15,6 +15,10 @@ use kumochi_scene::{
 use std::sync::atomic::AtomicBool;
 
 #[path = "support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "the shared counting allocator has helpers this file doesn't use"
+)]
 mod allocation;
 
 fn header() -> kumochi_scene::Begin {
@@ -1070,11 +1074,20 @@ fn checked_admission_builds_mesh_scratch_only_for_a_view_it_checks() {
     let text = r#"{"id":"flat","put":[{"text":{"id":"t","text":"","at":[0,0]}}]}"#;
     let (admission, freed) =
         allocation::releases_of_size(KEYS, || scene().admit_checked(&step(text), &global));
-    assert!(matches!(admission, Ok(Admission::New(_))), "a 2D step admits");
+    assert!(
+        matches!(admission, Ok(Admission::New(_))),
+        "a 2D step admits"
+    );
     assert_eq!(freed, 0, "a step with no view to check builds no scratch");
     let solid = put("solid", &[view("v"), cube("c", "")]);
     let (admission, freed) =
         allocation::releases_of_size(KEYS, || scene().admit_checked(&step(&solid), &global));
-    assert!(matches!(admission, Ok(Admission::New(_))), "a 3D step admits");
-    assert_eq!(freed, 1, "calibration: checking one view builds one scratch");
+    assert!(
+        matches!(admission, Ok(Admission::New(_))),
+        "a 3D step admits"
+    );
+    assert_eq!(
+        freed, 1,
+        "calibration: checking one view builds one scratch"
+    );
 }
