@@ -63,7 +63,7 @@ pub(crate) use windows::{
     remove_tree, unmark,
 };
 #[cfg(windows)]
-pub use windows::{login_browser, managed_presence, system_env};
+pub use windows::{managed_presence, system_env};
 #[cfg(windows)]
 pub(crate) use windows::{screen_capturer, screen_elements};
 

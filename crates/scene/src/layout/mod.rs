@@ -71,6 +71,7 @@ pub struct PrepareInput {
     before: LayoutState,
     surface: SurfaceGeometry,
     theme: Arc<Theme>,
+    paint_cap: Option<crate::display::PaintWork>,
 }
 impl PrepareInput {
     /// Joins commit-time sizing facts with the immediately preceding prepared state.
@@ -106,7 +107,14 @@ impl PrepareInput {
             before,
             surface,
             theme,
+            paint_cap: None,
         })
+    }
+    /// Refuses the step with `OverResidency` once the scene's own paint work passes `cap`,
+    /// counting no further crossings; without one, preparation charges its work exactly.
+    #[must_use]
+    pub fn with_paint_cap(self, paint_cap: Option<crate::display::PaintWork>) -> Self {
+        Self { paint_cap, ..self }
     }
 }
 
