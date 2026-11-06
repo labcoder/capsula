@@ -614,6 +614,22 @@ fn only_kumo_creates_a_task_at_the_next_id_and_the_next_new_task_follows_it() {
 }
 
 #[test]
+fn a_created_id_is_spent_before_its_write_is_acknowledged() {
+    let mut core = kumo_rendered_b();
+    assert_eq!(
+        creating(&mut core, model(R, "c1"), QUIET_TASK)
+            .1
+            .map(|(thread, _)| thread),
+        Some(CREATED)
+    );
+    assert_eq!(
+        next_new_task(&mut core),
+        ThreadId(5),
+        "a new task typed while the create is in flight takes the id after it"
+    );
+}
+
+#[test]
 fn a_quiet_or_late_creation_lists_the_task_and_moves_nothing() {
     let mut core = kumo_rendered_b();
     let caller = model(R, "c1");
