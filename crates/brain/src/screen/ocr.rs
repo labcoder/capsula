@@ -100,7 +100,7 @@ pub(crate) struct OcrWords {
     pub(crate) truncated: bool,
 }
 pub(crate) struct Bitmap {
-    pub(crate) rgba: image::RgbaImage,
+    pub(crate) bgra: image::RgbaImage,
 }
 pub(crate) struct NativeWord {
     pub(crate) text: String,
@@ -125,7 +125,7 @@ impl std::fmt::Debug for OcrWords {
 impl std::fmt::Debug for Bitmap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bitmap")
-            .field("size", &self.rgba.dimensions())
+            .field("size", &self.bgra.dimensions())
             .finish_non_exhaustive()
     }
 }
@@ -268,35 +268,29 @@ impl TextRecognizer {
         if frame.completeness() == Completeness::Pending {
             return Err(Failure::Pending);
         }
-        let (meta, bgra) = frame.image();
+        let (meta, pixels) = frame.image();
         if region.capture != meta.capture
             || intersection(region.rect, meta.display) != Some(region.rect)
         {
             return Err(Failure::Invalid);
         }
-        let mut rgba = image::RgbaImage::new(region.rect.size[0], region.rect.size[1]);
+        let mut bgra = image::RgbaImage::new(region.rect.size[0], region.rect.size[1]);
         let [left, top] = std::array::from_fn(|i| {
             u32::try_from(i64::from(region.rect.origin[i]) - i64::from(meta.display.origin[i]))
                 .expect("clipped region")
         });
-        for (x, y, pixel) in rgba.enumerate_pixels_mut() {
-            if x == 0 {
-                check(end, stop)?;
-            }
-            let offset = usize::try_from(
-                (u64::from(top + y) * u64::from(meta.display.size[0]) + u64::from(left + x)) * 4,
-            )
-            .expect("bounded pixel offset");
-            *pixel = image::Rgba([
-                bgra[offset + 2],
-                bgra[offset + 1],
-                bgra[offset],
-                bgra[offset + 3],
-            ]);
+        let row_bytes = usize::try_from(region.rect.size[0]).expect("bounded row width") * 4;
+        for (y, row) in bgra.as_mut().chunks_exact_mut(row_bytes).enumerate() {
+            check(end, stop)?;
+            let offset = ((usize::try_from(top).expect("clipped top") + y)
+                * usize::try_from(meta.display.size[0]).expect("bounded display width")
+                + usize::try_from(left).expect("clipped left"))
+                * 4;
+            row.copy_from_slice(&pixels[offset..offset + row_bytes]);
         }
         let (reply, response) = mpsc::sync_channel(1);
         let mut job = Job {
-            bitmap: Bitmap { rgba },
+            bitmap: Bitmap { bgra },
             region,
             masks: frame.painted().to_vec(),
             output: OcrWords {
@@ -380,8 +374,8 @@ fn recognize(engine: &mut dyn Engine, job: &mut Job) -> Result<(), Failure> {
     };
     // shortcut: small text in a region wider than the OCR maximum may be missed; tile if A6's numbers or a user show misses
     let scaled = (size != [w, h]).then(|| Bitmap {
-        rgba: image::imageops::resize(
-            &job.bitmap.rgba,
+        bgra: image::imageops::resize(
+            &job.bitmap.bgra,
             size[0],
             size[1],
             image::imageops::FilterType::Triangle,

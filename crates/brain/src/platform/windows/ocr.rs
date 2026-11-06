@@ -64,13 +64,13 @@ impl Engine for Native {
         stop.check()?;
         let writer = DataWriter::new().map_err(unavailable)?;
         writer
-            .WriteBytes(image.rgba.as_raw())
+            .WriteBytes(image.bgra.as_raw())
             .map_err(unavailable)?;
         let buffer = writer.DetachBuffer().map_err(unavailable)?;
         let bitmap = SoftwareBitmap::CreateWithAlpha(
-            BitmapPixelFormat::Rgba8,
-            i32::try_from(image.rgba.width()).map_err(|_| Failure::Invalid)?,
-            i32::try_from(image.rgba.height()).map_err(|_| Failure::Invalid)?,
+            BitmapPixelFormat::Bgra8,
+            i32::try_from(image.bgra.width()).map_err(|_| Failure::Invalid)?,
+            i32::try_from(image.bgra.height()).map_err(|_| Failure::Invalid)?,
             BitmapAlphaMode::Ignore,
         )
         .map_err(unavailable)?;

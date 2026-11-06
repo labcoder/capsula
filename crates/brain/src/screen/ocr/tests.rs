@@ -233,9 +233,9 @@ fn sanitized_region_is_only_source_and_masks_are_exactly_clipped() {
             _: &Stop,
             _: &mut dyn FnMut(NativeWord) -> bool,
         ) -> Result<(), Failure> {
-            assert_eq!(image.rgba.dimensions(), (3, 2));
-            assert_eq!(image.rgba.get_pixel(0, 0).0, [0, 0, 0, 255]);
-            assert_eq!(image.rgba.get_pixel(1, 0).0, [47, 31, 23, 255]);
+            assert_eq!(image.bgra.dimensions(), (3, 2));
+            assert_eq!(image.bgra.get_pixel(0, 0).0, [0, 0, 0, 255]);
+            assert_eq!(image.bgra.get_pixel(1, 0).0, [23, 31, 47, 255]);
             Ok(())
         }
     }
@@ -275,7 +275,7 @@ fn one_pixel_over_maximum_scales_aspect_and_inverse_bounds_before_filtering() {
             _: &Stop,
             emit: &mut dyn FnMut(NativeWord) -> bool,
         ) -> Result<(), Failure> {
-            assert_eq!(image.rgba.dimensions(), (3, 1));
+            assert_eq!(image.bgra.dimensions(), (3, 1));
             assert!(emit(word("masked", [0.1, 0.0, 0.8, 0.4])));
             assert!(emit(word("kept", [1.6, 0.1, 0.5, 0.4])));
             Ok(())
@@ -604,7 +604,7 @@ fn debug_redacts_outer_result_job_bitmap_and_native_words() {
     let (reply, _response) = mpsc::sync_channel(1);
     let job = Job {
         bitmap: Bitmap {
-            rgba: image::RgbaImage::from_raw(4, 1, b"SENTINEL PRIVATE!".to_vec()).unwrap(),
+            bgra: image::RgbaImage::from_raw(4, 1, b"SENTINEL PRIVATE!".to_vec()).unwrap(),
         },
         region: OcrRegion {
             rect: rect([0, 0], [4, 1]),
