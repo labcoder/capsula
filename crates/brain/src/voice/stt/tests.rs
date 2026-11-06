@@ -111,10 +111,10 @@ impl Harness {
                 if fail.load(Ordering::SeqCst) {
                     return Err(SpeechError::Native(NativeError::Load));
                 }
+                let generation = Generation(serving.load(Ordering::SeqCst));
                 events_in
                     .send(Event::Loaded(models.to_owned()))
                     .expect("the test watches");
-                let generation = Generation(serving.load(Ordering::SeqCst));
                 if holding_serve.swap(false, Ordering::SeqCst) {
                     released
                         .lock()
