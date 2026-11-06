@@ -6,6 +6,8 @@ use super::*;
 use crate::screen::{CaptureError, ScreenError};
 use crate::supervise::{read_request, write_message};
 
+mod continuation;
+
 pub(crate) const RECT: PhysicalRect = PhysicalRect {
     origin: [0, 0],
     size: [1, 1],
@@ -18,6 +20,7 @@ pub(crate) const TARGET: ElementTarget = ElementTarget::Window {
 pub(crate) struct Node {
     pub(crate) name: String,
     pub(crate) password: bool,
+    pub(crate) control_type: i32,
     pub(crate) rect: PhysicalRect,
     pub(crate) children: Vec<usize>,
 }
@@ -26,7 +29,10 @@ pub(crate) struct FakeSource {
     pub(crate) nodes: Vec<Node>,
     pub(crate) error: Option<SourceError>,
     pub(crate) fail_at: Option<usize>,
+    pub(crate) navigation_at: Option<usize>,
+    pub(crate) sibling_fail_at: Option<usize>,
     pub(crate) reads: Cell<usize>,
+    pub(crate) mask_reads: Cell<usize>,
 }
 
 impl FakeSource {
@@ -35,6 +41,7 @@ impl FakeSource {
             .map(|_| Node {
                 name: String::new(),
                 password: false,
+                control_type: 0,
                 rect: RECT,
                 children: Vec::new(),
             })
@@ -44,7 +51,10 @@ impl FakeSource {
             nodes,
             error: None,
             fail_at: None,
+            navigation_at: None,
+            sibling_fail_at: None,
             reads: Cell::new(0),
+            mask_reads: Cell::new(0),
         }
     }
 }
@@ -66,14 +76,27 @@ impl ElementSource for FakeSource {
         Ok(NodeProps {
             name: node.name.clone(),
             password: node.password,
-            control_type: 0,
+            control_type: node.control_type,
             rect: node.rect,
         })
     }
+    fn mask(&mut self, node: &usize) -> Result<(bool, PhysicalRect), SourceError> {
+        self.mask_reads.set(self.mask_reads.get() + 1);
+        if self.fail_at == Some(*node) {
+            return Err(SourceError::Fault(-7));
+        }
+        Ok((self.nodes[*node].password, self.nodes[*node].rect))
+    }
     fn first_child(&mut self, node: &usize) -> Result<Option<usize>, SourceError> {
+        if self.navigation_at == Some(*node) {
+            return Err(SourceError::Fault(-7));
+        }
         Ok(self.nodes[*node].children.first().copied())
     }
     fn next_sibling(&mut self, node: &usize) -> Result<Option<usize>, SourceError> {
+        if self.sibling_fail_at == Some(*node) {
+            return Err(SourceError::Fault(-7));
+        }
         Ok(self.nodes.iter().find_map(|parent| {
             parent
                 .children
@@ -87,6 +110,13 @@ impl ElementSource for FakeSource {
 #[derive(Clone)]
 pub(crate) struct FakePlatform(pub(crate) bool);
 impl ElementPlatform for FakePlatform {
+    fn foreground(&mut self) -> Option<TopWindow> {
+        Some(TopWindow {
+            window: WindowRef(7),
+            pid: 8,
+            rect: RECT,
+        })
+    }
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
         Ok(self.0 && pid == 8)
     }
@@ -113,6 +143,34 @@ fn unavailable(capture: CaptureId, why: Unavailable) -> ElementTree {
         cut: None,
         availability: Availability::Unavailable(why),
     }
+}
+
+pub(crate) struct FakeReader;
+impl ElementReader for FakeReader {
+    fn foreground(&mut self) -> Option<TopWindow> {
+        FakePlatform(false).foreground()
+    }
+    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
+        walk(
+            &mut FakeSource::flat(1),
+            &job,
+            &LIMITS,
+            &Instant::now,
+            &mut FakePlatform(false),
+        )
+        .map(|tree| Walked {
+            tree,
+            retire: false,
+        })
+    }
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the production opener signature"
+)]
+pub(crate) fn open_reader() -> Result<Box<dyn ElementReader>, i32> {
+    Ok(Box::new(FakeReader))
 }
 
 fn run(source: &mut FakeSource, limits: &ElementLimits) -> ElementTree {
@@ -236,6 +294,9 @@ fn root_only_unavailability_and_preorder_geometry_are_exact() {
     assert_eq!(tree.elements.len(), 1);
     assert_eq!(tree.elements[0].parent, None);
     assert_eq!(tree.elements[0].screen, RECT);
+    assert_eq!(tree.window, RECT);
+    assert!(!tree.elements[0].password);
+    assert_eq!(tree.elements[0].control_type, 0);
     assert_eq!(tree.elements[0].in_window, RECT);
     assert_eq!(tree.availability, Availability::Read);
     assert_eq!(tree.cut, None);
@@ -246,7 +307,23 @@ fn root_only_unavailability_and_preorder_geometry_are_exact() {
     ] {
         let mut source = FakeSource::flat(1);
         source.error = Some(error);
-        assert_eq!(run(&mut source, &LIMITS), unavailable(CaptureId(1), why));
+        let now = Instant::now();
+        let job = job(1, now + Duration::from_secs(1));
+        assert_eq!(
+            walk(
+                &mut source,
+                &job,
+                &LIMITS,
+                &|| now,
+                &mut FakePlatform(false)
+            )
+            .unwrap(),
+            unavailable(CaptureId(1), why)
+        );
+        assert_eq!(
+            job.masks.lock().unwrap().completeness(),
+            Completeness::Unknown(why)
+        );
         assert_eq!(source.reads.get(), 0);
     }
     let mut source = FakeSource::flat(4);
@@ -256,11 +333,21 @@ fn root_only_unavailability_and_preorder_geometry_are_exact() {
     };
     source.nodes[0].children = vec![1, 3];
     source.nodes[1].children = vec![2];
+    source.nodes[1].control_type = 50_000;
     source.nodes[1].rect = PhysicalRect {
         origin: [-90, -180],
         size: [30, 40],
     };
     let tree = run(&mut source, &LIMITS);
+    assert_eq!(
+        tree.window,
+        PhysicalRect {
+            origin: [-100, -200],
+            size: [200, 300]
+        }
+    );
+    assert_eq!(tree.elements[1].control_type, 50_000);
+    assert!(!tree.elements[1].password);
     assert_eq!(
         tree.elements.iter().map(|e| e.parent).collect::<Vec<_>>(),
         [None, Some(0), Some(1), Some(0)]
@@ -323,6 +410,16 @@ fn assert_absent(bytes: &[u8], sentinel: &str) {
     );
 }
 
+fn assert_debug_redacted(text: &str) {
+    for sentinel in [
+        "plain_name_sentinel",
+        "password_name_sentinel",
+        "password_child_sentinel",
+    ] {
+        assert_absent(text.as_bytes(), sentinel);
+    }
+}
+
 #[test]
 fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
     for stop in [None, Some(Cut::Budget), Some(Cut::Provider)] {
@@ -330,8 +427,9 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
         let mut source = FakeSource::flat(4);
         source.nodes[0].name = "plain_name_sentinel".into();
         source.nodes[0].children = vec![1, 3];
-        source.nodes[1].name = "password_name_sentinel".into();
+        source.nodes[1].name = "password_name_sentinel".repeat(7);
         source.nodes[1].password = true;
+        source.nodes[1].control_type = 50_001;
         source.nodes[1].rect = PhysicalRect {
             origin: [10, 20],
             size: [30, 40],
@@ -352,7 +450,11 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
         let tree = walk(&mut source, &job, &LIMITS, &clock, &mut FakePlatform(false)).unwrap();
         assert_eq!(tree.elements.len(), if stop.is_none() { 3 } else { 2 });
         assert_eq!(tree.cut, stop);
+        assert_eq!(tree.elements[0].name, "plain_name_sentinel");
         assert_eq!(tree.elements[1].name, "");
+        assert!(tree.elements[1].password);
+        assert_eq!(tree.elements[1].control_type, 50_001);
+        assert_eq!(tree.window, RECT);
         assert!(
             !tree.elements[1].name_cut,
             "password name was truncated rather than removed"
@@ -380,22 +482,27 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
             NodeProps {
                 name: "plain_name_sentinel".into(),
                 password: false,
-                control_type: 0,
+                control_type: 50_000,
                 rect: RECT
             },
             CaptureError::Screen(ScreenError::Fault(-7))
         );
-        for sentinel in [
-            "plain_name_sentinel",
-            "password_name_sentinel",
-            "password_child_sentinel",
-        ] {
-            assert_absent(text.as_bytes(), sentinel);
-        }
-        let reply = tree;
+        assert_debug_redacted(&text);
+        let walked = Walked {
+            tree,
+            retire: false,
+        };
+        let outer_debug = format!(
+            "{walked:?} {job:?} {:?}",
+            (CaptureId(1), Ok::<_, Failure>(&walked.tree))
+        );
+        assert_eq!(format!("{job:?}"), "WalkJob(..)");
+        assert_debug_redacted(&outer_debug);
+        let reply = crate::screen::ReplyBody::Elements(walked.tree);
         let mut framed = Vec::new();
         write_message(&mut framed, 4, &reply, super::super::wire::MAX_REPLY_BYTES).unwrap();
         let debug = format!("{reply:?}");
+        assert_debug_redacted(&debug);
         for bytes in [
             serde_json::to_vec(&reply).unwrap(),
             kumochi_protocol::frame::encode_payload(&reply).unwrap(),
@@ -407,7 +514,7 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
             }
         }
         assert_eq!(
-            read_request::<ElementTree>(
+            read_request::<crate::screen::ReplyBody>(
                 &mut framed.as_slice(),
                 super::super::wire::MAX_REPLY_BYTES
             )
@@ -546,6 +653,9 @@ fn element_ids_are_capture_scoped_and_reject_malformed_values() {
         "c12.e65536",
         "c18446744073709551616.e0",
         "c12.e",
+        "c+12.e7",
+        "c12.e+7",
+        "c012.e007",
         "secret",
     ] {
         assert_eq!(
@@ -562,4 +672,35 @@ fn element_ids_are_capture_scoped_and_reject_malformed_values() {
     assert_eq!(masks.capture(), CaptureId(12));
     assert_eq!(masks.completeness(), Completeness::Complete);
     assert_eq!(masks.rects(), [RECT]);
+}
+
+#[test]
+fn busy_completion_cannot_be_upgraded_by_a_late_walk() {
+    let masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(12))));
+    masks.lock().unwrap().push(RECT);
+    assert!(
+        ElementTree::unavailable(CaptureId(12), Unavailable::Busy).finish(&masks),
+        "initial timeout records unknown masks"
+    );
+    let mut late = ElementTree {
+        capture: CaptureId(12),
+        window: RECT,
+        elements: Vec::new(),
+        cut: None,
+        availability: Availability::Read,
+    };
+    for (cut, generation) in [(None, 2), (Some(Cut::Budget), 2)] {
+        late.cut = cut;
+        assert!(
+            !late.finish(&masks),
+            "a late walk cannot publish completeness"
+        );
+        let known = masks.lock().unwrap();
+        assert_eq!(
+            known.completeness(),
+            Completeness::Unknown(Unavailable::Busy)
+        );
+        assert_eq!(known.generation(), generation);
+        assert_eq!(known.rects(), [RECT]);
+    }
 }
