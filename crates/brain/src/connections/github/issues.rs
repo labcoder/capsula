@@ -41,6 +41,23 @@ pub struct IssueContent<'a> {
 /// }
 /// ```
 ///
+/// The same paths build the endpoint from a checked payload, so a renamed path fails here too:
+///
+/// ```
+/// use kumochi_brain::connections::github::issues::IssueContent;
+/// use kumochi_brain::connections::github::{GitHubEndpoint, GitHubToken};
+/// use kumochi_protocol::{Secret, message::{IssueBody, IssueTitle, RepoName}};
+/// use zeroize::Zeroizing;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let token = Secret::new(GitHubToken::new(Zeroizing::new("ghu_doc".to_owned()))?);
+/// let repo = RepoName::new("octo/repo")?;
+/// let (title, body) = (IssueTitle::new("A title")?, IssueBody::new("A body")?);
+/// let body = IssueContent { title: &title, body: &body }.into_payload()?;
+/// let _endpoint = GitHubEndpoint::CreateIssue { token, repo, body };
+/// # Ok(())
+/// # }
+/// ```
+///
 /// The payload's tuple constructor is private too:
 ///
 /// ```compile_fail
@@ -274,6 +291,9 @@ pub async fn create_issue(
     };
     let status = Some(response.status);
     let mut meta = response.meta;
+    meta.retry_after_s = meta
+        .retry_after_s
+        .map(|seconds| seconds.min(MAX_RETRY_AFTER_S));
     match parse::<CreatedWire>(&response, 201, cap) {
         Ok(raw) => {
             if let Ok(url) = IssueUrl::for_issue(repo, raw.number.get())
@@ -286,9 +306,6 @@ pub async fn create_issue(
             }
         }
         Err(error) => {
-            if let ApiError::Refused { meta: bounded, .. } = error {
-                meta = bounded;
-            }
             if let Some(reason) = error.definite_reason() {
                 return CreateOutcome::Definite {
                     reason,
@@ -298,9 +315,6 @@ pub async fn create_issue(
             }
         }
     }
-    meta.retry_after_s = meta
-        .retry_after_s
-        .map(|seconds| seconds.min(MAX_RETRY_AFTER_S));
     CreateOutcome::Uncertain { status, meta }
 }
 

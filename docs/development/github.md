@@ -116,8 +116,9 @@ seconds, plus unchanged page-one metadata. A full second page is incomplete even
 when every row was filtered out; no Link or third page is followed.
 
 Parser-entry caps enforce 1 MiB even for injected clients. A large remote page
-therefore fails preflight without sending, or leaves post-send lookup Unknown;
-callers must require completeness. Dropping either API future drops its active
-request future. No task survives cancellation. The action coordinator owns consent, durable admission,
-pre-send exclusions, generation checks and placement; this layer never resends or
+therefore fails the lookup that runs before a create, so nothing is sent, or
+leaves the lookup after a send Unknown; callers must require completeness.
+Dropping either API future drops its active request future. No task survives
+cancellation. The action coordinator owns consent, durable admission, pre-send
+exclusions, generation checks and placement; this layer never resends or
 substitutes the local clock for missing server evidence.
