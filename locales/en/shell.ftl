@@ -28,6 +28,10 @@ dock-brain-error = Needs attention
 
 # Turns
 
+chat-live-cut = Earlier streamed text isn't shown here.
+chat-empty = Start a conversation.
+chat-loading = Loading messages…
+chat-history-failed = Couldn't load messages. Try again.
 turn-busy = Still answering earlier messages. Try again in a moment.
 turn-offline = Not sent: the background process isn't connected.
 turn-too-long = That message is too long to send.
@@ -43,10 +47,6 @@ threads-search-empty = No matching tasks.
 thread-gone = This task is no longer available.
 thread-select = Select a task to read its messages.
 thread-cut = This message was shortened.
-chat-live-cut = Earlier streamed text isn't shown here.
-chat-empty = Start a conversation.
-chat-loading = Loading messages…
-chat-history-failed = Couldn't load messages. Try again.
 thread-older = Older messages
 threads-close = Close
 thread-user = You
