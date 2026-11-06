@@ -485,9 +485,9 @@ fn history_is_kumo_only_and_model_only() {
             .map(|schema| schema.name)
             .collect()
     };
-    assert_eq!(names(Origin::Kumo, Route::Model), ["probe", "recall"]);
+    assert_eq!(names(Origin::Kumo, Route::Model), ["focus", "probe", "recall"]);
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
-    assert_eq!(names(Origin::Task(T), Route::Model), ["probe"]);
+    assert_eq!(names(Origin::Task(T), Route::Model), ["focus", "probe"]);
 }
 
 #[test]

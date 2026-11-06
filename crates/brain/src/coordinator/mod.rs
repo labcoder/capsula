@@ -867,7 +867,7 @@ impl Coordinator {
             Input::Engines(now) => self.available(now, &mut effects),
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
-                    self.call_committed(&key, then, &mut effects)?
+                    self.call_committed(&key, then, &mut effects)?;
                 }
                 crate::dispatch::Committed::Refused(error) => {
                     self.call_refused(&key, error, &mut effects)?;
