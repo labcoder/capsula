@@ -85,7 +85,7 @@ impl ScreenHandle {
     ) -> Result<FrameMeta, CaptureError> {
         let capture = ticket.capture();
         let body = RequestBody::Capture {
-            ticket,
+            ticket: ticket.for_shell(crate::platform::connected_shell_pid()),
             display,
             exclude,
         };

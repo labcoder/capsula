@@ -2,6 +2,7 @@
 
 mod capture;
 mod credential;
+mod elements;
 #[cfg(test)]
 pub(crate) mod fake_claude;
 mod fault;
@@ -18,6 +19,7 @@ mod spawn;
 
 pub(crate) use capture::screen_capturer;
 pub(crate) use credential::WindowsCredentialStore;
+pub(crate) use elements::screen_elements;
 #[cfg(debug_assertions)]
 pub(crate) use fault::call_throwing_export;
 pub use fault::quiet_failures;
@@ -29,6 +31,7 @@ pub use job::{ChildPipes, Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
 };
+pub(crate) use pipe::shell_connection;
 pub use pipe::{
     Instance, PipeServer, client_image, client_process, create_owner_only, has_exited,
     process_image, server_image, session_id,
