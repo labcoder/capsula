@@ -1001,15 +1001,13 @@ impl Coordinator {
         }
     }
 
-    /// Starts this turn's run; `focus` tells the shell to follow it before anything can end it.
     fn turn(
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
         text: Content,
-        focus: bool,
         effects: &mut Vec<Effect>,
-    ) {
+    ) -> RunId {
         self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
@@ -1072,10 +1070,11 @@ impl Coordinator {
             run,
             after: WALL_CLOCK,
         });
-        if focus {
-            effects.push(Effect::Control(ControlToShell::Focus { run, thread }));
-        }
-        // The turn is kept, but nothing answers it.
+        run
+    }
+
+    /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
+    fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
         if let Availability::Unavailable(reason) = &self.availability {
             let reason = reason.clone();
             self.fail_with(run, Failure::Engine, reason, effects)

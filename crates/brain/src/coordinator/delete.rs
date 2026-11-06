@@ -98,7 +98,8 @@ impl Coordinator {
             return;
         }
         if self.admits(thread) && !text.trim().is_empty() {
-            self.turn(turn, thread, text, false, effects);
+            let run = self.turn(turn, thread, text, effects);
+            self.unanswered(run, effects);
         } else {
             let refused = ControlToShell::TurnRefused { turn, thread };
             effects.push(Effect::Control(refused));
