@@ -216,6 +216,7 @@ fn a_sign_out_during_the_first_build_ends_the_run_and_its_late_result_is_stale()
     assert_eq!(
         core.handle(Input::SendReady {
             key: SendKey::Build(key(1)),
+            hold: None,
         }),
         Ok(vec![Effect::Rebuild(SendKey::Build(key(1)))])
     );
@@ -240,6 +241,7 @@ fn the_grant_checks_the_runs_connection_itself() {
     assert_eq!(
         core.handle(Input::SendReady {
             key: SendKey::Build(key(1)),
+            hold: None,
         }),
         Ok(refused)
     );
@@ -263,6 +265,7 @@ fn a_catalog_change_keeps_the_run_and_another_connection_ends_it_before_any_gran
     assert_eq!(
         core.handle(Input::SendReady {
             key: SendKey::Build(key(1)),
+            hold: None,
         }),
         Ok(vec![Effect::Rebuild(SendKey::Build(key(1)))]),
         "the old round's held ask is answered with no send"

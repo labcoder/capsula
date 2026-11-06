@@ -31,6 +31,21 @@ channel bound pressure [guess]; overload fails fast rather than buffering more w
 worker can therefore make the brain hold up to 16 × 4 MiB of partial replies, plus 16 queued
 256 KiB frames, for at most one deadline.
 
+A request can also be streamed (`request_stream`): the worker sends several whole replies under
+one id, and the kind's `is_terminal` reply ends it. A plain request keeps only its terminal reply,
+and every reply of today's screen and speech kinds is terminal, so they get one reply as before.
+A request takes at most 16 messages. A stream also takes at most 12 MiB of serialized replies in
+total, counted on every chunk before it is stored, partial messages included; a plain request
+keeps its kind's cap. Going over either bound loses the worker, and so does any reply after the
+terminal one, whose id is no longer pending. A stream queues 4 whole replies for its reader
+[guess]. A reader that
+closes or falls behind ends only its stream, which then reports `WorkerLost` after the replies
+already queued: the supervisor keeps the id and discards its replies until the terminal one or the
+deadline, so an Esc never loses the worker. No reply extends the stream's absolute deadline. A
+loss ends each stream after the replies it had already queued. Dropping a stream doesn't tell the
+worker yet; the screen kind sends its Drop control with the capture streams that come next.
+A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies for one deadline.
+
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
 A loss terminates the worker, fails all pending operations, then broadcasts its `Generation`: the
 first worker is 0 and each respawn the next, and every reply names the generation that sent it.

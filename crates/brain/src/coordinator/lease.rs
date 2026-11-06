@@ -19,6 +19,9 @@ use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
 pub const SEND_DEADLINE: Duration = Duration::from_secs(15);
+/// The longest a held send may go without settling: a Claude Code question's whole launch and
+/// the grace for its teardown to confirm its job empty [guess].
+pub const MAX_HOLD: Duration = Duration::from_secs(165);
 
 /// What asks to send: a run's build, or a background job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +71,12 @@ impl Coordinator {
     /// The transport is about to send `key`'s body. It's granted only for the current run's
     /// admitted build that no delete has touched since; otherwise the body is dropped unsent,
     /// and a touched build is built again. Every ask gets an answer.
-    pub(super) fn send_ready(&mut self, key: BuildKey, effects: &mut Vec<Effect>) {
+    pub(super) fn send_ready(
+        &mut self,
+        key: BuildKey,
+        hold: Option<Duration>,
+        effects: &mut Vec<Effect>,
+    ) {
         let pending = self.pending_deletes();
         let current = self
             .current
@@ -108,14 +116,16 @@ impl Coordinator {
             return;
         }
         let sources = build.sources().to_vec();
-        self.grant(SendKey::Build(key), sources, effects);
+        self.grant(SendKey::Build(key), sources, hold, effects);
     }
 
-    /// Records a lease for `key` carrying `sources`, grants it and arms its deadline.
+    /// Records a lease for `key` carrying `sources`, grants it and arms its deadline: `hold`,
+    /// capped at [`MAX_HOLD`], or [`SEND_DEADLINE`].
     pub(super) fn grant(
         &mut self,
         key: SendKey,
         sources: Vec<ThreadId>,
+        hold: Option<Duration>,
         effects: &mut Vec<Effect>,
     ) {
         self.sends += 1;
@@ -131,7 +141,7 @@ impl Coordinator {
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
             lease: id,
-            after: SEND_DEADLINE,
+            after: hold.map_or(SEND_DEADLINE, |hold| hold.min(MAX_HOLD)),
         });
     }
 

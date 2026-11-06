@@ -305,8 +305,14 @@ Orbit applies −0.4° per horizontal logical pixel and +0.4° per vertical pixe
 distance positive and fov 10–120°. Eye and angle-derived basis stay in f64, so a tiny camera
 distance at a translated target never relies on subtracting a rounded f32 eye.
 
-`three::frame::frame` takes borrowed indexed `Solid`s, each with shared local vertices, source
-`Face`s, a theme-resolved colour/opacity and a composed sampled f64 `Transform`. Preparation must
+`three::frame::frame` takes borrowed indexed `Solid`s, each with a prepared mesh's unscaled local
+f64 vertices, its triangles, its `FaceRange`s (plane anchors and a checked `triangles[start..start +
+len]` run), a theme-resolved colour/opacity and a composed sampled `Transform`. Each vertex and
+anchor is transformed once by the pose, narrowed to world f32 with the same `point64` that
+`mesh::narrowed` certified at rest, then widened for camera-space work; it is never narrowed in
+local space or posed twice, so at rest the frame sees exactly the checked points.
+`ViewGeometry::solids_at` fills a caller-owned `[Solid; 160]` from a `ViewFrame`'s poses with no
+allocation. Preparation must
 preserve original vertex indices and one stable three-vertex plane anchor per source face across
 its tessellations; triangle soup alone cannot satisfy those contracts. A face's triangles tessellate
 one source plane before f32 vertex rounding. The caller composes attachments before the call;
@@ -807,7 +813,15 @@ and source once, so a colour-only revision still carries its full mesh charge on
 predecessor retires. `PreparedStep::scratch_bytes` reports only the fixed `MeshScratch`, which
 is allocated once per preparation that builds a view, never for a reshade, and never retained; it isn't the peak, which also holds the output
 triangles, face groups and the indexing map. An emptied view map is replaced, like the 2D maps,
-and the consumed view inputs leave no buffer behind. Prepared views don't move yet, and the brain's gate still refuses 3D steps.
+and the consumed view inputs leave no buffer behind.
+
+**Settled track ends.** `prepare` takes each 3D track's `final_key` into its solid's
+`PreparedSolid::{pos3, rot3}` and composes `local` from `pos + pos3`, `rot + rot3` and `scale`, so a
+cut view and recovery land at the end values. A rebuilt view carries these offsets by handle; a
+track-only step emits no `ViewInput` and `restyled` recomposes rests and the camera from the
+predecessor, sharing every mesh and source. World checks stay at build time (`shortcut:` a final
+offset that collapses a face isn't refused yet; the precommit check lands before the gate lifts).
+The brain's gate still refuses 3D steps.
 
 ### Motion and the host clock
 
@@ -1058,6 +1072,31 @@ It excludes parsing, admission, commit, input construction, inspection and succe
 output destruction; rejection includes cleanup inside `prepare`. Run the release
 test executable at normal priority on quiet Rez under the shared measurement lock,
 not through Cargo. The fixture is not a worst-case bound or a real-font/GPU measurement.
+
+#### 3D motion
+
+`motion/three.rs` samples the scene's one view. At activation, `own` aligns each `pos3`/`rot3`
+owner by `Handle` into `ViewMotion::owners`, one pair per solid in `ViewGeometry::solids` order, so a
+removal that compacts the solids can't move a track to the wrong solid. A later track takes a
+property only at its activation, as in 2D.
+
+`SceneView::frame` writes one `ViewFrame` (shared geometry, camera, poses). Pose selection is
+separate from scheduling: a property whose owner hasn't ended, before the scene deadline, takes
+`Live::sample(now)`, first-key hold included; otherwise it takes its settled offset. Each pose is
+`posed(offsets)` composed through its parent's pose, so an unowned solid sits at its `rest` bit for
+bit. The frame owns one pose `Vec` reserved at 160 that survives `Frame::clear`, so the first sample
+after any revision, a removed view or a re-added one allocates and frees nothing.
+
+A `view3d` `spin` starts at the activation that first puts the view and continues across later
+activations of the same view: yaw = authored yaw + `degrees_per_s × (min(now, start + 15 s, deadline,
+hold) − start) / 1000`, with saturating subtraction. `hold_spin` (a drag) stops it at its angle.
+`SceneView::new`, the cut and recovery path, installs no spin.
+
+- `view_motion(now)`: a spin or a 3D track is running. A track still to start is a hold, not motion.
+- `animating(now)`: the 2D predicate or `view_motion`. `next_wake` adds the spin's stop.
+- `at_rest(now)`: before the deadline, no track ends after `now`, no object's timing still runs or
+  flows, and no spin is still to stop. A delayed owner keeps it false. The presenter's kept-cut fast
+  path starts using it when 3D admission opens.
 
 ### Inputs, publication and cuts
 

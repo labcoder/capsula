@@ -90,6 +90,15 @@ impl Camera {
         Ok(())
     }
 
+    /// The same camera turned about its target by `degrees` of yaw.
+    #[must_use]
+    pub fn yawed(self, degrees: f64) -> Self {
+        Self {
+            angles: [(self.angles[0] + degrees).rem_euclid(360.0), self.angles[1]],
+            ..self
+        }
+    }
+
     /// Yaw, pitch, distance and vertical fov, in that order.
     pub fn parameters(self) -> [f64; 4] {
         [self.angles[0], self.angles[1], self.dist, self.fov]
