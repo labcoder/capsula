@@ -132,6 +132,11 @@ impl PrepareJob {
     }
 
     #[cfg(test)]
+    pub(super) fn attribution(&self) -> usize {
+        self.input.attribution()
+    }
+
+    #[cfg(test)]
     pub(super) fn scene(&self) -> SceneId {
         self.scene
     }

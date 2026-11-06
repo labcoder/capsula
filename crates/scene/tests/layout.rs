@@ -3060,3 +3060,50 @@ fn bounded_recovery_refuses_a_scene_over_the_cap() {
         }
     }
 }
+
+#[test]
+fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
+    for (count, accepted) in [(212, true), (213, false)] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut measure = Measure::default();
+        let first = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"first","put":[convex("a", 300)]}),
+        );
+        let first = picture(&scene, first, &before, &mut measure).expect("first fill");
+        assert_eq!(first.after.paint_work().fill_vertices, 300);
+        let next = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"next","put":[convex("b", count)]}),
+        );
+        let input = PrepareInput::new(
+            next.preparation,
+            first.after.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("next step follows the first layout")
+        .with_paint_cap(Some(kumochi_scene::display::PaintWork::LIMITS));
+        let result = prepare(input, &mut measure, &AtomicBool::new(false));
+        if accepted {
+            let next = result.expect("300 reused points plus 212 new points fit");
+            next.validate(&scene, &first.after)
+                .expect("current picture");
+            assert_eq!(next.after.paint_work().fill_vertices, 512);
+            let Prim::Fill { points: old, .. } = &first.after.items()[0].primitives[0] else {
+                panic!("original fill");
+            };
+            let Prim::Fill { points: reused, .. } = &next.after.items()[0].primitives[0] else {
+                panic!("reused fill");
+            };
+            assert!(Arc::ptr_eq(old, reused));
+        } else {
+            assert!(matches!(result, Err(PrepareError::OverResidency)));
+        }
+        assert_eq!(first.after.paint_work().fill_vertices, 300);
+    }
+}
