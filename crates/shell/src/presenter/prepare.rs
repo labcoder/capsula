@@ -55,6 +55,10 @@ pub(crate) struct AdmitJob {
 
 /// A job's answer, sent back to [`super::Presenter::completed`] whether or not it is still wanted.
 /// Its payload drops on the dropper thread wherever the answer is discarded.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one completion crosses the channel per job; boxing would add an allocation to each"
+)]
 pub(crate) enum Completion {
     /// A step's preparation.
     Prepared {

@@ -63,7 +63,7 @@ fn picture(
     scene: &SceneState,
     committed: Committed,
     before: &LayoutState,
-    cancel: bool,
+    cancel: &AtomicBool,
 ) -> Result<PreparedStep, PrepareError> {
     let input = PrepareInput::new(
         committed.preparation,
@@ -72,7 +72,7 @@ fn picture(
         Arc::new(Theme::default()),
     )
     .map_err(|(error, _)| error)?;
-    let result = prepare(input, &mut Measure, &AtomicBool::new(cancel))?;
+    let result = prepare(input, &mut Measure, cancel)?;
     result.validate(scene, before)?;
     Ok(result)
 }
@@ -83,7 +83,7 @@ fn next(
     value: Value,
 ) -> PreparedStep {
     let commit = committed(scene, budget, value);
-    picture(scene, commit, before, false).expect("prepared step")
+    picture(scene, commit, before, &AtomicBool::new(false)).expect("prepared step")
 }
 fn opening(scene: &mut SceneState, budget: &mut GlobalBudget, value: Value) -> PreparedStep {
     let before = LayoutState::new(scene);
@@ -159,8 +159,8 @@ fn scale_reaches_world_vertices_once_through_the_composed_rest() {
         corner = [corner[0].max(p.x), corner[1].max(p.y), corner[2].max(p.z)];
     }
     assert_eq!(
-        corner,
-        [15.0, 3.0, 3.0],
+        corner.map(f32::to_bits),
+        [15.0_f32, 3.0, 3.0].map(f32::to_bits),
         "a baked scale gives (16.5, 4.5, 4.5)"
     );
 }
@@ -202,8 +202,8 @@ fn reshading_shares_sources_and_meshes_and_text_sets_prepare_no_view() {
         ));
         assert!(Arc::ptr_eq(built(old, index), built(new, index)));
     }
-    let shared: usize = (0..2).map(|index| mesh_bytes(built(old, index))).sum();
-    assert!(new.marginal_bytes(Some(old)) + shared <= new.full_bytes());
+    let meshes: usize = (0..2).map(|index| mesh_bytes(built(old, index))).sum();
+    assert!(new.marginal_bytes(Some(old)) + meshes <= new.full_bytes());
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn a_cancelled_preparation_publishes_nothing() {
         json!({"id":"a","put":[view(), cube("s", &json!({}))]}),
     );
     assert!(matches!(
-        picture(&scene, commit, &before, true),
+        picture(&scene, commit, &before, &AtomicBool::new(true)),
         Err(PrepareError::Cancelled)
     ));
     assert!(before.views().is_empty());
