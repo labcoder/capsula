@@ -125,6 +125,10 @@ sequenceDiagram
   deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
   as `failed(engine)`; and nothing is granted again until the brain restarts. A late settlement
   changes nothing. A delete is never released because time ran out.
+- **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
+  (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
+  `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
+  place of the 15 s, for builds and jobs alike, and fails closed the same way.
 - **Restart.** A held delete never reached the store, so after a restart its thread is still
   there and no success was ever reported, as with any delete a quit didn't finish.
 

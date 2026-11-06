@@ -20,17 +20,17 @@ use io::Verified;
 /// The authority's file in the data folder; not the history store, so no purge touches it.
 pub(crate) const FILE: &str = "credentials.db";
 /// The newest schema this build knows; a newer file is refused, never downgraded.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 /// The sign-out marker's JSON bound, as the vault had it.
 const MARKER_BYTES: usize = 200;
 
-/// Version 2. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
+/// Version 3. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
 const SCHEMA: &str = "
-CREATE TABLE heads (
-    kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic')),
+CREATE TABLE \"heads\" (
+    kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic', 'github')),
     revision INTEGER NOT NULL CHECK (revision >= 0)
 ) STRICT;
-INSERT INTO heads (kind, revision) VALUES ('host', 0), ('chatgpt', 0), ('revoke', 0), ('anthropic', 0);
+INSERT INTO heads (kind, revision) VALUES ('host', 0), ('chatgpt', 0), ('revoke', 0), ('anthropic', 0), ('github', 0);
 CREATE TABLE generations (
     generation BLOB NOT NULL UNIQUE CHECK (length(generation) = 16),
     kind TEXT NOT NULL REFERENCES heads (kind),
@@ -57,6 +57,17 @@ const LEGACY: &str = "
 ALTER TABLE control ADD COLUMN legacy_deleted_in INTEGER;
 ALTER TABLE control ADD COLUMN legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1));
 PRAGMA user_version = 2;
+";
+
+const GITHUB: &str = "
+CREATE TABLE heads_v3 (
+    kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic', 'github')),
+    revision INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+INSERT INTO heads_v3 SELECT * FROM heads;
+INSERT OR IGNORE INTO heads_v3 (kind, revision) VALUES ('github', 0);
+DROP TABLE heads;
+ALTER TABLE heads_v3 RENAME TO heads;
 ";
 
 /// Why the authority refused; no name, generation or secret is carried.
@@ -95,6 +106,7 @@ pub(crate) enum Kind {
     Account,
     Revocations,
     AnthropicKey,
+    GitHub,
 }
 
 impl Kind {
@@ -104,6 +116,7 @@ impl Kind {
             Self::Account => "chatgpt",
             Self::Revocations => "revoke",
             Self::AnthropicKey => "anthropic",
+            Self::GitHub => "github",
         }
     }
 
@@ -113,6 +126,7 @@ impl Kind {
             Self::Account,
             Self::Revocations,
             Self::AnthropicKey,
+            Self::GitHub,
         ]
         .into_iter()
         .find(|kind| kind.label() == label)
@@ -296,35 +310,56 @@ impl Authority {
         conn.execute_batch(
             "PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;",
         )?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        match version {
-            0 => {
-                tx.execute_batch(SCHEMA)?;
-                tx.execute(
-                    "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
-                    [marker_json(SignOutMarker::default())?],
-                )?;
-                tx.execute_batch("PRAGMA user_version = 2")?;
-            }
-            1 => tx.execute_batch(LEGACY)?,
-            VERSION => {}
-            newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
-            _ => return Err(AuthorityError::Corrupt),
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if matches!(version, 1 | 2) {
+            conn.pragma_update(None, "foreign_keys", false)?;
         }
-        let lifetime = tx
-            .query_row(
-                "UPDATE control SET lifetime = lifetime + 1 WHERE id = 1 RETURNING lifetime",
+        let opening = (|| -> Result<i64, AuthorityError> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            match version {
+                0 => {
+                    tx.execute_batch(SCHEMA)?;
+                    tx.execute(
+                        "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
+                        [marker_json(SignOutMarker::default())?],
+                    )?;
+                }
+                1 => {
+                    tx.execute_batch(LEGACY)?;
+                    tx.execute_batch(GITHUB)?;
+                }
+                2 => tx.execute_batch(GITHUB)?,
+                VERSION => {}
+                newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
+                _ => return Err(AuthorityError::Corrupt),
+            }
+            if version < VERSION {
+                let violations: i64 =
+                    tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })?;
+                if violations != 0 {
+                    return Err(AuthorityError::Corrupt);
+                }
+                tx.pragma_update(None, "user_version", VERSION)?;
+            }
+            let lifetime = tx
+                .query_row(
+                    "UPDATE control SET lifetime = lifetime + 1 WHERE id = 1 RETURNING lifetime",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(AuthorityError::Corrupt)?;
+            tx.execute(
+                "UPDATE generations SET state = 'removed' WHERE state = 'pending'",
                 [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or(AuthorityError::Corrupt)?;
-        tx.execute(
-            "UPDATE generations SET state = 'removed' WHERE state = 'pending'",
-            [],
-        )?;
-        tx.commit()?;
+            )?;
+            tx.commit()?;
+            Ok(lifetime)
+        })();
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let lifetime = opening?;
         Ok(Self { conn, lifetime })
     }
 
@@ -531,6 +566,29 @@ impl Authority {
             let (generation, kind, chunks, bytes) = row?;
             Ok(Retired {
                 kind: Kind::parse(&kind)?,
+                generation: Generation::from_sql(&generation)?,
+                layout: Layout::from_sql(chunks, bytes)?,
+            })
+        })
+        .collect()
+    }
+
+    pub(crate) fn retired_kind(&self, kind: Kind) -> Result<Vec<Retired>, AuthorityError> {
+        let mut statement = self.conn.prepare(
+            "SELECT generation, chunks, bytes FROM generations
+             WHERE state = 'removed' AND kind = ?1 ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([kind.label()], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (generation, chunks, bytes) = row?;
+            Ok(Retired {
+                kind,
                 generation: Generation::from_sql(&generation)?,
                 layout: Layout::from_sql(chunks, bytes)?,
             })

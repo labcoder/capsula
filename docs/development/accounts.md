@@ -786,7 +786,7 @@ It holds no secret bytes. Those stay in Credential Manager under write-once name
 `<CREDENTIAL_SERVICE>/gen/<kind>/<generation>/<index>`, where the generation is a random
 128-bit id in hex. No legacy name starts with that prefix; a test checks all 262 of them.
 
-Per kind (`host`, `chatgpt`, `revoke`, `anthropic`) it owns a head revision that every change
+Per kind (`host`, `chatgpt`, `revoke`, `anthropic`, `github`) it owns a head revision that every change
 bumps, the one Active generation, at most one Pending candidate (unique indexes enforce both),
 and each generation's layout: its chunk count (1 to 64) and byte length (at most 48 KiB). It
 also owns the sign-out marker, which fails closed when malformed. `Authority::open` takes the

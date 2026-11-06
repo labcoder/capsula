@@ -17,7 +17,7 @@ impl Kind for Test {
 }
 
 /// `message` as the frames a worker writes for it.
-fn frames(id: u64, message: &impl Serialize, max: usize) -> Vec<Frame> {
+pub(super) fn frames(id: u64, message: &impl Serialize, max: usize) -> Vec<Frame> {
     let mut bytes = Vec::new();
     write_message(&mut bytes, id, message, max).expect("written");
     let mut reader = bytes.as_slice();
@@ -35,11 +35,10 @@ fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
     (
         BTreeMap::from([(
             id,
-            Pending {
-                until: Instant::now() + Duration::from_secs(1),
-                answer,
-                assembly: Assembly::new(Test::MAX_REPLY),
-            },
+            Pending::new(
+                Instant::now() + Duration::from_secs(1),
+                Destination::Single(answer),
+            ),
         )]),
         receive,
     )
@@ -200,10 +199,11 @@ async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
     assert_eq!(handle.request(vec![], until).await, Err(WorkerLost));
     assert_eq!(receive.len(), 16);
     for _ in 0..16 {
-        complete::<Test>(
-            receive.try_recv().expect("accepted request").answer,
-            Ok(("pong".to_owned(), Generation(1))),
-        );
+        let Destination::Single(answer) = receive.try_recv().expect("accepted request").answer
+        else {
+            panic!("a single request");
+        };
+        complete::<Test>(answer, Ok(("pong".to_owned(), Generation(1))));
     }
     for request in requests {
         assert_eq!(request.await, Ok(("pong".to_owned(), Generation(1))));
