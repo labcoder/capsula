@@ -197,22 +197,26 @@ impl fmt::Debug for GitHubEndpoint {
 
 impl GitHubEndpoint {
     pub(super) fn url(&self) -> Result<Url, HttpError> {
-        let path = match self {
-            Self::DeviceCode { .. } => "https://github.com/login/device/code".to_owned(),
-            Self::AccessToken { .. } => "https://github.com/login/oauth/access_token".to_owned(),
-            Self::User { .. } => "https://api.github.com/user".to_owned(),
-            Self::Installations { .. } => "https://api.github.com/user/installations".to_owned(),
+        let (host, path) = match self {
+            Self::DeviceCode { .. } => ("github.com", "/login/device/code".to_owned()),
+            Self::AccessToken { .. } => ("github.com", "/login/oauth/access_token".to_owned()),
+            Self::User { .. } => ("api.github.com", "/user".to_owned()),
+            Self::Installations { .. } => ("api.github.com", "/user/installations".to_owned()),
             Self::Repositories { installation, .. } => {
                 if *installation == 0 {
                     return Err(HttpError::Request);
                 }
-                format!("https://api.github.com/user/installations/{installation}/repositories")
+                (
+                    "api.github.com",
+                    format!("/user/installations/{installation}/repositories"),
+                )
             }
             Self::CreateIssue { repo, .. } | Self::Issues { repo, .. } => {
-                format!("https://api.github.com/repos/{}/issues", repo.as_str())
+                ("api.github.com", format!("/repos/{}/issues", repo.as_str()))
             }
         };
-        let mut url = Url::parse(&path).map_err(|_| HttpError::Endpoint)?;
+        let mut url =
+            Url::parse(&format!("https://{host}{path}")).map_err(|_| HttpError::Endpoint)?;
         match self {
             Self::Installations { page, .. }
             | Self::Repositories { page, .. }
@@ -239,12 +243,7 @@ impl GitHubEndpoint {
                 .append_pair("sort", "created")
                 .append_pair("direction", "desc");
         }
-        let host = if matches!(self, Self::DeviceCode { .. } | Self::AccessToken { .. }) {
-            "github.com"
-        } else {
-            "api.github.com"
-        };
-        check_origin(url, host)
+        check_origin(url, host, &path)
     }
 
     pub(super) fn body_limit(&self) -> usize {
@@ -256,9 +255,10 @@ impl GitHubEndpoint {
     }
 }
 
-fn check_origin(url: Url, host: &str) -> Result<Url, HttpError> {
+fn check_origin(url: Url, host: &str, path: &str) -> Result<Url, HttpError> {
     if url.scheme() != "https"
         || url.host_str() != Some(host)
+        || url.path() != path
         || url.port_or_known_default() != Some(443)
         || !url.username().is_empty()
         || url.password().is_some()

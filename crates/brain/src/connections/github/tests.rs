@@ -126,6 +126,25 @@ fn unrepresentable_since_and_zero_installation_are_refused() {
             .1,
         "1970-01-01T00:00:00Z"
     );
+    let GitHubEndpoint::Issues { since_s, .. } = &mut issues else {
+        panic!("issue fixture")
+    };
+    *since_s = 253_402_300_799;
+    assert_eq!(
+        issues
+            .url()
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "since")
+            .unwrap()
+            .1,
+        "9999-12-31T23:59:59Z"
+    );
+    let GitHubEndpoint::Issues { since_s, .. } = &mut issues else {
+        panic!("issue fixture")
+    };
+    *since_s = 253_402_300_800;
+    assert_eq!(issues.url().unwrap_err(), HttpError::Request);
     assert_eq!(
         GitHubEndpoint::Repositories {
             token: token(),
@@ -143,22 +162,24 @@ fn origins_are_rechecked_independently_of_identifier_grammars() {
     for host in ["github.com", "api.github.com"] {
         let good = format!("https://{host}/a?b=c");
         assert_eq!(
-            super::check_origin(url::Url::parse(&good).unwrap(), host)
+            super::check_origin(url::Url::parse(&good).unwrap(), host, "/a")
                 .unwrap()
                 .as_str(),
             good
         );
         for bad in [
             format!("http://{host}/"),
+            format!("http://{host}:443/"),
             format!("https://{host}:444/"),
             format!("https://{host}.example/"),
             format!("https://user@{host}/"),
             format!("https://user:pass@{host}/"),
+            format!("https://:pass@{host}/"),
             format!("https://{host}/#fragment"),
             "https://127.0.0.1/".to_owned(),
         ] {
             assert_eq!(
-                super::check_origin(url::Url::parse(&bad).unwrap(), host).unwrap_err(),
+                super::check_origin(url::Url::parse(&bad).unwrap(), host, "/").unwrap_err(),
                 HttpError::Endpoint
             );
         }
@@ -166,7 +187,8 @@ fn origins_are_rechecked_independently_of_identifier_grammars() {
     assert_eq!(
         super::check_origin(
             url::Url::parse("https://api.github.com/").unwrap(),
-            "github.com"
+            "github.com",
+            "/"
         )
         .unwrap_err(),
         HttpError::Endpoint
@@ -174,11 +196,27 @@ fn origins_are_rechecked_independently_of_identifier_grammars() {
     assert_eq!(
         super::check_origin(
             url::Url::parse("https://github.com/").unwrap(),
-            "api.github.com"
+            "api.github.com",
+            "/"
         )
         .unwrap_err(),
         HttpError::Endpoint
     );
+    for (url, path) in [
+        (
+            "https://api.github.com/repos/a/b/issues",
+            "/repos/a/c/issues",
+        ),
+        (
+            "https://api.github.com/repos/a/../b/issues",
+            "/repos/a/../b/issues",
+        ),
+    ] {
+        assert_eq!(
+            super::check_origin(url::Url::parse(url).unwrap(), "api.github.com", path).unwrap_err(),
+            HttpError::Endpoint
+        );
+    }
 }
 
 #[test]

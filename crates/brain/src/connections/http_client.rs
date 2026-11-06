@@ -35,7 +35,8 @@ pub enum HttpError {
     /// A URL didn't meet the endpoint's HTTPS/origin rules.
     #[error("account endpoint refused")]
     Endpoint,
-    /// A request tried to send credentials to a read-only endpoint.
+    /// A request was refused before dispatch: fields or credentials its endpoint doesn't take, or a
+    /// checked input out of bounds.
     #[error("account request refused")]
     Request,
     /// Redirects are never followed.
@@ -83,8 +84,8 @@ impl IssuerUrl {
     }
 }
 
-/// The only account destinations: code exchange, identity verification, revocation and the
-/// model list.
+/// The only account destinations: `OpenAI`'s code exchange, identity verification, revocation and
+/// model list, Anthropic's model list, and the typed GitHub operations.
 pub enum Endpoint {
     /// The documented form-token endpoint, one of the two accepting form credentials.
     Token,
@@ -217,6 +218,11 @@ fn http_seconds(value: &str) -> Option<u64> {
     }
     let date =
         time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822).ok()?;
+    // time's RFC 2822 parser doesn't check the weekday against the date.
+    let weekday = date.weekday().to_string();
+    if !value.trim_start().starts_with(weekday.get(..3)?) {
+        return None;
+    }
     u64::try_from(date.unix_timestamp()).ok()
 }
 
@@ -305,6 +311,7 @@ fn connecting_within(
         .https_only(true)
         .no_proxy()
         .redirect(Policy::none())
+        // Inert today (no h2 or h3 in this build); pins no retries so enabling http2 can't resend.
         .retry(reqwest::retry::never())
         .connect_timeout(connect)
         .read_timeout(Duration::from_secs(60))
@@ -354,7 +361,11 @@ impl Http for Client {
 }
 
 impl Client {
-    fn github_request(&self, endpoint: &GitHubEndpoint, url: &str) -> reqwest::RequestBuilder {
+    fn github_request(
+        &self,
+        endpoint: &GitHubEndpoint,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, HttpError> {
         let deadline = if matches!(
             endpoint,
             GitHubEndpoint::CreateIssue { .. } | GitHubEndpoint::Issues { .. }
@@ -375,15 +386,19 @@ impl Client {
             GitHubEndpoint::CreateIssue { token, body, .. } => self
                 .0
                 .post(url)
-                .bearer_auth(token.expose().as_str())
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    bearer(token.expose().as_str())?,
+                )
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.expose().to_vec()),
             GitHubEndpoint::User { token }
             | GitHubEndpoint::Installations { token, .. }
             | GitHubEndpoint::Repositories { token, .. }
-            | GitHubEndpoint::Issues { token, .. } => {
-                self.0.get(url).bearer_auth(token.expose().as_str())
-            }
+            | GitHubEndpoint::Issues { token, .. } => self.0.get(url).header(
+                reqwest::header::AUTHORIZATION,
+                bearer(token.expose().as_str())?,
+            ),
         }
         .header(
             reqwest::header::USER_AGENT,
@@ -394,11 +409,11 @@ impl Client {
             endpoint,
             GitHubEndpoint::DeviceCode { .. } | GitHubEndpoint::AccessToken { .. }
         ) {
-            request.header(reqwest::header::ACCEPT, "application/json")
+            Ok(request.header(reqwest::header::ACCEPT, "application/json"))
         } else {
-            request
+            Ok(request
                 .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2026-03-10")
+                .header("X-GitHub-Api-Version", "2026-03-10"))
         }
     }
     async fn send_to(&self, url: &str, request: Request) -> Result<Response, HttpError> {
@@ -409,7 +424,7 @@ impl Client {
             if !request.fields.is_empty() {
                 return Err(HttpError::Request);
             }
-            self.github_request(endpoint, url)
+            self.github_request(endpoint, url)?
         } else if matches!(request.endpoint, Endpoint::Token | Endpoint::Revocation(_)) {
             let fields: Vec<_> = request
                 .fields
@@ -422,7 +437,10 @@ impl Client {
                 return Err(HttpError::Request);
             }
             match &request.endpoint {
-                Endpoint::Models(bearer) => self.0.get(url).bearer_auth(bearer.expose().as_str()),
+                Endpoint::Models(token) => self
+                    .0
+                    .get(url)
+                    .header(reqwest::header::AUTHORIZATION, bearer(token.expose())?),
                 Endpoint::AnthropicModels(key) => anthropic_request(&self.0, url, key)?,
                 _ => self.0.get(url).timeout(Duration::from_secs(10)),
             }
@@ -444,15 +462,22 @@ fn anthropic_request(
     url: &str,
     key: &Secret<AnthropicKey>,
 ) -> Result<reqwest::RequestBuilder, HttpError> {
-    let bearer = Zeroizing::new(format!("Bearer {}", key.expose().as_str()));
-    let mut header =
-        reqwest::header::HeaderValue::from_str(&bearer).map_err(|_| HttpError::Request)?;
-    header.set_sensitive(true);
     Ok(client
         .get(url)
-        .header(reqwest::header::AUTHORIZATION, header)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            bearer(key.expose().as_str())?,
+        )
         .header("anthropic-version", "2023-06-01")
         .timeout(Duration::from_secs(15)))
+}
+
+fn bearer(token: &str) -> Result<reqwest::header::HeaderValue, HttpError> {
+    let value = Zeroizing::new(format!("Bearer {token}"));
+    let mut header =
+        reqwest::header::HeaderValue::from_str(&value).map_err(|_| HttpError::Request)?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 fn body_buffer(length: Option<u64>) -> Zeroizing<Vec<u8>> {
@@ -490,6 +515,7 @@ async fn read_response(
     let limit = github.map_or(MAX_BODY_BYTES, GitHubEndpoint::body_limit);
     let length_cap = u64::try_from(limit).unwrap_or(u64::MAX);
     let mut bytes = body_buffer(response.content_length().map(|n| n.min(length_cap)));
+    // Never Connect: classify reads Connect as "no tokens issued", and a body comes after sending.
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         if error.is_timeout() {
             HttpError::Timeout

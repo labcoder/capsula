@@ -7,6 +7,13 @@ redirects and no automatic retries. Its raw reqwest client stays inside
 `connections/http_client.rs`. `connections/github` owns checked, transient endpoint
 inputs, not a connection session, credential lookup or persistent state.
 
+Two client rules cover every account call, not only GitHub's. Retries are pinned
+off with `retry::never()`, which is inert while the build has no HTTP/2 or HTTP/3
+and keeps a create from being resent if that changes. A failure while reading a
+body is Timeout or Transport, never Connect, because account classification reads
+Connect as "nothing was sent, so no tokens were issued". Bearer headers are built
+in a wiped buffer and marked sensitive.
+
 ```mermaid
 flowchart LR
     Caller --> Request[Request: endpoint + legacy fields]
@@ -20,8 +27,8 @@ cannot be mixed independently. Device endpoints accept only their typed form
 inputs and have no bearer. REST requests use the fixed product User-Agent,
 `application/vnd.github+json`, API version `2026-03-10` and a checked `ghu_` bearer.
 Only issue creation carries JSON. Nonempty legacy form fields are refused.
-Every constructed GitHub URL is checked again for its exact host, HTTPS/443 and
-absence of userinfo or fragments. Installation, repository and issue pages fix
+Every constructed GitHub URL is checked again for its exact host and path,
+HTTPS/443 and absence of userinfo or fragments. Installation, repository and issue pages fix
 `per_page=100`; page numbers are restricted to one or two. Link URLs aren't used.
 
 The transport collects at most 4 KiB for device replies, 64 KiB for `/user`, and
@@ -36,8 +43,8 @@ Duplicate, oversized, malformed and overflowing headers become absent, not zero.
 HTTP-date Retry-After requires a valid server Date; no local-clock replacement
 is made. Issue-create 4xx replies keep their definite status and metadata without
 reading diagnostic bodies. Body failures after headers never become Connect.
-Per-request deadlines include the response body: 15 seconds for device, user and
-repository-page calls, 30 seconds for create and issue-page calls.
+Per-request deadlines include the response body: 15 seconds for device, user,
+installation-page and repository-page calls, 30 seconds for create and issue-page calls.
 
 The typed device/token parsers, create-outcome classification, two-page exact
 matching and their outer Tokio deadlines are a separate API-layer slice. It must

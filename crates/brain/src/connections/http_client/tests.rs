@@ -386,6 +386,7 @@ fn github_metadata_parses_fixed_gmt_and_retry_times_without_retaining_headers() 
         "Thu, 01 Jan 1970 00:00:00 +0000",
         "Wed, 31 Dec 1969 23:59:59 GMT",
         "Thu, 30 Feb 2024 00:00:00 GMT",
+        "Mon, 06 Nov 1994 08:49:37 GMT",
     ] {
         assert_eq!(parse("date", bad).date_s, None);
     }
@@ -547,6 +548,31 @@ async fn github_create_retains_every_rejection_without_reading_diagnostics() {
         assert_eq!(response.status, status);
         assert_eq!(response.meta.retry_after_s, Some(123));
         assert_eq!(response.body.expose().as_slice(), b"");
+        server.finish().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn github_create_reads_bodies_outside_the_4xx_range() {
+    use crate::connections::github::tests::endpoints;
+    for (status, expected) in [(399, HttpError::Redirect), (500, HttpError::Transport)] {
+        let server = Server::start(
+            format!(
+                "HTTP/1.1 {status} Edge\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes(),
+        );
+        assert_eq!(
+            server
+                .client()
+                .send_to(
+                    &server.url(),
+                    request(Endpoint::GitHub(endpoints().remove(5))),
+                )
+                .await
+                .unwrap_err(),
+            expected
+        );
         server.finish().unwrap();
     }
 }
@@ -1351,7 +1377,11 @@ fn destinations_queries_methods_and_headers_are_closed() {
     let client = server.client();
     for (index, (endpoint, (method, url))) in endpoints().into_iter().zip(expected).enumerate() {
         assert_eq!(endpoint.url().unwrap().as_str(), url);
-        let request = client.github_request(&endpoint, url).build().unwrap();
+        let request = client
+            .github_request(&endpoint, url)
+            .unwrap()
+            .build()
+            .unwrap();
         assert_eq!(request.method().as_str(), method);
         assert_eq!(request.url().as_str(), url);
         assert_eq!(
