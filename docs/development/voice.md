@@ -280,7 +280,8 @@ Cancel sends every install that's waiting, fetching or loading back to where it 
 files kept, so the next install resumes. A cancelled load's late success is dropped and sends
 nothing, because the handle already freed it. A commit in flight isn't cancelled. An install
 during a removal's `RemoveDone` write starts once that write commits. Installs keep going while
-no shell is connected.
+no shell is connected. Quit tells the running fetch to stop and starts no other, so an install
+still waiting never downloads; a commit already queued still lands.
 
 ```mermaid
 stateDiagram-v2

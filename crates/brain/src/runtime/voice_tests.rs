@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch};
 use super::{Brain, Ended, Shell, duplex};
 use crate::coordinator::Input;
 use crate::platform::sherpa::tests::TrustedScratch;
+use crate::runtime::Seen;
 use crate::runtime::settings::Gate;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
@@ -44,11 +45,13 @@ const NO_SPEECH_INPUT: PartState = PartState::Failed {
 };
 
 /// A fetch that has 3 of 9 bytes downloaded, then ends with the result the test sends, or as
-/// cancelled once cancelled. It counts the fetches begun.
+/// cancelled once cancelled. It counts the fetches begun and cancelled, and notifies each start.
 #[derive(Debug)]
 struct HeldFetch {
     results: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<(), DownloadError>>>,
     begun: AtomicUsize,
+    cancelled: AtomicUsize,
+    started: tokio::sync::Notify,
 }
 
 impl Fetch for HeldFetch {
@@ -60,6 +63,7 @@ impl Fetch for HeldFetch {
     ) -> Pin<Box<dyn Future<Output = Result<(), DownloadError>> + Send + 'a>> {
         Box::pin(async move {
             self.begun.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
             progress.send_replace(Progress {
                 phase: FetchPhase::Downloading,
                 done: 3,
@@ -69,7 +73,10 @@ impl Fetch for HeldFetch {
             let mut results = self.results.lock().await;
             tokio::select! {
                 Some(result) = results.recv() => result,
-                Ok(()) = cancel.changed() => Err(DownloadError::Cancelled),
+                Ok(()) = cancel.changed() => {
+                    self.cancelled.fetch_add(1, Ordering::SeqCst);
+                    Err(DownloadError::Cancelled)
+                }
                 else => Err(DownloadError::Transport),
             }
         })
@@ -84,6 +91,8 @@ fn held_fetch() -> (Arc<HeldFetch>, Results) {
     let fetch = HeldFetch {
         results: tokio::sync::Mutex::new(held),
         begun: AtomicUsize::new(0),
+        cancelled: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
     };
     (Arc::new(fetch), results)
 }
@@ -112,6 +121,18 @@ fn attached(
     voice: &str,
     short: u64,
 ) -> (Brain, std_mpsc::Sender<()>, Arc<AtomicUsize>, Results) {
+    let (fetcher, results) = held_fetch();
+    let (brain, release, loads) = attached_with(scratch, voice, short, fetcher);
+    (brain, release, loads, results)
+}
+
+/// As [`attached`], fetching with `fetcher`.
+fn attached_with(
+    scratch: &Scratch,
+    voice: &str,
+    short: u64,
+    fetcher: Arc<dyn Fetch>,
+) -> (Brain, std_mpsc::Sender<()>, Arc<AtomicUsize>) {
     let models = seeded(scratch, voice, short);
     let mut brain = test_support::brain(scratch, "0 text Hello there.");
     let (release, released) = std_mpsc::channel();
@@ -129,7 +150,6 @@ fn attached(
     )
     .expect("the owner thread starts");
     let (_, stt_heard) = Reports::new();
-    let (fetcher, results) = held_fetch();
     brain.attach_voice(
         models,
         &[],
@@ -141,7 +161,7 @@ fn attached(
         rate: 24_000,
         generation: OutputGeneration(1),
     });
-    (brain, release, loads, results)
+    (brain, release, loads)
 }
 
 /// Writes `voice` as the `[voice]` table and spoken replies' files, the last one `short` bytes
@@ -583,4 +603,135 @@ async fn a_report_that_came_before_a_connection_is_in_its_opening_view() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     drop(forward);
+}
+
+fn install() -> ControlToBrain {
+    ControlToBrain::Settings(SettingsOp::InstallVoice(VoicePart::SpokenReplies))
+}
+
+#[tokio::test]
+async fn quit_stops_the_running_fetch() {
+    let scratch = Scratch::new("voice-quit-fetch");
+    let (fetch, _results) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    brain.control_offline(install(), 0, &mut tap);
+    brain.pump_settings_offline();
+    tokio::time::timeout(super::PATIENCE, fetch.started.notified())
+        .await
+        .expect("the fetch starts");
+    tokio::time::timeout(
+        super::PATIENCE,
+        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+    )
+    .await
+    .expect("quit ends");
+    assert_eq!(fetch.cancelled.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn quit_cancels_the_fetch_and_keeps_the_held_write() {
+    let scratch = Scratch::new("voice-quit-drain");
+    let (fetch, _results) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    brain.control_offline(install(), 0, &mut tap);
+    brain.pump_settings_offline();
+    tokio::time::timeout(super::PATIENCE, fetch.started.notified())
+        .await
+        .expect("the fetch starts");
+    let release = brain.hold_config_write();
+    brain.control_offline(
+        ControlToBrain::Settings(SettingsOp::SetTalkBack(true)),
+        0,
+        &mut tap,
+    );
+    brain.pump_settings_offline();
+    release
+        .send(Gate::Write)
+        .expect("the write waits on the gate");
+    tokio::time::timeout(
+        super::PATIENCE,
+        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+    )
+    .await
+    .expect("quit ends");
+    assert_eq!(fetch.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        voice_on_disk(&scratch)["talk_back"],
+        toml::Value::Boolean(true)
+    );
+}
+
+#[tokio::test]
+async fn an_install_queued_behind_a_write_never_fetches_after_quit() {
+    let scratch = Scratch::new("voice-quit-queued");
+    let (fetch, _results) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    let release = brain.hold_config_write();
+    brain.control_offline(
+        ControlToBrain::Settings(SettingsOp::SetTalkBack(true)),
+        0,
+        &mut tap,
+    );
+    brain.pump_settings_offline();
+    brain.control_offline(install(), 0, &mut tap);
+    release
+        .send(Gate::Write)
+        .expect("the write waits on the gate");
+    tokio::time::timeout(
+        super::PATIENCE,
+        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+    )
+    .await
+    .expect("quit ends");
+    tokio::task::yield_now().await;
+    assert_eq!(
+        voice_on_disk(&scratch)["talk_back"],
+        toml::Value::Boolean(true)
+    );
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_install_finishes_while_no_shell_is_connected() {
+    let scratch = Scratch::new("voice-install-idle");
+    let (fetch, results) = held_fetch();
+    let (mut brain, release, loads) =
+        attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut seen = brain.observe();
+    let mut tap = Tap::from_env();
+    brain.control_offline(install(), 0, &mut tap);
+    results.send(Ok(())).expect("the fetch waits");
+    release.send(()).expect("the load waits");
+    let committed =
+        async { while seen.recv().await.expect("the brain reports") != Seen::SettingsCommitted {} };
+    tokio::select! {
+        () = brain.idle() => unreachable!("idle never returns"),
+        committed = tokio::time::timeout(super::PATIENCE, committed) => {
+            committed.expect("the install commits with no shell connected");
+        }
+    }
+    let saved = voice_on_disk(&scratch);
+    assert_eq!(
+        saved["installed"],
+        toml::Value::Array(vec!["spoken-replies".into()])
+    );
+    assert_eq!(saved["talk_back"], toml::Value::Boolean(true));
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        assert_eq!(opening(&mut shell).await.spoken_replies, PartState::Ready);
+        assert!(spoke(&mut shell).await, "the installed part speaks");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("the shell sees the installed part");
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
 }

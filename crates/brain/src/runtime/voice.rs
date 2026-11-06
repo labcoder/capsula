@@ -293,6 +293,16 @@ impl Brain {
         )
     }
 
+    /// Quit's voice boundary, before settings drain: no install starts from here on, and the
+    /// running fetch is told to stop.
+    pub(super) fn voice_quit(&mut self) {
+        let Some(voice) = &mut self.voice else {
+            return;
+        };
+        let effects = voice.installer.quit();
+        self.run(effects);
+    }
+
     /// Tells the coordinator whether runs speak: spoken replies are ready and talk-back is on.
     pub(super) fn spoken_replies(&mut self) {
         let Some(voice) = &mut self.voice else {

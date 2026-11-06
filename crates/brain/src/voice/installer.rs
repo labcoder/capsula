@@ -101,6 +101,8 @@ pub(crate) struct Installer {
     parts: [Entry; 2],
     /// The token of the fetch still running, cancelled or not. Only one runs at a time.
     fetching: Option<u64>,
+    /// Quit began: no fetch starts again.
+    quitting: bool,
     next_token: u64,
     effects: Vec<Effect>,
 }
@@ -127,6 +129,7 @@ impl Installer {
                 install_after: false,
             }),
             fetching: None,
+            quitting: false,
             next_token: 1,
             effects: Vec::new(),
         };
@@ -215,6 +218,16 @@ impl Installer {
                 Rest::Idle => Phase::Idle,
                 Rest::Failed(key) => Phase::Failed(key),
             };
+        }
+        self.take()
+    }
+
+    /// Quit: the running fetch is told to stop, and no fetch starts after it, so an install still
+    /// queued never downloads. A commit already queued still lands.
+    pub(crate) fn quit(&mut self) -> Vec<Effect> {
+        self.quitting = true;
+        if self.fetching.is_some() {
+            self.effects.push(Effect::CancelFetch);
         }
         self.take()
     }
@@ -343,9 +356,9 @@ impl Installer {
         self.take()
     }
 
-    /// Starts the earliest queued install's fetch once no fetch is running.
+    /// Starts the earliest queued install's fetch once no fetch is running, unless quitting.
     fn advance(&mut self) {
-        if self.fetching.is_some() {
+        if self.quitting || self.fetching.is_some() {
             return;
         }
         let next = VoicePart::ALL
