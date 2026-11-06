@@ -479,7 +479,11 @@ mod tests {
             panic!("ready");
         };
         assert_eq!(placement, PERCH);
-        assert_eq!(targeting.publish(drag(2), w), None, "another carry's publish");
+        assert_eq!(
+            targeting.publish(drag(2), w),
+            None,
+            "another carry's publish"
+        );
         assert_eq!(targeting.publish(drag(1), w), None, "and it used w up");
         let (mut targeting, _) = armed();
         targeting.first_check(drag(1), Some(&host(HOST, 0)));
