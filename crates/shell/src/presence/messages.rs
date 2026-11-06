@@ -385,6 +385,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_task_deleted_row_renders_the_exact_localized_note(cx: &mut TestAppContext) {
+        let (model, view, window) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = vec![PageEvent {
+                id: EventId(7),
+                run: None,
+                kind: PageEventKind::TaskDeleted,
+                text: String::new(),
+                cut: false,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.rows.len(), 1);
+            assert_eq!(view.rows[0].id, ("event", 7));
+            assert_eq!(view.rows[0].label, None);
+            assert_eq!(view.rows[0].text.as_ref(), "You deleted a task.");
+        });
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        assert!(frame.debug_bounds("message-event-7").is_some());
+    }
+
+    #[gpui::test]
     fn cached_row_updates_keep_exact_text_and_redact_the_snapshot(cx: &mut TestAppContext) {
         let (model, view, _) = open(cx);
         let sentinel = "private-row-sentinel-83c2";
