@@ -56,7 +56,7 @@ pub(crate) use windows::{
     remove_tree, unmark,
 };
 #[cfg(windows)]
-pub use windows::{login_browser, managed_presence, system_env};
+pub use windows::{managed_presence, system_env};
 
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
 /// `Absent`; access denied and every other unresolved result are `Indeterminate`.
