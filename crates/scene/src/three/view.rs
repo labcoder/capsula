@@ -545,4 +545,35 @@ mod tests {
             "preparation reshades from the step; admission composes nothing"
         );
     }
+
+    #[test]
+    fn a_ticket_charges_its_view_updates_once() {
+        let Ok(Record::Begin(header)) =
+            parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+        else {
+            panic!("begin fixture");
+        };
+        let Ok(Record::Step(step)) = parse_record(
+            br#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
+        ) else {
+            panic!("step fixture");
+        };
+        let (mut scene, mut budget) = (
+            SceneState::begin(header).expect("scene"),
+            GlobalBudget::default(),
+        );
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted") else {
+            panic!("new step");
+        };
+        let ticket = scene
+            .commit(candidate, &mut budget)
+            .expect("fresh")
+            .preparation;
+        assert_eq!(ticket.views.len(), 1);
+        assert_eq!(
+            ticket.attributed_bytes(),
+            853,
+            "the step's source, compiled input and sizing facts plus its one view update, once"
+        );
+    }
 }

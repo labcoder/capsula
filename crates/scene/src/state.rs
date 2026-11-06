@@ -650,7 +650,8 @@ impl SceneState {
                         + heap::step_bytes(original)
                         + heap::compiled_bytes(original, &expansion.run)
                         + heap::extras_bytes(std::iter::empty(), [&expansion.extras])
-                        + heap::btree::<Handle, f32>(path_scales.len()),
+                        + heap::btree::<Handle, f32>(path_scales.len())
+                        + retire::views_bytes(&views),
                     after_bytes: heap::btree::<WireId, Object>(after.len()) + owned,
                     history_bytes: original.id.as_str().len()
                         + ids

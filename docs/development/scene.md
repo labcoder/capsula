@@ -1179,8 +1179,9 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
-Admission caches each preparation ticket's own source, compiled record and sizing-fact
-attribution on the worker. The UI reads that cache, not the whole semantic scene's size.
+Admission caches each preparation ticket's own source, compiled record, view-update and
+sizing-fact attribution on the worker. The UI reads that cache, not the whole semantic
+scene's size.
 A dispatched preparation input adds only its preceding layout's cached full charge.
 Halting meters each queue's buffer and its protected payloads. Releasing a scene meters
 its rest/view/frame separately from the binding's semantic owner; disconnecting queues

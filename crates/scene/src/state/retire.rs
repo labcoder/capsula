@@ -31,8 +31,9 @@ pub(crate) fn views_bytes(views: &Vec<crate::three::view::ViewUpdate>) -> usize 
 }
 
 impl Preparation {
-    /// Cached bytes this ticket retains: its source, compiled input and sizing facts, not the
-    /// rest of its scene. Shared allocations count once per ticket for queue attribution.
+    /// Cached bytes this ticket retains: its source, compiled input, view updates and sizing
+    /// facts, not the rest of its scene. Shared allocations count once per ticket for queue
+    /// attribution.
     pub fn attributed_bytes(&self) -> usize {
         self.retained_bytes
     }
