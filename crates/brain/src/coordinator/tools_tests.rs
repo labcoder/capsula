@@ -138,7 +138,8 @@ fn commits(core: &mut Coordinator) -> Input {
     };
     Input::CallCommitted {
         key: call.key.clone(),
-        committed: true,
+        outcome: crate::dispatch::Committed::Done,
+        then: None,
     }
 }
 
@@ -545,7 +546,8 @@ fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_or
     };
     let ack = |key: &crate::dispatch::LedgerKey| Input::CallCommitted {
         key: key.clone(),
-        committed: true,
+        outcome: crate::dispatch::Committed::Done,
+        then: None,
     };
     let (first, second) = (ack(&first.key), ack(&second.key));
     assert_eq!(

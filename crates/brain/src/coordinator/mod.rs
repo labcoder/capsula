@@ -272,8 +272,10 @@ pub enum Input {
     CallCommitted {
         /// The call.
         key: crate::dispatch::LedgerKey,
-        /// Its write and ledger row committed.
-        committed: bool,
+        /// How the store settled it.
+        outcome: crate::dispatch::Committed,
+        /// The call's follow-up, as the dispatcher built it.
+        then: Option<crate::dispatch::Then>,
     },
     /// The shell's output device: its rate and generation.
     AudioOutput {
@@ -863,14 +865,15 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
-            Input::CallCommitted {
-                key,
-                committed: true,
-            } => self.call_committed(&key, &mut effects)?,
-            Input::CallCommitted {
-                key,
-                committed: false,
-            } => self.call_failed(&key, &mut effects)?,
+            Input::CallCommitted { key, outcome, then } => match outcome {
+                crate::dispatch::Committed::Done => {
+                    self.call_committed(&key, then, &mut effects)?
+                }
+                crate::dispatch::Committed::Refused(error) => {
+                    self.call_refused(&key, error, &mut effects)?;
+                }
+                crate::dispatch::Committed::Failed => self.call_failed(&key, &mut effects)?,
+            },
             input @ (Input::AudioOutput { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }

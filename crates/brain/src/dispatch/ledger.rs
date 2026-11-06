@@ -75,8 +75,9 @@ impl Ledger {
         );
     }
 
-    /// The store committed `key`'s write: every caller waiting on it, with the output.
-    pub(crate) fn committed(&mut self, key: &LedgerKey) -> Vec<(Caller, ToolOutput)> {
+    /// The store committed `key`'s write: every caller waiting on it, with the output. `None`
+    /// unless the key was running, so a second acknowledgement does nothing.
+    pub(crate) fn committed(&mut self, key: &LedgerKey) -> Option<Vec<(Caller, ToolOutput)>> {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {
             Some(Entry::Running {
@@ -89,7 +90,24 @@ impl Ledger {
                     .map(|caller| (caller, output.clone()))
                     .collect();
                 self.entries.insert(id, Entry::Done { hash, output });
-                answers
+                Some(answers)
+            }
+            Some(other) => {
+                self.entries.insert(id, other);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// The store refused `key`'s write on its own check: the key stays refused with `error`, and
+    /// every caller waiting on it is returned to be answered with it.
+    pub(crate) fn refused(&mut self, key: &LedgerKey, error: ToolError) -> Vec<Caller> {
+        let id = (key.route, key.call.clone());
+        match self.entries.remove(&id) {
+            Some(Entry::Running { waiting, .. }) => {
+                self.entries.insert(id, Entry::Refused(error));
+                waiting
             }
             Some(other) => {
                 self.entries.insert(id, other);

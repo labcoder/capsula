@@ -6,9 +6,10 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. No production tool exists yet: 15 adds `create_task` and `focus`, and
-slice 4's B10 adds `draw`'s ledger entry. Until then the test tools
-in `dispatch/tests.rs` exercise the path.
+`Coordinator::tool_call`. The one production tool is `focus` (15a). No tool is offered to a model
+yet, because `context::tools` is empty until the staged producers are enabled (OSC-116); 15b adds
+`create_task`, and slice 4's B10 adds `draw`'s ledger entry. The test tools in `dispatch/tests.rs`
+exercise the rest of the path.
 
 ## Who made a call
 
@@ -40,6 +41,7 @@ flowchart TD
     G -- no --> E6[TooLarge / Invalid, recorded]
     G -- yes --> H[CommitCall: the write and the ledger row,<br/>one transaction]
     H --> I[CallCommitted: answer every waiting caller]
+    H --> K[Refused by the write's own check: answer every<br/>waiting caller with the error, run goes on]
 ```
 
 - **The run.** The coordinator resolves the caller's run first. A call queued by a run that was
@@ -64,6 +66,33 @@ flowchart TD
   `StoreOp::CommitCall` and is answered only on `Input::CallCommitted`. A duplicate while it runs
   joins it. A failed write fails the run as `failed(store)`. An acknowledgement for a run that ended
   confirms storage only. One for a launch no longer authorized answers nobody.
+- **Outcomes.** The store settles a write as `Committed::Done`, `Refused(error)` or `Failed`.
+  `Refused` means the write's own check failed and nothing was written: the key turns refused,
+  every caller waiting on it gets the error, and the run goes on. A later acknowledgement for that
+  key changes nothing.
+- **Follow-ups.** A write can carry a `Then`, which comes back with its acknowledgement. The
+  coordinator runs it once, only on `Done` for a key that was still running, and only while the run
+  is current, so a stopped run's or a repeated acknowledgement's follow-up never runs.
+
+## `focus`
+
+`focus { task }` moves the user's typed input to a task, or back to Kumo. Kumo's runs may name any
+task; a task's run may name only Kumo, and anything else is `NotHere` (a named task's own run
+waits for OSC-116). Its write checks, in the call's transaction, that the target is a live thread,
+and is refused with `NoTask` otherwise. Once it commits, the coordinator sends
+`ControlToShell::Focus { run, thread }`.
+
+The shell applies it, as an explicit switch, only when all of these hold:
+
+- it came over the current connection;
+- `run` is the newest run the shell named, past the Esc and delete fence;
+- `run` answered a turn the user typed, under the turn number that is still the last one this
+  connection sent, at the selection that is still current.
+
+So a manual switch, a later turn (even one the brain refused), Esc, a reconnect or a new brain
+each make a pending `Focus` stale. The turn number is taken at send and kept with the submission,
+so with several turns pending only the run answering the last can move the input. The numbering
+restarts with each connection, together with the fence.
 
 ## A round's calls
 

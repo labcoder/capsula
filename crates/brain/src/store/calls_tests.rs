@@ -4,7 +4,7 @@ use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, params};
 
 use super::{Store, StoreError};
-use crate::dispatch::{CommitCall, LedgerKey, LocalWrite, Route, ToolOutput};
+use crate::dispatch::{CommitCall, Committed, LedgerKey, LocalWrite, Route, ToolError, ToolOutput};
 use crate::test_support::Scratch;
 
 fn opened(scratch: &Scratch) -> Store {
@@ -35,6 +35,7 @@ fn renaming(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
         hash: [7; 32],
         write: LocalWrite::Title("After".to_owned()),
         output: ToolOutput::Text("probed".to_owned()),
+        then: None,
     }
 }
 
@@ -63,10 +64,11 @@ fn a_call_and_its_write_commit_together_and_survive_a_restart() {
     let scratch = Scratch::new("calls-commit");
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
-    assert!(
+    assert_eq!(
         store
             .commit_call(&renaming(thread, run, "c1"))
-            .expect("recorded")
+            .expect("recorded"),
+        Committed::Done
     );
     drop(store);
     let conn = Connection::open(scratch.db()).expect("reopen");
@@ -88,7 +90,10 @@ fn a_failed_record_rolls_back_the_calls_write() {
     let (thread, run) = task(&mut store);
     let mut first = renaming(thread, run, "c1");
     first.write = LocalWrite::None;
-    assert!(store.commit_call(&first).expect("recorded"));
+    assert_eq!(
+        store.commit_call(&first).expect("recorded"),
+        Committed::Done
+    );
     let error = store
         .commit_call(&renaming(thread, run, "c1"))
         .expect_err("the key is recorded already");
@@ -114,7 +119,7 @@ fn the_ledger_caps_a_result_in_bytes_and_rolls_its_write_back_when_over() {
     fits.write = LocalWrite::None;
     fits.output = ToolOutput::Text(at.clone());
     assert_eq!(fits.output.stored().len(), 65_536);
-    assert!(store.commit_call(&fits).expect("recorded"));
+    assert_eq!(store.commit_call(&fits).expect("recorded"), Committed::Done);
     let mut over = renaming(thread, run, "over");
     over.output = ToolOutput::Text(format!("a{at}"));
     assert_eq!(over.output.stored().len(), 65_537);
@@ -141,10 +146,11 @@ fn a_call_in_a_thread_being_deleted_writes_nothing() {
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
     store.begin_delete(thread).expect("hidden");
-    assert!(
-        !store
+    assert_eq!(
+        store
             .commit_call(&renaming(thread, run, "c1"))
-            .expect("no error")
+            .expect("no error"),
+        Committed::Failed
     );
     assert_eq!(title(&store.conn, thread), "Before");
     assert_eq!(rows(&store.conn), []);
@@ -158,16 +164,62 @@ fn deleting_a_thread_removes_its_calls() {
     let mut mcp = renaming(thread, run, "m:n:1");
     mcp.key.route = Route::Mcp(crate::bridge::LaunchId(0xab));
     mcp.write = LocalWrite::None;
-    assert!(
+    assert_eq!(
         store
             .commit_call(&renaming(thread, run, "c1"))
-            .expect("recorded")
+            .expect("recorded"),
+        Committed::Done
     );
-    assert!(store.commit_call(&mcp).expect("recorded"));
+    assert_eq!(store.commit_call(&mcp).expect("recorded"), Committed::Done);
     assert_eq!(
         rows(&store.conn)[1].0,
         "mcp:000000000000000000000000000000ab"
     );
     assert_eq!(store.delete(thread).outcome, Deleted::Removed);
     assert_eq!(rows(&store.conn), []);
+}
+
+#[test]
+fn a_focus_commits_only_while_its_target_is_live() {
+    let scratch = Scratch::new("calls-focus");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    let (other, _) = task(&mut store);
+    let focus = |call: &str, target: ThreadId| {
+        let mut focus = renaming(thread, run, call);
+        focus.write = LocalWrite::Focus(target);
+        focus
+    };
+    assert_eq!(
+        store.commit_call(&focus("live", other)).expect("recorded"),
+        Committed::Done
+    );
+    assert_eq!(
+        store
+            .commit_call(&focus("missing", ThreadId(other.0 + 1)))
+            .expect("no error"),
+        Committed::Refused(ToolError::NoTask)
+    );
+    assert_eq!(
+        store
+            .commit_call(&focus("too-big", ThreadId(u64::MAX)))
+            .expect("no error"),
+        Committed::Refused(ToolError::NoTask)
+    );
+    store.begin_delete(other).expect("hidden");
+    assert_eq!(
+        store
+            .commit_call(&focus("deleting", other))
+            .expect("no error"),
+        Committed::Refused(ToolError::NoTask)
+    );
+    assert_eq!(
+        rows(&store.conn),
+        [(
+            "model".to_owned(),
+            "live".to_owned(),
+            r#"{"text":"probed"}"#.to_owned()
+        )]
+    );
+    assert_eq!(title(&store.conn, thread), "Before");
 }

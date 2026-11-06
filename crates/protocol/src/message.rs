@@ -512,6 +512,15 @@ pub enum ControlToShell {
     /// The brain changed a listed thread on its own, such as a task's title, so the shell reads
     /// its list again. It carries nothing.
     ThreadsChanged,
+    /// `run` asked to move the user's typed input to `thread`, sent once its tool call
+    /// committed. The shell applies it only while `run` is its newest named run, not stopped,
+    /// typed at the selection still current, with no turn sent after it.
+    Focus {
+        /// The run whose tool asked.
+        run: RunId,
+        /// The task, or Kumo's thread.
+        thread: ThreadId,
+    },
     /// Capture finished; the shell may release the input's exclusion lease.
     CaptureDone {
         /// The input whose capture completed.
