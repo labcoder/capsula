@@ -29,18 +29,22 @@ fn set(segment: i64, sample: i64, text: i64) -> Stored {
     (Some(segment), Some(sample), Some(text))
 }
 
-/// A thread with one run, ended `Done` unless `active`.
-fn run(store: &mut Store, active: bool) -> (ThreadId, RunId) {
+/// A thread with one active run.
+fn active_run(store: &mut Store) -> (ThreadId, RunId) {
     let (high_thread, high_run) = store.high_water().expect("high water");
     let (thread, run) = (ThreadId(high_thread.0 + 1), RunId(high_run.0 + 1));
     store
         .begin_turn(thread, Some("t"), run, "hi")
         .expect("turn");
-    if !active {
-        store
-            .end_run(thread, run, &[], RunEnd::Done)
-            .expect("ended");
-    }
+    (thread, run)
+}
+
+/// A thread with one run, ended `Done`.
+fn run(store: &mut Store) -> (ThreadId, RunId) {
+    let (thread, run) = active_run(store);
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
     (thread, run)
 }
 
@@ -74,7 +78,7 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
 fn the_three_columns_are_set_together_or_not_at_all() {
     let scratch = Scratch::new("heard-pairs");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (_, ended) = run(&mut store, false);
+    let (_, ended) = run(&mut store);
     let id = i64::try_from(ended.0).expect("small id");
     for partial in [
         "UPDATE runs SET heard_segment = 1 WHERE id = ?1",
@@ -139,7 +143,7 @@ fn the_three_columns_are_set_together_or_not_at_all() {
 fn the_point_only_moves_forward() {
     let scratch = Scratch::new("heard-forward");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (_, ended) = run(&mut store, false);
+    let (_, ended) = run(&mut store);
     store.heard(ended, heard(1, 100, 10)).expect("first");
     assert_eq!(point(&store.conn, ended), set(1, 100, 10));
     for behind in [heard(1, 100, 99), heard(1, 99, 99), heard(0, 500, 99)] {
@@ -156,11 +160,11 @@ fn the_point_only_moves_forward() {
 fn an_active_missing_or_deleted_run_is_left_alone() {
     let scratch = Scratch::new("heard-alone");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (_, active) = run(&mut store, true);
+    let (_, active) = active_run(&mut store);
     store.heard(active, heard(0, 1, 1)).expect("no error");
     assert_eq!(point(&store.conn, active), (None, None, None), "active");
 
-    let (thread, ended) = run(&mut store, false);
+    let (thread, ended) = run(&mut store);
     store
         .conn
         .execute(
@@ -186,7 +190,7 @@ fn an_active_missing_or_deleted_run_is_left_alone() {
 fn a_stored_point_survives_a_restart() {
     let scratch = Scratch::new("heard-restart");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (_, ended) = run(&mut store, false);
+    let (_, ended) = run(&mut store);
     store.heard(ended, heard(3, 4, 5)).expect("written");
     drop(store);
     let store = Store::open(&scratch.db()).expect("reopens");

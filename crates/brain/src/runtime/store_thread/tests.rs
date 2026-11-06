@@ -689,7 +689,14 @@ fn every_operation_gets_one_reply_in_order() {
 fn a_heard_point_is_stored_and_answers_nothing() {
     let scratch = Scratch::new("heard-op");
     let store = Store::open(&scratch.db()).expect("store");
-    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .conn_for_tests()
+        .execute_batch(
+            "CREATE TRIGGER refuse_heard BEFORE UPDATE OF heard_segment ON runs WHEN OLD.id = 2
+             BEGIN SELECT RAISE(ABORT, 'kept'); END;",
+        )
+        .expect("trigger");
+    let (thread, run, refused) = (ThreadId(1), RunId(1), RunId(2));
     let (acks, mut replies) = mpsc::unbounded_channel();
     let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
     let heard = crate::voice::reply::Heard {
@@ -712,6 +719,24 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             clear: None,
             end: RunEnd::Done,
         },
+        StoreOp::BeginTurn {
+            thread,
+            title: None,
+            run: refused,
+            text: "again".into(),
+        },
+        StoreOp::EndRun {
+            thread,
+            run: refused,
+            text: None,
+            revealed: None,
+            clear: None,
+            end: RunEnd::Done,
+        },
+        StoreOp::Heard {
+            run: refused,
+            heard,
+        },
         StoreOp::Heard { run, heard },
         StoreOp::Heard {
             run: RunId(u64::MAX),
@@ -727,18 +752,29 @@ fn a_heard_point_is_stored_and_answers_nothing() {
     }
     assert_eq!(
         got,
-        [Input::TurnStored { run }, Input::RunStored { run }],
-        "a heard point that fails, here on a run id SQLite can't hold, answers nothing either"
+        [
+            Input::TurnStored { run },
+            Input::RunStored { run },
+            Input::TurnStored { run: refused },
+            Input::RunStored { run: refused },
+        ],
+        "a heard point SQLite refuses, or on a run id it can't hold, answers nothing"
     );
-    let stored: (i64, i64, i64) = rusqlite::Connection::open(scratch.db())
-        .expect("raw open")
-        .query_row(
-            "SELECT heard_segment, heard_sample, heard_text FROM runs WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    let conn = rusqlite::Connection::open(scratch.db()).expect("raw open");
+    let row = |id: i64| -> (String, Option<i64>, Option<i64>, Option<i64>) {
+        conn.query_row(
+            "SELECT state, heard_segment, heard_sample, heard_text FROM runs WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .expect("the run's point");
-    assert_eq!(stored, (2, 480, 17));
+        .expect("the run's row")
+    };
+    assert_eq!(row(1), ("done".into(), Some(2), Some(480), Some(17)));
+    assert_eq!(
+        row(2),
+        ("done".into(), None, None, None),
+        "the refused point leaves the run's outcome as it was"
+    );
 }
 
 #[test]

@@ -166,6 +166,27 @@ fn a_spoken_answer_ends_done_only_after_its_last_segment_played() {
 }
 
 #[test]
+fn the_heard_point_is_stored_before_the_job_its_run_starts() {
+    let mut core = draining();
+    assert_eq!(
+        core.handle(Input::SignedIn { generation: 1 }),
+        Ok(Vec::new())
+    );
+    core.handle(Input::SegmentPlayed {
+        run: R,
+        segment: SEG,
+        samples: 100,
+    })
+    .expect("current");
+    let effects = core.handle(Input::RunStored { run: R }).expect("ending");
+    assert_eq!(effects.first(), Some(&heard(100, 12)));
+    assert!(
+        matches!(effects.get(1), Some(Effect::Store(StoreOp::ReadJob(_)))),
+        "the title job's read follows the point: {effects:?}"
+    );
+}
+
+#[test]
 fn a_spoken_run_with_nothing_to_say_ends_at_once() {
     let mut core = spoken();
     assert_eq!(finish(&mut core), vec![end_run(None, None, RunEnd::Done)]);
