@@ -5,13 +5,14 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 use kumochi_protocol::message::{
-    ActionState, ApprovalRev, DraftId, FailReason, IssueBody, IssueRefused, IssueTitle, IssueUrl,
-    LookupResult, RepoName, StateVersion, ThreadId,
+    ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueRefused,
+    IssueTitle, IssueUrl, LookupResult, RepoName, StateVersion, ThreadId,
 };
 use kumochi_scene::text::Bounded;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
-use crate::connections::github::api::GitHubUser;
+use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
 
 /// The most already-matching issue numbers a mark keeps (guess).
 pub const MAX_PRESEND: usize = 200;
@@ -105,6 +106,29 @@ pub enum Answer {
     Gone,
 }
 
+/// What admission checks a decision against, from the GitHub connection as it stands.
+pub struct Live<'a> {
+    /// The verified connected user, from the device machine's `user()`.
+    pub account: Option<&'a GitHubUser>,
+    /// The repositories the connection lists.
+    pub repos: &'a [RepoName],
+}
+
+/// A lookup's verdict on an action's uncertain attempts.
+#[derive(Clone, Copy, Debug)]
+pub enum Lookup {
+    /// One match, placed after the mark.
+    Placed(NonZeroU64),
+    /// One match that can't be placed after the mark.
+    Unplaced(NonZeroU64),
+    /// No match.
+    None,
+    /// More than one match.
+    Several,
+    /// The lookup failed or was incomplete.
+    Failed,
+}
+
 impl Action {
     /// What the card shows. Preflight and Posting both show as Sending.
     ///
@@ -132,6 +156,199 @@ impl Action {
                 maybe_filed: self.uncertain >= 1,
             },
         }
+    }
+
+    /// The consent binding: SHA-256 of the JSON of the repository, the account id, the title and
+    /// the body, in that order. The login isn't bound; the id decides.
+    ///
+    /// # Panics
+    /// Never: the fields are strings and integers, which always encode.
+    pub fn hash(&self) -> ContentHash {
+        #[derive(Serialize)]
+        struct Bound<'a> {
+            repo: Option<&'a RepoName>,
+            account: Option<u64>,
+            title: &'a IssueTitle,
+            body: &'a IssueBody,
+        }
+        let json = serde_json::to_vec(&Bound {
+            repo: self.repo.as_ref(),
+            account: self.account.as_ref().map(|user| user.id),
+            title: &self.title,
+            body: &self.body,
+        })
+        .expect("strings and integers encode");
+        ContentHash(Sha256::digest(json).into())
+    }
+
+    /// Applies a decision presented with `approval`. The last revision used up answers as done,
+    /// and any other but the current one is stale. The current one is used up even when a check
+    /// refuses it, so a stale click can't file once the cause is fixed.
+    pub(crate) fn consent(
+        &mut self,
+        hash: &ContentHash,
+        approval: ApprovalRev,
+        decision: Decision,
+        live: &Live<'_>,
+    ) -> Result<(), IssueRefused> {
+        if self.consumed == Some(approval) {
+            return Ok(());
+        }
+        if self.approval != Some(approval) {
+            return Err(IssueRefused::StaleApproval);
+        }
+        self.consumed = Some(approval);
+        let next = match (decision, &self.stage) {
+            (Decision::File, Stage::Draft | Stage::Failed { .. }) => {
+                Stage::Preflight { unresolved: None }
+            }
+            (Decision::FileAnyway, Stage::Unknown { mark, .. }) => Stage::Preflight {
+                unresolved: Some(mark.clone()),
+            },
+            (
+                Decision::ThisIsTheIssue,
+                Stage::Unknown {
+                    lookup: LookupResult::Unplaced { number, .. },
+                    ..
+                },
+            ) => Stage::Filed {
+                number: NonZeroU64::new(*number).ok_or(IssueRefused::NotAllowedNow)?,
+                confirmed: true,
+            },
+            _ => return Err(IssueRefused::NotAllowedNow),
+        };
+        if *hash != self.hash() {
+            return Err(IssueRefused::ContentChanged);
+        }
+        let (Some(bound), Some(connected)) =
+            (&self.account, live.account.filter(|user| user.id != 0))
+        else {
+            return Err(IssueRefused::NotConnected);
+        };
+        if bound.id != connected.id {
+            return Err(IssueRefused::OtherAccount);
+        }
+        if !self
+            .repo
+            .as_ref()
+            .is_some_and(|repo| live.repos.contains(repo))
+        {
+            return Err(IssueRefused::RepoNotListed);
+        }
+        self.stage = next;
+        Ok(())
+    }
+
+    /// Binds the connected account, and the default repository where none is chosen, to a
+    /// Draft or Failed action; a change makes it a Draft again. It never files.
+    pub(crate) fn bind(
+        &mut self,
+        account: Option<&GitHubUser>,
+        repo: Option<&RepoName>,
+    ) -> Result<(), IssueRefused> {
+        if !matches!(self.stage, Stage::Draft | Stage::Failed { .. }) {
+            return Err(IssueRefused::NotAllowedNow);
+        }
+        let account = account.cloned().or_else(|| self.account.clone());
+        let repo = self.repo.clone().or_else(|| repo.cloned());
+        if (&account, &repo) != (&self.account, &self.repo) {
+            (self.account, self.repo, self.stage) = (account, repo, Stage::Draft);
+        }
+        Ok(())
+    }
+
+    /// Ends the Preflight dispatched at `at`: a mark lets the create go out, and a refusal means
+    /// nothing was sent.
+    pub(crate) fn preflighted(
+        &mut self,
+        at: StateVersion,
+        result: Result<Mark, FailReason>,
+    ) -> Result<(), IssueRefused> {
+        let (Stage::Preflight { unresolved }, true) = (&self.stage, self.version == at) else {
+            return Err(IssueRefused::NotAllowedNow);
+        };
+        self.stage = match result {
+            Ok(mark) => Stage::Posting {
+                mark,
+                unresolved: unresolved.clone(),
+            },
+            Err(reason) => Stage::unsent(unresolved.clone(), reason),
+        };
+        Ok(())
+    }
+
+    /// Records the create dispatched at `at` as P3b reported it. A zero number proves nothing,
+    /// so it counts as uncertain. `None` when the count is exhausted.
+    pub(crate) fn posted(
+        &mut self,
+        at: StateVersion,
+        outcome: &CreateOutcome,
+    ) -> Option<Result<(), IssueRefused>> {
+        let (Stage::Posting { unresolved, .. }, true) = (&self.stage, self.version == at) else {
+            return Some(Err(IssueRefused::NotAllowedNow));
+        };
+        let number = match outcome {
+            CreateOutcome::Created { number, .. } => NonZeroU64::new(*number),
+            _ => None,
+        };
+        match (number, outcome) {
+            (Some(number), _) => {
+                self.stage = Stage::Filed {
+                    number,
+                    confirmed: false,
+                };
+            }
+            (None, CreateOutcome::Definite { reason, .. }) => {
+                self.stage = Stage::unsent(unresolved.clone(), *reason);
+            }
+            (None, _) => {
+                (self.stage, self.uncertain) = self.stage.clone().interrupted(self.uncertain)?;
+            }
+        }
+        Some(Ok(()))
+    }
+
+    /// Ends the send dispatched at `at` that the runtime gave up on, as recovery would.
+    /// `None` when the count is exhausted.
+    pub(crate) fn interrupted(&mut self, at: StateVersion) -> Option<Result<(), IssueRefused>> {
+        if self.version != at
+            || !matches!(self.stage, Stage::Preflight { .. } | Stage::Posting { .. })
+        {
+            return Some(Err(IssueRefused::NotAllowedNow));
+        }
+        (self.stage, self.uncertain) = self.stage.clone().interrupted(self.uncertain)?;
+        Some(Ok(()))
+    }
+
+    /// Applies a lookup run for the uncertain attempts counted as `episode`. A refused File
+    /// anyway moves the version but not the count, so the lookup in flight still lands.
+    pub(crate) fn looked_up(&mut self, episode: u32, lookup: Lookup) -> Result<(), IssueRefused> {
+        let (Stage::Unknown { mark, .. }, true) = (&self.stage, self.uncertain == episode) else {
+            return Err(IssueRefused::NotAllowedNow);
+        };
+        let mark = mark.clone();
+        let lookup = match lookup {
+            Lookup::Placed(number) => {
+                self.stage = Stage::Filed {
+                    number,
+                    confirmed: false,
+                };
+                return Ok(());
+            }
+            Lookup::Unplaced(number) => LookupResult::Unplaced {
+                number: number.get(),
+                url: self
+                    .repo
+                    .as_ref()
+                    .and_then(|repo| IssueUrl::for_issue(repo, number.get()).ok())
+                    .ok_or(IssueRefused::NotAllowedNow)?,
+            },
+            Lookup::None => LookupResult::None,
+            Lookup::Several => LookupResult::Several,
+            Lookup::Failed => LookupResult::Failed,
+        };
+        self.stage = Stage::Unknown { mark, lookup };
+        Ok(())
     }
 
     /// Replaces a Draft's or Failed action's content; a change makes it a Draft again.
@@ -170,21 +387,9 @@ impl Stage {
     /// the earliest unresolved mark stays. `None` when the count is exhausted.
     pub(crate) fn interrupted(self, uncertain: u32) -> Option<(Self, u32)> {
         Some(match self {
-            Self::Preflight { unresolved: None } => (
-                Self::Failed {
-                    reason: FailReason::Interrupted,
-                },
-                uncertain,
-            ),
-            Self::Preflight {
-                unresolved: Some(mark),
-            } => (
-                Self::Unknown {
-                    mark,
-                    lookup: LookupResult::Pending,
-                },
-                uncertain,
-            ),
+            Self::Preflight { unresolved } => {
+                (Self::unsent(unresolved, FailReason::Interrupted), uncertain)
+            }
             Self::Posting { mark, unresolved } => (
                 Self::Unknown {
                     mark: unresolved.unwrap_or(mark),
@@ -194,6 +399,18 @@ impl Stage {
             ),
             settled => (settled, uncertain),
         })
+    }
+
+    /// Where an attempt that sent nothing lands: a first attempt fails, and an earlier attempt
+    /// that may have created an issue keeps the action Unknown.
+    fn unsent(unresolved: Option<Mark>, reason: FailReason) -> Self {
+        match unresolved {
+            None => Self::Failed { reason },
+            Some(mark) => Self::Unknown {
+                mark,
+                lookup: LookupResult::Pending,
+            },
+        }
     }
 }
 
@@ -241,6 +458,15 @@ impl fmt::Debug for Stage {
             Self::Unknown { lookup, .. } => f.debug_tuple("Unknown").field(lookup).finish(),
             Self::Discarded => f.write_str("Discarded"),
         }
+    }
+}
+
+impl fmt::Debug for Live<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Live")
+            .field("connected", &self.account.is_some())
+            .field("repos", &self.repos.len())
+            .finish()
     }
 }
 

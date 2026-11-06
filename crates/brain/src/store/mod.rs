@@ -9,6 +9,8 @@
 mod actions;
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod admission_tests;
 mod calls;
 #[cfg(test)]
 mod calls_tests;

@@ -153,7 +153,9 @@ a failed durable removal. A clean SignedOut view has no cleanup warning. Connect
 is also permitted after a refused physical delete, because durable removal has
 already fenced the old credential; Running and NotDurable still block it.
 Repository defaults are displayed and accepted only by exact membership in the
-fetched list, preserving GitHub's spelling.
+fetched list, preserving GitHub's spelling. `user()` returns the verified user,
+without its bearer, only while Connected; issue admission takes the numeric id
+from it, never from a login.
 
 The verification page is the protocol's VERIFICATION_URI constant. The API
 checks the reply against it; neither the view nor a brain effect carries a
