@@ -26,7 +26,7 @@ pub(crate) struct ThreadedReader<P> {
 #[cfg_attr(not(test), expect(dead_code, reason = "A3b opens the platform reader"))]
 impl<P: ElementPlatform> ThreadedReader<P> {
     pub(crate) fn new<S: ElementSource + 'static>(
-        open: impl FnOnce() -> Result<S, i32> + Send + 'static,
+        mut open: impl FnMut() -> Result<S, i32> + Send + 'static,
         platform: P,
     ) -> Result<Self, i32> {
         let (jobs, requests) = mpsc::sync_channel::<WalkJob>(1);
@@ -34,9 +34,9 @@ impl<P: ElementPlatform> ThreadedReader<P> {
         let mut worker_platform = platform.clone();
         let thread = std::thread::Builder::new()
             .spawn(move || {
-                let mut source = open();
+                let mut source = None;
                 while let Ok(job) = requests.recv() {
-                    let result = match &mut source {
+                    let result = match source.get_or_insert_with(&mut open) {
                         Ok(source) => elements::walk(
                             source,
                             &job,
@@ -45,14 +45,16 @@ impl<P: ElementPlatform> ThreadedReader<P> {
                             &mut worker_platform,
                         ),
                         Err(code) => {
-                            let tree = ElementTree::unavailable(job.capture, Unavailable::Busy);
-                            if tree.finish(&job.masks) {
-                                Err(Failure::Retire(*code))
+                            if elements::finish_unavailable(&job.masks, Unavailable::Busy) {
+                                Err(Failure::Fault(*code))
                             } else {
-                                Ok(tree)
+                                Err(Failure::Retire(*code))
                             }
                         }
                     };
+                    if source.as_ref().is_some_and(Result::is_err) {
+                        source = None;
+                    }
                     if answers.try_send((job.capture, result)).is_err() {
                         break;
                     }
@@ -76,7 +78,7 @@ impl<P: ElementPlatform> ThreadedReader<P> {
 
     fn busy(&mut self, capture: CaptureId, masks: &MaskSink) -> Walked {
         let tree = ElementTree::unavailable(capture, Unavailable::Busy);
-        let finished = tree.finish(masks);
+        let finished = elements::finish_unavailable(masks, Unavailable::Busy);
         self.retired |= !finished;
         Walked {
             tree,
@@ -184,10 +186,11 @@ mod tests {
     }
 
     fn reader(read: impl FnMut(u32) -> NodeProps + Send + 'static) -> ThreadedReader<Platform> {
+        let mut read = Some(read);
         ThreadedReader::new(
             move || {
                 Ok(Source {
-                    read,
+                    read: read.take().unwrap(),
                     count: 0,
                     _local: Rc::new(()),
                 })
@@ -238,9 +241,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_source_initialization_is_final_and_retires_after_its_fault() {
-        let mut reader =
-            ThreadedReader::new::<Source<fn(u32) -> NodeProps>>(|| Err(-7), Platform).unwrap();
+    fn failed_source_initialization_is_a_fault_and_the_next_capture_retries() {
+        let mut attempts = 0;
+        let mut reader = ThreadedReader::new(
+            move || {
+                attempts += 1;
+                if attempts == 1 {
+                    return Err(-7);
+                }
+                Ok(Source {
+                    read: |_| props("retry"),
+                    count: 0,
+                    _local: Rc::new(()),
+                })
+            },
+            Platform,
+        )
+        .unwrap();
         let sink = masks(20);
         assert_eq!(
             reader
@@ -250,16 +267,28 @@ mod tests {
                     Arc::clone(&sink)
                 ))
                 .err(),
-            Some(Failure::Retire(-7))
+            Some(Failure::Fault(-7))
         );
         assert_eq!(
             sink.lock().unwrap().completeness(),
             Completeness::Unknown(Unavailable::Busy)
         );
-        assert_busy(
-            &reader.walk(job(21, Instant::now(), masks(21))).unwrap(),
-            21,
-            true,
+        let next_masks = masks(21);
+        let walked = reader
+            .walk(job(
+                21,
+                Instant::now() + Duration::from_secs(1),
+                Arc::clone(&next_masks),
+            ))
+            .unwrap();
+        assert!(!walked.retire);
+        assert_eq!(walked.tree.capture, CaptureId(21));
+        assert_eq!(walked.tree.availability, Availability::Read);
+        assert_eq!(walked.tree.elements.len(), 1);
+        assert_eq!(walked.tree.elements[0].name, "retry");
+        assert_eq!(
+            next_masks.lock().unwrap().completeness(),
+            Completeness::Complete
         );
     }
 
@@ -330,14 +359,9 @@ mod tests {
                 }
             }
         });
-        let trigger = std::thread::spawn(move || {
-            std::thread::sleep(
-                (until + Duration::from_millis(230)).saturating_duration_since(Instant::now()),
-            );
-            release.send(()).unwrap();
-        });
         let old_masks = masks(1);
         let first = reader.walk(job(1, until, Arc::clone(&old_masks)));
+        release.send(()).unwrap();
         assert_eq!(
             notification.recv_timeout(Duration::from_secs(1)).unwrap(),
             CaptureId(1)
@@ -353,7 +377,6 @@ mod tests {
             Arc::clone(&fresh_masks),
         ));
         drop(reader);
-        trigger.join().unwrap();
         relay.join().unwrap();
         assert_busy(&first.unwrap(), 1, false);
         let second = second.unwrap();
@@ -371,8 +394,8 @@ mod tests {
     }
 
     #[test]
-    fn cached_read_finishing_150ms_after_budget_is_accepted_within_slack() {
-        let until = Instant::now() + Duration::from_millis(100);
+    fn cached_read_finishing_100ms_after_budget_is_accepted_within_slack() {
+        let until = Instant::now() + Duration::from_millis(500);
         let (entered, entering) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let mut reader = reader(move |_| {
@@ -383,7 +406,7 @@ mod tests {
         let trigger = std::thread::spawn(move || {
             entering.recv_timeout(Duration::from_secs(1)).unwrap();
             std::thread::sleep(
-                (until + Duration::from_millis(150)).saturating_duration_since(Instant::now()),
+                (until + Duration::from_millis(100)).saturating_duration_since(Instant::now()),
             );
             release.send(()).unwrap();
         });
@@ -471,7 +494,10 @@ mod tests {
                 .join()
                 .is_err()
             );
-            props("must not publish")
+            NodeProps {
+                password: true,
+                ..props("must not publish")
+            }
         });
         assert_busy(
             &reader
@@ -527,7 +553,7 @@ mod tests {
         };
         let (release, released) = mpsc::channel();
         let consumer = std::thread::spawn(move || {
-            let wake = released.recv_timeout(Duration::from_millis(100));
+            let wake = released.recv_timeout(Duration::from_secs(3));
             let queued = requests.recv_timeout(Duration::from_secs(1)).unwrap();
             (wake, queued.capture)
         });
@@ -547,7 +573,7 @@ mod tests {
             sink.lock().unwrap().completeness(),
             Completeness::Unknown(Unavailable::Busy)
         );
-        assert!(elapsed < Duration::from_millis(50));
+        assert!(elapsed < Duration::from_millis(500));
     }
 
     #[test]

@@ -261,23 +261,10 @@ impl ElementTree {
             availability: Availability::Unavailable(why),
         }
     }
+}
 
-    pub(crate) fn finish(&self, masks: &MaskSink) -> bool {
-        let completeness = match self.availability {
-            Availability::Unavailable(why) => Completeness::Unknown(why),
-            Availability::Read
-                if self.cut.is_some()
-                    || self
-                        .elements
-                        .iter()
-                        .any(|element| element.password && element.screen.size.contains(&0)) =>
-            {
-                Completeness::Partial
-            }
-            Availability::Read => Completeness::Complete,
-        };
-        finish_masks(masks, completeness)
-    }
+pub(super) fn finish_unavailable(masks: &MaskSink, why: Unavailable) -> bool {
+    finish_masks(masks, Completeness::Unknown(why))
 }
 
 impl std::fmt::Debug for WalkJob {
@@ -298,6 +285,7 @@ impl std::fmt::Debug for Walked {
 fn finish_masks(masks: &MaskSink, completeness: Completeness) -> bool {
     match masks.lock() {
         Ok(mut masks) => {
+            // MaskSet keeps the first finish; this also drops a late walk's text reply.
             if masks.completeness() == Completeness::Unknown(Unavailable::Busy) {
                 return false;
             }
@@ -344,7 +332,7 @@ pub(crate) fn walk<S: ElementSource>(
         .lock()
         .is_ok_and(|masks| masks.capture() == job.capture)
     {
-        ElementTree::unavailable(job.capture, Unavailable::Busy).finish(&job.masks);
+        finish_unavailable(&job.masks, Unavailable::Busy);
         return Ok(ElementTree::unavailable(job.capture, Unavailable::Busy));
     }
     let result = walk_tree(source, job, limits, now, platform);
@@ -352,7 +340,7 @@ pub(crate) fn walk<S: ElementSource>(
         Ok((tree, completeness)) if finish_masks(&job.masks, completeness) => Ok(tree),
         Ok(_) => Ok(ElementTree::unavailable(job.capture, Unavailable::Busy)),
         Err(error) => {
-            ElementTree::unavailable(job.capture, Unavailable::Busy).finish(&job.masks);
+            finish_unavailable(&job.masks, Unavailable::Busy);
             Err(error)
         }
     }
@@ -388,6 +376,11 @@ fn walk_tree<S: ElementSource>(
         availability: Availability::Read,
     };
     let rooted = source.root(*target).and_then(|(root, window, pid)| {
+        if let ElementTarget::Window { pid: hint, .. } = target
+            && pid != *hint
+        {
+            return Err(SourceError::NoWindow);
+        }
         if !intersects(window, *display) {
             return Err(SourceError::NoWindow);
         }

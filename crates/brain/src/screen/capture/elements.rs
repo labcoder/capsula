@@ -62,7 +62,7 @@ fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk()
         rig.screen
             .elements(CaptureId(10), ElementTarget::Foreground, &|| now)
             .err(),
-        Some(Failure::Retire(-7))
+        Some(Failure::Fault(-7))
     );
     assert_eq!(
         rig.screen.masks.lock().unwrap().completeness(),
@@ -74,6 +74,31 @@ fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk()
             .err(),
         Some(Failure::Refused(Refusal::Reused))
     );
+    assert_eq!(
+        rig.screen.capture(
+            &ticket(2),
+            &rect([4, 3]),
+            Exclusion::KumochiWindows,
+            now,
+            &|| now,
+            (
+                || Err(9),
+                || Ok(Box::new(Probe {
+                    current: Rc::new(Cell::new(7)),
+                    jobs: Rc::new(RefCell::new(Vec::new())),
+                }))
+            )
+        ),
+        Ok(meta(2, [4, 3], 0))
+    );
+    let walked = rig
+        .screen
+        .elements(CaptureId(20), ElementTarget::Foreground, &|| now)
+        .unwrap();
+    assert!(!walked.retire);
+    assert_eq!(walked.tree.capture, CaptureId(20));
+    assert_eq!(walked.tree.availability, Availability::Read);
+    assert_eq!(walked.tree.elements.len(), 1);
 }
 
 struct Probe {

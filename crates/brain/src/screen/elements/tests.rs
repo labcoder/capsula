@@ -526,12 +526,16 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
 
 #[test]
 fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
-    for target in [
-        ElementTarget::Foreground,
-        ElementTarget::Window {
-            window: WindowRef(7),
-            pid: 9,
-        },
+    for (target, why) in [
+        (ElementTarget::Foreground, Unavailable::Excluded),
+        (TARGET, Unavailable::Excluded),
+        (
+            ElementTarget::Window {
+                window: WindowRef(7),
+                pid: 9,
+            },
+            Unavailable::NoWindow,
+        ),
     ] {
         let now = Instant::now();
         let mut job = job(1, now + Duration::from_secs(1));
@@ -539,12 +543,12 @@ fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
         let mut source = FakeSource::flat(1);
         assert_eq!(
             walk(&mut source, &job, &LIMITS, &|| now, &mut FakePlatform(true)).unwrap(),
-            unavailable(CaptureId(1), Unavailable::Excluded)
+            unavailable(CaptureId(1), why)
         );
         assert_eq!(source.reads.get(), 0);
         assert_eq!(
             job.masks.lock().unwrap().completeness(),
-            Completeness::Unknown(Unavailable::Excluded)
+            Completeness::Unknown(why)
         );
     }
 }
@@ -679,20 +683,12 @@ fn busy_completion_cannot_be_upgraded_by_a_late_walk() {
     let masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(12))));
     masks.lock().unwrap().push(RECT);
     assert!(
-        ElementTree::unavailable(CaptureId(12), Unavailable::Busy).finish(&masks),
+        finish_unavailable(&masks, Unavailable::Busy),
         "initial timeout records unknown masks"
     );
-    let mut late = ElementTree {
-        capture: CaptureId(12),
-        window: RECT,
-        elements: Vec::new(),
-        cut: None,
-        availability: Availability::Read,
-    };
-    for (cut, generation) in [(None, 2), (Some(Cut::Budget), 2)] {
-        late.cut = cut;
+    for completeness in [Completeness::Complete, Completeness::Partial] {
         assert!(
-            !late.finish(&masks),
+            !finish_masks(&masks, completeness),
             "a late walk cannot publish completeness"
         );
         let known = masks.lock().unwrap();
@@ -700,7 +696,35 @@ fn busy_completion_cannot_be_upgraded_by_a_late_walk() {
             known.completeness(),
             Completeness::Unknown(Unavailable::Busy)
         );
-        assert_eq!(known.generation(), generation);
+        assert_eq!(known.generation(), 2);
         assert_eq!(known.rects(), [RECT]);
     }
+}
+
+#[test]
+fn a_reused_window_handle_with_a_different_root_pid_is_no_window() {
+    let mut source = FakeSource::flat(1);
+    source.nodes[0].name = "must not read".into();
+    let mut job = job(13, Instant::now() + Duration::from_secs(1));
+    job.target = ElementTarget::Window {
+        window: WindowRef(7),
+        pid: 9,
+    };
+    let tree = walk(
+        &mut source,
+        &job,
+        &LIMITS,
+        &Instant::now,
+        &mut FakePlatform(false),
+    )
+    .unwrap();
+    assert_eq!(tree, unavailable(CaptureId(13), Unavailable::NoWindow));
+    assert_eq!(source.reads.get(), 0);
+    let masks = job.masks.lock().unwrap();
+    assert_eq!(
+        masks.completeness(),
+        Completeness::Unknown(Unavailable::NoWindow)
+    );
+    assert_eq!(masks.generation(), 1);
+    assert_eq!(masks.rects(), &[]);
 }

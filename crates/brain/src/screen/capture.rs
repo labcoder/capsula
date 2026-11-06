@@ -137,6 +137,9 @@ impl Screen {
             Some(capturer) => capturer,
             None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
         };
+        if self.reader.as_ref().is_some_and(Result::is_err) {
+            self.reader = None;
+        }
         let foreground = self
             .reader
             .get_or_insert_with(open.1)
@@ -199,9 +202,13 @@ impl Screen {
         let reader = match self.reader.as_mut().ok_or(Failure::Fault(0))? {
             Ok(reader) => reader,
             Err(code) => {
-                ElementTree::unavailable(capture, super::elements::Unavailable::Busy)
-                    .finish(&self.masks);
-                return Err(Failure::Retire(*code));
+                if !super::elements::finish_unavailable(
+                    &self.masks,
+                    super::elements::Unavailable::Busy,
+                ) {
+                    return Err(Failure::Retire(*code));
+                }
+                return Err(Failure::Fault(*code));
             }
         };
         let display = self.frame.meta().ok_or(Failure::Fault(0))?.display;
@@ -219,7 +226,10 @@ impl Screen {
         let Some(target) = target else {
             let mut tree =
                 ElementTree::unavailable(capture, super::elements::Unavailable::NoWindow);
-            let retire = !tree.finish(&self.masks);
+            let retire = !super::elements::finish_unavailable(
+                &self.masks,
+                super::elements::Unavailable::NoWindow,
+            );
             if retire {
                 tree = ElementTree::unavailable(capture, super::elements::Unavailable::Busy);
             }

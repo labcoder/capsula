@@ -181,8 +181,9 @@ Unavailability is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are 
 needs masking: image consumers must withhold or flag those frames, not call them fully masked.
 
 Offline fake-source fixtures cover exact limits, Unicode names, provider/budget cuts, relative
-geometry, excluded roots and password/descendant sentinels. No real window or platform timing
-is exercised by these tests. Cancellation belongs to A6; worker authority and late/hung-thread handling are described below.
+geometry, excluded roots and password/descendant sentinels. Reader fixtures use real threads and
+clocks, but never read real windows or measure platform calls. Cancellation belongs to A6;
+worker authority and late/hung-thread handling are described below.
 
 ## Capture-scoped element operation
 
@@ -192,8 +193,9 @@ capture is Reused. Each new Capture drops authority and installs a fresh mask si
 its ticket, so refused captures leave no walkable frame and late writes reach only the old sink.
 
 Capture pins the foreground top-level window, pid and physical rectangle just before acquiring
-the frame. Foreground walks use that pin; explicit Window targets carry a pid too. The source must
-recheck root visibility and pid before reading. A walk must start before both ticket expiry and
+the frame. Foreground walks use that pin; explicit Window targets carry a pid too. Portable walks
+reject a root whose pid differs from that hint as NoWindow; the source must also recheck native
+root visibility and ownership before reading. A walk must start before both ticket expiry and
 frame arrival + 250 ms [guess]; its deadline is the earliest of those two and start + 120 ms [guess].
 
 One disposable thread constructs and owns the non-Send platform source. Both channels have one
@@ -206,7 +208,9 @@ the next walk replies Busy and the worker exits after writing the reply. A dead 
 sink also replies Busy and retires. Drop never joins the provider thread.
 
 A reader-opener failure does not discard a successfully acquired frame. Its first Elements
-attempt publishes Unknown(Busy), reports the numeric fault and retires the worker.
+attempt publishes Unknown(Busy) and reports the numeric fault, but the worker keeps serving Ping
+and Capture. The next capture retries a failed opener, including a failed reader-thread spawn.
+An opener that fails inside the reader thread is retried for the next capture's Elements.
 
 The supervisor accepts only an Elements tree naming the requested capture. Refusals pass through;
 other reply kinds or capture ids become WorkerLost. There is no cancel operation yet: A6's Drop

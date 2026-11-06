@@ -57,8 +57,9 @@ fn exchange_with(
     times: &[u64],
     reader: super::super::OpenElements,
 ) -> Vec<(u64, ReplyBody)> {
-    let mut input = Vec::new();
+    let mut requests = Vec::new();
     for (id, body) in bodies.iter().enumerate() {
+        let mut input = Vec::new();
         write_message(
             &mut input,
             u64::try_from(id).unwrap(),
@@ -66,21 +67,23 @@ fn exchange_with(
             ScreenKind::MAX_REQUEST,
         )
         .unwrap();
+        requests.push((times.get(id).copied().unwrap_or(0), input));
     }
-    let now = Instant::now();
-    let calls = Cell::new(0);
-    let clock = || {
-        let call = calls.get();
-        calls.set(call + 1);
-        now + Duration::from_millis(times.get(call).copied().unwrap_or(0))
+    let start = Instant::now();
+    let time = Cell::new(start);
+    let mut input = Requests {
+        pending: requests.into_iter(),
+        current: std::io::Cursor::new(Vec::new()),
+        start,
+        time: &time,
     };
     let mut output = Vec::new();
     serve_on(
-        &mut input.as_slice(),
+        &mut input,
         &mut output,
         || Ok(Box::new(Good)),
         reader,
-        &clock,
+        &|| time.get(),
     )
     .unwrap();
     let mut bytes = output.as_slice();
@@ -89,6 +92,26 @@ fn exchange_with(
         replies.push(reply);
     }
     replies
+}
+
+struct Requests<'a> {
+    pending: std::vec::IntoIter<(u64, Vec<u8>)>,
+    current: std::io::Cursor<Vec<u8>>,
+    start: Instant,
+    time: &'a Cell<Instant>,
+}
+
+impl std::io::Read for Requests<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if self.current.position() == u64::try_from(self.current.get_ref().len()).unwrap() {
+            let Some((elapsed, bytes)) = self.pending.next() else {
+                return Ok(0);
+            };
+            self.time.set(self.start + Duration::from_millis(elapsed));
+            self.current = std::io::Cursor::new(bytes);
+        }
+        std::io::Read::read(&mut self.current, output)
+    }
 }
 
 #[test]
@@ -155,7 +178,7 @@ fn expired_walk_stays_spent_after_valid_input() {
     for elapsed in [250, 2_000] {
         let replies = exchange(
             &[capture(1, 1), elements(1), elements(1), RequestBody::Ping],
-            &[0, 0, 0, elapsed, elapsed],
+            &[0, elapsed, elapsed, elapsed],
         );
         assert_eq!(
             replies,
@@ -171,7 +194,7 @@ fn expired_walk_stays_spent_after_valid_input() {
 
 #[test]
 fn walk_can_start_one_millisecond_before_the_frame_age_limit() {
-    let replies = exchange(&[capture(1, 1), elements(1)], &[0, 0, 0, 249, 249]);
+    let replies = exchange(&[capture(1, 1), elements(1)], &[0, 249]);
     assert_eq!(replies[0], (0, captured(1)));
     let ReplyBody::Elements(tree) = &replies[1].1 else {
         panic!("expected last valid walk")
@@ -185,6 +208,69 @@ fn walk_can_start_one_millisecond_before_the_frame_age_limit() {
 
 thread_local! {
     static RELEASE: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static OPENS: Cell<u32> = const { Cell::new(0) };
+}
+
+#[test]
+fn opener_failures_answer_fault_keep_ping_and_retry_for_the_next_capture() {
+    let outer: OpenElements = || {
+        let attempt = OPENS.with(|opens| {
+            opens.set(opens.get() + 1);
+            opens.get()
+        });
+        if attempt == 1 { Err(-7) } else { open_reader() }
+    };
+    let inner: OpenElements = || {
+        let mut attempts = 0;
+        crate::screen::reader::ThreadedReader::new(
+            move || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(-7)
+                } else {
+                    Ok(crate::screen::elements::tests::FakeSource::flat(1))
+                }
+            },
+            crate::screen::elements::tests::FakePlatform(false),
+        )
+        .map(|reader| -> Box<dyn crate::screen::elements::ElementReader> { Box::new(reader) })
+    };
+    for opener in [outer, inner] {
+        OPENS.with(|opens| opens.set(0));
+        let replies = exchange_with(
+            &[
+                capture(1, 1),
+                elements(1),
+                elements(1),
+                RequestBody::Ping,
+                capture(2, 2),
+                elements(2),
+                RequestBody::Ping,
+            ],
+            &[],
+            opener,
+        );
+        assert_eq!(
+            &replies[..5],
+            &[
+                (0, captured(1)),
+                (1, ReplyBody::Fault(-7)),
+                (2, ReplyBody::Refused(Refusal::Reused)),
+                (3, ReplyBody::Pong),
+                (4, captured(2))
+            ]
+        );
+        let ReplyBody::Elements(tree) = &replies[5].1 else {
+            panic!("expected retried tree")
+        };
+        assert_eq!(replies[5].0, 5);
+        assert_eq!(tree.capture, CaptureId(2));
+        assert_eq!(tree.availability, crate::screen::Availability::Read);
+        assert_eq!(tree.elements.len(), 1);
+        assert_eq!(tree.cut, None);
+        assert_eq!(replies[6], (6, ReplyBody::Pong));
+        assert_eq!(replies.len(), 7);
+    }
 }
 
 struct Blocked(std::sync::mpsc::Receiver<()>);
@@ -227,8 +313,9 @@ fn first_busy_answers_and_second_busy_replies_before_retiring() {
     let opener: OpenElements = || {
         let (send, receive) = std::sync::mpsc::channel();
         RELEASE.with(|slot| *slot.borrow_mut() = Some(send));
+        let mut receive = Some(receive);
         crate::screen::reader::ThreadedReader::new(
-            move || Ok(Blocked(receive)),
+            move || Ok(Blocked(receive.take().unwrap())),
             crate::screen::elements::tests::FakePlatform(false),
         )
         .map(|reader| -> Box<dyn crate::screen::elements::ElementReader> { Box::new(reader) })
