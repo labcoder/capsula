@@ -968,11 +968,13 @@ async fn analytics_from_a_stale_or_unready_attempt_changes_nothing() {
     rig.close().await;
 }
 
-/// Sets the clock so a bind now fixes a question deadline `left` from now.
-fn deadline_in(rig: &Rig, left: Duration) {
-    *rig.now.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now()
-        .checked_sub(launch::QUESTION.saturating_sub(left))
-        .expect("the machine has been up for two minutes");
+/// Fixes the question's deadline `left` after bind, independently of child audit time.
+fn deadline_in(rig: &mut Rig, left: Duration) {
+    rig.claude.clock = Clock(Arc::new(move || {
+        Instant::now()
+            .checked_sub(launch::QUESTION.saturating_sub(left))
+            .expect("the machine has been up for two minutes")
+    }));
 }
 
 /// A Grant after the question's deadline, which bind fixed: nothing is seeded, the lease goes
@@ -980,9 +982,9 @@ fn deadline_in(rig: &Rig, left: Duration) {
 #[tokio::test]
 async fn a_grant_after_the_question_deadline_seeds_nothing() {
     let mut rig = Rig::new("question-late-grant", &synthetic_signed_in()).await;
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
     let mut played = play(&question);
     let ask = rig.drive(played.inputs.recv()).await;
     assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
@@ -1002,9 +1004,9 @@ async fn a_grant_after_the_question_deadline_seeds_nothing() {
 #[tokio::test]
 async fn an_unanswered_ask_ends_at_the_question_deadline() {
     let mut rig = Rig::new("question-unanswered", &synthetic_signed_in()).await;
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
     let mut played = play(&question);
     let ask = rig.drive(played.inputs.recv()).await;
     assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
@@ -1118,9 +1120,10 @@ async fn a_dead_warm_launch_is_not_reused() {
 async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
     let mut rig = Rig::new("question-ready-late-grant", &synthetic_signed_in()).await;
     rig.claude.budget = Arc::new(Budget::limited(Some(1)));
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
     let key = request.key;
     let asks = Asks::default();
