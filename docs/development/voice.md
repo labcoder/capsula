@@ -286,8 +286,12 @@ flowchart LR
 - **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
   `load`. A newer ask reloads after the running decode, and a decode left waiting is served by
   the new model.
-- **A lost worker:** `SttHandle::spawn` subscribes to `SpeechHandle::lost`, and a small task marks
-  each loss in the shared state, so an idle loss ends serving too. The running decode is answered
+- **A lost worker:** the `voice-stt` thread has its own subscription to `SpeechHandle::lost`, and a
+  small task wakes it on each loss, so an idle loss ends serving too. A load's reply names the
+  worker generation that holds the model, and each loss names the generation that died. Only that
+  generation's loss is the load's, even one that comes before serving starts. An older worker's
+  loss can arrive after a newer load, because the supervisor answers before it broadcasts, so it's
+  skipped and the newer model keeps serving and is unloaded as usual. The running decode is answered
   `Failed(WorkerLost)`, a waiting one `NotLoaded`, and the ask is reported `Lost`. Speech input
   stays unloaded unless a newer ask came after the lost load started; a failure's cleanup never
   undoes a newer ask. Retrying is the installer's bounded policy; nothing here retries on its own.
@@ -302,15 +306,18 @@ the ask is the caller's own counter, and send one `LoadReport { ask, event }` pe
 | Event | When |
 |---|---|
 | `Loaded` | the load (with its warm-up) finished and the ask is still the wanted one |
-| `Discarded` | the load finished after its unload or a newer ask; the model is freed in the owner thread |
+| `Discarded` | the load finished after its unload or a newer ask; sent once the model is freed in the owner thread |
 | `Failed` | the load failed |
 | `Unloaded` | the ask's model is freed, or the owner never had that ask |
 | `Lost` | speech input only: the worker went while the ask was loading or loaded |
 
 When a load finishes, every command sent meanwhile is already in the shared state, so the owner
 keeps the model only if its ask is still wanted. `unload(ask)` clears only that ask and frees only
-its model: an unload for any other ask is reported `Unloaded` and changes nothing. Reports go out
-under the state lock, so an unload's own report can't overtake the owner's.
+its model: an unload for any other ask is reported `Unloaded` and changes nothing. An ask stays
+the owner's until its model has dropped, so no report says an ask is quiet while its model is
+still being freed, and an ask unloaded while an older model drops never starts loading. Reports
+go out under the state lock, so an unload's own report can't overtake the owner's. Every
+ask that starts loading ends in one of `Discarded`, `Failed`, `Unloaded` or `Lost`.
 
 ### The FFI owner
 

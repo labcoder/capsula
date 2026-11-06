@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::Duration;
 
@@ -46,10 +46,32 @@ impl Drop for FakeStream {
 struct Fake {
     streams: Arc<Mutex<std_mpsc::Receiver<FakeStream>>>,
     live: Arc<AtomicUsize>,
+    drops: Arc<DropGate>,
+}
+
+/// Holds the next model drop until the test releases it.
+struct DropGate {
+    hold: AtomicBool,
+    dropping: Mutex<std_mpsc::Sender<()>>,
+    release: Mutex<std_mpsc::Receiver<()>>,
 }
 
 impl Drop for Fake {
     fn drop(&mut self) {
+        if self.drops.hold.swap(false, Ordering::SeqCst) {
+            self.drops
+                .dropping
+                .lock()
+                .expect("one model drops at a time")
+                .send(())
+                .expect("the test watches the drop");
+            self.drops
+                .release
+                .lock()
+                .expect("one model drops at a time")
+                .recv_timeout(WAIT)
+                .expect("the test releases the drop");
+        }
         self.live.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -71,6 +93,9 @@ struct Harness {
     live: Arc<AtomicUsize>,
     loads: Arc<AtomicUsize>,
     reports: Mutex<UnboundedReceiver<LoadReport>>,
+    drops: Arc<DropGate>,
+    dropping: std_mpsc::Receiver<()>,
+    drop_release: std_mpsc::Sender<()>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -130,6 +155,14 @@ impl Harness {
         let live = Arc::new(AtomicUsize::new(0));
         let loads = Arc::new(AtomicUsize::new(0));
         let (live_in, loads_in) = (Arc::clone(&live), Arc::clone(&loads));
+        let (dropping_in, dropping) = std_mpsc::channel();
+        let (drop_release, drop_released) = std_mpsc::channel();
+        let drops = Arc::new(DropGate {
+            hold: AtomicBool::new(false),
+            dropping: Mutex::new(dropping_in),
+            release: Mutex::new(drop_released),
+        });
+        let drops_in = Arc::clone(&drops);
         let (sender, reports) = Reports::new();
         let handle = TtsHandle::spawn_with(runtime.handle().clone(), sender, move |_dir: &Path| {
             loads_in.fetch_add(1, Ordering::SeqCst);
@@ -144,6 +177,7 @@ impl Harness {
             Ok(Fake {
                 streams: Arc::clone(&queued),
                 live: Arc::clone(&live_in),
+                drops: Arc::clone(&drops_in),
             })
         })
         .expect("the owner thread starts");
@@ -153,6 +187,9 @@ impl Harness {
             live,
             loads,
             reports: Mutex::new(reports),
+            drops,
+            dropping,
+            drop_release,
             runtime,
         }
     }
@@ -535,6 +572,67 @@ fn a_load_that_finishes_after_its_unload_is_discarded_and_the_newer_ask_loads() 
             total: 0
         })
     );
+}
+
+#[test]
+fn a_discarded_model_is_gone_before_its_ask_is_quiet() {
+    let (started, loading) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let harness = Harness::gated(
+        Ok(()),
+        Some(Gate {
+            started,
+            release: released,
+        }),
+    );
+    harness.handle.load("models".into(), 1);
+    loading
+        .recv_timeout(WAIT)
+        .expect("the owner is inside the load");
+    harness.handle.unload(1);
+    harness.handle.load("models".into(), 2);
+    harness.drops.hold.store(true, Ordering::SeqCst);
+    release.send(()).expect("the first load is waiting");
+    harness
+        .dropping
+        .recv_timeout(WAIT)
+        .expect("the late model drops");
+    harness.handle.unload(1);
+    harness.no_report();
+    harness.drop_release.send(()).expect("the drop is waiting");
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Discarded)]);
+    assert_eq!(harness.live.load(Ordering::SeqCst), 0);
+    loading
+        .recv_timeout(WAIT)
+        .expect("the newer ask loads after the late model is gone");
+    release.send(()).expect("the second load is waiting");
+    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
+}
+
+#[test]
+fn an_ask_unloaded_while_the_old_model_drops_never_loads() {
+    let harness = Harness::loaded();
+    harness.drops.hold.store(true, Ordering::SeqCst);
+    harness.handle.load("other".into(), 2);
+    harness
+        .dropping
+        .recv_timeout(WAIT)
+        .expect("the held model drops for the newer ask");
+    harness.handle.unload(2);
+    assert_eq!(
+        harness.reports(1),
+        [report(2, LoadEvent::Unloaded)],
+        "never started, so answered at once"
+    );
+    harness.drop_release.send(()).expect("the drop is waiting");
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+    harness.no_report();
+    assert_eq!(
+        harness.loads.load(Ordering::SeqCst),
+        1,
+        "the unloaded ask never loads"
+    );
+    assert_eq!(harness.live.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use tokio::runtime::Handle;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast::{self, error::TryRecvError};
+use tokio::sync::oneshot;
 
 use super::{LoadEvent, Reports};
 use crate::speech::{SpeechError, SpeechHandle};
-use crate::supervise::WorkerLost;
+use crate::supervise::Generation;
 
 /// One utterance to transcribe: mono PCM at its capture rate.
 pub(crate) struct Decode {
@@ -100,17 +101,16 @@ impl Decoder for Remote<'_> {
     }
 }
 
-/// The models a load serves, or the loss that ended it.
-type Engine =
-    dyn FnMut(&Path, &mut dyn FnMut(&dyn Decoder) -> Served) -> Result<(), SpeechError> + Send;
+/// The models a load serves, with the worker generation that loaded them, or the loss that ended
+/// it.
+type Engine = dyn FnMut(&Path, &mut dyn FnMut(Generation, &dyn Decoder) -> Served) -> Result<(), SpeechError>
+    + Send;
 
 struct State {
     /// The models wanted, with the ask that wants them.
     want: Option<(PathBuf, u64)>,
     /// The ask the thread is loading or serving.
     current: Option<u64>,
-    /// The worker was lost; the serving thread clears it when it sees it.
-    lost: bool,
     /// Set by the worker only while a loaded model serves `want`.
     ready: bool,
     waiting: Option<Decode>,
@@ -156,27 +156,33 @@ impl SttHandle {
         reports: Reports,
     ) -> io::Result<Self> {
         let losses = speech.lost();
+        let wakes = speech.lost();
         let tasks = runtime.clone();
-        let handle = Self::spawn_with(reports, move |models, serve| {
-            runtime.block_on(speech.load(natives.clone(), models.to_owned()))?;
+        let handle = Self::spawn_with(reports, losses, move |models, serve| {
+            let generation = runtime.block_on(speech.load(natives.clone(), models.to_owned()))?;
             let remote = Remote {
                 speech: &speech,
                 runtime: &runtime,
             };
-            if serve(&remote) == Served::Lost {
+            if serve(generation, &remote) == Served::Lost {
                 return Err(SpeechError::WorkerLost);
             }
             runtime.block_on(speech.unload())
         })?;
-        tasks.spawn(forward_losses(Arc::clone(&handle.control), losses));
+        tasks.spawn(wake_on_losses(Arc::clone(&handle.control), wakes));
         Ok(handle)
     }
 
-    /// `engine` loads the models, hands the loaded decoder to `serve` until it returns, then
-    /// unloads before it returns. A loss reported by `serve` is returned as an error.
+    /// `engine` loads the models, hands the loaded decoder and the generation that loaded it to
+    /// `serve` until it returns, then unloads before it returns. A loss reported by `serve` is
+    /// returned as an error. `losses` is the thread's own subscription to worker losses.
     fn spawn_with(
         reports: Reports,
-        engine: impl FnMut(&Path, &mut dyn FnMut(&dyn Decoder) -> Served) -> Result<(), SpeechError>
+        losses: broadcast::Receiver<Generation>,
+        engine: impl FnMut(
+            &Path,
+            &mut dyn FnMut(Generation, &dyn Decoder) -> Served,
+        ) -> Result<(), SpeechError>
         + Send
         + 'static,
     ) -> io::Result<Self> {
@@ -184,7 +190,6 @@ impl SttHandle {
             state: Mutex::new(State {
                 want: None,
                 current: None,
-                lost: false,
                 ready: false,
                 waiting: None,
                 shutdown: false,
@@ -195,7 +200,7 @@ impl SttHandle {
         let thread_reports = reports.clone();
         std::thread::Builder::new()
             .name("voice-stt".into())
-            .spawn(move || run(&worker, &thread_reports, Box::new(engine)))?;
+            .spawn(move || run(&worker, &thread_reports, losses, Box::new(engine)))?;
         Ok(Self { control, reports })
     }
 
@@ -224,12 +229,6 @@ impl SttHandle {
         if let Some(decode) = waiting {
             decode.answer(SttResult::Stale);
         }
-    }
-
-    /// The speech worker was lost: the model being served is gone.
-    #[cfg(test)]
-    fn worker_lost(&self) {
-        self.control.update(|state| state.lost = true);
     }
 
     /// Queues `decode` behind the one in progress. While no model is ready, or once unload is
@@ -265,14 +264,27 @@ impl std::fmt::Debug for SttHandle {
     }
 }
 
-/// Marks the model lost on each `WorkerLost`, so an idle loss ends serving too.
-async fn forward_losses(control: Arc<Control>, mut losses: broadcast::Receiver<WorkerLost>) {
+/// Wakes the thread on each loss, so it reads the loss from its own subscription and an idle loss
+/// ends serving too.
+async fn wake_on_losses(control: Arc<Control>, mut losses: broadcast::Receiver<Generation>) {
     loop {
         match losses.recv().await {
-            Ok(WorkerLost) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                control.update(|state| state.lost = true);
-            }
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => control.update(|_| ()),
             Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Whether the subscription holds the loss of `served`, the worker holding the model. An older
+/// worker's loss can arrive after a newer load, since the supervisor answers before it broadcasts,
+/// so it's skipped. A lag drops only the oldest losses, and a later one still counts.
+fn lost(losses: &mut broadcast::Receiver<Generation>, served: Generation) -> bool {
+    loop {
+        match losses.try_recv() {
+            Ok(dead) if dead < served => {}
+            Ok(_) => return true,
+            Err(TryRecvError::Lagged(_)) => {}
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return false,
         }
     }
 }
@@ -281,13 +293,17 @@ async fn forward_losses(control: Arc<Control>, mut losses: broadcast::Receiver<W
 /// freed. A failed load, or a lost worker, leaves speech input unloaded unless a newer ask came
 /// after that load started: the running decode was answered `Failed(WorkerLost)`, and a waiting
 /// one is answered `NotLoaded`.
-fn run(control: &Control, reports: &Reports, mut engine: Box<Engine>) {
+fn run(
+    control: &Control,
+    reports: &Reports,
+    mut losses: broadcast::Receiver<Generation>,
+    mut engine: Box<Engine>,
+) {
     while let Some((models, ask)) = next_load(control) {
         let mut ended = None;
-        let mut serve = |decoder: &dyn Decoder| {
+        let mut serve = |generation: Generation, decoder: &dyn Decoder| {
             // Every command sent during the load is in the state now; only the newest ask is kept.
             let kept = control.update(|state| {
-                state.lost = false;
                 let kept = wants(state, ask);
                 if kept {
                     reports.send(ask, LoadEvent::Loaded);
@@ -298,7 +314,7 @@ fn run(control: &Control, reports: &Reports, mut engine: Box<Engine>) {
                 ended = Some(LoadEvent::Discarded);
                 return Served::Released;
             }
-            let served = serve_decodes(control, ask, decoder);
+            let served = serve_decodes(control, ask, generation, decoder, &mut losses);
             ended = Some(match served {
                 Served::Lost => LoadEvent::Lost,
                 Served::Released => LoadEvent::Unloaded,
@@ -344,10 +360,16 @@ fn wants(state: &State, ask: u64) -> bool {
         .is_some_and(|(_, wanted)| *wanted == ask)
 }
 
-/// Serves decodes while `ask` stays wanted and the worker isn't lost.
-fn serve_decodes(control: &Control, ask: u64, decoder: &dyn Decoder) -> Served {
+/// Serves decodes while `ask` stays wanted and the worker `generation` isn't lost.
+fn serve_decodes(
+    control: &Control,
+    ask: u64,
+    generation: Generation,
+    decoder: &dyn Decoder,
+    losses: &mut broadcast::Receiver<Generation>,
+) -> Served {
     loop {
-        let decode = match next_decode(control, ask) {
+        let decode = match next_decode(control, ask, generation, losses) {
             Ok(Some(decode)) => decode,
             Ok(None) => return Served::Released,
             Err(Lost) => return Served::Lost,
@@ -390,11 +412,15 @@ fn next_load(control: &Control) -> Option<(PathBuf, u64)> {
 struct Lost;
 
 /// The next decode while `ask` stays wanted, `None` once it isn't or on shutdown, or `Lost`.
-fn next_decode(control: &Control, ask: u64) -> Result<Option<Decode>, Lost> {
+fn next_decode(
+    control: &Control,
+    ask: u64,
+    generation: Generation,
+    losses: &mut broadcast::Receiver<Generation>,
+) -> Result<Option<Decode>, Lost> {
     let mut state = control.lock();
     loop {
-        if state.lost {
-            state.lost = false;
+        if lost(losses, generation) {
             state.ready = false;
             return Err(Lost);
         }

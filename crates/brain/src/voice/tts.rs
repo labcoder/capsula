@@ -262,33 +262,45 @@ impl Owner {
         loop {
             match self.next(engine.as_ref().map(|(ask, _)| *ask)) {
                 Next::Exit => return,
-                Next::Unload => self.free(&mut engine, None),
+                Next::Unload => {
+                    self.free(&mut engine, None);
+                }
                 Next::Load(dir, ask) => {
-                    self.free(&mut engine, Some(ask));
+                    if !self.free(&mut engine, Some(ask)) {
+                        continue;
+                    }
                     let loaded = load(&dir);
                     if let Err(error) = &loaded {
                         tracing::warn!(?error, "spoken replies failed to load");
                     }
                     // Every command sent during the load is in the state now; only the newest
                     // ask keeps its model.
-                    let kept = self.control.update(|state| {
-                        let wanted = wants(state, ask);
-                        let event = match &loaded {
-                            Ok(_) if wanted => LoadEvent::Loaded,
-                            Ok(_) => LoadEvent::Discarded,
-                            Err(_) => LoadEvent::Failed,
-                        };
-                        if event != LoadEvent::Loaded {
-                            state.current = None;
+                    let kept = loaded.is_ok()
+                        && self.control.update(|state| {
+                            let wanted = wants(state, ask);
+                            if wanted {
+                                self.reports.send(ask, LoadEvent::Loaded);
+                            }
+                            wanted
+                        });
+                    match loaded {
+                        Ok(loaded) if kept => engine = Some((ask, loaded)),
+                        rejected => {
+                            let event = match rejected {
+                                Ok(_) => LoadEvent::Discarded,
+                                Err(_) => LoadEvent::Failed,
+                            };
+                            // The model drops while its ask is still current, so nothing
+                            // reports it quiet before it's gone.
+                            drop(rejected);
+                            self.control.update(|state| {
+                                state.current = None;
+                                if event == LoadEvent::Failed && wants(state, ask) {
+                                    state.want = None;
+                                }
+                                self.reports.send(ask, event);
+                            });
                         }
-                        if event == LoadEvent::Failed && wanted {
-                            state.want = None;
-                        }
-                        self.reports.send(ask, event);
-                        event == LoadEvent::Loaded
-                    });
-                    if kept && let Ok(loaded) = loaded {
-                        engine = Some((ask, loaded));
                     }
                 }
                 Next::Speak(speak) => match &engine {
@@ -299,16 +311,19 @@ impl Owner {
         }
     }
 
-    /// Drops the model in this thread, then reports its ask unloaded as `next` becomes current.
-    fn free<E>(&self, engine: &mut Option<(u64, E)>, next: Option<u64>) {
+    /// Drops the model in this thread, then reports its ask unloaded. `next` becomes current
+    /// only if it's still wanted, since an unload during the drop already answered it absent;
+    /// returns whether it did.
+    fn free<E>(&self, engine: &mut Option<(u64, E)>, next: Option<u64>) -> bool {
         let Some((ask, loaded)) = engine.take() else {
-            return;
+            return true;
         };
         drop(loaded);
         self.control.update(|state| {
-            state.current = next;
+            state.current = next.filter(|next| wants(state, *next));
             self.reports.send(ask, LoadEvent::Unloaded);
-        });
+            next.is_none() || state.current.is_some()
+        })
     }
 
     fn next(&self, loaded: Option<u64>) -> Next {
