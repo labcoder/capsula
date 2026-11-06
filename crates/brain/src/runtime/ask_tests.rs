@@ -6,7 +6,7 @@ use std::sync::Arc;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ConnectionKind, ControlToShell, DataToBrain, Effort, ModelChoice, ModelSlug, Phase, RunId,
-    ScreenChoice, ThreadId,
+    SceneId, ScreenChoice, ThreadId,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -53,6 +53,9 @@ impl Engine for Asked {
     }
 }
 
+const T: ThreadId = ThreadId(2);
+const U: ThreadId = ThreadId(3);
+
 /// 400 scalars, most of them four UTF-8 bytes, led by an ASCII marker.
 fn capped(marker: &str) -> String {
     let mut text = marker.to_owned();
@@ -60,10 +63,61 @@ fn capped(marker: &str) -> String {
     text
 }
 
+/// Thread 2 drew a car whose solid "a" has `label` and `info` and whose scene has `alt`, after a
+/// turn of its own, then took `choice`; thread 3 ran a turn of its own after it.
+fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) -> SceneId {
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recover");
+    store.main_thread().expect("main");
+    store
+        .begin_turn(T, Some("task"), RunId(1), "T-HISTORY earlier")
+        .expect("turn");
+    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":1})).expect("header");
+    let step = serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
+        {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2],"label":label,"info":info}}]}))
+    .expect("typed step");
+    let Reply::Step(scene) = store
+        .drawing_write(&Write::Step {
+            thread: T,
+            run: RunId(1),
+            target: Target::New(header),
+            revision: 1,
+            layout_version: 1,
+            step: Arc::new(step),
+        })
+        .expect("step")
+    else {
+        panic!("step reply")
+    };
+    store
+        .end_run(T, RunId(1), &[], RunEnd::Done)
+        .expect("outcome");
+    assert!(store.set_model(T, choice).expect("model"));
+    store
+        .begin_turn(U, Some("other"), RunId(2), "U-SENTINEL")
+        .expect("other turn");
+    store
+        .end_run(U, RunId(2), &[], RunEnd::Done)
+        .expect("other outcome");
+    scene
+}
+
+/// `stamp` reads as `YYYY-MM-DD HH:MM`.
+fn assert_minute(stamp: &str) {
+    assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM");
+    assert!(
+        stamp.char_indices().all(|(at, c)| match at {
+            4 | 7 => c == '-',
+            10 => c == ' ',
+            13 => c == ':',
+            _ => c.is_ascii_digit(),
+        }),
+        "YYYY-MM-DD HH:MM"
+    );
+}
+
 #[tokio::test]
 async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_history() {
-    const T: ThreadId = ThreadId(2);
-    const U: ThreadId = ThreadId(3);
     let (label, info, alt) = (capped("LABELSENT"), capped("INFOSENT"), capped("ALTSENT"));
     let scratch = Scratch::new("ask-request");
     let choice = ModelChoice {
@@ -71,43 +125,7 @@ async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_hi
         effort: Effort::High,
         connection: ConnectionKind::ChatGpt,
     };
-    let scene = {
-        let mut store = Store::open(&scratch.db()).expect("store");
-        store.recover().expect("recover");
-        store.main_thread().expect("main");
-        store
-            .begin_turn(T, Some("task"), RunId(1), "T-HISTORY earlier")
-            .expect("turn");
-        let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":1})).expect("header");
-        let step =
-            serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
-            {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2],"label":label,"info":info}}]}))
-            .expect("typed step");
-        let Reply::Step(scene) = store
-            .drawing_write(&Write::Step {
-                thread: T,
-                run: RunId(1),
-                target: Target::New(header),
-                revision: 1,
-                layout_version: 1,
-                step: Arc::new(step),
-            })
-            .expect("step")
-        else {
-            panic!("step reply")
-        };
-        store
-            .end_run(T, RunId(1), &[], RunEnd::Done)
-            .expect("outcome");
-        assert!(store.set_model(T, &choice).expect("model"));
-        store
-            .begin_turn(U, Some("other"), RunId(2), "U-SENTINEL")
-            .expect("other turn");
-        store
-            .end_run(U, RunId(2), &[], RunEnd::Done)
-            .expect("other outcome");
-        scene
-    };
+    let scene = seed(&scratch, [&label, &info, &alt], &choice);
     let logs = Captured::default();
     let _guard = logs.install();
     let (seen, mut requests) = mpsc::unbounded_channel();
@@ -188,16 +206,7 @@ async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_hi
         .last()
         .and_then(|last| last.strip_prefix(&format!("{literal}\n\nLocal time: ")))
         .expect("the ask is the last user message");
-    assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM");
-    assert!(
-        stamp.char_indices().all(|(at, c)| match at {
-            4 | 7 => c == '-',
-            10 => c == ' ',
-            13 => c == ':',
-            _ => c.is_ascii_digit(),
-        }),
-        "YYYY-MM-DD HH:MM"
-    );
+    assert_minute(stamp);
     assert!(!format!("{input:?}").contains("U-SENTINEL"));
     assert!(input.iter().all(|item| match item {
         InputItem::Message { text, .. } => !text.contains("U-SENTINEL"),

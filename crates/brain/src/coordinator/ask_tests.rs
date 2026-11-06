@@ -59,11 +59,11 @@ fn ask(scene: SceneId, element: Handle) -> Input {
     }
 }
 
-fn refused() -> Result<Vec<Effect>, Stale> {
-    Ok(vec![Effect::Control(ControlToShell::TurnRefused {
+fn refused() -> Vec<Effect> {
+    vec![Effect::Control(ControlToShell::TurnRefused {
         turn: 2,
         thread: None,
-    })])
+    })]
 }
 
 fn delete(thread: ThreadId, after_turns: u32) -> Input {
@@ -167,7 +167,11 @@ fn a_part_that_does_not_resolve_is_refused_without_a_run_or_an_id() {
         (scene, Handle::new(2, 1).expect("in range")),
         (SceneId(scene.0 + 1), handle(1)),
     ] {
-        assert_eq!(core.handle(ask(scene, element)), refused(), "{element:?}");
+        assert_eq!(
+            core.handle(ask(scene, element)),
+            Ok(refused()),
+            "{element:?}"
+        );
         assert_eq!(core.current_run(), None);
     }
     core.handle(ask(scene, handle(1))).expect("not stale");
@@ -179,14 +183,14 @@ fn an_ask_in_a_thread_being_deleted_or_deleted_is_refused() {
     let scratch = Scratch::new("ask-deleting");
     let (mut core, scene) = drawn(&scratch);
     core.handle(delete(T, 0)).expect("accepted");
-    assert_eq!(core.handle(ask(scene, handle(1))), refused());
+    assert_eq!(core.handle(ask(scene, handle(1))), Ok(refused()));
     core.handle(answer(T, Deleted::NotHidden))
         .expect("answered");
     core.handle(delete(T, 1)).expect("accepted");
     core.handle(answer(T, Deleted::Removed)).expect("answered");
     assert_eq!(
         core.handle(ask(scene, handle(1))),
-        refused(),
+        Ok(refused()),
         "its scene left with it"
     );
     assert_eq!(core.current_run(), None);
@@ -198,7 +202,7 @@ fn an_ask_in_a_thread_being_deleted_or_deleted_is_refused() {
 fn stale_asks_retire_fences_so_deletes_past_the_shells_limit_never_break() {
     let scratch = Scratch::new("ask-fences");
     let (mut core, scene) = drawn(&scratch);
-    for (read, thread) in (0..).zip(20..20 + 2 * MAX_PENDING_DELETES as u64) {
+    for (read, thread) in (0u32..).zip(20u64..).take(2 * MAX_PENDING_DELETES) {
         let thread = ThreadId(thread);
         core.handle(delete(thread, read + 1)).expect("accepted");
         assert_eq!(
@@ -209,7 +213,7 @@ fn stale_asks_retire_fences_so_deletes_past_the_shells_limit_never_break() {
                 last_run: None,
             })])
         );
-        assert_eq!(core.handle(ask(scene, handle(2))), refused());
+        assert_eq!(core.handle(ask(scene, handle(2))), Ok(refused()));
         assert!(core.fenced.is_empty());
     }
 }
