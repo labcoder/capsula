@@ -13,6 +13,8 @@ mod frame;
     expect(dead_code, reason = "A3 and A6 populate shared capture masks")
 )]
 mod mask;
+#[cfg_attr(not(test), expect(dead_code, reason = "A6 connects regional OCR"))]
+pub(crate) mod ocr;
 mod reader;
 mod sanitize;
 mod supervisor;

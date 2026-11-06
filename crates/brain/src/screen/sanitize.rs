@@ -12,6 +12,7 @@ pub(crate) struct SanitizedFrame<'a> {
     meta: FrameMeta,
     generation: u32,
     completeness: Completeness,
+    painted: Vec<PhysicalRect>,
 }
 
 impl SanitizedFrame<'_> {
@@ -25,6 +26,10 @@ impl SanitizedFrame<'_> {
 
     pub(crate) fn completeness(&self) -> Completeness {
         self.completeness
+    }
+
+    pub(crate) fn painted(&self) -> &[PhysicalRect] {
+        &self.painted
     }
 }
 
@@ -52,10 +57,12 @@ pub(crate) fn sanitize<'a>(
         return Err(Refusal::Stale);
     }
     let width = usize::try_from(meta.display.size[0]).expect("capturable width fits usize");
+    let mut painted = Vec::new();
     for mask in masks.rects() {
         let Some(rect) = intersection(*mask, meta.display) else {
             continue;
         };
+        painted.push(rect);
         let [left, top] = std::array::from_fn(|axis| {
             usize::try_from(i64::from(rect.origin[axis]) - i64::from(meta.display.origin[axis]))
                 .expect("intersection lies inside the display")
@@ -77,6 +84,7 @@ pub(crate) fn sanitize<'a>(
         meta,
         generation: masks.generation(),
         completeness: masks.completeness(),
+        painted,
     })
 }
 
