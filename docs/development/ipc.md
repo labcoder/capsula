@@ -103,6 +103,12 @@ flowchart LR
   in the typing panel in preference to the retained brain error. Reconnecting or accepting a
   `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
   the end of `ErrorKey` and gets its catalog id in `strings.rs`'s `error_id`.
+  Non-wire text entries go in their feature's section, never at the file's tail:
+  keep `Text`, its catalog list and ID mapping in `crates/shell/src/strings.rs`,
+  `ErrorKey`'s catalog list and mapping, and `locales/en/shell.ftl` grouped together.
+  Catalog array lengths are derived from their lists. Wire enums, including `ErrorKey`,
+  remain append-only because postcard tags are positional; concurrent error-key additions
+  can still conflict at that enum's tail and are reconciled per batch.
 - **Admission.** The core loop never awaits a pipe, the store or an engine, and it always takes
   control frames and store replies, so `Stop` is never queued behind data. The data reader never
   waits on the core either, so credit is always read. While the data queue holds 512 KiB,
