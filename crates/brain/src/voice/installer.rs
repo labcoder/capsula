@@ -69,9 +69,10 @@ enum Phase {
         prior: Option<Rest>,
         ask: u64,
     },
-    /// The Activate write is in flight.
+    /// The Activate write is in flight. A loss meanwhile waits for its result: `lost`.
     Committing {
         ask: u64,
+        lost: bool,
     },
     Ready {
         ask: u64,
@@ -282,17 +283,18 @@ impl Installer {
                 if entry.durable == Durable::Installed {
                     entry.phase = Phase::Ready { ask };
                 } else {
-                    entry.phase = Phase::Committing { ask };
+                    entry.phase = Phase::Committing { ask, lost: false };
                     self.effects.push(Effect::Activate {
                         part,
                         token: entry.token,
                     });
                 }
             }
+            (Phase::Committing { ask: current, .. }, LoadEvent::Lost) if current == ask => {
+                entry.phase = Phase::Committing { ask, lost: true };
+            }
             (
-                Phase::Loading { ask: current, .. }
-                | Phase::Committing { ask: current }
-                | Phase::Ready { ask: current },
+                Phase::Loading { ask: current, .. } | Phase::Ready { ask: current },
                 LoadEvent::Lost,
             ) if current == ask => self.lost(part),
             (
@@ -305,7 +307,8 @@ impl Installer {
     }
 
     /// The Activate write's result. What's on disk is mirrored whatever the token; the phase
-    /// moves only for the current one. A refused write unloads the model it would have kept.
+    /// moves only for the current one. A refused write unloads the model it would have kept; a
+    /// committed one reloads a model lost during the write.
     pub(crate) fn activated(
         &mut self,
         part: VoicePart,
@@ -316,13 +319,14 @@ impl Installer {
         if result.is_ok() {
             entry.durable = Durable::Installed;
         }
-        let Phase::Committing { ask } = entry.phase else {
+        let Phase::Committing { ask, lost } = entry.phase else {
             return self.take();
         };
         if entry.token != token {
             return self.take();
         }
         match result {
+            Ok(()) if lost => self.lost(part),
             Ok(()) => entry.phase = Phase::Ready { ask },
             Err(key) => {
                 let fresh = self.token();

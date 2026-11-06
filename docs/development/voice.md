@@ -273,6 +273,8 @@ queue order, with the current settings, and progress follows as `Voice`.
    spoken replies install turns `talk_back` on in the same write, unless the file already has a
    `talk_back` key, so a choice made during the install wins. The part is `Ready` only once the
    write commits. A refused write unloads it: `Failed { SettingsRefused, installed: false }`.
+   A loss during the write waits for it: a refused write still fails, and a committed one
+   reloads.
 5. A retry of an installed part (`Failed` with `installed: true`) fetches, which re-hashes its
    files, then loads, and is `Ready` with no write.
 

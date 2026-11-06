@@ -376,6 +376,52 @@ fn a_refused_activate_unloads_and_fails_uninstalled() {
 }
 
 #[test]
+fn a_loss_during_a_refused_activate_fails_and_writes_nothing_more() {
+    let mut installer = fresh();
+    installer.install(SpokenReplies);
+    installer.fetched(SpokenReplies, 3, Ok(()));
+    installer.reported(SpokenReplies, report(3, LoadEvent::Loaded));
+    assert_eq!(
+        installer.reported(SpokenReplies, report(3, LoadEvent::Lost)),
+        []
+    );
+    assert_eq!(
+        installer.activated(SpokenReplies, 3, Err(ErrorKey::SettingsRefused)),
+        [Effect::Unload {
+            part: SpokenReplies,
+            ask: 3
+        }]
+    );
+    assert_eq!(
+        installer.reported(SpokenReplies, report(4, LoadEvent::Loaded)),
+        []
+    );
+    assert_eq!(
+        installer.view().spoken_replies,
+        failed_absent(ErrorKey::SettingsRefused)
+    );
+    assert!(!installer.ready(SpokenReplies));
+}
+
+#[test]
+fn a_loss_during_the_activate_reloads_once_it_commits() {
+    let mut installer = fresh();
+    installer.install(SpokenReplies);
+    installer.fetched(SpokenReplies, 3, Ok(()));
+    installer.reported(SpokenReplies, report(3, LoadEvent::Loaded));
+    installer.reported(SpokenReplies, report(3, LoadEvent::Lost));
+    assert_eq!(
+        installer.activated(SpokenReplies, 3, Ok(())),
+        [load(SpokenReplies, 4)]
+    );
+    assert_eq!(
+        installer.reported(SpokenReplies, report(4, LoadEvent::Loaded)),
+        []
+    );
+    assert!(installer.ready(SpokenReplies));
+}
+
+#[test]
 fn a_second_install_waits_for_the_first_fetch() {
     let mut installer = fresh();
     assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);
