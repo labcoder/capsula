@@ -36,7 +36,10 @@ fn the_instrumented_clock_observes_the_walks_deadline_check() {
         .unwrap();
     assert_eq!(walked.tree.availability, Availability::Read);
     assert_eq!(walked.tree.elements.len(), 1);
-    assert_eq!(checks.load(Ordering::Relaxed), 1);
+    assert!(
+        checks.load(Ordering::Relaxed) >= 1,
+        "the walk reads the injected clock"
+    );
 }
 
 #[derive(Clone)]

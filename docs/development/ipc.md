@@ -13,6 +13,9 @@ is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything
   one closes so another process can never take the name in between.
 - The brain only talks to the `kumochi.exe` beside its own executable, and the shell only to
   the `kumochid.exe` beside its own. Each side checks the other's image path through the pipe.
+- The control and data clients must be the same process. Once both hellos pass, the brain
+  checks the control client's image again and holds its process handle for the whole connection.
+  It registers the shell's pid so the screen walk excludes the shell, and clears it on disconnect.
 - On every start the brain writes a fresh random 32-byte **instance capability** to Windows
   Credential Manager. A shell proves it runs as the same user by reading it back. It's never on
   a command line, in a file, or in the environment.

@@ -35,6 +35,7 @@ impl<'a> Registration<'a> {
 #[cfg(any(windows, test))]
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
+        // A failed exchange means a newer connection owns the slot, so it stays.
         self.slot
             .compare_exchange(self.pid, 0, Ordering::AcqRel, Ordering::Acquire)
             .unwrap_or_default();

@@ -159,9 +159,9 @@ record Rez's scale with that result.
 The control-view data and walk run under capture authority on a bounded reader thread.
 On Windows, the source creates `CUIAutomation8` in that thread's MTA, with 100 ms connection
 and transaction timeouts. A control-view walker builds a per-node cache of name, control type,
-physical bounds, password/offscreen flags and process id. Password and offscreen names are
-not fetched from that cache. Root handles are checked for top-level visibility and ownership
-before caching and checked again afterward; the cached pid must match. The worker and the
+physical bounds and password/offscreen flags. Password and offscreen names are not fetched
+from that cache. Root handles are checked for top-level visibility and ownership before the UIA
+lookup, and the native window owner is checked again after it. The worker and the
 connected shell are excluded by pid, with Kumochi process-image names also excluded by the
 portable policy. Other platforms return E_NOTIMPL. Nothing in production requests Elements
 yet because the brain's capture flow is not connected.

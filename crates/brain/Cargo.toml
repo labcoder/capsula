@@ -90,7 +90,8 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [features]
-# Lets another crate's tests drive a coordinator with no store behind it.
+# Lets another crate's tests drive a coordinator with no store behind it, and lets an
+# outside harness time the UIA reader on a window it owns (platform::WindowSession).
 test-support = []
 
 [dev-dependencies]

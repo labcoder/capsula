@@ -1,4 +1,9 @@
-//! Explicit-window measurement access for external, owned-fixture probes.
+//! Timing access to the UIA reader for one explicit window, compiled only with `test-support`.
+//!
+//! It measures what a screen walk costs on a real window: retained elements and masks, the
+//! walk plus serialization time, and, through a [`WindowProbe`], provider navigation calls and
+//! the walk's deadline checks. An outside harness drives it against a window that harness owns,
+//! named by handle and owner pid; it never targets the foreground window. Nothing here ships.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -157,5 +162,60 @@ impl WindowSession {
             ended,
             dpi: self.dpi,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    };
+    use windows::core::{PCWSTR, w};
+
+    use super::{WindowProbe, WindowSession};
+
+    struct Unobserved;
+    impl WindowProbe for Unobserved {
+        fn now(&self) -> Instant {
+            Instant::now()
+        }
+        fn navigation(&self) {}
+    }
+
+    #[test]
+    fn open_refuses_a_bad_handle_and_a_window_another_pid_owns() {
+        let pid = std::process::id();
+        assert_eq!(
+            WindowSession::open(0, pid, Arc::new(Unobserved)).unwrap_err(),
+            -1
+        );
+        // SAFETY: creates a 1x1 off-screen, non-activating popup owned by this thread.
+        let window = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP | WS_VISIBLE,
+                -32_000,
+                -32_000,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a test window");
+        let handle = u64::try_from(window.0.addr()).expect("a handle fits in u64");
+        let wrong = WindowSession::open(handle, pid.wrapping_add(4), Arc::new(Unobserved));
+        let right = WindowSession::open(handle, pid, Arc::new(Unobserved));
+        // SAFETY: the window was created above on this thread and is destroyed once.
+        unsafe { DestroyWindow(window) }.expect("the test window closes");
+        assert_eq!(wrong.unwrap_err(), -1);
+        right.expect("the owner's own pid opens the same window");
     }
 }

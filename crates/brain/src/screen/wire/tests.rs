@@ -1,7 +1,8 @@
 use super::*;
+use crate::supervise::{read_request, write_message};
 
 #[test]
-fn shell_identity_round_trips_privately_and_legacy_tickets_default_to_zero() {
+fn shell_identity_round_trips_privately_through_the_worker_wire() {
     let ticket = TicketWire::new(
         kumochi_protocol::message::RunId(1),
         CaptureId(7),
@@ -10,24 +11,19 @@ fn shell_identity_round_trips_privately_and_legacy_tickets_default_to_zero() {
         2_000,
     )
     .for_shell(305_419_896);
-    let value = serde_json::to_value(&ticket).unwrap();
-    let decoded: TicketWire = serde_json::from_value(value.clone()).unwrap();
+    let mut bytes = Vec::new();
+    write_message(&mut bytes, 9, &ticket, MAX_REPLY_BYTES).expect("small ticket");
+    let (id, decoded) = read_request::<TicketWire>(&mut bytes.as_slice(), MAX_REPLY_BYTES)
+        .expect("one ticket")
+        .expect("not end of input");
+    assert_eq!(id, 9);
     assert_eq!(decoded.shell_pid(), 305_419_896);
     assert_eq!(decoded.nonce, *b"shell-pid-secret");
     let printed = format!("{decoded:?}");
     assert!(!printed.contains("305419896"));
     assert!(!printed.contains("shell-pid-secret"));
     assert!(!printed.contains(&format!("{:?}", b"shell-pid-secret")));
-    let mut legacy = value;
-    legacy.as_object_mut().unwrap().remove("shell_pid");
-    assert_eq!(
-        serde_json::from_value::<TicketWire>(legacy)
-            .unwrap()
-            .shell_pid(),
-        0
-    );
 }
-use crate::supervise::{read_request, write_message};
 
 #[test]
 fn request_debug_is_redacted() {

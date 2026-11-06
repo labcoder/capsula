@@ -446,4 +446,20 @@ mod tests {
         assert!(third.is_err(), "only two instances may exist");
         drop((first, next));
     }
+
+    #[tokio::test]
+    async fn a_shell_connection_registers_its_pid_until_it_drops() {
+        let (control, _control_client) = super::test_pair("shell-identity-control")
+            .await
+            .expect("control pipe");
+        let (data, _data_client) = super::test_pair("shell-identity-data")
+            .await
+            .expect("data pipe");
+        let image = std::env::current_exe().expect("the test binary has a path");
+        let connection =
+            super::shell_connection(&control, &data, &image).expect("this process is both clients");
+        assert_eq!(crate::platform::connected_shell_pid(), std::process::id());
+        drop(connection);
+        assert_eq!(crate::platform::connected_shell_pid(), 0);
+    }
 }

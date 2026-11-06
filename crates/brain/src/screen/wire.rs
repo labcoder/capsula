@@ -74,7 +74,6 @@ pub struct TicketWire {
     generation: u64,
     nonce: [u8; 16],
     ttl_ms: u32,
-    #[serde(default)]
     shell_pid: u32,
 }
 
