@@ -365,6 +365,7 @@ fn a_cut_at_each_stage_before_the_grant_leaves_the_ask_nothing_to_send() {
                 built(ASKED, attempt, &[T]),
                 Input::SendReady {
                     key: SendKey::Build(key(attempt)),
+                    hold: None,
                 },
             ] {
                 let effects = core.handle(later);
