@@ -368,6 +368,7 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
         Op::Highlight(r) => positive(r.pad, "pad")?,
         Op::Diagram(r) => bounds(r.bounds)?,
         Op::Table(r) => bounds(r.bounds)?,
+        Op::View3d(r) => bounds(r.bounds)?,
         Op::Chart(r) => {
             bounds(r.bounds)?;
             if r.title.is_some()

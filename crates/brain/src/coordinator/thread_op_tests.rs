@@ -27,11 +27,24 @@ fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
     };
     assert_eq!(
         op.failed(),
-        Input::ModelSet {
+        Some(Input::ModelSet {
             thread: T,
             choice: choice.clone(),
             applied: false,
+        })
+    );
+    assert_eq!(
+        StoreOp::Heard {
+            run: kumochi_protocol::message::RunId(1),
+            heard: crate::voice::reply::Heard {
+                segment: kumochi_protocol::message::SegmentId(0),
+                sample: 1,
+                text: 1,
+            },
         }
+        .failed(),
+        None,
+        "a heard point that can't reach the store answers nothing"
     );
     for applied in [false, true] {
         let input = Input::ModelSet {

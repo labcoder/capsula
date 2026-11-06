@@ -377,6 +377,13 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
             (state.mutations.clone(), notes)
         };
         assert_eq!(notes.len(), mutations.len());
+        let generations = format!("{}/gen/", seeded.service);
+        // An Erase arms before its boot, whose open first deletes every legacy name.
+        let legacy = mutations
+            .iter()
+            .take_while(|m| matches!(m, Mutation::Delete(name) if !name.starts_with(&generations)))
+            .count();
+        assert_eq!(legacy, if erase { 262 } else { 0 });
         let list = format!("{}/gen/revoke/", seeded.service);
         let flips: Vec<usize> = (0..mutations.len())
             .filter(|&at| matches!(&mutations[at], Mutation::Set(name) if name.starts_with(&list)))
@@ -400,7 +407,7 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
                 && notes[checkpoint..].iter().all(|note| *note == deleting),
             "every mutation runs under Revoking, then Deleting: {notes:?}"
         );
-        for at in 0..mutations.len() {
+        for at in legacy..mutations.len() {
             for fault in [Fault::CrashAfter, Fault::Refuse] {
                 let (h, at_fault, crashed) = faulted(&seeded, erase, at, fault, false);
                 let context = format!("erase {erase}, mutation {at}, {fault:?}");
@@ -430,7 +437,7 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
                     names.sort();
                     assert_eq!(
                         names,
-                        replay(&seeded.service, &seed, &mutations[..=at]),
+                        replay(&seeded.service, &seed, &mutations[legacy..=at]),
                         "{context}: the names at the crash"
                     );
                 }

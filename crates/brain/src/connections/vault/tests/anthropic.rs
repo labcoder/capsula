@@ -52,7 +52,7 @@ fn the_current_key_loads_and_each_bad_key_is_rejected_exactly() {
 
 /// PR 2 reads no legacy name, and adopting a staged paste waits for C7.
 #[test]
-fn legacy_names_are_never_read_and_a_staged_paste_is_refused_untouched() {
+fn legacy_names_are_deleted_unread_and_a_staged_paste_is_refused() {
     let (_scratch, path, service, store) = setup("key-legacy");
     let active = anthropic_key_target(&service);
     let staged = anthropic_staging_target(&service);
@@ -75,12 +75,10 @@ fn legacy_names_are_never_read_and_a_staged_paste_is_refused_untouched() {
         ),
         "adoption is refused"
     );
-    let mut expected = vec![active, staged];
-    expected.sort();
     assert_eq!(
         store.names(),
-        expected,
-        "both legacy names are left as they were"
+        Vec::<String>::new(),
+        "the open deleted both legacy names"
     );
     assert!(!is_current(&vault, Kind::AnthropicKey));
 }

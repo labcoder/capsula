@@ -221,7 +221,7 @@ fn translucent_layers_blend_back_to_front_over_opaque() {
 #[test]
 fn translucent_faces_never_write_depth() {
     // The nearer green face sorts first (centroid 9); the farther blue one still blends over it.
-    // This is OSC-218's accepted order, pinned exactly.
+    // This is the accepted order OSC-242 replaces, pinned exactly.
     let full = rect(0, 0, texels(1), texels(1));
     let mut frame = FrameScratch::with_capacity(2);
     push(
