@@ -122,7 +122,9 @@ pub struct FaceRange {
 
 /// A solid's canonical mesh at its authored dimensions, before scale or placement.
 pub struct SolidMesh {
-    /// Distinct local vertices.
+    /// Local f64 point the vertices are stored relative to, so f32 keeps the rest geometry.
+    pub origin: [f64; 3],
+    /// Distinct local vertices, relative to `origin`.
     pub vertices: Box<[Vec3]>,
     /// Outward-wound triangles indexing `vertices`.
     pub triangles: Box<[[u32; 3]]>,
@@ -137,6 +139,11 @@ impl fmt::Debug for SolidMesh {
     }
 }
 impl SolidMesh {
+    /// The transform that places this mesh's stored vertices: `rest` after the local origin.
+    #[must_use]
+    pub fn pose(&self, rest: &Transform) -> Transform {
+        rest.shifted(self.origin)
+    }
     fn bytes(&self) -> usize {
         heap::ARC_HEADER
             + size_of::<Self>()
@@ -361,15 +368,21 @@ fn build(
             scratch,
         )
     });
-    match built {
-        Ok(_) => Ok(Mesh::Built(Arc::new(index(out, groups)))),
+    match built.and_then(|(_, origin)| index(out, groups, origin, &solid.rest)) {
+        Ok(mesh) => Ok(Mesh::Built(Arc::new(mesh))),
         Err(error @ (MeshError::Cancelled | MeshError::Full)) => Err(error),
         Err(error) => Ok(Mesh::Failed(error)),
     }
 }
 
-/// Merges exactly equal vertices and gives each source face its triangle run.
-fn index(out: &[Triangle], groups: &[u8]) -> SolidMesh {
+/// Merges exactly equal vertices, gives each source face its triangle run, and checks the stored
+/// mesh at rest the way the frame stage reads it: three distinct indices and a nonzero f64 normal.
+fn index(
+    out: &[Triangle],
+    groups: &[u8],
+    origin: [f64; 3],
+    rest: &Transform,
+) -> Result<SolidMesh, MeshError> {
     let mut seen = HashMap::with_capacity(out.len());
     let mut vertices = Vec::new();
     let triangles: Vec<[u32; 3]> = out
@@ -398,11 +411,31 @@ fn index(out: &[Triangle], groups: &[u8]) -> SolidMesh {
             face
         })
         .collect();
-    SolidMesh {
+    let mesh = SolidMesh {
+        origin,
         vertices: vertices.into_boxed_slice(),
         triangles: triangles.into_boxed_slice(),
         faces,
+    };
+    let pose = mesh.pose(rest);
+    let world = |i: u32| {
+        let v = mesh.vertices[usize::try_from(i).expect("u32 fits usize")];
+        pose.apply([v.x, v.y, v.z].map(f64::from))
+    };
+    for &[a, b, c] in &*mesh.triangles {
+        let [first, second, third] = [a, b, c].map(world);
+        let [e1, e2] =
+            [second, third].map(|p| std::array::from_fn::<f64, 3, _>(|d| p[d] - first[d]));
+        let normal = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        if a == b || b == c || a == c || normal.iter().all(|&n| n == 0.0) {
+            return Err(MeshError::Degenerate("pos"));
+        }
     }
+    Ok(mesh)
 }
 
 fn camera(view: &View3d, solids: &[PreparedSolid]) -> Option<Camera> {
@@ -411,8 +444,9 @@ fn camera(view: &View3d, solids: &[PreparedSolid]) -> Option<Camera> {
         let Mesh::Built(mesh) = &solid.mesh else {
             return None;
         };
+        let pose = mesh.pose(&solid.rest);
         for &v in &*mesh.vertices {
-            let p = solid.rest.point(v).ok()?;
+            let p = pose.point(v).ok()?;
             for (i, c) in [p.x, p.y, p.z].into_iter().enumerate() {
                 bounds[0][i] = bounds[0][i].min(f64::from(c));
                 bounds[1][i] = bounds[1][i].max(f64::from(c));

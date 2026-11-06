@@ -14,7 +14,7 @@ use crate::{
     three::{mesh::MeshScratch, size::MeshError, view::tessellate_view},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem::size_of,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -55,17 +55,18 @@ pub fn prepare(
             .insert(ticket.revision, Arc::clone(&ticket.extras));
     }
     // 3D targets never enter the 2D maps; the ticket's view updates carry them.
-    let three: HashSet<&WireId> = ticket
+    let three: HashMap<&WireId, usize> = ticket
         .run
         .put
         .iter()
-        .filter_map(|op| match op {
-            Op::View3d(view) => Some(&view.id),
-            Op::Solid(solid) => Some(&solid.id),
+        .enumerate()
+        .filter_map(|(slot, op)| match op {
+            Op::View3d(view) => Some((&view.id, slot)),
+            Op::Solid(solid) => Some((&solid.id, slot)),
             _ => None,
         })
         .collect();
-    let is_three = |id: &WireId| three.contains(id) || before.is_three(id).is_some();
+    let is_three = |id: &WireId| three.contains_key(id) || before.is_three(id).is_some();
     let mut sources = BTreeMap::<WireId, (Handle, Arc<Op>)>::new();
     let mut order = Vec::new();
     let mut tables = false;
@@ -112,7 +113,9 @@ pub fn prepare(
     }
     let mut removed = Vec::new();
     for id in &*ticket.run.remove {
-        if let Some(handle) = before.is_three(id) {
+        if let Some(&slot) = three.get(id) {
+            removed.push(Handle::new(ticket.revision, slot)?);
+        } else if let Some(handle) = before.is_three(id) {
             removed.push(handle);
         } else if let Some(old) = after.objects.remove(id) {
             tables |= matches!(&*old.source, Op::Row(_));
@@ -369,6 +372,10 @@ pub fn prepare(
             after.views.remove(&update.id);
         }
     }
+    if after.views.is_empty() {
+        // As for the 2D maps: the last removal leaves a root leaf the index charge doesn't count.
+        after.views = BTreeMap::new();
+    }
     let view_bytes: usize = views
         .iter()
         .map(|view| {
@@ -417,7 +424,7 @@ pub fn prepare(
     build.check_cancel()?;
     // Only preparation reads the sizing facts, so the held result keeps none.
     ticket.path_scales.clear();
-    ticket.views.clear();
+    ticket.views = Vec::new();
     Ok(PreparedStep {
         index: ticket.revision - 1,
         display: DisplayList { items },

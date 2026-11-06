@@ -422,6 +422,30 @@ mod tests {
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
     }
     #[test]
+    fn a_prepared_step_keeps_no_view_update_buffer() {
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"v","surface":"overlay","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let mut scene = SceneState::begin(header).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let prepared = picture(
+            &mut scene,
+            &mut budget,
+            &before,
+            r#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
+        );
+        assert_eq!(prepared.views.len(), 1);
+        assert_eq!(
+            prepared.ticket.views.capacity(),
+            0,
+            "the consumed inputs leave no allocation"
+        );
+    }
+    #[test]
     fn chart_basis_is_replaced_when_attached_and_shared_after_a_cut() {
         let Record::Begin(header) =
             parse_record(br#"{"begin":{"v":1,"scene":"basis","surface":"inline","alt":""}}"#)

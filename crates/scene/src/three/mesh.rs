@@ -60,6 +60,11 @@ impl MeshScratch {
     }
 }
 
+/// Bit-for-bit equality: a construction fact, not a tolerance.
+fn same(a: Point, b: Point) -> bool {
+    a.map(f64::to_bits) == b.map(f64::to_bits)
+}
+
 fn subtract(a: Point, b: Point) -> Point {
     std::array::from_fn(|i| a[i] - b[i])
 }
@@ -158,6 +163,8 @@ struct Emitter<'a> {
     world: &'a Transform,
     /// Output in the solid's own unscaled space, checked at `world`, with one group per source face.
     local: Option<&'a mut Vec<u8>>,
+    /// The first local vertex; local output is stored relative to it so f32 keeps rest precision.
+    origin: Option<Point>,
     out: &'a mut Vec<Triangle>,
     cancel: &'a AtomicBool,
     part: u16,
@@ -213,10 +220,11 @@ impl Emitter<'_> {
             return Err(MeshError::Degenerate("pos"));
         }
         let v = if self.local.is_some() {
+            let origin = *self.origin.get_or_insert(local[0]);
             [
-                IDENTITY.point64(local[0])?,
-                IDENTITY.point64(local[1])?,
-                IDENTITY.point64(local[2])?,
+                IDENTITY.point64(subtract(local[0], origin))?,
+                IDENTITY.point64(subtract(local[1], origin))?,
+                IDENTITY.point64(subtract(local[2], origin))?,
             ]
         } else {
             v
@@ -250,12 +258,13 @@ pub fn build(
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
 ) -> Result<Built, MeshError> {
-    emit(solid, world, None, part, out, cancel, scratch)
+    emit(solid, world, None, part, out, cancel, scratch).map(|(built, _)| built)
 }
 
 /// Like [`build`], with every check at the complete rest transform `rest`, but appends the
-/// solid's canonical unscaled vertices and one entry per source face to `groups`: how many of
-/// the appended triangles that face emitted. On failure, truncate both to their saved lengths.
+/// solid's canonical unscaled vertices relative to the returned local origin, and one entry per
+/// source face to `groups`: how many of the appended triangles that face emitted. On failure,
+/// truncate both to their saved lengths.
 /// # Errors
 /// As [`build`].
 pub fn build_local(
@@ -266,8 +275,9 @@ pub fn build_local(
     groups: &mut Vec<u8>,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
-) -> Result<Built, MeshError> {
+) -> Result<(Built, [f64; 3]), MeshError> {
     emit(solid, rest, Some(groups), part, out, cancel, scratch)
+        .map(|(built, origin)| (built, origin.unwrap_or_default()))
 }
 
 const IDENTITY: Transform = Transform([
@@ -288,7 +298,7 @@ fn emit(
     out: &mut Vec<Triangle>,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
-) -> Result<Built, MeshError> {
+) -> Result<(Built, Option<Point>), MeshError> {
     let MeshScratch {
         keys,
         tangents,
@@ -314,6 +324,7 @@ fn emit(
     let mut emit = Emitter {
         world,
         local,
+        origin: None,
         out,
         cancel,
         part,
@@ -335,6 +346,7 @@ fn emit(
                 [0, 1, 5, 4],
                 [2, 6, 7, 3],
             ] {
+                // A box face is an axis-aligned rectangle.
                 emit.quad(face.map(point), Face::Surface)?;
             }
         }
@@ -349,6 +361,7 @@ fn emit(
             check_vertices(n * n, &point, world, cancel, keys)?;
             for i in 0..n {
                 for j in 0..n {
+                    // Both rings are circles about one axis, so the band is a mirror-symmetric trapezoid.
                     emit.quad(quad_indices(i, (i + 1) % n, j, n).map(point), Face::Surface)?;
                 }
             }
@@ -374,6 +387,7 @@ fn emit(
                     };
                     let mut corners = quad_indices(i, i + 1, j, n);
                     corners[1..].reverse();
+                    // Both rings are circles about one axis, so the band is a mirror-symmetric trapezoid.
                     emit.quad(corners.map(point), face)?;
                 }
             }
@@ -391,7 +405,7 @@ fn emit(
         }
     }
     poll(cancel)?;
-    Ok(emit.built)
+    Ok((emit.built, emit.origin))
 }
 
 fn quad_indices(row: usize, next: usize, column: usize, n: usize) -> [usize; 4] {
@@ -424,6 +438,7 @@ fn revolved(
         if top == 0.0 {
             emit.triangle([point(i), point(n), point((i + 1) % n)], Face::Surface)?;
         } else {
+            // Both rings are circles about one axis, so the side is a mirror-symmetric trapezoid.
             emit.quad(
                 [i, n + i, n + (i + 1) % n, (i + 1) % n].map(point),
                 Face::Surface,
@@ -464,6 +479,7 @@ fn extrude(
     for i in 0..n {
         let a = usize::from(indices[i]);
         let b = usize::from(indices[(i + 1) % n]);
+        // A side joins one outline edge to its copy translated along z: a rectangle.
         emit.quad([a, b, b + n, a + n].map(point), Face::Surface)?;
     }
     let mut len = n;
@@ -531,7 +547,11 @@ fn tube(
         } else {
             let a = unit(subtract(points.point(i), points.point(i - 1)))?;
             let b = unit(subtract(points.point(i + 1), points.point(i)))?;
-            unit(std::array::from_fn(|d| a[d] + b[d]))?
+            if same(a, b) {
+                a
+            } else {
+                unit(std::array::from_fn(|d| a[d] + b[d]))?
+            }
         };
     }
     let tangent = tangents[0];
@@ -542,7 +562,8 @@ fn tube(
     axis[least] = 1.0;
     let mut normal = unit(cross(tangent, axis))?;
     for i in 0..points.len {
-        if i > 0 {
+        // An unchanged tangent keeps the frame bit for bit, so a straight run's rings are translations.
+        if i > 0 && !same(tangents[i - 1], tangents[i]) {
             let a = tangents[i - 1];
             let b = tangents[i];
             let cosine = dot(a, b);
@@ -566,8 +587,16 @@ fn tube(
     };
     check_vertices(points.len * n, &point, emit.world, emit.cancel, keys)?;
     for i in 0..points.len - 1 {
+        // Only rings that are translations of each other bound planar bands; a bend's are split.
+        let planar = same(frames[i][0], frames[i + 1][0]) && same(frames[i][1], frames[i + 1][1]);
         for j in 0..n {
-            emit.quad(quad_indices(i, i + 1, j, n).map(point), Face::Surface)?;
+            let v = quad_indices(i, i + 1, j, n).map(point);
+            if planar {
+                emit.quad(v, Face::Surface)?;
+            } else {
+                emit.triangle([v[0], v[1], v[2]], Face::Surface)?;
+                emit.triangle([v[0], v[2], v[3]], Face::Surface)?;
+            }
         }
     }
     let end = (points.len - 1) * n;
@@ -683,6 +712,7 @@ mod tests {
             let mut emit = Emitter {
                 world: &world,
                 local: None,
+                origin: None,
                 out: &mut out,
                 cancel: &cancel,
                 part: 1,
@@ -702,6 +732,7 @@ mod tests {
         let mut emit = Emitter {
             world: &world,
             local: None,
+            origin: None,
             out: &mut out,
             cancel: &cancel,
             part: 1,

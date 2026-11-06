@@ -733,15 +733,23 @@ owners, or Stop must settle motion first. Position-track and delayed-owner tests
 ### 3D preparation
 
 A 3D `put` clones its `view3d` or `solid` record once into an `Arc` on the state object; a
-`color` set makes a new source sharing that record. Commit composes one `three::view::ViewInput`
-per view the step changes (a 3D put, a removal or a colour set; `label` and `info` sets change
-none), with each solid's complete rest transform composed down its attach chain, and carries
-them in `Preparation`.
+`color` set makes a new source sharing that record. Admission builds the sources and, in its
+candidate, one `three::view::ViewInput` per view the step changes (a 3D put, a removal or a
+colour set; `label` and `info` sets change none), with each solid's complete rest transform
+composed down its attach chain; commit moves them into `Preparation`. So that cost lands in
+admission, not commit.
 
 `prepare` routes 3D sets, removals and tracks away from the 2D loops, then runs
-`tessellate_view` per changed view. `mesh::build_local` writes canonical, unscaled local
-vertices and one triangle run per source face, after running `build`'s world checks at the
-rest transform, so authored scale reaches the world once, through the pose. A solid whose
+`tessellate_view` per changed view, including removals of objects the same step put.
+`mesh::build_local` writes canonical, unscaled local vertices and one triangle run per source
+face, after running `build`'s world checks at the rest transform, so authored scale reaches the
+world once, through the pose. Vertices are stored as f32 offsets from an f64 local origin (the
+first vertex), which `SolidMesh::pose` folds into the rest translation, so f32 keeps the checked
+rest geometry far from the local origin. Before publishing `Built`, preparation checks the stored
+mesh at rest as the frame stage reads it: three distinct indices and a nonzero normal per
+triangle; a failure is a typed `Mesh::Failed`. Two triangles share a face only where their four
+vertices are coplanar by construction: box and extrude sides, revolved and torus bands, and tube
+bands between rings that are exact translations. A bent tube band is two one-triangle faces. A solid whose
 record is unchanged reuses its mesh `Arc`, so a colour set only resolves the theme RGB again.
 A solid that fails at rest keeps a typed `Mesh::Failed` while its record is unchanged, and its
 view is published as an explicit `failed` replacement that draws nothing; removing the solid
@@ -751,8 +759,10 @@ keeps each surviving view's surviving solids and recomputes `failed`; recovery r
 `PreparedStep::resident_bytes` charges `ViewGeometry::marginal_bytes`, leaving out meshes and
 sources the predecessor holds; `LayoutState::resident_bytes` charges `full_bytes`, every mesh
 and source once, so a colour-only revision still carries its full mesh charge once its
-predecessor retires. `PreparedStep::scratch_bytes` reports mesh scratch, which is never
-retained. Prepared views don't move yet, and the brain's gate still refuses 3D steps.
+predecessor retires. `PreparedStep::scratch_bytes` reports only the fixed `MeshScratch`, which
+is allocated per preparation and never retained; it isn't the peak, which also holds the output
+triangles, face groups and the indexing map. An emptied view map is replaced, like the 2D maps,
+and the consumed view inputs leave no buffer behind. Prepared views don't move yet, and the brain's gate still refuses 3D steps.
 
 ### Motion and the host clock
 

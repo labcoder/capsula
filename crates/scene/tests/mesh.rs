@@ -593,15 +593,36 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
         [0.0; 3],
         1.0,
     ));
+    let ok = |written, dropped| Ok(Built { written, dropped });
+    // Counts from each shape's topology: 6 quads; a 320-face icosphere; 4n − 4 and 2n − 2 for
+    // cylinder and cone; 2n² for the torus; one axis triangle dropped per lathe quad; 4 sides
+    // and 2 caps for the square; 4 bands and 2 two-triangle caps for the tube.
     let cases = [
-        (solid("box", json!({"size":[1,2,3]})), &rest),
-        (solid("sphere", json!({"r":1,"segments":12})), &rest),
-        (solid("cylinder", json!({"r":1,"h":2,"segments":12})), &rest),
-        (solid("cone", json!({"r":1,"h":2,"segments":12})), &rest),
-        (solid("torus", json!({"r":2,"r2":0.5,"segments":12})), &rest),
+        (solid("box", json!({"size":[1,2,3]})), &rest, ok(12, 0)),
+        (
+            solid("sphere", json!({"r":1,"segments":12})),
+            &rest,
+            ok(320, 0),
+        ),
+        (
+            solid("cylinder", json!({"r":1,"h":2,"segments":12})),
+            &rest,
+            ok(44, 0),
+        ),
+        (
+            solid("cone", json!({"r":1,"h":2,"segments":12})),
+            &rest,
+            ok(22, 0),
+        ),
+        (
+            solid("torus", json!({"r":2,"r2":0.5,"segments":12})),
+            &rest,
+            ok(288, 0),
+        ),
         (
             solid("lathe", json!({"points":[[0,-1],[1,0],[0,1]],"segments":8})),
             &rest,
+            ok(16, 16),
         ),
         (
             solid(
@@ -609,11 +630,24 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
                 json!({"points":[[0,0],[1,0],[1,1],[0,1]],"depth":1}),
             ),
             &rest,
+            ok(12, 0),
         ),
-        (solid("box", json!({"size":[1,1,1]})), &far),
+        (
+            solid(
+                "tube",
+                json!({"path":[[0,0,0],[0,0,1]],"r2":0.25,"segments":4}),
+            ),
+            &rest,
+            ok(12, 0),
+        ),
+        (
+            solid("box", json!({"size":[1,1,1]})),
+            &far,
+            Err(MeshError::Degenerate("pos")),
+        ),
     ];
     let mut scratch = MeshScratch::new();
-    for (shape, world) in cases {
+    for (shape, world, expected) in cases {
         let count = usize::try_from(triangles(&shape).expect("valid count")).expect("bounded");
         let (mut a, mut b, mut groups) = (
             Vec::with_capacity(count),
@@ -621,9 +655,15 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
             Vec::new(),
         );
         let cancel = AtomicBool::new(false);
-        let expected = build(&shape, world, 0, &mut a, &cancel, &mut scratch);
-        let local = build_local(&shape, world, 0, &mut b, &mut groups, &cancel, &mut scratch);
+        let local = build_local(&shape, world, 0, &mut b, &mut groups, &cancel, &mut scratch)
+            .map(|(built, _)| built);
         assert_eq!(local, expected, "{:?}", shape.shape);
+        assert_eq!(
+            build(&shape, world, 0, &mut a, &cancel, &mut scratch),
+            expected,
+            "{:?}",
+            shape.shape
+        );
         if let Ok(built) = expected {
             assert_eq!(b.len(), a.len());
             assert_eq!(
@@ -643,7 +683,7 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
         &mut scratch,
     );
     assert_eq!(
-        alone.map(|built| built.written),
+        alone.map(|(built, _)| built.written),
         Ok(12),
         "only the parent collapses it"
     );
