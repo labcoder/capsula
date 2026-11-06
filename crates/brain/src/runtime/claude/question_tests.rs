@@ -966,7 +966,7 @@ async fn analytics_from_a_stale_or_unready_attempt_changes_nothing() {
 /// Sets the clock so a bind now fixes a question deadline `left` from now.
 fn deadline_in(rig: &Rig, left: Duration) {
     *rig.now.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now()
-        .checked_sub(launch::QUESTION - left)
+        .checked_sub(launch::QUESTION.saturating_sub(left))
         .expect("the machine has been up for two minutes");
 }
 
@@ -1078,19 +1078,26 @@ async fn a_post_seed_failure_reported_after_a_find_still_quarantines() {
 #[tokio::test]
 async fn a_dead_warm_launch_is_not_reused() {
     let mut rig = Rig::new("question-dead-warm", &synthetic_signed_in()).await;
-    for ended in [false, true] {
+    for (ended, repeat) in [(false, false), (true, false), (false, true), (true, true)] {
         let warm = rig.claude.warm(rig.snapshot()).expect("warm");
         let (_, control) = rig.last();
         control.withdraw();
         if ended {
             until("the warm launch's teardown", || control.is_ended()).await;
         }
-        assert_ne!(
-            rig.claude.warm(rig.snapshot()),
-            Ok(warm),
-            "a repeat, ended: {ended}"
-        );
+        if repeat {
+            assert_ne!(
+                rig.claude.warm(rig.snapshot()),
+                Ok(warm),
+                "a repeat, ended: {ended}"
+            );
+        }
         let question = rig.claude.take(&rig.snapshot()).expect("taken");
+        assert_ne!(
+            rig.last().0,
+            warm,
+            "taken, ended: {ended}, repeat: {repeat}"
+        );
         let mut played = play(&question);
         let lease = played.lease();
         rig.drive(played.asked(lease)).await;
