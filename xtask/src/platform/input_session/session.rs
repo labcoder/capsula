@@ -673,15 +673,15 @@ impl Session {
         )
     }
 
-    /// One tagged left click where the pointer already is, which must be `point` over `target`.
+    /// One tagged absolute left click at `point`, where the pointer must already be over `target`.
     pub(crate) fn click(&mut self, point: POINT, target: Target) -> Result<()> {
-        self.send(
-            &[
-                mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0),
-                mouse_input(MOUSEEVENTF_LEFTUP, 0, 0),
-            ],
-            Some(Aim::Click(point, target)),
-        )
+        let [left, top, width, height] = desktop_rect();
+        let (dx, dy) = self.or_abort(
+            normalized(point.x, left, width)
+                .zip(normalized(point.y, top, height))
+                .context("click destination is outside the virtual desktop"),
+        )?;
+        self.send(&click_inputs(dx, dy), Some(Aim::Click(point, target)))
     }
 
     pub(crate) fn restore_cursor(&mut self) -> Result<&'static str> {
@@ -917,6 +917,14 @@ fn owner(window: HWND) -> Owner {
     }
 }
 
+fn click_inputs(dx: i32, dy: i32) -> [INPUT; 2] {
+    let position = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    [
+        mouse_input(position | MOUSEEVENTF_LEFTDOWN, dx, dy),
+        mouse_input(position | MOUSEEVENTF_LEFTUP, dx, dy),
+    ]
+}
+
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -956,10 +964,24 @@ fn scan_input(scan: u16, edge: InputEdge) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::hover_cover;
+    use super::{INPUT_MOUSE, MARKER, click_inputs, hover_cover};
     use windows::Win32::Foundation::{POINT, RECT};
 
     const DESKTOP: [i32; 4] = [0, 0, 2560, 1440];
+
+    #[test]
+    fn both_click_edges_pin_the_absolute_virtual_desktop_coordinates() {
+        for (dx, dy) in [(12_345, 54_321), (0, 65_535), (65_535, 0)] {
+            for (input, flags) in click_inputs(dx, dy).into_iter().zip([0xc003, 0xc005]) {
+                assert_eq!(input.r#type, INPUT_MOUSE);
+                // SAFETY: the asserted mouse type selects the initialized MOUSEINPUT member.
+                let mouse = unsafe { input.Anonymous.mi };
+                assert_eq!((mouse.dx, mouse.dy), (dx, dy));
+                assert_eq!(mouse.dwFlags.0, flags);
+                assert_eq!(mouse.dwExtraInfo, MARKER);
+            }
+        }
+    }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
         RECT {

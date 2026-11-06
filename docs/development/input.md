@@ -462,9 +462,16 @@ Actual Alt-Tab into owner applications remains manual or unmeasured.
 
 `hover-gate <path-session.txt>` runs the hover phase alone, with the same transcript, evidence
 directory, fixture, guards and PresentMon bounds as `gate-session`. Only the opener differs.
-Nobody presses Ready. The fixture declines until `GetLastInputInfo` shows ten minutes away.
-It then grants one mouse-only activation admission and registers the native foreign-input
-guard before any injected event. The ordinary keyboard gate remains closed.
+Nobody presses Ready. The runner waits until `GetLastInputInfo` shows ten minutes away.
+The fixture checks again during its single-use prepare; input between the runner's check and
+prepare aborts the run rather than retrying. A successful prepare grants one mouse-only
+activation admission and registers the native foreign-input guard before any injected event.
+The ordinary keyboard gate remains closed.
+
+The exact stdout line `activation_native_guard=armed` is flushed after native preparation
+and before the first mouse event. This is the outside watchdog's handoff contract: only that
+line transfers owner-input monitoring to the native tagged-input guard, before our own click
+changes the last-input tick.
 
 The runner temporarily raises only the fixture above other windows, without activating it.
 It chooses a harmless point inside the fixture EDIT and checks both the exact window and its

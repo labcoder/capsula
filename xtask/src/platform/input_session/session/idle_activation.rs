@@ -9,8 +9,8 @@ use anyhow::{Result, bail, ensure};
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, SendInput,
+    GetAsyncKeyState, INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_VIRTUALDESK, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GUITHREADINFO, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, WindowFromPoint,
@@ -23,7 +23,7 @@ use super::super::{
     Receipt, desktop_ours, desktop_rect, last_input, mouse_and_keyboard_only, normalized, property,
     request, size,
 };
-use super::{FRESH, Session, mouse_input, owner};
+use super::{FRESH, Session, click_inputs, mouse_input, owner};
 
 /// How long the idle activation waits for its own move or click to land.
 const SETTLE: Duration = Duration::from_millis(250);
@@ -112,10 +112,7 @@ impl Session {
             dx,
             dy,
         )];
-        let click = [
-            mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0),
-            mouse_input(MOUSEEVENTF_LEFTUP, 0, 0),
-        ];
+        let click = click_inputs(dx, dy);
         mouse_and_keyboard_only()?;
         let snapshot = Instant::now();
         let look = self.look(end, point)?;
